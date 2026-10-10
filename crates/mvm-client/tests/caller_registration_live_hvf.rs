@@ -51,24 +51,51 @@ fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).context("decode witness metadata")
 }
 
-fn owned_root() -> Result<PathBuf> {
-    let root = path_env("MVM_CALLER_WITNESS_ROOT")?.canonicalize()?;
+fn canonical_private_directory(path: &Path) -> Result<PathBuf> {
     ensure!(
-        root.starts_with("/private/tmp") || root.starts_with("/tmp"),
+        path.is_absolute()
+            && path.components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "witness directory must be absolute without traversal"
+    );
+    let canonical = path.canonicalize()?;
+    // /tmp is the platform alias; no operator-selected symlink is accepted.
+    let normalized = match path.strip_prefix("/tmp") {
+        Ok(relative) => Path::new("/private/tmp").join(relative),
+        Err(_) => path.to_path_buf(),
+    };
+    ensure!(canonical == normalized, "witness directory alias refused");
+    let lease = mvm_core::transcript::secure_cleanup::CaptureDirectory::for_writer(&canonical)?;
+    drop(lease);
+    Ok(canonical)
+}
+
+fn owned_root() -> Result<PathBuf> {
+    let root = canonical_private_directory(&path_env("MVM_CALLER_WITNESS_ROOT")?)?;
+    ensure!(
+        root.starts_with("/private/tmp") && root != Path::new("/private/tmp"),
         "unique isolated /tmp witness root required"
     );
+    let lease = mvm_core::transcript::secure_cleanup::CaptureDirectory::for_writer(&root)?;
+    let marker = b"native-cold-registration-v1\n";
     ensure!(
-        fs::read(root.join("caller-witness-owned"))? == b"native-cold-registration-v1\n",
+        lease.read_private_member("caller-witness-owned", marker.len())? == marker,
         "owned witness root marker missing"
     );
-    ensure!(
-        path_env("MVM_HOME")?.canonicalize()? == root.join("mvm"),
-        "MVM_HOME must be the owned isolated state"
-    );
-    ensure!(
-        path_env("TMPDIR")?.canonicalize()? == root.join("tmp"),
-        "TMPDIR must be the owned isolated temporary directory"
-    );
+    drop(lease);
+    for (variable, leaf) in [
+        ("MVM_HOME", "mvm"),
+        ("TMPDIR", "tmp"),
+        ("CARGO_HOME", "cargo"),
+        ("CARGO_TARGET_DIR", "target"),
+    ] {
+        ensure!(
+            canonical_private_directory(&path_env(variable)?)? == root.join(leaf),
+            "witness state/cache directory does not match the owned root"
+        );
+    }
     Ok(root)
 }
 
@@ -496,6 +523,7 @@ fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
 #[test]
 #[ignore = "explicit companion cleanup for the native cold witness's exact recorded VM names"]
 fn native_caller_registration_cleanup() -> Result<()> {
+    await_controller_record()?;
     declare_helpers()?;
     let root = owned_root()?;
     let path = root.join("owned-vms.json");
@@ -530,5 +558,26 @@ fn cleanup_ownership_accepts_only_its_exact_generated_names() -> Result<()> {
     owned.validate()?;
     owned.names[1] = "unrelated-vm".into();
     ensure!(owned.validate().is_err(), "unrelated cleanup name accepted");
+    Ok(())
+}
+
+#[test]
+fn witness_directories_refuse_symlink_aliases_and_nonprivate_modes() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let canonical_root = root.path().canonicalize()?;
+    let actual = canonical_root.join("actual");
+    mvm_core::private_fs::ensure_private_dir(&actual)?;
+    let canonical = canonical_private_directory(&actual)?;
+    let alias = canonical_root.join("alias");
+    std::os::unix::fs::symlink(&actual, &alias)?;
+    ensure!(
+        canonical_private_directory(&alias).is_err(),
+        "directory alias accepted"
+    );
+    mvm_core::private_fs::set_mode(&canonical, 0o755)?;
+    ensure!(
+        canonical_private_directory(&canonical).is_err(),
+        "nonprivate directory accepted"
+    );
     Ok(())
 }
