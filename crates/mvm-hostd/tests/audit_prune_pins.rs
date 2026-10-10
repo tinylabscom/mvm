@@ -428,3 +428,100 @@ async fn an_unsigned_legacy_claim_cannot_downgrade_enrolled_evidence() {
         payload
     );
 }
+
+#[tokio::test]
+async fn metadata_tenants_are_validated_before_any_authority_lookup() {
+    let outside = tempfile::tempdir().unwrap();
+    let sentinel = outside.path().join("authority.jsonl");
+    std::fs::write(&sentinel, b"synthetic outside authority must not be parsed").unwrap();
+    let sibling = outside.path().file_name().unwrap().to_str().unwrap();
+    for tenant in [
+        format!("../{sibling}/authority"),
+        outside
+            .path()
+            .join("authority")
+            .to_str()
+            .unwrap()
+            .to_owned(),
+    ] {
+        for seedless in [false, true] {
+            let fixture = Fixture::new(true, true, false).await;
+            if seedless {
+                std::fs::remove_file(fixture.capture.join("capture-seed.json")).unwrap();
+                let mut manifest = fixture.manifest.clone();
+                manifest.format_version = 6;
+                manifest.at_rest = None;
+                manifest.sealed_unix_secs = None;
+                manifest.binding.tenant_id = tenant.clone();
+                manifest.sealed_root_hex =
+                    mvm_core::transcript::sealed_root_hex(&manifest).unwrap();
+                write_manifest(&fixture.capture.join(MANIFEST_FILENAME), &manifest);
+            } else {
+                let path = fixture.capture.join("capture-seed.json");
+                let mut seed: TranscriptManifest =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                seed.binding.tenant_id = tenant.clone();
+                seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
+                write_manifest(&path, &seed);
+            }
+            let payload =
+                std::fs::read(fixture.capture.join(&fixture.manifest.chunks[0].file)).unwrap();
+            let error = fixture.refuses_unchanged(1);
+            assert!(error.contains("invalid prune tenant component"), "{error}");
+            assert!(
+                !error.contains("authority refused"),
+                "must not reach the outside authority reader"
+            );
+            assert_eq!(
+                std::fs::read(fixture.capture.join(&fixture.manifest.chunks[0].file)).unwrap(),
+                payload
+            );
+            assert_eq!(
+                std::fs::read(&sentinel).unwrap(),
+                b"synthetic outside authority must not be parsed"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn valid_foreign_tenant_authority_is_not_replaced_by_the_requested_tenant() {
+    let fixture = Fixture::new(true, true, false).await;
+    let path = fixture.capture.join("capture-seed.json");
+    let mut seed: TranscriptManifest =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    seed.binding.tenant_id = "foreign".into();
+    seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
+    write_manifest(&path, &seed);
+    let mut manifest = fixture.manifest.clone();
+    manifest.binding.tenant_id = "foreign".into();
+    manifest.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&manifest).unwrap();
+    write_manifest(&fixture.capture.join(MANIFEST_FILENAME), &manifest);
+    let foreign = FileAuditSigner::open(key(), fixture.root.path()).unwrap();
+    let mut opening = event(
+        TRANSCRIPT_OPENED_EVENT,
+        evidence::opening_labels(&seed).unwrap(),
+    );
+    opening.tenant = TenantId("foreign".into());
+    foreign.sign_and_emit(&opening).await.unwrap();
+    let mut seal = event(
+        TRANSCRIPT_SEALED_EVENT,
+        [
+            ("capture_id".into(), manifest.capture_id.clone()),
+            ("vm_name".into(), manifest.binding.vm_name.clone()),
+            ("transcript_root".into(), manifest.sealed_root_hex.clone()),
+            ("chunk_count".into(), manifest.chunks.len().to_string()),
+        ]
+        .into(),
+    );
+    seal.tenant = TenantId("foreign".into());
+    foreign.sign_and_emit(&seal).await.unwrap();
+    fixture
+        .signer
+        .prune_through(&TenantId("local".into()), 1)
+        .unwrap();
+    assert!(
+        evidence::authenticated_retirement(fixture.root.path(), &key().verifying_key(), &manifest,)
+            .is_ok()
+    );
+}

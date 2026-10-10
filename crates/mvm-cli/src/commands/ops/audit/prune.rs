@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 /// Dry-run unless acknowledged. The signer rechecks pins inside its commit lock.
 pub(super) fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
+    mvm_hostd::audit::validate_prune_tenant(tenant)?;
     let dir = default_audit_dir()?;
     let keys = host_signer::default_keys_dir()?;
     let (signing, verifying) = mvm_core::crypto::ed25519_keypair::load_existing(
@@ -60,6 +61,20 @@ mod tests {
     use super::*;
     use mvm_hostd::supervisor::audit::{AuditSigner, for_plan};
     use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
+
+    #[test]
+    fn invalid_tenant_refuses_before_keys_or_chain_discovery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(root.path());
+        for tenant in ["", "/", "../outside", "/outside", "a/b", "./local"] {
+            for ack in [false, true] {
+                let error = audit_prune(tenant, 1, ack).unwrap_err().to_string();
+                assert_eq!(error, "invalid prune tenant component");
+            }
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
 
     #[test]
     fn missing_prune_authority_does_not_initialize_keys() {

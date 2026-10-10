@@ -18,7 +18,9 @@ pub(crate) struct PinGuard {
     _inventory: inventory::Inventory,
 }
 
-pub(crate) fn validate_tenant(tenant: &str) -> Result<()> {
+/// Validate a tenant before using it to locate prune authority. On Unix this
+/// must be exactly one normal filename component, not a path or normalized alias.
+pub fn validate_tenant(tenant: &str) -> Result<()> {
     let mut components = Path::new(tenant).components();
     ensure!(
         matches!(components.next(), Some(std::path::Component::Normal(name)) if name == tenant)
@@ -45,6 +47,12 @@ pub(crate) fn admit(
     let mut legacy = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for capture in &inventory.captures {
+        // Integrity roots are recomputable, not authority. Validate every
+        // metadata-derived lookup component before any authority reader sees it,
+        // including a manifest with no opening seed.
+        for metadata in capture.seed.iter().chain(capture.manifest.iter()) {
+            validate_tenant(&metadata.binding.tenant_id)?;
+        }
         let identity = capture
             .seed
             .as_ref()
