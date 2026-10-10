@@ -8,7 +8,7 @@ fn fixture() -> (SigningKey, RegistrationChallenge) {
     };
     let binding = RegistrationBinding {
         tenant: "tenant".into(),
-        instance: "concrete-instance".into(),
+        instance: format!("concrete-vm/{}", Uuid::new_v4()),
         plan_id: "plan-id".into(),
         plan_nonce: Nonce::from_bytes([1; 16]),
         run: Uuid::new_v4(),
@@ -30,6 +30,10 @@ fn proof_roundtrips_and_verifies_exact_canonical_claims() {
     let wire = serde_json::to_vec(&proof).unwrap();
     let received: RegistrationProof = serde_json::from_slice(&wire).unwrap();
     assert_eq!(
+        received.challenge.binding.instance_vm().unwrap(),
+        "concrete-vm"
+    );
+    assert_eq!(
         received.verify(&expected, 100).unwrap().challenge(),
         &expected
     );
@@ -45,12 +49,74 @@ fn proof_roundtrips_and_verifies_exact_canonical_claims() {
 }
 
 #[test]
+fn every_construction_and_verification_path_refuses_noncanonical_instance_identities() {
+    let (key, expected) = fixture();
+    let valid = RegistrationProof::sign(&key, &expected.identity, &expected, 100).unwrap();
+    let id = Uuid::parse_str("abcdefab-cdef-4abc-8def-abcdefabcdef").unwrap();
+    for vm in ["a".into(), "0".into(), "vm-1".into(), "a".repeat(63)] {
+        let mut canonical = expected.clone();
+        canonical.binding.instance = format!("{vm}/{id}");
+        assert_eq!(canonical.binding.instance_vm().unwrap(), vm);
+        let proof = RegistrationProof::sign(&key, &canonical.identity, &canonical, 100).unwrap();
+        assert_eq!(
+            proof.verify(&canonical, 100).unwrap().challenge(),
+            &canonical
+        );
+    }
+    for instance in [
+        "concrete-instance".into(),
+        id.to_string(),
+        format!("vm/{}", Uuid::nil()),
+        format!("vm/{}", id.to_string().to_uppercase()),
+        format!("vm/{}", id.simple()),
+        format!("vm/{{{id}}}"),
+        format!("vm/urn:uuid:{id}"),
+        format!("VM/{id}"),
+        format!("-vm/{id}"),
+        format!("vm-/{id}"),
+        format!("vm_name/{id}"),
+        format!("{}/{id}", "a".repeat(64)),
+        format!("vm name/{id}"),
+        format!("/{id}"),
+        format!("vm/extra/{id}"),
+        format!("vm/{id}/extra"),
+    ] {
+        let mut malformed = expected.clone();
+        malformed.binding.instance = instance;
+        assert_eq!(
+            malformed.binding.instance_vm(),
+            Err(DelegationError::Invalid)
+        );
+        assert!(matches!(
+            RegistrationChallenge::fresh(
+                malformed.binding.clone(),
+                malformed.identity.clone(),
+                100
+            ),
+            Err(DelegationError::Invalid)
+        ));
+        assert!(matches!(
+            RegistrationProof::sign(&key, &malformed.identity, &malformed, 100),
+            Err(DelegationError::Invalid)
+        ));
+        let forged = RegistrationProof {
+            challenge: malformed.clone(),
+            signature: valid.signature.clone(),
+        };
+        assert!(matches!(
+            forged.verify(&malformed, 100),
+            Err(DelegationError::Invalid)
+        ));
+    }
+}
+
+#[test]
 fn every_binding_dimension_is_signed_and_compared_with_trusted_expectation() {
     let (key, expected) = fixture();
     let proof = RegistrationProof::sign(&key, &expected.identity, &expected, 100).unwrap();
     let mutations: &[fn(&mut RegistrationChallenge)] = &[
         |c| c.binding.tenant.push('x'),
-        |c| c.binding.instance.push('x'),
+        |c| c.binding.instance = format!("other-vm/{}", Uuid::new_v4()),
         |c| c.binding.plan_id.push('x'),
         |c| c.binding.plan_nonce = Nonce::from_bytes([2; 16]),
         |c| c.binding.run = Uuid::new_v4(),

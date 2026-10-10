@@ -1,7 +1,9 @@
-//! Dedicated native custody for an entrypoint caller's reusable identity.
+//! Dedicated macOS native custody for an entrypoint caller's reusable identity.
 //!
 //! Enrollment is explicit preparation, never a side effect of loading a key.
 //! Native custody proves possession only; it does not authorize a producer.
+//! Linux and other platforms refuse this opt-in rather than selecting an
+//! unvalidated backend or falling back to mock/file storage.
 
 use ed25519_dalek::SigningKey;
 use mvm_core::crypto::entrypoint_delegation::{
@@ -13,8 +15,6 @@ use zeroize::Zeroizing;
 
 mod worker;
 pub use worker::{IdentityClient, PendingCredential};
-#[cfg(all(feature = "native-caller-identity", target_os = "linux"))]
-mod linux;
 #[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 mod macos;
 #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]
@@ -22,10 +22,7 @@ mod native_tests;
 #[cfg(test)]
 mod tests;
 
-#[cfg(all(
-    feature = "native-caller-identity",
-    any(target_os = "macos", target_os = "linux")
-))]
+#[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 const SERVICE: &str = "com.tinylabs.mvm.entrypoint-caller.v1";
 
 /// Loaded dedicated key, zeroized on drop; neither cloneable nor printable.
@@ -56,11 +53,11 @@ impl CallerCredential {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum IdentityError {
     #[error(
-        "native caller custody is not enabled on this build/platform; use a supported native-caller-identity host build"
+        "native caller custody requires a macOS host build with native-caller-identity; Linux and other platforms do not support this opt-in"
     )]
     Unsupported,
     #[error(
-        "native caller custody unavailable or locked; configure and unlock the user's login keychain or persistent Secret Service before enrollment"
+        "native caller custody unavailable or locked; configure and unlock the user's macOS login keychain before enrollment"
     )]
     Unavailable,
     #[error("caller identity is not enrolled; explicitly enroll before launching")]
@@ -79,7 +76,7 @@ pub enum IdentityError {
 
 type Result<T> = std::result::Result<T, IdentityError>;
 
-/// Private seam for native implementations and deterministic tests.
+/// Private seam for the native implementation and deterministic tests.
 trait Store: Send + 'static {
     fn read(&self, account: &str) -> Result<Zeroizing<Vec<u8>>>;
     /// Create only. Existing items must never be replaced.
@@ -102,14 +99,7 @@ fn native_store() -> Result<Box<dyn Store>> {
     {
         Ok(Box::new(macos::NativeStore))
     }
-    #[cfg(all(feature = "native-caller-identity", target_os = "linux"))]
-    {
-        Ok(Box::new(linux::NativeStore))
-    }
-    #[cfg(not(all(
-        feature = "native-caller-identity",
-        any(target_os = "macos", target_os = "linux")
-    )))]
+    #[cfg(not(all(feature = "native-caller-identity", target_os = "macos")))]
     {
         Err(IdentityError::Unsupported)
     }

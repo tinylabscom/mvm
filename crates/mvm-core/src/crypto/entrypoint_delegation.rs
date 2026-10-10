@@ -29,6 +29,7 @@ pub enum RegistrationPurpose {
 #[serde(deny_unknown_fields)]
 pub struct RegistrationBinding {
     pub tenant: String,
+    /// Valid VM name, '/', then a nonnil lowercase hyphenated instance UUID.
     pub instance: String,
     pub plan_id: String,
     pub plan_nonce: Nonce,
@@ -78,8 +79,24 @@ pub enum DelegationError {
 type Result<T> = std::result::Result<T, DelegationError>;
 
 impl RegistrationBinding {
+    /// Validate the complete instance identity and return its bound VM name.
+    /// Alternate UUID spellings are refused, never normalized before signing.
+    pub fn instance_vm(&self) -> Result<&str> {
+        let (vm, suffix) = self
+            .instance
+            .split_once('/')
+            .ok_or(DelegationError::Invalid)?;
+        crate::naming::validate_vm_name(vm).map_err(|_| DelegationError::Invalid)?;
+        let instance = Uuid::parse_str(suffix).map_err(|_| DelegationError::Invalid)?;
+        if instance.is_nil() || instance.to_string() != suffix {
+            return Err(DelegationError::Invalid);
+        }
+        Ok(vm)
+    }
+
     fn validate(&self, now: u64) -> Result<()> {
-        for label in [&self.tenant, &self.instance, &self.plan_id] {
+        self.instance_vm()?;
+        for label in [&self.tenant, &self.plan_id] {
             if label.is_empty()
                 || label.len() > MAX_LABEL_BYTES
                 || label.chars().any(char::is_control)
