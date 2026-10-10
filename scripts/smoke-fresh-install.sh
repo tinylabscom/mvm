@@ -37,6 +37,12 @@
 # take that archive, because it refuses anything without the signature the
 # publish step adds.
 #
+# MVM_SMOKE_GUEST_RUNTIME adds the release's unpublished guest runtime to that
+# archive: it is staged in guest-runtime/ beside the unpacked mvmctl, where the
+# installer puts the published one, and `mvmctl bootstrap` must adopt it there
+# rather than look for it in a release that does not exist yet. That pairs the
+# CLI with the guest runtime it will ship with before either is published.
+#
 # The environment is rebuilt from nothing (`env -i`): no MVM_* knob, cache
 # directory or tool the developer's shell happens to carry can make a broken
 # release look working. Nothing outside the throwaway root is written.
@@ -46,6 +52,9 @@
 #                                  URL; default: this checkout's install.sh
 #   MVM_SMOKE_ARCHIVE              release archive (mvmctl-<target>.tar.gz) to
 #                                  unpack instead of running an installer
+#   MVM_SMOKE_GUEST_RUNTIME        the release's guest runtime archive
+#                                  (mvm-guest-bins-v<version>.tar.gz) to stage
+#                                  beside the unpacked mvmctl; archive mode only
 #   MVM_SMOKE_OUT                  directory for the transcript and VM logs;
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
@@ -78,6 +87,11 @@ esac
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 BOUNDED="$REPO_ROOT/scripts/run-bounded-command.py"
 ARCHIVE="${MVM_SMOKE_ARCHIVE:-}"
+GUEST_RUNTIME="${MVM_SMOKE_GUEST_RUNTIME:-}"
+if [ -n "$GUEST_RUNTIME" ] && [ -z "$ARCHIVE" ]; then
+  echo "MVM_SMOKE_GUEST_RUNTIME is staged beside an unpacked MVM_SMOKE_ARCHIVE; set both" >&2
+  exit 2
+fi
 if [ -n "$ARCHIVE" ] && [ -n "${MVM_SMOKE_INSTALLER:-}" ]; then
   echo "MVM_SMOKE_ARCHIVE and MVM_SMOKE_INSTALLER each name what to install; set one" >&2
   exit 2
@@ -275,6 +289,12 @@ install_from_archive() {
   done
   [ -n "$unpacked" ] || fail "$ARCHIVE holds no mvmctl-<target>/mvmctl"
   ln -s "$unpacked" "$SMOKE_HOME/.local/bin/mvmctl"
+  if [ -n "$GUEST_RUNTIME" ]; then
+    [ -f "$GUEST_RUNTIME" ] || fail "no guest runtime at $GUEST_RUNTIME"
+    mkdir -p "$(dirname "$unpacked")/guest-runtime"
+    cp "$GUEST_RUNTIME" "$(dirname "$unpacked")/guest-runtime/" \
+      || fail "could not stage $GUEST_RUNTIME beside mvmctl"
+  fi
   shipped=""
   for entry in "$(dirname "$unpacked")"/*; do
     shipped="$shipped $(basename "$entry")"
@@ -314,6 +334,12 @@ if [ -n "$VERSION" ] && [ "$INSTALLED" != "mvmctl ${VERSION#v}" ]; then
 fi
 if grep -q 'bootstrap failed' "$ROOT/install.err"; then
   log "note: the installer's bootstrap failed; the first command must recover on its own"
+fi
+if [ -n "$GUEST_RUNTIME" ]; then
+  runtime_name="$(basename "$GUEST_RUNTIME")"
+  grep -q "Guest runtime $runtime_name ready (installed beside mvmctl)" "$ROOT/install.out" "$ROOT/install.err" \
+    || fail "bootstrap did not adopt the unpublished guest runtime $runtime_name staged beside mvmctl"
+  log "guest runtime: $runtime_name adopted from beside mvmctl"
 fi
 
 # Keep what the guests and their supervisors said before the throwaway HOME

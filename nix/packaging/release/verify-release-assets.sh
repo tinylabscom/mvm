@@ -3,13 +3,17 @@
 # every binary target tarball has a SHA256 file that matches, a cosign
 # signature bundle, and an entry in the combined checksums manifest; every
 # Linux target has exactly one .deb and one .rpm held to the same three
-# checks; the signed SBOM is present. Fail-closed — any missing or mismatched asset is a
+# checks; the release's one guest runtime archive (mvm-guest-bins-v<version>)
+# is held to them too, with its signed `.sha256` sidecar beside it and a
+# manifest inside; the signed SBOM is present. Fail-closed — any missing or mismatched asset is a
 # nonzero exit. Run post-publish (release.yml `verify-release` job) against a
 # directory of downloaded release assets, or locally against a staging dir.
 #
 # Boot images are not part of a CLI release: they are members of the signed
 # image set `crates/mvm-core/images.lock` pins, and every consumer verifies
-# them against that root, so there is nothing image-shaped to check here.
+# them against that root, so there is nothing image-shaped to check here. The
+# guest runtime is not an image: it is the guest programs and libraries built
+# from this tree, version-locked to the CLI that ships with them.
 #
 # Usage:
 #   verify-release-assets.sh --assets-dir DIR [--targets "t1 t2 ..."] [--cosign]
@@ -157,6 +161,63 @@ check_distro_packages() {
   return 0
 }
 
+# A blob's own Sigstore bundle, under the release identity, when --cosign asks.
+cosign_verify_blob() {
+  label="$1"; blob="$2"
+  [ "$DO_COSIGN" = 1 ] && [ -f "$blob.bundle" ] || return 0
+  command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return 0; }
+  cosign verify-blob --bundle "$blob.bundle" \
+    ${COSIGN_IDENTITY_REGEXP:+--certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"} \
+    ${COSIGN_IDENTITY:+--certificate-identity "$COSIGN_IDENTITY"} \
+    ${COSIGN_OIDC_ISSUER:+--certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"} \
+    "$blob" >/dev/null 2>&1 \
+    || fail "$label $(basename "$blob") cosign verify-blob failed"
+  return 0
+}
+
+# The guest runtime every CLI release ships: exactly one archive, named for
+# the release's version, signed and listed like a tarball. mvmctl reads the
+# `.sha256` sidecar before it fetches the archive, so the sidecar must be there,
+# signed, and agree with the bytes; and the archive must carry the manifest
+# mvmctl verifies its members against.
+check_guest_runtime() {
+  label="[guest runtime]"
+  runtimes=()
+  for candidate in "$ASSETS_DIR"/mvm-guest-bins-v*.tar.gz; do
+    if [ -f "$candidate" ]; then runtimes+=("$candidate"); fi
+  done
+  if [ "${#runtimes[@]}" -ne 1 ]; then
+    fail "$label expected one mvm-guest-bins-v<version>.tar.gz, found ${#runtimes[@]}"
+    return 0
+  fi
+  runtime="${runtimes[0]}"
+  name="$(basename "$runtime")"
+  if [ -n "$EXPECT_VERSION" ] && [ "$name" != "mvm-guest-bins-v${EXPECT_VERSION}.tar.gz" ]; then
+    fail "$label $name is not the guest runtime of version $EXPECT_VERSION"
+  fi
+  check_signed_asset "$label" "$runtime"
+
+  sidecar="$runtime.sha256"
+  if [ ! -f "$sidecar" ]; then
+    fail "$label digest sidecar missing: $name.sha256"
+  else
+    want=$(awk -v name="$name" '$2 == name || $2 == "*" name {print $1}' "$sidecar")
+    got=$(sha256_of "$runtime")
+    [ "$want" = "$got" ] || fail "$label $name.sha256 records '$want', the archive hashes to $got"
+    [ -f "$sidecar.bundle" ] || fail "$label signature bundle missing: $name.sha256.bundle"
+    cosign_verify_blob "$label" "$sidecar"
+  fi
+
+  listing="$(mktemp)"
+  if tar tzf "$runtime" > "$listing" 2>/dev/null; then
+    grep -qx 'manifest.json' "$listing" || fail "$label $name carries no manifest.json"
+  else
+    fail "$label $name failed to list"
+  fi
+  rm -f "$listing"
+  return 0
+}
+
 COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
 require_signed_manifest "$COMBINED" "combined checksums manifest"
@@ -221,12 +282,14 @@ for target in $TARGETS; do
   check_distro_packages "$target"
 done
 
+check_guest_runtime
+
 # The SBOM ships signed alongside the binaries on every release.
 [ -f "$ASSETS_DIR/sbom.cdx.json" ]        || fail "SBOM missing: sbom.cdx.json"
 [ -f "$ASSETS_DIR/sbom.cdx.json.bundle" ] || fail "SBOM signature bundle missing: sbom.cdx.json.bundle"
 
 if [ "$FAILED" = 0 ]; then
-  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; SBOM signed."
+  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; guest runtime signed and listed; SBOM signed."
 else
   echo "release asset verification FAILED" >&2
   exit 1

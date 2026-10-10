@@ -11,6 +11,11 @@ name: First run of an unpublished release archive
 # allowed only the latter, and every run that granted egress failed once the
 # guest authenticated. The smoke's egress boot is what reaches that endpoint.
 #
+# The guest runtime the same run built is staged beside that mvmctl, where the
+# installer puts the published one, and the smoke requires `mvmctl bootstrap`
+# to adopt it there: the CLI and the guest runtime it ships with are paired
+# before either is published.
+#
 # x86_64 only. GitHub's arm64 runners expose no KVM, so there is no hosted
 # runner the aarch64 archive could boot on; CI's musl confinement lane runs the
 # endpoint's seccomp tests against both musl targets instead.
@@ -85,15 +90,54 @@ jobs:
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
 
+      - name: Download the guest runtime the calling release run built
+        if: inputs.run_id == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: ${{ runner.temp }}/guest-runtime
+
+      - name: Download the guest runtime the named release run built
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: ${{ runner.temp }}/guest-runtime
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
       - name: Check the archive against the checksum the build recorded
         run: |
           cd "${RUNNER_TEMP}/release-archive"
           sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256
 
+      # One runtime, held to the checksum its build recorded; on a tag, the
+      # one named for the tag's version.
+      - name: Check the guest runtime against the checksum the build recorded
+        id: guest-runtime
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/guest-runtime"
+          shopt -s nullglob
+          runtimes=(mvm-guest-bins-v*.tar.gz)
+          if [ "${#runtimes[@]}" -ne 1 ]; then
+            echo "::error::expected one guest runtime archive, found ${#runtimes[@]}: ${runtimes[*]}" >&2
+            exit 1
+          fi
+          if [ -n "${TAG_NAME}" ] && [ "${runtimes[0]}" != "mvm-guest-bins-${TAG_NAME}.tar.gz" ]; then
+            echo "::error::${runtimes[0]} is not the guest runtime of ${TAG_NAME}" >&2
+            exit 1
+          fi
+          sha256sum --check "${runtimes[0]}.sha256"
+          echo "archive=${RUNNER_TEMP}/guest-runtime/${runtimes[0]}" >> "${GITHUB_OUTPUT}"
+
       - name: Unpack the archive and run the first-run smoke, egress included
         env:
           TAG_NAME: ${{ inputs.tag }}
           MVM_SMOKE_ARCHIVE: ${{ runner.temp }}/release-archive/mvmctl-x86_64-unknown-linux-gnu.tar.gz
+          MVM_SMOKE_GUEST_RUNTIME: ${{ steps.guest-runtime.outputs.archive }}
           MVM_SMOKE_OUT: ${{ runner.temp }}/release-archive-smoke
         run: sh scripts/smoke-fresh-install.sh ${TAG_NAME:+"$TAG_NAME"}
 

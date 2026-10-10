@@ -5,9 +5,11 @@ name: Linux distro packages
 # distributions per format, on both architectures, where the installed mvmctl
 # is run and every installed file is checked against the tarball's bytes.
 #
-# release.yml calls this with `tarballs: build`, packaging the archives its
-# build job just made; the release job then signs, attests and publishes the
-# packages with the tarballs. Anywhere else it packages a published release's
+# Each package also carries the release's guest runtime under
+# /usr/lib/mvmctl/guest-runtime. release.yml calls this with `tarballs: build`,
+# packaging the archives its build job just made with the guest runtime its
+# guest-runtime job built; the release job then signs, attests and publishes
+# the packages with the tarballs. Anywhere else it packages a published release's
 # tarballs instead, so the packaging path is exercised without a release
 # build: on pull requests that change it, nightly from Extended CI, and on
 # dispatch.
@@ -74,6 +76,13 @@ jobs:
           path: tarballs
           merge-multiple: true
 
+      - name: Download this run's guest runtime
+        if: ${{ inputs.tarballs == 'build' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: guest-runtime
+
       - name: Download a published release's tarballs
         if: ${{ inputs.tarballs != 'build' }}
         env:
@@ -92,6 +101,22 @@ jobs:
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
             --pattern 'mvmctl-*-unknown-linux-gnu.tar.gz' --dir tarballs
           echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          # The release's guest runtime, when it publishes one. A release that
+          # predates the asset gets a labelled stand-in so the packaging and
+          # install path is still exercised; release mode never publishes what
+          # it builds, so the stand-in cannot reach a user.
+          runtime="mvm-guest-bins-${tag}.tar.gz"
+          mkdir -p guest-runtime
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+               --jq '.assets[].name' | grep -x "${runtime}" >/dev/null; then
+            gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${runtime}" --pattern "${runtime}.sha256" --dir guest-runtime
+          else
+            echo "::notice::${tag} publishes no guest runtime; packaging a stand-in"
+            printf 'stand-in guest runtime for %s\n' "${tag}" > guest-runtime/STAND-IN
+            tar czf "guest-runtime/${runtime}" -C guest-runtime STAND-IN
+            (cd guest-runtime && sha256sum "${runtime}" > "${runtime}.sha256")
+          fi
 
       # A release build packages under the tree's version, which the tag
       # matches; a published release, under its own tag's. The script refuses
@@ -118,7 +143,8 @@ jobs:
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
             bash scripts/build-distro-packages.sh \
-              "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages
+              "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages \
+              "guest-runtime/mvm-guest-bins-v${VERSION}.tar.gz"
           done
           ls -la distro-packages/
 

@@ -61,6 +61,14 @@ jobs:
       # guest-image-boot lane is dispatch-only today.
       boot_pinned_images: true
 
+  # The guest runtime this release ships: the `mvm-guest-bins` archive for
+  # both guest architectures, built from the tagged tree with the pinned
+  # toolchain. The release job signs it, lists it in the signed checksum
+  # manifest, attests it and publishes it beside the CLI tarballs, so a
+  # downloaded mvmctl fetches the runtime of its own version and nothing else.
+  guest-runtime:
+    uses: ./.github/workflows/guest-bins.yml
+
   build:
     strategy:
       # Each target publishes independently — one target's failure must not
@@ -342,7 +350,7 @@ jobs:
   # endpoint from them. v0.22.0 published an endpoint that could not survive a
   # guest's egress handshake for exactly that reason.
   release-archive-smoke:
-    needs: [build]
+    needs: [build, guest-runtime]
     uses: ./.github/workflows/release-archive-smoke.yml
     with:
       # A tag must ship the version it names; a dry run builds from a branch,
@@ -353,13 +361,13 @@ jobs:
   # rebuilt, and installed on Debian, Ubuntu, Fedora and Rocky on both
   # architectures before the release job will publish them.
   distro-packages:
-    needs: build
+    needs: [build, guest-runtime]
     uses: ./.github/workflows/distro-packages.yml
     with:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, release-archive-smoke, distro-packages]
+    needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]
     # `e2e-docs` was added to `needs` above when the documented-surface gate
     # landed, and its result was never added here. `!cancelled()` overrides the
     # implicit all-needs-succeeded rule, so for as long as that was true the
@@ -372,7 +380,7 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -402,13 +410,37 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Exactly one guest runtime, and on a tag the one whose name carries the
+      # tag's version: the archive's own manifest records the version it was
+      # built at, and mvmctl refuses a runtime that is not its own.
+      - name: Check the guest runtime matches this release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          runtimes=(artifacts/mvm-guest-bins-v*.tar.gz)
+          if [ "${#runtimes[@]}" -ne 1 ]; then
+            echo "::error::expected one guest runtime archive, found ${#runtimes[@]}: ${runtimes[*]}" >&2
+            exit 1
+          fi
+          runtime="${runtimes[0]}"
+          if [ "${IS_TAG}" = "true" ] && [ "${runtime}" != "artifacts/mvm-guest-bins-${TAG_NAME}.tar.gz" ]; then
+            echo "::error::${runtime} is not the guest runtime of ${TAG_NAME}" >&2
+            exit 1
+          fi
+          (cd artifacts && sha256sum --check "$(basename "${runtime}").sha256")
+
       - name: Generate combined checksum file
         shell: bash
         run: |
           cd artifacts
           # Combine the per-tarball and per-package checksums into one file;
-          # distro-packages writes a `.sha256` per .deb and .rpm in the same
-          # format as the build job's.
+          # distro-packages writes a `.sha256` per .deb and .rpm, and the
+          # guest-runtime job one for its archive, in the same format as the
+          # build job's.
           # ./ prefix: a file named like an option must stay a filename.
           cat ./*.sha256 > checksums-sha256.txt
           echo "Combined checksums:"
@@ -442,6 +474,11 @@ jobs:
           # The .deb and .rpm are signed directly like the tarballs, and are
           # in the manifest too, so either anchor authenticates them.
           #
+          # The guest runtime archive matches `*.tar.gz` and is signed with
+          # the tarballs. Its `.sha256` sidecar is published too, since
+          # mvmctl reads that digest before it fetches the archive, and is
+          # signed so that no unsigned file ships in the release.
+          #
           # Boot images are not in this release: they are members of the
           # signed image set `images.lock` pins, verified against that root's
           # own signature, so nothing here re-signs them.
@@ -449,6 +486,7 @@ jobs:
             artifacts/*.tar.gz \
             artifacts/*.deb \
             artifacts/*.rpm \
+            artifacts/mvm-guest-bins-v*.tar.gz.sha256 \
             artifacts/checksums-sha256.txt \
             sbom.cdx.json; do
             cosign sign-blob \
@@ -471,8 +509,8 @@ jobs:
       # an independent rebuild landing on the same bytes needs no trust in this
       # builder at all.
       #
-      # Subjects are the tarballs and the distro packages, matching the
-      # direct-signature set.
+      # Subjects are the tarballs (the guest runtime archive among them) and
+      # the distro packages, matching the direct-signature set.
       - name: Attest build provenance for the release tarballs (release-provenance)
         if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
@@ -505,6 +543,8 @@ jobs:
             artifacts/*.deb.bundle
             artifacts/*.rpm
             artifacts/*.rpm.bundle
+            artifacts/mvm-guest-bins-v*.tar.gz.sha256
+            artifacts/mvm-guest-bins-v*.tar.gz.sha256.bundle
             artifacts/checksums-sha256.txt
             artifacts/checksums-sha256.txt.bundle
             sbom.cdx.json

@@ -31,6 +31,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// before an OCI workload can launch.
 pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()> {
     run_steps(production)?;
+    crate::release_guest_runtime::prepare_for_running_binary()
+        .context("preparing the release guest runtime")?;
     let local_build_requested = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode()
         == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         || mvm_build::image_source::configured_images_dir().is_some();

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Focused tests for verify-release-assets.sh: a release whose binary archives,
-# distro packages, combined checksum manifest and SBOM are complete and signed
-# verifies; one with a missing signature, a drifted digest, an unlisted
-# archive or package, a missing or duplicated package, or a missing packaged
-# binary fails closed. Runs the real script (no --cosign, no
+# distro packages, guest runtime, combined checksum manifest and SBOM are
+# complete and signed verifies; one with a missing signature, a drifted digest,
+# an unlisted archive or package, a missing or duplicated package or guest
+# runtime, or a missing packaged binary fails closed. Runs the real script (no --cosign, no
 # --expect-version, so the OIDC/host-version checks are skipped) against
 # fixtures built here. No network, no cosign.
 set -euo pipefail
@@ -36,6 +36,21 @@ add_packages() {
   done
 }
 
+# The release's guest runtime: an archive carrying a manifest, its signed
+# `.sha256` sidecar, its own bundle, and its manifest entry.
+add_guest_runtime() {
+  local dir="$1" version="$2"
+  local name="mvm-guest-bins-v${version}.tar.gz" stage
+  stage="$(mktemp -d)"
+  printf '{}\n' > "$stage/manifest.json"
+  tar czf "$dir/$name" -C "$stage" manifest.json
+  rm -rf "$stage"
+  printf 'bundle\n' > "$dir/$name.bundle"
+  echo "$(sha256_of "$dir/$name")  $name" > "$dir/$name.sha256"
+  printf 'bundle\n' > "$dir/$name.sha256.bundle"
+  echo "$(sha256_of "$dir/$name")  $name" >> "$dir/checksums-sha256.txt"
+}
+
 # Build a fully-valid release-assets dir (every tarball/package/manifest/SBOM
 # check passes). Echoes the dir path.
 build_valid_fixture() {
@@ -51,6 +66,7 @@ build_valid_fixture() {
   done
   add_packages "$dir" amd64 x86_64
   add_packages "$dir" arm64 aarch64
+  add_guest_runtime "$dir" 0.0.0
   printf 'bundle\n' > "$dir/checksums-sha256.txt.bundle"
   printf '{"sbom":true}\n' > "$dir/sbom.cdx.json"
   printf 'bundle\n' > "$dir/sbom.cdx.json.bundle"
@@ -148,7 +164,71 @@ echo "$(sha256_of "$d/mvmctl_0.0.1-1_amd64.deb")  mvmctl_0.0.1-1_amd64.deb" >> "
 if run "$d"; then bad "two .debs for one arch must fail"; else ok "two .debs for one arch fail closed"; fi
 rm -rf "$d"
 
-# 12. Every binary the verifier REQUIRES must be one release.yml actually
+# 12. A release without its guest runtime → fail closed: a downloaded mvmctl
+# fetches the runtime of its own version and has nowhere else to get it.
+d="$(build_valid_fixture)"
+rm -f "$d"/mvm-guest-bins-v*
+if run "$d"; then bad "a missing guest runtime must fail"; else ok "a missing guest runtime fails closed"; fi
+rm -rf "$d"
+
+# 13. An unsigned guest runtime → fail closed.
+d="$(build_valid_fixture)"
+rm -f "$d/mvm-guest-bins-v0.0.0.tar.gz.bundle"
+if run "$d"; then bad "an unsigned guest runtime must fail"; else ok "an unsigned guest runtime fails closed"; fi
+rm -rf "$d"
+
+# 14. A guest runtime whose sidecar disagrees with its bytes → fail closed.
+# mvmctl reads that digest first and would refuse the download.
+d="$(build_valid_fixture)"
+echo "0000000000000000000000000000000000000000000000000000000000000000  mvm-guest-bins-v0.0.0.tar.gz" \
+  > "$d/mvm-guest-bins-v0.0.0.tar.gz.sha256"
+if run "$d"; then bad "a drifted guest runtime sidecar must fail"; else ok "a drifted guest runtime sidecar fails closed"; fi
+rm -rf "$d"
+
+# 15. A guest runtime the signed manifest does not list → fail closed.
+d="$(build_valid_fixture)"
+grep -v 'mvm-guest-bins-v0.0.0.tar.gz' "$d/checksums-sha256.txt" > "$d/.c.tmp"
+mv "$d/.c.tmp" "$d/checksums-sha256.txt"
+if run "$d"; then bad "an unlisted guest runtime must fail"; else ok "an unlisted guest runtime fails closed"; fi
+rm -rf "$d"
+
+# 16. Two guest runtimes → fail closed: an installer could not tell which one
+# belongs to the CLI.
+d="$(build_valid_fixture)"
+add_guest_runtime "$d" 0.0.1
+if run "$d"; then bad "two guest runtimes must fail"; else ok "two guest runtimes fail closed"; fi
+rm -rf "$d"
+
+# 17. A guest runtime with no manifest inside → fail closed.
+d="$(build_valid_fixture)"
+name=mvm-guest-bins-v0.0.0.tar.gz
+stage="$(mktemp -d)"; printf 'x\n' > "$stage/README"
+tar czf "$d/$name" -C "$stage" README; rm -rf "$stage"
+echo "$(sha256_of "$d/$name")  $name" > "$d/$name.sha256"
+grep -v "$name" "$d/checksums-sha256.txt" > "$d/.c.tmp"
+echo "$(sha256_of "$d/$name")  $name" >> "$d/.c.tmp"
+mv "$d/.c.tmp" "$d/checksums-sha256.txt"
+if run "$d"; then bad "a guest runtime without a manifest must fail"; else ok "a guest runtime without a manifest fails closed"; fi
+rm -rf "$d"
+
+# 18. A guest runtime named for another version than the one expected →
+# fail closed. --expect-version also runs the host's mvmctl when one matches,
+# so this is checked with the host target left out of --targets.
+d="$(build_valid_fixture)"
+if bash "$SCRIPT" --assets-dir "$d" --targets aarch64-unknown-linux-gnu --expect-version 0.0.1 >/dev/null 2>&1; then
+  bad "a guest runtime of another version must fail"
+else
+  ok "a guest runtime of another version fails closed"
+fi
+if bash "$SCRIPT" --assets-dir "$d" --targets aarch64-unknown-linux-gnu --expect-version 0.0.0 >/dev/null 2>&1 \
+  || [ "$(uname -s)/$(uname -m)" = "Linux/aarch64" ]; then
+  ok "the guest runtime of the expected version verifies"
+else
+  bad "the guest runtime of the expected version should verify"
+fi
+rm -rf "$d"
+
+# 19. Every binary the verifier REQUIRES must be one release.yml actually
 # bundles. The fixtures above cannot catch a stale name: build_valid_fixture
 # creates whatever bins_for names, so a required-but-unbuilt binary verifies
 # green here and fails only at release time. Compare against the workflow.

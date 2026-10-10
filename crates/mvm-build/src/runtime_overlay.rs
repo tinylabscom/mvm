@@ -916,12 +916,12 @@ pub fn download_runtime_overlay_from(
 }
 
 /// Fetch `asset` from the per-version directory `release_url` of a CLI
-/// release, the way clients that predate the image set acquire it: its
-/// `.sha256` sidecar first, then the archive held to that digest, then the
-/// archive held to the CLI release workflow's signing identity.
+/// release: its `.sha256` sidecar first, then the archive held to that
+/// digest, then the archive held to the CLI release workflow's signing
+/// identity at exactly `version`. Nothing reads the archive before both pass.
 ///
-/// The CLI release still publishes these archives for those clients, and its
-/// workflow proves each one survives this path before publishing.
+/// The guest runtime each CLI release publishes is acquired through here
+/// ([`crate::guest_bins::release`]).
 pub fn fetch_cli_release_archive(
     release_url: &str,
     version: &str,
