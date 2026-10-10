@@ -7,6 +7,8 @@ pub mod ed25519_keypair;
 // Gated so the runtime-free default build skips `rcgen`.
 #[cfg(feature = "egress-ca")]
 pub mod egress_ca;
+pub mod entrypoint_delegation;
+pub mod entrypoint_identity;
 pub mod image_verify;
 pub mod key_rotation;
 pub mod keystore;
