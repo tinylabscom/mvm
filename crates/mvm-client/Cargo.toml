@@ -1,5 +1,6 @@
 [package]
 name = "mvm-client"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "The embedder-facing mvm client: local machine lifecycle, launch, inventory, and the MvmClient facade."

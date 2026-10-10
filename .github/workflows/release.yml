@@ -57,8 +57,8 @@ jobs:
       # images.lock pins, not a pair build of the tree's guest sources. The
       # SDK sidecar and the dev default image are therefore adopted from that
       # signed set whatever sources it was built from, and the lane fails if
-      # the set's signed compatibility excludes this CLI. Guest-source changes
-      # are pair-built and booted in the merge queue's guest-image-boot lane.
+      # the set's signed compatibility excludes this CLI. The
+      # guest-image-boot lane is dispatch-only today.
       boot_pinned_images: true
 
   build:
@@ -92,10 +92,11 @@ jobs:
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
-    # Backstop: a cold release build is ~15-25 min. Without a cap a hung
-    # build (e.g. the nested-cargo target-lock deadlock fixed in build.rs)
-    # runs to the 6h default, burning runner minutes silently.
-    timeout-minutes: 45
+    # Backstop: a cold macOS release plus host binaries took 43 min before the
+    # size check began on 2026-10-08. That check and man-page generation each
+    # compile xtask separately. Keep a bounded cap with room to package, so a
+    # healthy cold build is not canceled at the old 45-minute limit.
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v6
@@ -115,7 +116,7 @@ jobs:
         run: rustup target add "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
 
       # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
-      # binaries (mvm-host-vm-init, mvm-builderd) as static
+      # binaries (mvm-host-vm-init, mvm-builderd, mvm-setpriv) as static
       # aarch64-unknown-linux-musl via cargo-zigbuild — so zig +
       # cargo-zigbuild must be present at `cargo build`-of-mvmctl time, the
       # same as the ci.yml Lint job. Without this the release binary build

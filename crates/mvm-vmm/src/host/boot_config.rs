@@ -48,50 +48,9 @@ pub fn probe_verity_sidecar(rootfs_path: &str) -> (Option<String>, Option<String
     (Some(verity.to_string_lossy().into_owned()), Some(hash))
 }
 
-/// Build the cmdline fragment consumed by `mvm-verity-init`
-/// (the PID 1 in the verity initramfs). Pure function for unit
-/// testing — `None` is returned when verity is disabled (no
-/// `roothash`). When the three runtime-overlay fields are also
-/// present, the fragment includes the `mvm.runtime_*` knobs the
-/// init binary reads to set up the second dm-verity target and
-/// bind-mount it at `/sysroot/mvm/runtime`.
-pub fn build_verity_cmdline_args(
-    roothash: Option<&str>,
-    overlay_roothash: Option<&str>,
-) -> Option<String> {
-    let h = roothash?;
-    let base = format!("mvm.roothash={h} mvm.data=/dev/vda mvm.hash=/dev/vdb");
-    match overlay_roothash {
-        Some(oh) => Some(format!(
-            "{base} mvm.runtime_roothash={oh} mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd"
-        )),
-        None => Some(base),
-    }
-}
-
-/// Build the runtime-overlay cmdline fragment for Firecracker workload boots.
-///
-/// Verity-root boots use the fixed `/dev/vdc` + `/dev/vdd` runtime pair that
-/// `mvm-verity-init` consumes. Injected OCI non-verity boots instead mount a
-/// plain read-only overlay ext4 from `/dev/vdb` in their `/init`, so they only
-/// need the data-device token.
-pub fn build_runtime_overlay_cmdline_args(
-    rootfs_roothash: Option<&str>,
-    overlay_present: bool,
-) -> Option<String> {
-    if !overlay_present {
-        return None;
-    }
-    match rootfs_roothash {
-        Some(_) => Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd".to_string()),
-        None => Some("mvm.runtime_data=/dev/vdb".to_string()),
-    }
-}
-
-/// Whether this boot attached the universal initramfs (as opposed to a
-/// legacy per-rootfs verity initramfs or no initramfs at all). Bundles carry
-/// an admitted boot-assets pin; other launches resolve the shared initramfs
-/// cache. A legacy `rootfs.initrd` sibling is never sent `ActivateEnvironment`.
+/// Whether this boot attached the universal initramfs. Bundles carry an
+/// admitted boot-assets pin; other launches resolve the shared initramfs cache.
+/// This keeps the activation handshake tied to the artifact that implements it.
 pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
     let Some(initrd) = &config.initrd_path else {
         return false;
@@ -112,12 +71,12 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
 /// present — including on the virtiofs-root shape, which reaches its guest
 /// binaries the same way every other shape does now that the overlay is the
 /// single runtime source. Returned to the backends that assign the overlay the
-/// next free `/dev/vdN` after the rootfs — always `/dev/vdb` on the non-verity
-/// branch, matching [`build_runtime_overlay_cmdline_args`]`(None, true)`.
+/// next free `/dev/vdN` after the rootfs; the live cmdline token names the
+/// attached device on this path.
 pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> Option<&str> {
     // The three overlay fields are populated together; require the full triple
     // so a half-populated config can't attach a device the guest can't
-    // corroborate against the cmdline token.
+    // corroborate against the boot metadata.
     if config.runtime_overlay_verity_path.is_none() || config.runtime_overlay_roothash.is_none() {
         return None;
     }
@@ -404,76 +363,8 @@ mod tests {
     // verity cmdline + runtime-overlay attachment
     // ------------------------------------------------------------------
 
-    /// 64-char lowercase hex used wherever a roothash is needed.
-    /// Two distinct values so cmdline tests can prove the rootfs
-    /// hash and the overlay hash flow through the right knobs.
+    /// A valid 64-character rootfs hash for sidecar discovery tests.
     const ROOTFS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-    const OVERLAY_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000002";
-
-    #[test]
-    fn build_verity_cmdline_args_none_without_roothash() {
-        assert_eq!(build_verity_cmdline_args(None, None), None);
-        // Overlay hash alone without rootfs verity does not synthesize verity
-        // knobs; non-verity OCI boots use the separate runtime-data token path.
-        assert_eq!(
-            build_verity_cmdline_args(None, Some(OVERLAY_HASH)),
-            None,
-            "overlay-only input should not produce verity cmdline knobs"
-        );
-    }
-
-    #[test]
-    fn build_verity_cmdline_args_rootfs_only_matches_legacy_shape() {
-        let got =
-            build_verity_cmdline_args(Some(ROOTFS_HASH), None).expect("rootfs verity → cmdline");
-        assert_eq!(
-            got,
-            format!("mvm.roothash={ROOTFS_HASH} mvm.data=/dev/vda mvm.hash=/dev/vdb"),
-        );
-        assert!(!got.contains("runtime_"));
-    }
-
-    #[test]
-    fn build_verity_cmdline_args_with_overlay_appends_runtime_knobs() {
-        let got = build_verity_cmdline_args(Some(ROOTFS_HASH), Some(OVERLAY_HASH))
-            .expect("rootfs + overlay verity → cmdline");
-        // Rootfs knobs come first, overlay knobs append at the end —
-        // mvm-verity-init parses tokens left-to-right and only the
-        // last assignment wins for a duplicate key, so order is
-        // load-bearing if rootfs/overlay were ever to share a key.
-        // The runtime keys are distinct names today, but pinning
-        // the order keeps the contract obvious.
-        assert!(got.starts_with(&format!("mvm.roothash={ROOTFS_HASH} ")));
-        assert!(got.contains(&format!("mvm.runtime_roothash={OVERLAY_HASH}")));
-        assert!(got.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(got.contains("mvm.runtime_hash=/dev/vdd"));
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_none_without_overlay() {
-        assert_eq!(build_runtime_overlay_cmdline_args(None, false), None);
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), false),
-            None
-        );
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_uses_verity_shape_when_rootfs_is_verified() {
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), true).as_deref(),
-            Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd")
-        );
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_uses_non_verity_oci_shape() {
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(None, true).as_deref(),
-            Some("mvm.runtime_data=/dev/vdb")
-        );
-    }
-
     #[test]
     fn non_verity_overlay_ext4_requires_the_full_triple() {
         use mvm_core::vm_backend::VmStartConfig;

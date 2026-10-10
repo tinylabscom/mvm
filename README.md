@@ -1,323 +1,106 @@
 # mvm
 
-**mvm** is a Rust CLI (`mvmctl`) and a set of language SDKs for running
-workloads in fast, hardware-isolated microVMs — from **OCI images**, **Nix
-flakes**, or **decorated functions** — on macOS and Linux, with a security
-posture that is enforced by CI, not by documentation.
+mvm runs workloads in microVMs on macOS and Linux. Each workload gets its own
+Linux kernel under a hypervisor: the in-house HVF backend on macOS 26+ Apple
+Silicon, Firecracker on Linux with `/dev/kvm`. You can start one from an OCI
+image, a Nix flake, or a decorated Python or TypeScript function. The CLI is
+`mvmctl`. Python, TypeScript and Rust libraries drive the same operations from
+code.
 
-Every machine boots its own Linux kernel under a real hypervisor. There is no
-Docker on the runtime path, no SSH in any guest, and **no guest network device
-at all** — on any workload backend. Every byte a workload sends crosses
-**vsock**, where the host can audit flows, substitute secrets so the workload
-never sees raw credentials, detect-and-replace secrets and structured PII on
-owned cleartext egress paths, and enforce default-deny egress from a signed
-execution plan.
+It is built for running code you don't fully trust, such as agent tool calls,
+user-submitted scripts or third-party builds, on a laptop or a single host.
+Fleet orchestration lives in a separate project,
+[mvmd](https://github.com/tinylabscom/mvmd).
 
-That last point is load-bearing: because the guest has no NIC, the **host
-originates every outbound connection**. That is what makes default-deny egress,
-"no raw secret reaches the guest", and the audit chain mechanically enforceable
-rather than merely intended.
-
-## Role of the `mvmctl` crate
-
-The repository root is also the `mvmctl` Cargo package. Its binary is the thin
-process entry point that initializes platform-specific main-thread behavior and
-calls `mvm_cli::run()`. Its library is a convenience facade that re-exports the
-core, runtime, build, guest-agent, and host-daemon crates for embedders that
-want one dependency.
-
-The CLI is the main consumer of this package. External Rust automation can use
-the facade, while `mvm-conformance` uses the built binary and selected library
-surfaces in end-to-end tests. Implementation remains in the narrower workspace
-crates so each layer can be tested and depended on independently; the root
-crate should contain composition and re-exports, not a second implementation
-of lifecycle or security policy.
-
-```
-macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
-Linux + /dev/kvm           →  Firecracker
-```
-
-## Highlights
-
-- **Sub-300ms prepared launches** — after explicit bootstrap, pull, and warm,
-  `mvmctl machine run --image alpine -- uname -a` only claims and runs
-- **Three ways to define a workload** — an OCI image, a Nix flake (`mkGuest`), or
-  a decorated function (`@mvm.app`) — all compile to the same signed, auditable
-  microVM
-- **SDKs for Python, TypeScript, and Rust** — a _decorator_ SDK for authoring
-  workloads and a _runtime_ SDK for driving them, both thin wrappers over one
-  conformance-pinned surface
-- **Security claims, CI-enforced** — 18+ numbered claims (signed execution
-  plans, chain-signed audit log, dm-verity boot, default-deny egress, run-shaped
-  agent-verb grants, sealed prod images that refuse interactive access, secret
-  substitution over vsock)
-
-## Local. A real microVM in milliseconds.
-
-The steady state is deliberately simple: give mvm an image and a command, and
-it gives the workload its own Linux kernel, memory boundary, writable root, and
-host-brokered I/O. The warm path uses cached VM and image artifacts, so the
-microVM starts in milliseconds. Launch never downloads, compiles, or materializes
-missing artifacts: `bootstrap`, `image pull`, and `pool warm` make that work
-explicit before the latency-sensitive command.
-
-```bash
-mvmctl bootstrap
-mvmctl image pull python:3.12
-export MVM_RESIDENCY=warm
-mvmctl pool warm 1 --image python:3.12
-mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
-```
-
-Network access is off by default. Filesystem sharing, egress, and secrets are
-explicit launch decisions recorded in the signed execution plan — there is no
-SSH session, daemon to operate, or container fallback hiding behind this
-command.
+Workload VMs have no network device. Everything the guest sends goes over
+vsock to a per-VM process on the host, and that process opens any outbound
+connection itself. This gives the host one place to enforce default-deny
+egress and to swap secret placeholders for real credentials, so the guest
+never holds them. Every launch is described by an execution plan that `mvmctl`
+signs, checks and records in a hash-chained audit log before the VM boots.
+There is no SSH server in any guest.
 
 ## Install
 
 ```bash
-# Pre-built release (macOS Apple Silicon, Linux x86_64/aarch64)
+# Release binary: macOS 26+ on Apple Silicon, or Linux x86_64/aarch64 with /dev/kvm
 curl -fsSL https://runmvm.com/install.sh | sh
 
-# From source
+# From source (run ./target/release/mvmctl from the checkout)
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
-cargo build --release && cp target/release/mvmctl ~/.local/bin/
-mvmctl bootstrap
+cargo build --release
 
 # Language SDKs
-pip install mvm                 # Python  (or: pip install ./crates/mvm-sdk/sdks/python)
-npm install @runmvm/mvm         # TypeScript
+pip install mvm
+npm install @runmvm/mvm
 ```
 
-Host prerequisites: **macOS 26+ Apple Silicon** needs nothing (the in-house HVF
-backend and builder are dependency-free); **Linux** needs `/dev/kvm`
-(Firecracker is managed for you). Standard source builds and release artifacts
-do not install, link, or require libkrun. `mvmctl doctor` diagnoses your host and
-prints exact install hints for anything missing.
-
-For source builds, `bootstrap` downloads signed host helpers matching the exact
-clean `main` commit embedded in `mvmctl`. A dirty checkout or a commit not yet
-published from `main` has no matching remote artifact; local compilation is
-available only through the explicit
-`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap` path.
+Nothing else is required: no Docker, no host Nix, no Homebrew packages.
+`mvmctl doctor` checks the host and says what is missing. Source builds have a
+few extra steps, covered in
+[Building from source](public/src/content/docs/guides/building-from-source.md).
 
 ## Quick start
 
-### Transient machines
-
-A transient machine boots, runs one command, and is torn down on exit — nothing
-is registered, nothing persists. This is the default shape of `machine run`
-(no `--name`):
-
 ```bash
-# Acquisition is explicit and stays off the sub-300ms launch path.
+mvmctl doctor
 mvmctl bootstrap
 mvmctl image pull alpine
 export MVM_RESIDENCY=warm
 mvmctl pool warm 1 --image alpine
-
-# Boot an OCI image, run a command, tear the VM down.
-# Networking is OFF by default (default-deny egress).
 mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
+```
 
-# Multiple args after `--` are the argv; the VM lives only for this command.
+`bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
+fetches and unpacks an OCI image. `pool warm` boots a standby VM, and
+`MVM_RESIDENCY=warm` lets the next matching run claim it. A `machine run
+--image` launch reads only the local cache and never downloads anything. A run
+that claims a standby must be ready in under 300 ms, or `mvmctl` reports the
+launch as failed.
+
+The VM is torn down when the command exits. Networking is off unless you allow
+it:
+
+```bash
 mvmctl image pull python:3.12
-mvmctl pool warm 1 --image python:3.12
-mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
-# Run a Python file from the host checkout (the mount is read-only).
-# Repeat --mount for additional host directories. Every backend serves it:
-# the directory is materialized into an ext4 image and attached as a block
-# device, so there is no virtio-fs requirement and Firecracker takes it too.
-# The image is a snapshot taken at boot — host edits mid-run are not visible.
-# The complete tree is copied and .gitignore is not consulted, so mount a
-# narrow source tree or stage a filtered copy instead of a large checkout.
-# For a sized disk instead of a directory, --volume HOST:/GUEST:SIZE.
+# Share a host directory, read-only. It is copied into a block device at boot.
 mvmctl machine run --image python:3.12 \
   --mount "$PWD/examples/python/hello-app:/work:ro" -- python /work/app.py
 
-# Install pandas and run the file in the same transient VM.
-# The install disappears when this VM is torn down.
-mvmctl machine run --image python:3.12 \
-  --allow-host pypi.org:443 \
-  --allow-host files.pythonhosted.org:443 \
-  --mount "$PWD/examples/python/hello-app:/work:ro" \
-  -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'
-
-# Interactive console with a bare command resolved through the image's PATH.
-mvmctl machine run --image alpine -it -- ls /
-
-# Give it resources; admit specific egress only (audited; TCP/22 always refused).
-# A request above the backend's vCPU ceiling is clamped to it, with a warning.
+# Size the VM and admit one destination. The connection is made by the host and audited.
 mvmctl machine run --image alpine --cpus 2 --memory 512M \
   --allow-host api.example.com:443 -- ./fetch
 
-# Build a Nix flake and run it transiently in one step
-mvmctl machine run --flake . -- ./app
-
-# Snapshot a small host directory read-only into the guest.
-mvmctl machine run --image alpine --mount ./src:/work -- ls /work
-
-# Increase logging globally; RUST_LOG still overrides the generated filter
-mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
-
-# Cap AI API usage with a token budget by adding [network.ai] to mvm.toml:
-#   [network]
-#   allow_hosts = ["api.openai.com:443"]
-#   [network.ai]
-#   metering = true
-#   [network.ai.budget]
-#   max_total_tokens = 1_000_000
-mvmctl machine run --flake . -- ./ask-model
+# Interactive terminal
+mvmctl machine run --image alpine -it -- ls /
 ```
+
+Runs that mount a directory or allow egress are not served from the warm pool.
+They boot cold.
 
 ### Persistent machines
 
-A persistent machine has a name and an on-disk spec: create once, start/stop/exec
-against it, reconfigure it, remove it when done.
+A machine with a name keeps its spec on disk until you remove it:
 
 ```bash
-# A request above the backend's vCPU ceiling is clamped to it, with a warning.
+mvmctl image pull nginx
 mvmctl machine create web --image nginx --cpus 2 --memory 512M
 mvmctl machine start web
-mvmctl machine exec  web -- nginx -v
-mvmctl machine logs  web
-# For a workload admitted with host.display.view.v1, serve its frames at a
-# single-use URL bound to 127.0.0.1 only.
-mvmctl machine display web
-mvmctl machine reconfigure web --memory 1G     # patch + relaunch
-mvmctl machine stop  web && mvmctl machine rm web
-
-mvmctl machine ps                              # list (alias: ls)
+mvmctl machine exec web -- nginx -v
+mvmctl machine logs web
+mvmctl machine reconfigure web --memory 1G
+mvmctl machine ps
 mvmctl machine inspect web
+mvmctl machine stop web
+mvmctl machine rm web
 ```
-
-### The builder VM
-
-Nix builds run inside a **headless builder VM** that mvm manages for you — there
-is no interactive shell into it. It exists only to run `nix build`, and you debug
-it through its logs. It auto-bootstraps on the first `machine build` / `machine
-run`; to set up host tooling and pre-acquire all shared launch artifacts ahead
-of time:
-
-```bash
-mvmctl bootstrap      # host setup + builder VM, kernel, overlay, initramfs, guest shims
-mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
-```
-
-`bootstrap` is optional: the first `machine run` acquires whatever it is
-missing on its own. A binary built from source builds those artifacts locally,
-which on a cold cache can take tens of minutes; it prints one notice before the
-first build, and later runs reuse the results. Scripts and CI that would rather
-fail than build pass `machine run --no-build` or set `MVM_COLD_BUILD=refuse`.
-
-`bootstrap` is safe to rerun. It verifies warm artifacts and only rebuilds or
-downloads what is missing or invalid. Official release binaries download
-published, verified artifacts and never infer a local build merely because the
-command runs inside a source checkout. Contributor binaries build source-matched
-artifacts when that source is available. If a Stage 0 source build is
-interrupted, the incomplete output is never installed; rerunning resumes with
-the persistent Nix store still warm.
-
-For an interactive shell you want a _workload_ microVM, not the builder — use a
-transient run against a dev-tier image: `mvmctl machine run --image alpine -it -- /bin/sh`.
-
-On the first image-backed run from a contributor build, mvm may prepare and
-cache the guest runtime and workload kernel from local sources. The guest
-runtime phase is concise by default; pass `-v` to show Cargo's raw compilation
-progress. Official binaries download these version-matched artifacts instead.
-The host-side builder egress endpoint is terminated after a one-shot Stage 0
-build exits; this expected SIGTERM is hidden unless verbose diagnostics are
-enabled. In particular, a message saying that the resolved workload kernel has
-no device-mapper/dm-verity support means the cached kernel cannot boot a
-verity-sealed workload. Rebuild or download the workload kernel explicitly:
-
-```bash
-# Use the release's hash-verified kernel
-mvmctl build kernel build --which workload --source download
-
-# Or compile the host-architecture kernel from this source checkout
-mvmctl build kernel build --which workload --source compile
-```
-
-### Examples
-
-Working example workloads live in [`examples/`](examples/) — build any of them
-with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile`
-(SDK):
-
-| Example                                                                              | Kind             | What it shows                                                                           |
-| ------------------------------------------------------------------------------------ | ---------------- | --------------------------------------------------------------------------------------- |
-| [`examples/python/hello-app`](examples/python/hello-app)                             | Python decorator | Minimal `@mvm.app` function-entrypoint workload                                         |
-| [`examples/python/hello-app-with-deps`](examples/python/hello-app-with-deps)         | Python decorator | `@mvm.app` with a locked `python_deps` (uv) dependency → sealed deps volume             |
-| [`examples/python/secret-egress`](examples/python/secret-egress)                     | Python decorator | Secret substitution over egress — the workload sees a placeholder, never the raw secret |
-| [`examples/typescript/hello-app`](examples/typescript/hello-app)                     | TS decorator     | Minimal `mvm.app({...})(fn)` workload                                                   |
-| [`examples/typescript/hello-app-with-deps`](examples/typescript/hello-app-with-deps) | TS decorator     | `mvm.app` with locked `node_deps`                                                       |
-| [`examples/exit_code`](examples/exit_code)                                           | Nix flake        | One-shot sealed workload (exits a chosen code)                                          |
-| [`examples/sleeper`](examples/sleeper)                                               | Nix flake        | Long-lived sealed workload fixture                                                      |
-| [`examples/egress-probe`](examples/egress-probe)                                     | Nix flake        | One-shot workload that TCP-probes targets and exits a verdict — exercises egress policy |
-| [`examples/audit-probe`](examples/audit-probe)                                       | Nix flake        | In-guest `host.audit.v1` round-trip fixture                                             |
-
-### From a template
-
-You can also scaffold a new project from a template instead of starting from
-an empty directory. A small core set ships with `mvmctl` and works offline;
-richer templates are fetched from the [`mvm-packs`](https://github.com/tinylabscom/mvm-packs)
-registry on first use and cached under `~/.mvm/templates/remote/`.
-
-```bash
-# List bundled + cached templates
-mvmctl template list
-
-# Show details for one template
-mvmctl template info python
-
-# Scaffold a project from a template
-mvmctl generate template python ./my-python-app
-
-# Search the remote registry
-mvmctl template search pandas
-```
-
-Templates can be Nix flakes or SDK-based. Nix templates ship a `flake.nix`;
-SDK templates ship source files (e.g. `app.py`) plus a generated `flake.nix`.
-See the [`mvm-packs` README](https://github.com/tinylabscom/mvm-packs/blob/main/README.md)
-for how to author one, including the optional `files` list that tells `mvmctl`
-which additional files to copy into the generated project.
-
----
 
 ## Defining a workload
 
-A workload can be defined three ways. All three compile to the same artifact —
-a signed image plus a launch plan — and boot identically on every backend.
+### Nix flake
 
-### 1. From an OCI image
-
-The fastest path — no flake, no host Nix:
-
-```bash
-mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
-```
-
-Provenance (registry, repo, resolved digest, layer list, cosign verdict) is
-recorded in the chain-signed audit log; `--prod` refuses mutable tags before any
-network fetch. A contributor binary built from a source checkout automatically
-builds and caches the source-matched guest runtime and dedicated
-dm-verity-capable workload kernel on first use. An official binary downloads
-the matching verified release artifacts by default and does not implicitly
-invoke the local Rust or Nix toolchain.
-Use `MVM_KERNEL_SOURCE=download` to prefer the matching hash-verified release
-kernel, or `mvmctl kernel build --which workload` when you want to prewarm it.
-
-### 2. From a Nix flake (`mkGuest`)
-
-Reproducible, minimal guests built from a flake — the guest carries only what
-you declare. `mkGuest` has three entrypoint forms; the form sets the image's
-default accessibility and profile metadata, while the launch profile and run
-shape decide the agent-verb grant:
+`mkGuest` builds a minimal image containing only what you declare:
 
 ```nix
 {
@@ -334,41 +117,24 @@ shape decide the agent-verb grant:
       packages.${system}.default = mvm.lib.${system}.mkGuest {
         inherit pkgs;
         name = "my-app";
-
-        # Form 1 — command entrypoint  (SEALED, one-shot)
+        # Sealed, one-shot. Alternatives: entrypoint.services (supervised,
+        # long-running) or entrypoint.shell (dev image with a console).
         entrypoint.command = [ "${pkgs.python3}/bin/python3" "-m" "http.server" "8080" ];
-
-        # Form 2 — services  (SEALED, supervised long-running)
-        # entrypoint.services.web.exec = "${pkgs.caddy}/bin/caddy run";
-
-        # Form 3 — shell  (DEV, console drops to a shell)
-        # entrypoint.shell = "bash";
       };
     };
 }
 ```
 
 ```bash
-mvmctl machine build --flake .          # build the image inside the builder VM
-mvmctl machine run   --flake . -- ./app # build + boot + run
+mvmctl machine build --flake .
+mvmctl machine run --flake . -- ./app
 ```
 
-Builds run `nix build` inside a builder VM — **host Nix is never used or
-required**, so the same `mvmctl` produces byte-identical artifacts on every host.
-Sealed images are dm-verity verified and refuse interactive access — no shell,
-no `do_exec`, no PTY; the dev form keeps a console. At launch, a
-baked-entrypoint run on a non-dev profile gets the restricted ProdSafe
-agent-verb grant, while a PTY or ad-hoc argv run requires DevOnly verbs. This
-grant is chosen from the run shape and profile, not from whether an OCI rootfs
-carries a sealed sidecar bit. See the
-[mkGuest guide](public/src/content/docs/guides/nix-flakes.md) and
-`nix/lib/default.nix` for the full API.
+`nix build` runs inside a headless builder VM that mvm manages, so the host
+never needs Nix. Sealed images boot from a dm-verity-protected root and have no
+shell. See the [mkGuest guide](public/src/content/docs/guides/nix-flakes.md).
 
-### 3. From a decorated function (SDK)
-
-Write an ordinary function; the decorator declares the image, resources, deps,
-and env around it. `mvmctl build compile` reads the file **statically** (it is never
-executed on the host) and emits the flake + launch plan:
+### Decorated function
 
 ```python
 # app.py
@@ -379,128 +145,28 @@ import mvm
     source=mvm.local_path("."),
     image=mvm.python_image(python="3.12"),
     resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-    dependencies=mvm.python_deps(lockfile="uv.lock", tool="uv"),
     env={"BANNER": mvm.literal("hi")},
-    before_start="export FOO=1",
 )
 def greet(name: str) -> str:
     return f"hello {name}"
 ```
 
 ```bash
-mvmctl build compile app.py --out ./out   # static parse (no execution) → ./out (flake.nix + launch plan)
-mvmctl machine build --flake ./out        # build the image inside the builder VM
-
-# Dispatch greet(name="ari"): the entrypoint payload is [args, kwargs] JSON on stdin
-# (empty stdin ⇒ the default no-arg payload `[[], {}]`).
-echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out   # → "hello ari"
+mvmctl build compile app.py --out ./out
+mvmctl machine build --flake ./out
+echo '[[], {"name": "ari"}]' | mvmctl machine run --entrypoint --flake ./out
 ```
 
-At build time the `@mvm.app` decorator and the `mvm` import are **stripped** from
-the bundled source, so the guest runs your plain function with no SDK dependency
-inside the microVM.
+`build compile` parses the file without running it and writes a flake and a
+launch plan. The decorator and the `mvm` import are stripped from the bundled
+source, so the guest runs the plain function. The entrypoint reads
+`[args, kwargs]` as JSON on stdin. For locked dependencies and sealed
+dependency volumes, see
+[From dev loop to attested image](public/src/content/docs/guides/develop-to-attested.md).
 
----
+## Driving VMs from code
 
-### From dev loop to attested image
-
-The three routes above are the _start_ of one path: pick a base, iterate until
-the workload actually works, then end with a sealed, hashed, recorded artifact.
-
-What that looks like today:
-
-```bash
-mvmctl build compile app.py --out ./out   # declared deps; lockfiles must be hash-pinned
-mvmctl machine build --flake ./out        # installs deps into a SEALED volume
-mvmctl machine run --entrypoint --flake ./out
-```
-
-The `mvmctl deps` verbs — a dev-loop install into a sealed volume, an export
-from a live guest, and an offline inspection of the result — are not documented
-here yet: the install arm does not run on the macOS builder backends, so the
-flow they belong to cannot be followed end to end on a Mac. They remain in
-`mvmctl deps --help`.
-
-Dependencies land in a sealed volume rather than in the image: hash-locked
-content, an SBOM, a CVE scan, and a hash-chained `meta.json`. The supervisor
-verifies that volume before launch and refuses a tampered one, and `--prod`
-fails closed on high/critical findings or a stub SBOM. A lockfile entry with no
-integrity hash is rejected at compile time.
-
-`mvmctl deploy` packages the local attested deployment, while `mvmctl watch`
-rebuilds a workload when its local inputs change. Both commands are available
-in the CLI; use `mvmctl deploy --help` and `mvmctl watch --help` for their
-required inputs and limits. The declared route above remains the supported way
-to get a dependency into an attested workload.
-
-Full walkthrough: [From dev loop to attested image](public/src/content/docs/guides/develop-to-attested.md).
-
-## SDKs
-
-Two SDK families, three languages. Both are deliberately **thin**: they drive
-the exact surface the CLI does — decorators emit the canonical `Workload` IR;
-runtime calls go through the client facade — pinned by shared conformance
-fixtures so no SDK can drift from `mvmctl`.
-
-### Decorator SDK — _authoring_
-
-Declare a workload where it lives. `@mvm.app(...)` (Python) / `mvm.app({...})`
-(TypeScript) is higher-order: it records the declaration and returns your
-function unchanged, so the same file still runs normally under `python` / `tsx`
-and is _also_ read statically by `mvmctl build compile`.
-
-<table>
-<tr><th>Python</th><th>TypeScript</th></tr>
-<tr valign="top"><td>
-
-```python
-import mvm
-
-@mvm.app(
-    name="greeter",
-    source=mvm.local_path("."),
-    image=mvm.node_image(node="22"),
-    resources=mvm.resources(cpu_cores=1, memory_mb=256, rootfs_size_mb=512),
-)
-def greet(name: str) -> str:
-    return f"hello {name}"
-```
-
-</td><td>
-
-```ts
-import * as mvm from "@runmvm/mvm";
-
-mvm.workload({ id: "hello" });
-
-export const greet = mvm.app({
-  image: mvm.node_image({ node: "22" }),
-  resources: mvm.resources({ cpu: 1, memory_mb: 256 }),
-})((name: string): string => `hello ${name}`);
-```
-
-</td></tr></table>
-
-Shared builder vocabulary across both languages: image builders
-(`python_image`, `node_image`, `nix_packages`), `resources`, dependency locks
-(`python_deps`, `node_deps`), `env` values (`literal`, `secret`), `network` /
-`egress` policy, and lifecycle hooks (`before_build`, `before_start`, …). Emit
-the IR directly for inspection or tests with `mvm.emit_json()` /
-`mvm.emitJson()`.
-
-**Rust** is the engine behind this path: `mvm-sdk` parses the decorators, holds
-the canonical `ir::Workload`, and renders the flake — so adding a language means
-emitting that IR, not writing a compiler.
-
-### Runtime SDK — _control plane_
-
-Drive machines imperatively: create, exec, move files, run processes, forward
-ports, tear down. The Python/TypeScript `Sandbox` object model and the Rust
-`MvmClient` facade are the same operations over different transports.
-
-<table>
-<tr><th>Python</th><th>TypeScript</th></tr>
-<tr valign="top"><td>
+The runtime SDK creates sandboxes, runs commands and moves files:
 
 ```python
 import mvm
@@ -511,621 +177,97 @@ with mvm.Sandbox.create(image="python-3.12") as sb:
     print(sb.exec("uname", "-sr").stdout)
 ```
 
-</td><td>
-
-```ts
-import * as mvm from "@runmvm/mvm";
-
-const sb = await mvm.Sandbox.create({ image: "python-3.12" });
-sb.files.write("/app/main.py", "print('hi from mvm')");
-sb.commands.start(["python", "/app/main.py"]);
-await sb.kill();
-```
-
-</td></tr></table>
-
-Run a Sandbox script as an admission-only plan check or against a real VM:
-
 ```bash
-mvmctl run --mode plan ./script.py     # synthesize + sign + admit, no boot
-mvmctl run --mode live --profile dev ./script.py  # explicitly enable dev-only Sandbox verbs
+mvmctl run --mode plan ./script.py
 ```
 
-Interactive surfaces (`exec`, `commands.start`, `console`) are **dev-tier only**;
-they refuse with `SandboxDevOnly` when the run needs DevOnly verbs but admission
-offers only the restricted ProdSafe grant — no silent fallback (claim 4).
-`Machine` is the persistent-handle variant; `Session` drives function-entrypoint
-`invoke`.
+`--mode plan` signs and admits the script's plan without booting anything.
+`exec`, `commands.start` and the console are available only under the dev
+profile, and fail with `SandboxDevOnly` otherwise.
 
-**Rust** — the runtime SDK is the `MvmClient` facade (`crates/mvm-client`), an
-`async` trait with a `LocalBackend` (in-process, drives the host directly) and a
-`GatewayBackend` (REST, for remote/hosted control — behind the `remote` feature).
-Everything is one import; embed it to run machines from your own Rust service:
+From Rust, use the `mvm-client` crate:
 
 ```rust
-use mvm_client::{MvmClient, MachineSpec, LocalBackend};
+use mvm_client::{LocalBackend, MachineSpec, MvmClient};
 
 let client = LocalBackend::new();
-
-// Fluent builder — name + image are required; cpus/memory/env default + override.
-// The image is parsed here, so a declaration that names nothing is refused at
-// construction rather than at boot.
 let spec = MachineSpec::builder("web", "alpine")?
     .cpus(2)
     .memory_mib(512)
-    .env("PORT", "8080")
     .build();
-
 let machine = client.run_machine(spec).await?;
 let out = client.exec_machine(&machine.id, vec!["uname".into(), "-sr".into()]).await?;
 println!("{}", String::from_utf8_lossy(&out.stdout));
 ```
 
-The same facade is what the CLI, the desktop **studio** GUI, and the fleet
-orchestrator (**mvmd**) all consume — one surface, every frontend.
-
-#### Embedding mvm — studio, mvmd, and custom frontends
-
-There are two integration seams, depending on what you're building.
-
-**Driving machines from a frontend** (the desktop studio, a custom GUI/CLI, a web
-service): link `mvm-client` and go through the `MvmClient` trait. `connect(Target)`
-picks the transport; the returned `Box<dyn MvmClient>` behaves identically either
-way, so the same UI code drives a local host or a remote fleet:
-
-```rust
-use mvm_client::{connect, MvmClient, Target};
-
-// In-process — this host's microVMs, auto-selected VMM. No daemon required.
-let local = connect(Target::Local)?;              // == mvm_client::LocalBackend::new()
-
-// Remote — a hosted fleet or a local sidecar, over REST (needs feature `remote`).
-let remote = connect(Target::Gateway {
-    base_url: "https://fleet.example.com".into(),
-    token: std::env::var("MVM_TOKEN")?,
-})?;
-
-// Identical methods on both: create / run / start / stop / remove, exec, logs, reconfigure.
-for m in remote.list_machines(Default::default()).await? {
-    println!("{}", m.id.0);
-}
-```
-
-The **studio** desktop app is exactly this pattern — the in-process
-`LocalBackend` (built into `mvm-client`) or the remote `GatewayBackend` (the
-`remote` feature), selected at runtime via `MVM_STUDIO_BACKEND`, one
-`dyn MvmClient` behind its Tauri commands. Its `Cargo.toml`:
-
-```toml
-# LocalBackend ships by default; the `remote` feature adds the REST GatewayBackend.
-mvm-client = { path = "../mvm/crates/mvm-client", features = ["remote"] }
-```
-
-**Embedding the runtime in a host-side daemon** (the **mvmd** fleet orchestrator,
-or your own controller that manages instances directly): link the `mvmctl`
-library facade for the runtime types, the host shell seam, and the gated
-host↔guest IPC transport. Keep `default-features = false` so no async runtime is
-pulled in unless you opt into the transport:
-
-```toml
-mvmctl = { path = "../mvm", default-features = false, features = ["hostd-transport"] }
-```
-
-```rust
-use mvmctl::core::{instance::InstanceStatus, pool::Role, protocol};
-use mvmctl::runtime::shell;   // host command-execution seam
-```
-
-`mvmd` reconciles pools/instances and reaches each guest agent over the
-`hostd-transport` protocol through this seam, while workload-driving frontends
-stay on the `MvmClient` facade above. Rule of thumb: **drive sandboxes → `MvmClient`;
-run the host that hosts them → the `mvmctl` facade.**
-
----
-
-## How it works
-
-```
-Host (macOS / Linux)
-  mvmctl / SDK ──► signed ExecutionPlan ──► admission (validity window, nonce, audit)
-                                              │
-                                  VM backend (auto-selected)
-              Firecracker (KVM) · in-house HVF · libkrun (opt-in dev) · QEMU (dev/test)
-                                              │
-Guest (its own Linux kernel)
-  /init (universal initramfs) ──► mvm-guest-agent on vsock :5252
-    1. mounts /proc, /sys, /dev
-    2. waits fail-closed for a signed ActivateEnvironment
-    3. mounts the dm-verity rootfs + runtime overlay, pivots root, drops to uid 901
-  no sshd · no SSH keys · setpriv + seccomp service isolation
-  rootfs: ext4 block root, dm-verity sealed in prod
-```
-
-On boots that attach the universal initramfs, the kernel cmdline carries no
-roothash tokens. The guest PID 1 waits fail-closed for a signed
-`ActivateEnvironment` over vsock, then mounts the root — dm-verity for a
-sealed boot, plain-block for an unverified dev boot — plus the runtime overlay
-when one is attached, pivots into
-it, and drops to the workload uid before serving operational RPCs. The same
-initramfs serves Nix-built and OCI images on every runner backend
-(Firecracker, libkrun, HVF). See
-[Boot flow](public/src/content/docs/architecture/boot-flow.md) for the
-detailed sequence.
-
-Backend selection is automatic per host (`--hypervisor` overrides); all backends
-consume the same image artifacts. Egress is default-deny — where policy admits
-flows they are enforced and audited host-side. On Linux, an optional host-side
-[eBPF](https://ebpf.io/) probe attached to the egress substitution process
-observes `tcp_connect` events (destination address and port) via a ring buffer,
-with a procfs fallback when BPF loading is unavailable. The probe does not widen
-the guest attack surface: the guest still has no NIC, the probe reads no guest
-payloads, and policy enforcement remains at the existing admission and vsock
-forwarding seams.
-
-### Vsock-only: the invariant the other guarantees rest on
-
-**No production workload microVM has a network device.** Firecracker's config
-sequence omits `/network-interfaces`; libkrun pins its direct-vsock mode; and
-the in-house HVF device model has no net device. Guest I/O leaves over one
-authenticated FlowMux session to a per-VM host endpoint, and the host originates
-the real connection or owns the admitted ingress listener. QEMU's explicit
-user-mode network is a dev/test facility outside this production claim.
-
-This is enforced mechanically, not by convention:
-
-- **`xtask check-single-network-path`** pins every claim-bearing backend to the
-  one endpoint spawner and `NetworkFlow` channel, rejects raw-packet/NIC/L3
-  symbols, and inventories every production workload `connect` and listener
-  bind so a second socket owner fails CI.
-- **`xtask check-one-guest-protocol`** rejects any guest caller of the network
-  port that does not construct an authenticated FlowMux client.
-
-The admitted domain cannot represent the removed raw-network mode. Every
-network operation instead receives the endpoint's one signed-plan projection:
-the same policy, per-VM resource budget, identity, and payload-free audit sink.
-
-### vsock Protocol
-
-All communication between host and guest uses **vsock**, a Linux kernel facility for guest-host messaging:
-
-**Guest agent (port 5252)**: Uses a binary protocol with length-prefixed JSON frames:
-
-- 4-byte big-endian length header indicating payload size
-- JSON serialized request/response objects
-- Connection begins with `CONNECT 5252\n` / `OK 5252\n` handshake
-
-**FlowMux (port 5253)**: Authenticated frame-based protocol for egress and ingress, supporting:
-
-- TCP connections (via SOCKS5-like framing)
-- UDP datagrams
-- DNS queries
-- Typed connectors for secrets, PII detection, and audit logging
-
-All guest-to-host traffic crosses the host's control plane where it can be:
-
-- Audited (without exposing payload bytes)
-- Substituted (secrets replaced with placeholders)
-  -Admitted/denied (per signed execution plan)
-
-**The builder VM is the deliberate exception.** It runs `nix build` and does
-have a NIC, because it must reach package mirrors. It carries no untrusted
-tenant workload — a different tier with a different contract, and its network
-configuration is never consulted by any workload backend.
-
-#### Reaching a store without a network
-
-`--host-service host.kv.v1` binds a per-workload key-value store served on the
-host-services broker channel. The workload gets durable storage with no network
-path and no credential; the namespace comes from the supervisor's call context
-rather than any request field, so one workload cannot address another's by
-asking. A workload whose plan did not bind it gets `NotBound` before any
-handler runs. A catalog runtime can declare the services it needs, so the
-operator does not have to pass the flag every time — declared bindings and
-`--host-service` are unioned.
-
-#### Reaching another workload
-
-Peer addressing lets a workload dial `db.mvm.peer:5432` and have the host
-resolve and connect, with the name and its resolved address both bound in the
-signed plan. Resolution runs in front of the same gate that decides ordinary
-egress, so east-west inherits default-deny; a binding authorizes one
-`name:port` route; and the reserved `.mvm.peer` suffix keeps the two namespaces
-from overlapping. `xtask check-single-network-path` pins the branch to one
-place.
-
-```sh
-mvmctl run --peer db.mvm.peer:5432=127.0.0.1:34567 -- ./my-service
-```
-
-The binding rides the network policy, so it is signed, admitted, and delivered
-to the gate by the path that already carries every other egress decision — one
-field rather than a parallel channel that a layer could forget. A malformed
-route is refused at the CLI, before it can reach the plan.
-
-Peer dialing is TCP-only, peers are not reachable through the
-credential-substituting HTTP proxy, and peers are a transient-run capability —
-`machine create` does not persist a peer set.
+The same trait has a REST backend for remote hosts, behind the `remote`
+feature. See the [Python](crates/mvm-sdk/sdks/python/README.md) and
+[TypeScript](crates/mvm-sdk/sdks/typescript/README.md) SDK READMEs and the
+[Rust SDK guide](public/src/content/docs/sdk/rust.md).
 
 ## Security model
 
-mvm makes **eighteen numbered, CI-enforced security claims** (plus preview
-claims), each backed by a named test or workflow gate. In summary:
+[ADR-001](specs/adrs/001-microvm-security-posture.md) lists the security claims
+and names a test or CI job behind each one. CI fails when a named witness
+disappears. The shipped claims:
 
-1. **No host-fs access from a guest beyond explicit shares** — per-service uid,
-   seccomp, `setpriv --no-new-privs` bounding set.
-2. **No guest binary can elevate to uid 0** — read-only `/etc/{passwd,group}`,
-   `no-new-privs` in the launch path.
-3. **A tampered rootfs ext4 fails to boot** — dm-verity + universal initramfs
-   (roothash delivered over vsock, not the kernel cmdline); live-KVM tamper
-   regression panics before userspace. Scoped to the block+ext4 backends
-   (Firecracker + Option B); the virtiofs-root dev-tier path carries a weaker
-   contract — see the claim catalog.
-4. **The guest agent has no `do_exec` in production builds** — symbol-absence
-   CI gate on the sealed agent.
-5. **Vsock framing + supervisor config are fuzzed** — `cargo-fuzz` targets;
-   `#[serde(deny_unknown_fields)]` fails closed on every host↔guest type.
-6. **Pre-built dev image is hash-verified** — SHA-256 manifest checked, rejected
-   on mismatch.
-7. **Cargo deps are audited on every PR** — `deny.toml` + reproducibility
-   double-build.
-8. **Every workload runs from a signed, audited `ExecutionPlan`** — Ed25519
-   host signature, validity window, nonce replay-store; chain-signed
-   `plan.admitted`/`launched`/`failed` audit entries.
-9. **Every published bundle is content-addressed and re-verified** at fetch and
-   admit time (unknown-key, tampered-manifest, pin-drift ladders).
-10. **No untrusted workload reaches the network unless admitted by policy** —
-    default-deny; `unrestricted` requires an explicit opt-in.
-11. **Every app-dependency volume is hash-locked, attestation-checked,
-    CVE-scanned, SBOM-enumerated,** and bound to the workload's audit chain.
-12. **Every host-side broker service is bound to a signed
-    `ExecutionPlan.services` binding,** enforced before dispatch, audited.
-13. **No raw secret value crosses to the guest** — destination-bound,
-    time-bound signed credentials only; real bytes never leave the supervisor.
-    For owned cleartext outbound flows, the host can also detect and replace
-    matched secrets and structured PII with request-scoped opaque tokens, then
-    restore the original bytes only when the exact token returns on an owned,
-    authorized cleartext path.
-14. **Every `run --image` admission records OCI image provenance** in the
-    chain-signed audit log.
-15. **A sealed production microVM has no shell, no `do_exec`, no PTY, and no
-    input that can change what runs** — the console is
-    `interactive`-feature-gated, the prod rootfs is verity-sealed, console
-    capture is write-only, and the host gate refuses `console` on a sealed VM.
-    The host→guest input channel carries bytes to an already-running
-    entrypoint's stdin and nothing else — it cannot select a program, alter
-    argv or env, or spawn anything, and it is refused outright without a grant
-    in the signed plan.
-16. **Every workload asset and pinned host share is content-identified in the
-    signed plan, and share drift after admission fails closed** — `--asset
-    KIND:HOST_PATH` hashes the asset into the signed plan, and a directory
-    share whose contents change after admission is refused at attach time.
-17. **Every published release artifact is authenticated under the release
-    workflow's identity** — archives and checksum manifests carry keyless
-    cosign bundles, while raw kernels, root filesystems, and metadata are
-    covered by digests in the signed manifests. Build and fetch paths refuse
-    artifacts whose required signature is absent or invalid.
-18. **Every base image is CVE-scanned and SBOM-enumerated before production
-    admission** — the unpacked rootfs's OS packages and in-image kernel are
-    inventoried at pull, matched against OSV, and production admission refuses
-    an image with a missing scan or any high/critical finding.
+1. **No host filesystem access from a guest** beyond explicit shares.
+2. **No guest binary can gain uid 0.**
+3. **A tampered root filesystem fails to boot** (dm-verity, on block-backed roots).
+4. **A production-safe run cannot call DevOnly guest-agent verbs.**
+5. **The vsock framing, FlowMux decoder and supervisor config are fuzzed.**
+6. **The prebuilt dev image is hash-verified** against a signed image-set root.
+7. **Cargo dependencies are audited on every PR**, with a reproducibility double build.
+8. **Every workload runs from a signed, audited execution plan.**
+9. **Every published bundle is content-addressed** and re-verified at fetch and admission.
+10. **No untrusted workload reaches the network** unless policy admits it.
+11. **Dependency volumes are CVE-scanned and SBOM-enumerated when sealed**, then hash-locked and re-verified at admission.
+12. **Every host service a workload calls is bound in its signed plan** and audited.
+13. **Secret substitution gives the guest placeholders**, never raw secret values.
+14. **OCI image provenance is recorded** in the audit log.
+15. **A sealed production VM has no shell, no DevOnly agent verbs and no PTY.**
 
-Claim 15 used to hold by _absence_: there was no host→guest byte path at all.
-The workload input channel built one, so refusing input is now a policy
-decision rather than a consequence of there being nothing to refuse. ADR-001
-carries that rewording, plus a `Preview` claim 17 for the input channel with
-the fingerprint-scan and shell-classification limits that keep it a preview.
-Both the operator input surface and mvmd's fleet stream-edge workflow are now
-production callers; reachability is no longer the reason for the status. See
-[Workload input](public/src/content/docs/guides/workload-input.md).
+Claims 16 to 18 (the egress substitution leak gate, workload stdin, and
+resource bounds) are previews and are not listed here.
 
-    Separately, the restricted ProdSafe grant is issued only to a baked-entrypoint
-    run on a non-dev profile; PTY and ad-hoc argv paths require DevOnly verbs.
+19. **Workload assets and pinned host shares are content-identified** in the signed plan, and a share that changes after admission is refused.
+20. **Every release artifact is signed by the release workflow**, and the build, fetch, install and self-update paths refuse a missing or invalid signature.
+21. **Base OCI images are inventoried and CVE-scanned at pull**, and production admission refuses a missing scan or a high or critical finding.
 
-The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
-`~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious
-_host_ (mvmctl trusts the host with the hypervisor and private keys),
-multi-tenant guests (one guest = one workload), and hardware-backed key
-attestation.
-
-- The claim ledger (claim → witness, machine-checked): the conformance claim
-  catalog embedded in [ADR-001](specs/adrs/001-microvm-security-posture.md)
-- The source of truth (threat model, tier matrix): [ADR-001](specs/adrs/001-microvm-security-posture.md)
-- Live posture on your host: `mvmctl doctor`
-- Audit chain verification: `mvmctl trust audit verify` (exits nonzero on drift)
+Out of scope: a malicious host, several tenants sharing one guest, and
+hardware-backed key attestation. `mvmctl doctor` reports the posture of the
+current host, and `mvmctl trust audit verify` checks the audit chain.
 
 ## Documentation
 
-Every `mvmctl` command printed in this README **or anywhere in the website
-docs** is a checked assertion, not prose. `just bdd::run` extracts all of them —
-currently 600+ invocations across 130+ pages, each with `file:line` provenance —
-and verifies each at one of three tiers:
-
-| Tier    | What it proves                                                                                                                                   | Runs                           |
-| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
-| `parse` | The real clap tree parses the invocation with full argument validation: a removed verb, renamed flag, rejected value, or wrong arity fails here. | Every PR, no VM                |
-| `exec`  | Additionally executed for real against an isolated `MVM_HOME`.                                                                                   | Every PR, no VM                |
-| `live`  | Additionally boots a real microVM.                                                                                                               | `MVM_BDD_LIVE=1`, KVM/HVF host |
-
-The tier assignment in `features/suites/s29_doc_examples/tiers.toml` is
-**total**: a documented command with no entry fails the suite by name, so a
-newly documented verb cannot ship without someone deciding how it is proven. A
-`live` tier is checked against the scenarios that actually boot it, so the label
-cannot outlive its witness. Placeholder templates (`mvmctl <verb> …`) are exempt
-from parsing but their verb prefix is still resolved, so `<angle brackets>` are
-not an escape hatch — a command that never existed is either fixed or declared
-under `[[planned]]` with a reason. Commands stranded outside a code fence, which
-render as broken prose and silently drop out of extraction, fail too.
-
-`just bdd::run` also checks every CLI option including hidden internal ones, and
-exercises the SDK fixtures. The merge queue additionally runs a KVM-backed fast
-witness for the persistent-machine path above: create, start, exec, logs,
-inspect, stop, and remove all operate one real Firecracker guest before the
-change can merge.
-
-- [Getting started](public/src/content/docs/getting-started/) ·
-  [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
+- [Getting started](public/src/content/docs/getting-started/quickstart.md) and the [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
 - [CLI reference](public/src/content/docs/reference/cli-commands.md)
-- [SDK docs](public/src/content/docs/sdk/) ·
-  [Python SDK](crates/mvm-sdk/sdks/python/README.md) ·
-  [TypeScript SDK](crates/mvm-sdk/sdks/typescript/README.md)
-- [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
-- [Secrets and credentials](public/src/content/docs/guides/secrets-and-credentials.mdx) ·
-  [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx) ·
-  [Rootless networking](public/src/content/docs/guides/networking.md) ·
-  [AI agent integration](public/src/content/docs/guides/ai-agent-integration.md)
-- [Security](public/src/content/docs/security/) ·
-  [Troubleshooting](public/src/content/docs/guides/troubleshooting.md)
-- [Architecture & ADRs](specs/adrs/)
+- [SDK docs](public/src/content/docs/sdk/index.md)
+- [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx), [secrets](public/src/content/docs/guides/secrets-and-credentials.mdx), and [vsock networking](public/src/content/docs/guides/flowmux-networking.md), including key-value storage and peer routes
+- [Builder VM](public/src/content/docs/guides/builder-vm.md) and [kernels](public/src/content/docs/guides/kernels.md)
+- [Boot flow](public/src/content/docs/architecture/boot-flow.md) and [architecture](public/src/content/docs/architecture/overview.md)
+- [Troubleshooting](public/src/content/docs/guides/troubleshooting.md)
+- [Releases](public/src/content/docs/reference/releases.md)
 
 ## Contributing
 
-Contributions are welcome. The short version:
-
-### Issue-driven development
-
-GitHub issues are the only mutable work ledger. Before changing code, claim the
-issue, then generate a disposable briefing from its live state, explicitly
-linked ADRs/contracts, related pull requests, and Graft:
-
-```bash
-gh issue edit 3892 --add-assignee @me
-just maint::task-context 3892
-```
-
-Use the briefing to follow one route through the project:
-
-1. The issue owns the outcome, scope, dependencies, priority, and acceptance
-   evidence.
-2. Linked files under [`specs/adrs/`](specs/adrs/) and
-   [`specs/contracts/`](specs/contracts/) own durable decisions and interfaces.
-3. Graft locates the current implementation and its blast radius.
-4. The pull request records the change and validation and includes
-   `Closes #3892` (or `Refs #3892` for a partial slice).
-
-Do not recursively read `specs/` or create a sprint/progress document: that
-directory also contains frozen historical research and plans. The generated
-task briefing is terminal output, not another file to maintain. See the
-[`specs/` authority and lifecycle rules](specs/README.md) and the full
-[AI-assisted issue-to-PR workflow](public/src/content/docs/contributing/ai-coding-workflow.md).
-
-Open the PR only after the local checks below pass. Required GitHub checks and
-review remain the merge gate; use auto-merge/merge queue rather than bypassing
-them:
-
-```bash
-gh pr create --fill
-gh pr merge --auto --squash
-```
-
-### Setup
+Work is tracked in GitHub issues. Start with the
+[development guide](public/src/content/docs/contributing/development.md) and
+[AGENTS.md](AGENTS.md), which holds the rules CI enforces.
 
 ```bash
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
-just maint::hooks        # pre-commit hook: auto-runs cargo fmt --all
-
-# Recommended: enter the pinned edit/check environment.
-nix develop
-
-# For payload and release work, use the full shell and install the
-# exact cross-compilation toolchain pinned by this checkout.
-nix develop .#full
-just payload::toolchain
+just maint::hooks   # pre-commit hook that runs cargo fmt --all
+nix develop         # optional: pinned toolchain
+just ci             # lint, tests and doctests; run before opening a PR
 ```
 
-The root [`flake.nix`](flake.nix) provides a lean `nix develop` shell with the
-pinned Rust toolchain and tools needed for the normal edit, check, and test
-loop. `nix develop .#full` adds Zig, libclang, release, lint, and documentation
-tools. Run `just payload::toolchain` before payload or release builds to install
-the exact cross-compilation pins, including cargo-zigbuild. The
-root flake also offers `#prebuilt`, a hash-pinned host CLI release. Host Nix is
-optional for running `mvmctl`. Distributed image construction and publication
-belong to [mvm-images](https://github.com/tinylabscom/mvm-images); `mvm` consumes
-its signed image set.
-
-The full shell switches interactive sessions to login zsh. Neither shell
-installs Rust targets on entry.
-
-After building, run `mvmctl doctor` — it reports the resolved builder backend
-and emits install hints for anything missing.
-
-One clone of this repo is a complete development environment: every image a
-guest boots resolves from the released set pinned by `images.lock` — no image
-checkout, no image building. [`bin/dev`](bin/dev) runs this checkout's mvmctl
-with isolated state. Prepare the launch inputs explicitly:
-
-```sh
-bin/dev bootstrap
-bin/dev image pull alpine
-export MVM_RESIDENCY=warm
-bin/dev pool warm 1 --image alpine
-bin/dev machine run --image alpine -- uname -a
-
-MVM_IMAGES_DIR=../mvm-images \
-  MVM_ALLOW_LOCAL_BUILDER_BUILD=1 \
-  bin/dev build image-set builder-vm  # paired (explicit opt-in): build images from that checkout
-```
-
-`bin/dev` uses the released image set unless `MVM_IMAGES_DIR` explicitly selects
-an `mvm-images` checkout. Sibling checkouts are never discovered implicitly.
-Pairing is needed only for image-definition work; developing the in-guest
-binaries never leaves this repo.
-
-### Build, test, lint
-
-```bash
-just build           # nightly Cranelift + 8-thread rustc frontend
-just test            # cargo nextest run --workspace   (the named test gate)
-just lint            # cargo fmt --all -- --check  +  clippy -D warnings
-just ci              # lint + tests + doctests — run this before every PR
-```
-
-When iterating on `mvmctl` itself, make sure you are running the freshly-built
-binary. A manually-copied `bin/mvmctl` or a stale `target/release/mvmctl` can
-miss backend fixes — for example, the QEMU session teardown that reaps
-`qemu-system-aarch64` and `mvmctl __qemu-vsock-bridge` after a transient run.
-
-The repository pins a dated nightly and installs Cranelift through
-`rust-toolchain.toml`. Development recipes route Cargo through
-`scripts/cargo-fast.sh`: dev builds use Cranelift and eight frontend threads,
-while tests and release builds retain LLVM. The nightly-only settings live in
-`.cargo/fast.toml`, separate from the baseline Cargo configuration, so explicit
-stable/MSRV and release lanes remain loadable. Lint recipes use the repository's
-stable Rust 1.96 toolchain because current nightly Clippy reports a generated
-async-trait future as carrying a redundant must-use annotation; no lint is
-suppressed. Reproducible embedded-host and runtime-overlay guest binaries remain
-on their separately pinned stable Rust toolchain so outer nightly flags cannot
-leak into Zig-based artifact builds.
-
-Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
-
-- **Zero clippy warnings.** `#[allow(clippy::too_many_arguments)]` is banned in
-  hand-written code — introduce a builder struct instead.
-- **Always `cargo fmt --all`** — without `--all`, other workspace members are
-  silently skipped and CI will fail.
-- **No task is done without tests.** Types get serde round-trips; wire/protocol
-  code gets tampered-input rejection tests; security paths get positive _and_
-  negative cases. SDK changes must keep the live-transport scenarios
-  (`features/suites/s27_sdk/`) green — both languages must make the same
-  host-library calls — and must never spawn `mvmctl`
-  (`xtask check-no-cli-shellout`).
-- **Reuse first.** Search the workspace before adding a helper — duplicated logic
-  is this repo's most common bug source. All `~/.mvm` paths go
-  through `mvm-core::config` helpers, never inline `$HOME` joins.
-- **Specs discipline.** GitHub issues own work status and PRs own delivery
-  evidence; do not mirror either in shared files under `specs/`. Keep durable
-  decisions in `specs/adrs/`, stable behavioral contracts in
-  `specs/contracts/`, and technical design material only while it remains
-  useful to active work. See [the specs policy](specs/README.md). If a change
-  touches a security claim, keep the conformance claim catalog in
-  [ADR-001](specs/adrs/001-microvm-security-posture.md) in sync — the
-  claim→witness mapping is machine-checked.
-
-Keep PRs focused (one concern each) and write commit messages that explain
-_why_. PRs merge through the GitHub **merge queue** once CI is green. The full
-live suite (workspace clippy on x86_64-linux, seccomp probes, longer fuzz runs,
-live-KVM smokes) needs real `/dev/kvm`; cloud-init scaffolding for a throwaway
-KVM box lives in [`nix/ops/hetzner/`](nix/ops/hetzner/), and the
-[contributor guide](public/src/content/docs/contributing/development.md) has the
-details.
-
-### Release workflows
-
-This project maintains **two release trains** with independent lifecycles, in
-**two repositories**:
-
-| Train        | Where                    | Tag pattern                  | What it releases                                                        | Key command              |
-| ------------ | ------------------------ | ---------------------------- | ----------------------------------------------------------------------- | ------------------------ |
-| **CLI**      | this repo                | `v*` (e.g. `v0.18.3`)        | `mvmctl` binaries, manifests — no image bytes                             | `just release::pr 0.18.4`  |
-| **Images**   | `tinylabscom/mvm-images` | `image-set/v*` (e.g. `v0.2.2`) | The complete signed image set: builder/default images, kernels, overlay, SDK sidecars, initramfs | `just release 0.2.3`     |
-
-Source builds also use a non-versioned CI support channel:
-[`source-host-helpers.yml`](.github/workflows/source-host-helpers.yml) publishes
-Sigstore-signed helper bundles keyed by every exact `main` commit. This channel
-does not replace either release train and cannot satisfy dirty or unpublished
-source revisions.
-
-`mvm` consumes the image train through one checked-in lock
-(`crates/mvm-core/images.lock`) — every fetch cosign-verifies the signed
-`image-set.json` root and digest-checks every member before touching a byte.
-
-The dependency direction, stated once: **for images, `mvm` depends on
-`mvm-images`** — every byte a guest boots is built, signed, and published
-there, and this repo only ever fetches the published sets. The one reverse
-edge is **source**, not images: the guest binaries' source (agent, egress
-client, the shared `mvm-core`/`mvm-contract` protocol crates) lives here,
-because they compile against this workspace's `Cargo.lock` and are exercised
-by its tests, and `mvm-images` builds them from a pinned `mvm` commit as a
-source input. Image construction never happens in this repo.
-
-#### CLI release (`v*`)
-
-The CLI train packages `mvmctl` for all targets. It runs on `v*` tags and
-publishes CLI archives, checksums, and an SBOM — nothing else: since W8 the CLI
-release never builds, mirrors, or re-signs image bytes.
-
-To prepare the next version from conventional commits, run `just release::pr`.
-To choose the version explicitly, run `just release::pr 0.18.4`. Both run the
-local release gates, bump the workspace version, prepend the changelog, and open
-a `release/v<version>` pull request. After it merges, run
-`just release::tag 0.18.4`; it tags `origin/main` and triggers the workflow,
-which builds, runs the full documented-surface e2e on Linux and macOS, stages
-the release, and promotes it only after a fresh-install smoke passes.
-
-#### Image releases (`image-set/v*` in `mvm-images`)
-
-Image construction lives entirely in
-[`tinylabscom/mvm-images`](https://github.com/tinylabscom/mvm-images) — kernels,
-workload rootfses, the builder VM, the runtime overlay, SDK sidecars, and the
-initramfs are built, signed, and published there as one immutable, atomic set
-per release. Releasing new images is deliberately small:
-
-```sh
-# in the mvm-images checkout, on main:
-git pull --ff-only
-just release 0.2.3   # verifies, tags image-set/v0.2.3; the workflow builds
-                     # both arches, signs the root, verifies it with the
-                     # pinned mvm, and publishes (protected-env review)
-```
-
-Then advance this repo's pin — the `update-image-pin` workflow proposes the
-lock update with the cosign evidence (a maintainer opens the pushed branch by
-hand until the "Actions can open PRs" setting is enabled), or by hand:
-
-```sh
-gh release download image-set/v0.2.3 --repo tinylabscom/mvm-images   -p image-set.json -p image-set.json.bundle
-cosign verify-blob --bundle image-set.json.bundle   --certificate-identity-regexp   'https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v0.2.3'   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'   image-set.json
-cargo xtask repin-image-lock image-set.json   # rewrites tag + sha256 from the
-                                              # verified root; nothing to hand-edit
-```
-
-That is the whole upgrade: consumers resolve the new set at the next fetch.
-**An image-only change never needs a CLI release**, and rollback is pointing
-the lock back at a previous verified set — no binary is rebuilt either way.
-
-#### Verifying a release
-
-Run `mvmctl image boot check` to compare the cached image against the pinned
-set, and `mvmctl image boot verify` for the offline root/member verification
-path. `mvmctl doctor` reports the acquisition posture (tier, source, digests),
-and `mvmctl trust audit verify` checks the local audit chain.
-
-### Repository layout
-
-14-crate Cargo workspace. The dependency spine runs low → high:
-`mvm-contract` (`no_std` + alloc: wire types / Workload IR / policy / audit-log
-verify — wasm-capable) → `mvm-core` (std: config / paths / crypto / signed
-execution plans — no async by default) → { `mvm-fs` (ext4 / OCI / overlay),
-`mvm-net` (vsock + egress tunnel), `mvm-build` (Nix builder pipeline) } →
-`mvm-runtime` (the `VmBackend` trait plus the libkrun / HVF / Firecracker / QEMU
-impls and VM lifecycle) → `mvm-client` (the local/remote client facade the SDKs
-and frontends share) → `mvm-cli` (the `mvmctl` surface). Alongside the spine:
-`mvm-hostd` (host daemons — broker, signers, per-VM supervisor binaries),
-`mvm-agentd` (in-guest vsock protocol + agent), `mvm-sdk` (decorator parser →
-Workload IR → Nix template, plus the runtime SDK), and `deps/libkrun-sys` (the
-libkrun FFI + safe wrapper). `xtask` holds the CI lint gates and
-`mvm-conformance` runs the BDD security-claim suite. The full module map is in
-[CLAUDE.md](CLAUDE.md). Language SDK surfaces live under `crates/mvm-sdk/`.
+Every `mvmctl` command in this README is checked against the real CLI, and
+each one is mapped either to a conformance scenario that runs it or to a
+recorded reason it cannot run
+([readme_examples.toml](features/suites/s8_readme_contract/readme_examples.toml)).
+PRs merge through the merge queue.
 
 ## License
 
-Apache 2.0 — see [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

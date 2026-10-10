@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use super::fixture::ImageSetFixture;
 use super::*;
 use mvm_core::util::test_env::TestEnv;
@@ -210,6 +212,28 @@ fn a_member_whose_bytes_differ_from_the_root_is_refused_and_removed() {
     assert!(!dest.exists(), "refused bytes must not stay on disk");
 }
 
+/// `MVM_SKIP_HASH_VERIFY` waives the kernel-fetch checks, not this path: a
+/// member the signed root does not describe is refused with the hatch set.
+#[test]
+fn the_hash_skip_hatch_does_not_admit_a_member_the_root_does_not_describe() {
+    let mut env = unsigned_env();
+    env.set(crate::runtime_overlay::SKIP_HASH_VERIFY_ENV, "1");
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_overlay(b"declared").serve_instead(OVERLAY, b"tampered".to_vec());
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let dest = out.path().join("archive");
+    let err = set
+        .fetch_member_artifact(ImageSetRole::RuntimeOverlay, ARCH, OVERLAY, &dest)
+        .unwrap_err();
+    assert!(
+        matches!(err, ImageSetMemberError::DigestMismatch { .. }),
+        "{err}"
+    );
+    assert!(!dest.exists(), "refused bytes must not stay on disk");
+}
+
 #[test]
 fn a_member_of_another_size_is_refused_before_it_is_hashed() {
     let _env = unsigned_env();
@@ -312,6 +336,25 @@ fn acquire_refuses_a_root_without_a_signature() {
     let err = PublishedImageSet::acquire_from(with_overlay(b"o").serve_from(served.path()))
         .err()
         .expect("an unsigned root must be refused even when its digest is pinned");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("publisher identity"),
+        "the refusal must be the signature rung: {rendered}"
+    );
+}
+
+/// The two hatches are independent: waiving digest checks must not waive the
+/// publisher signature on the pinned root.
+#[test]
+fn the_hash_skip_hatch_does_not_waive_the_root_signature() {
+    let mut env = TestEnv::new();
+    env.remove(crate::release_signature::SKIP_COSIGN_VERIFY_ENV);
+    env.set(crate::runtime_overlay::SKIP_HASH_VERIFY_ENV, "1");
+    let served = tempfile::tempdir().unwrap();
+
+    let err = PublishedImageSet::acquire_from(with_overlay(b"o").serve_from(served.path()))
+        .err()
+        .expect("an unsigned root must be refused whatever the hash hatch says");
     let rendered = format!("{err:#}");
     assert!(
         rendered.contains("publisher identity"),

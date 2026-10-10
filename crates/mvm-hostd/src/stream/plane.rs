@@ -190,6 +190,12 @@ impl StreamPlane {
     /// than getting a second broker that would split its output across two
     /// hash chains.
     pub fn attach(&self, capture: &ConsoleCapture<'_>) -> Result<()> {
+        // Ownership is admitted by the backend, not inferred from a socket's
+        // current availability. A delayed/failed supervisor must never create
+        // a competing launcher writer or re-enable plaintext capture.
+        if capture.supervisor_owned {
+            return Ok(());
+        }
         let vm = capture.vm_name;
         let mut registry = self.registry();
         if registry.contains_key(vm) {
@@ -527,25 +533,44 @@ fn build_broker(
 /// key wrapped under the host KEK, and the ring-retention policy every stream
 /// capture runs under.
 fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
-    let keys_dir = config::mvm_keys_dir();
-    let kek = transcript::load_or_init_kek(&keys_dir)
+    build_writer_with_policy(
+        vm,
+        transcript_dir,
+        None,
+        DEFAULT_TENANT,
+        &config::mvm_keys_dir(),
+    )
+}
+
+pub(super) fn build_writer_with_policy(
+    vm: &str,
+    transcript_dir: &Path,
+    at_rest: Option<transcript::AtRestRetention>,
+    tenant: &str,
+    keys_dir: &Path,
+) -> Result<TranscriptWriter> {
+    let kek = transcript::load_or_init_kek(keys_dir)
         .with_context(|| format!("open the transcript key in {}", keys_dir.display()))?;
     let data_key = aead::Key::random();
     let wrapped_data_key_b64 = transcript::wrap_data_key(&kek, &data_key);
 
     // The writer's directory has to exist before it does. Creating it is not
     // destructive, so unlike the discard it can run before the socket claim.
-    std::fs::create_dir_all(transcript_dir)
+    config::create_private_dir(transcript_dir)
         .with_context(|| format!("create the capture dir {}", transcript_dir.display()))?;
 
     // Through `stream_capture_config` and nowhere else: it is the one door
     // that installs ring retention, and a config assembled by hand would
     // silently get the fail-closed default — a workload that stops being
     // observable because it talked too much.
-    let config = stream_capture_config(StreamCaptureIdentity {
-        capture_id: format!("stream-{vm}"),
+    let mut config = stream_capture_config(StreamCaptureIdentity {
+        capture_id: if at_rest.is_some() {
+            format!("stream-{vm}-{}", now_unix_nanos())
+        } else {
+            format!("stream-{vm}")
+        },
         binding: CaptureBinding {
-            tenant_id: DEFAULT_TENANT.to_string(),
+            tenant_id: tenant.to_string(),
             vm_name: vm.to_string(),
             session_id: None,
         },
@@ -553,7 +578,16 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
         recipient: TRANSCRIPT_KEK_RECIPIENT.to_string(),
         wrapped_data_key_b64,
     });
-    Ok(TranscriptWriter::new(transcript_dir, data_key, config))
+    config.at_rest = at_rest;
+    if at_rest.is_some() {
+        config.generation_budget = Some(transcript::GenerationBudget::default());
+        config.payload_encoding = transcript::PayloadEncoding::StreamRecordV1;
+    }
+    let writer = TranscriptWriter::new(transcript_dir, data_key, config)?;
+    if at_rest.is_some() {
+        journal::publish_seed(transcript_dir, &writer.sealed_manifest())?;
+    }
+    Ok(writer)
 }
 
 /// Throw away whatever a previous boot left in the capture directory, keeping
@@ -561,6 +595,11 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
 /// the module docs on why a boot starts from an empty one, and why this runs
 /// only after the socket claim.
 fn discard_previous_capture(dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !dir.join(mvm_core::stream_client::protected::RUN_FILENAME)
+            .try_exists()?,
+        "legacy capture cannot discard protected generation history"
+    );
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         // No directory is the same state as an empty one, and it is the
@@ -720,7 +759,7 @@ fn seal_capture(vm: &str, stream: VmStream) {
 /// **No signer is minted here.** Teardown loads the host signer that admitted
 /// the run; it never creates one. A host with no signer never admitted a plan
 /// under it, so there is no chain this transcript belongs in.
-fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
+pub(super) fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
     let plan = match plan_persist::read_plan(vm) {
         Ok(plan) => plan,
         Err(error) => {
@@ -800,6 +839,17 @@ fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
 /// seal still overwrites an adopted one as it should.
 fn adopt_capture(vm: &str) {
     let dir = config::vm_stream_transcript_dir(vm);
+    match dir
+        .join(mvm_core::stream_client::protected::RUN_FILENAME)
+        .try_exists()
+    {
+        Ok(false) => {}
+        Ok(true) => return,
+        Err(_) => {
+            tracing::warn!("capture ownership unavailable; refusing legacy journal adoption");
+            return;
+        }
+    }
     if dir.join(MANIFEST_FILENAME).exists() {
         return;
     }
@@ -869,10 +919,16 @@ fn drop_unaccounted_tail(path: &Path, declared: u64) {
 /// this way. The read side degrades on an unparseable manifest rather than
 /// hard-erroring; this is the other half of that pair, and the half that
 /// stops the case arising.
-fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
+pub(super) fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     let path = dir.join(MANIFEST_FILENAME);
     let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
-    atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))
+    atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))?;
+    // A timed-out writer still owns its journal. Only terminalized protected
+    // captures or complete legacy seals license removing the recovery source.
+    if manifest.sealed_unix_secs.is_some() || (manifest.at_rest.is_none() && !manifest.adopted) {
+        journal::CaptureJournal::discard(&dir.join(journal::JOURNAL_FILENAME));
+    }
+    Ok(())
 }
 
 /// Publish the manifest only if nothing has published one yet, and report
@@ -973,6 +1029,7 @@ mod tests {
     fn capture<'a>(vm: &'a str, console_log: &'a Path) -> ConsoleCapture<'a> {
         ConsoleCapture {
             vm_name: vm,
+            supervisor_owned: false,
             console_log,
             display_socket: None,
             redaction: &DEFAULT_REDACTION,
@@ -999,6 +1056,48 @@ mod tests {
         let state = config::vm_state_dir(vm);
         std::fs::create_dir_all(&state).expect("state dir");
         state.join("console.log")
+    }
+
+    #[test]
+    fn a_legacy_plane_cannot_delete_protected_generation_history() {
+        let (_env, _tmp) = isolated_home();
+        let vm = "protected-legacy-transition";
+        let console = console_log_for(vm);
+        let dir = config::vm_stream_transcript_dir(vm);
+        config::create_private_dir(&dir).unwrap();
+        let marker = dir.join(mvm_core::stream_client::protected::RUN_FILENAME);
+        std::fs::write(&marker, b"protected-routing-evidence").unwrap();
+        let ciphertext = dir.join("retained.seg");
+        std::fs::write(&ciphertext, b"synthetic-ciphertext").unwrap();
+        let plane = StreamPlane::new();
+        assert!(plane.attach(&capture(vm, &console)).is_err());
+        assert_eq!(
+            std::fs::read(marker).unwrap(),
+            b"protected-routing-evidence"
+        );
+        assert_eq!(std::fs::read(ciphertext).unwrap(), b"synthetic-ciphertext");
+    }
+
+    #[test]
+    fn supervisor_owned_capture_never_starts_a_competing_launcher_writer() {
+        let (_env, _tmp) = isolated_home();
+        for retention in [StreamRetention::Persist, StreamRetention::Ephemeral] {
+            let console = console_log_for("supervisor-owned");
+            let plane = StreamPlane::new();
+            let capture = ConsoleCapture {
+                supervisor_owned: true,
+                retention,
+                ..capture("supervisor-owned", &console)
+            };
+            // No supervisor socket exists yet. Neither a delayed owner nor a
+            // failed one licenses a second writer or a plaintext follower.
+            plane.attach(&capture).unwrap();
+            plane.attach(&capture).unwrap();
+            assert!(!plane.is_attached("supervisor-owned"));
+            assert!(!config::vm_stream_transcript_dir("supervisor-owned").exists());
+            assert!(!config::vm_stream_socket("supervisor-owned").exists());
+            assert!(!console.exists());
+        }
     }
 
     /// A follower attached on its own thread.
@@ -1419,6 +1518,7 @@ mod tests {
         plane
             .attach(&ConsoleCapture {
                 vm_name: "plane-policy",
+                supervisor_owned: false,
                 console_log: &console,
                 display_socket: None,
                 redaction: &narrowed,
@@ -1775,6 +1875,7 @@ mod tests {
                 wrapped_data_key_b64: String::new(),
             }),
         )
+        .unwrap()
         .sealed_manifest();
         manifest.adopted = true;
 

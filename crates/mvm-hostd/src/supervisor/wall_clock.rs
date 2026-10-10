@@ -248,7 +248,7 @@ impl SupervisorTimerInputs<'_> {
 /// value themselves — and a decoder that understands only one shape would just
 /// move the failure rather than remove it. Anything that is neither still
 /// errors, so an unreadable bound keeps failing closed.
-pub(crate) fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPlan> {
+pub fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPlan> {
     use anyhow::anyhow;
 
     let signed_err =

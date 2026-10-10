@@ -1704,6 +1704,16 @@ mod tests {
                 "{wf} must run on a schedule, not dispatch alone"
             );
         }
+        assert!(
+            watcher.contains("github.event.workflow_run.event == 'workflow_dispatch'")
+                && watcher.contains(
+                    r#"[ "$RUN_EVENT" = workflow_dispatch ] && [ "$HEAD_BRANCH" != "$DEFAULT_BRANCH" ]"#
+                )
+                && !watcher.contains(
+                    "github.event.workflow_run.head_branch == github.event.repository.default_branch"
+                ),
+            "manual recovery must use a case-sensitive default-branch trust check in the shell"
+        );
     }
 
     #[test]

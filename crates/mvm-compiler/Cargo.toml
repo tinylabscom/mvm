@@ -1,5 +1,6 @@
 [package]
 name = "mvm-compiler"
+publish = false
 description = "Shared workload compilation and build-artifact generation for mvm"
 version.workspace = true
 edition.workspace = true

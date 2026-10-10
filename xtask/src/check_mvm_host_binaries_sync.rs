@@ -3,8 +3,8 @@
 //! CI lint — asserts the Rust manifest at
 //! `crates/mvm-build/src/host_payload_manifest.rs` and the Nix
 //! attrset at `nix/lib/mvm-host-binaries.nix` agree on the set of
-//! entries and their install paths. Adding or renaming a binary
-//! requires updating both files in the same PR.
+//! legacy-image-installed entries and their install paths. A payload-only
+//! binary has no install path and does not belong in the Nix mirror.
 //!
 //! It also holds `.github/actions/install-zigbuild` to installing the Rust
 //! version the workspace metadata pins, the compiler `mvmctl`'s embedded
@@ -93,6 +93,10 @@ fn parse_rust_manifest(root: &Path) -> Result<BTreeMap<String, String>> {
         if let Some(n) = extract_quoted_after(line, "name:") {
             current_name = Some(n);
         }
+        if line.contains("install_path: None") {
+            current_name = None;
+            continue;
+        }
         if let Some(p) = extract_quoted_after(line, "install_path:")
             && let Some(n) = current_name.take()
         {
@@ -171,6 +175,7 @@ mod tests {
             entries.get("mvm-builderd").map(String::as_str),
             Some("/sbin/mvm-builderd")
         );
+        assert!(!entries.contains_key("mvm-setpriv"));
     }
 
     #[test]

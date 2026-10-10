@@ -556,6 +556,10 @@ impl RunDevice for super::device::Pl011 {
         super::device::MmioDevice::write(self, offset, value, size);
         None // PL011 has no interrupt in this model
     }
+    fn poll(&mut self) -> Option<u32> {
+        self.poll_handoff();
+        None
+    }
     fn snapshot_device(&self) -> Option<&dyn SnapshotDeviceState> {
         Some(self)
     }

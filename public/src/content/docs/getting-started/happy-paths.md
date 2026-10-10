@@ -142,8 +142,13 @@ to launch.
 ```bash
 mvmctl doctor --workflow bundle-run          # preflight (no host rust needed)
 mvmctl bundle fetch ./my-app.mvmpkg          # verify the signed bundle
-mvmctl bundle install ./my-app.mvmpkg        # install it into ~/.mvm/bundles/
+mvmctl run ./my-app.mvmpkg -- <cmd>          # verify, install on first use, boot
 ```
+
+`mvmctl run` checks the bundle's signature against your trust store every time
+and installs it into `~/.mvm/bundles/` the first time. `mvmctl bundle install`
+does the install on its own, for a host that should hold the bundle before
+anything runs it.
 
 `mvmctl machine check-artifact` verifies the same bundle without installing
 or booting it, and shows the posture it declares — the ceilings any launch of

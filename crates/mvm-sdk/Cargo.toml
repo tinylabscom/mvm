@@ -1,5 +1,6 @@
 [package]
 name = "mvm-sdk"
+publish = false
 description = "Rust SDK for mvm — build-time workload authoring and runtime record mode. The cdylib language SDKs load is mvm-host-services; this crate references it for the error taxonomy."
 version.workspace = true
 edition.workspace = true

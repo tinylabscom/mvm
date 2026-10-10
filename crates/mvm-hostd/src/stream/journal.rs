@@ -41,6 +41,27 @@ use serde::{Deserialize, Serialize};
 
 /// The mirrored manifest, beside the segments it describes.
 pub(in crate::stream) const JOURNAL_FILENAME: &str = "capture.jsonl";
+pub(crate) const SEED_FILENAME: &str = "capture-seed.json";
+
+/// Preserve the canonical opening metadata before any producer is exposed.
+/// Exclusive publication prevents a later owner from resetting its opening time.
+pub(in crate::stream) fn publish_seed(dir: &Path, seed: &TranscriptManifest) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        seed.chunks.is_empty()
+            && !seed.adopted
+            && seed.sealed_unix_secs.is_none()
+            && seed.refused_chunks == 0
+            && seed.refused_bytes == 0
+            && seed.evicted_chunks == 0
+            && seed.evicted_bytes == 0,
+        "capture opening seed is not empty and immutable"
+    );
+    mvm_core::transcript::verify_sealed_root(seed)?;
+    let body = serde_json::to_vec(seed)?;
+    mvm_core::util::atomic_io::atomic_write_new(&dir.join(SEED_FILENAME), &body)?;
+    File::open(dir)?.sync_all()?;
+    Ok(())
+}
 
 /// How much of a capture never landed, as of one journal line.
 ///
@@ -138,11 +159,6 @@ impl CaptureJournal {
         let _ = std::fs::remove_file(path);
     }
 
-    /// This journal's path, for the caller that removes it after sealing.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn append(&mut self, line: &JournalLine) -> std::io::Result<()> {
         if self.file.is_none() {
             self.open()?;
@@ -164,11 +180,22 @@ impl CaptureJournal {
     /// capture before the first chunk of the new one, so anything found here
     /// belongs to a run whose segments are already gone.
     fn open(&mut self) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
+        let protected = self
+            .header
+            .as_ref()
+            .is_some_and(|seed| seed.at_rest.is_some());
+        let mut options = OpenOptions::new();
+        options
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&self.path)?;
+            .create_new(protected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&self.path)?;
         // Errors rather than asserts: the header is taken exactly once by
         // construction, and a journal that somehow lost it is worth one broken
         // mirror, never a killed teardown.
@@ -188,6 +215,8 @@ impl CaptureJournal {
 /// A capture rebuilt from its journal, ready to seal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::stream) struct ReplayedCapture {
+    /// Original header, before recovered chunks and loss counters are applied.
+    pub seed: TranscriptManifest,
     /// The manifest the departed writer would have produced, as far as its
     /// journal got — always carrying `adopted`.
     pub manifest: TranscriptManifest,
@@ -217,8 +246,14 @@ pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
         match serde_json::from_str::<JournalLine>(&line) {
-            Ok(JournalLine::Header(header)) => manifest = Some(*header),
+            Ok(JournalLine::Header(header)) => {
+                if manifest.is_some() {
+                    return None;
+                }
+                manifest = Some(*header);
+            }
             Ok(JournalLine::Chunk(entry)) => {
+                manifest.as_ref()?;
                 if let Err(error) = check_safe_name(&entry.chunk.file) {
                     tracing::warn!(
                         dir = %dir.display(),
@@ -236,6 +271,7 @@ pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
     }
 
     let mut manifest = manifest?;
+    let seed = manifest.clone();
     // Eviction drops from the front, oldest first, and the journal records
     // every chunk that ever landed — so the surviving window is the tail, cut
     // to exactly what the writer's own deque held. Without this the manifest
@@ -268,6 +304,7 @@ pub(in crate::stream) fn replay(dir: &Path) -> Option<ReplayedCapture> {
 
     let declared_lengths = declared_lengths(&manifest.chunks);
     Some(ReplayedCapture {
+        seed,
         manifest,
         declared_lengths,
     })
@@ -313,11 +350,15 @@ mod tests {
                     max_chunks: 4096,
                 },
                 retention: RetentionPolicy::Ring,
+                at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 7,
                 recipient: "host:test".to_string(),
                 wrapped_data_key_b64: "wrapped".to_string(),
             },
         )
+        .unwrap()
     }
 
     /// Push `payloads` through a real writer while mirroring each landed
@@ -357,6 +398,37 @@ mod tests {
             sealed.wrapped_data_key_b64
         );
         verify_sealed_root(&replayed.manifest).expect("a replayed manifest verifies");
+    }
+
+    #[test]
+    fn canonical_seed_is_durable_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let seed = writer_at(dir.path()).sealed_manifest();
+        publish_seed(dir.path(), &seed).unwrap();
+        let path = dir.path().join(SEED_FILENAME);
+        let before = std::fs::read(&path).unwrap();
+        assert!(publish_seed(dir.path(), &seed).is_err());
+        assert_eq!(std::fs::read(path).unwrap(), before);
+        let restored: TranscriptManifest = serde_json::from_slice(&before).unwrap();
+        assert_eq!(restored, seed);
+    }
+
+    #[test]
+    fn duplicate_journal_headers_are_refused_instead_of_resetting_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        capture(dir.path(), &[b"synthetic"]);
+        let seed = replay(dir.path()).unwrap().seed;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join(JOURNAL_FILENAME))
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&JournalLine::Header(Box::new(seed))).unwrap()
+        )
+        .unwrap();
+        assert!(replay(dir.path()).is_none());
     }
 
     #[test]
@@ -524,11 +596,15 @@ mod tests {
                     max_chunks: u64::MAX,
                 },
                 retention: RetentionPolicy::Ring,
+                at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 0,
                 recipient: "host:test".to_string(),
                 wrapped_data_key_b64: "wrapped".to_string(),
             },
-        );
+        )
+        .unwrap();
         let mut journal = CaptureJournal::new(dir.path(), writer.sealed_manifest());
         let payload = vec![b'x'; 4096];
         for _ in 0..600u32 {

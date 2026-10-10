@@ -205,6 +205,13 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 // does not emit a local audit-chain entry of its own.
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
+// `mvmctl image revocations` — `update` advances the image-set revocation
+// checkpoint and records it; `status` only re-verifies the applied list.
+const IMAGE_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("update", AuditPosture::Emits("ImageSetRevocationUpdate")),
+    ("status", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("build-layer", AuditPosture::InteractiveOrControl),
     ("pull", AuditPosture::Emits("ImageFetch")),
@@ -213,6 +220,10 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("CachePrune")),
     ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
     ("dev", AuditPosture::DelegatesToSub(IMAGE_DEV_SUB)),
+    (
+        "revocations",
+        AuditPosture::DelegatesToSub(IMAGE_REVOCATIONS_SUB),
+    ),
 ];
 
 // `mvmctl pack` manages the versioned attested-pack cache and signed workload
@@ -519,6 +530,9 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
     ("disarm", AuditPosture::Emits("TranscriptSealed")),
     ("list", AuditPosture::ReadOnly),
     ("export", AuditPosture::Emits("TranscriptExported")),
+    // Authenticated cleanup appends transcript.retired before unlink; exact
+    // already-retired/no-op reconciliation does not append duplicate evidence.
+    ("reconcile", AuditPosture::Emits("transcript.retired")),
 ];
 
 // `trust audit <sub>` — the chain inspection/verification verbs are read-only;
@@ -930,6 +944,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "TranscriptArmed",
         "TranscriptExported",
         "TranscriptSealed",
+        // Managed payload retirement is a signed original-capture event,
+        // rather than a LocalAuditKind operator-log variant.
+        "transcript.retired",
         "TrustAdd",
         "TrustRemove",
         "TrustInstructionsInit",
@@ -962,6 +979,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "RegistryPackPin",
         "RegistryPackRemove",
         "RegistryPackRevocationUpdate",
+        "ImageSetRevocationUpdate",
         // Secret-service entries: the recorder emits `secret.<action>`
         // for the action the service names, and a consent run names
         // `oauth_login` whatever its outcome.

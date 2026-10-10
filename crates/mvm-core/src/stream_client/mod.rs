@@ -38,6 +38,7 @@
 mod console;
 mod opts;
 mod output;
+pub mod protected;
 mod reader;
 mod wire;
 

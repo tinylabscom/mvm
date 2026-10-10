@@ -1266,44 +1266,22 @@ fn trust_the_fixture_publisher(world: &mut CliWorld) {
     );
 }
 
-/// The template slot a `machine build --flake <flake_dir>` registered in
-/// `home`, found by the flake it was built from rather than by recency: a live
-/// home may be the shared warm one, holding other builds.
-fn flake_slot_in(home: &Path, flake_dir: &str) -> Option<String> {
-    let suffix = format!("/{}", flake_dir.trim_end_matches('/'));
-    fs::read_dir(home.join("templates"))
-        .ok()?
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if name.len() != 64 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
-                return None;
-            }
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&fs::read(entry.path().join("manifest.json")).ok()?).ok()?;
-            let flake_ref = manifest.get("flake_ref")?.as_str()?;
-            flake_ref
-                .trim_end_matches('/')
-                .ends_with(&suffix)
-                .then_some(name)
-        })
-}
-
 /// Seal what the last live `machine build` produced into a `.mvmpkg`, on the
 /// host that ran the build and under that host's signer. The builder VM that
 /// produced the image never held the key; this is the step that uses it.
-#[when(expr = "I seal the live build of {string} into a bundle")]
-fn seal_live_build(world: &mut CliWorld, flake_dir: String) {
+#[when("I seal the live manifest build into a bundle")]
+fn seal_live_build(world: &mut CliWorld) {
     let home = world
         .last_live_home
         .clone()
         .expect("a live build step runs before the seal");
-    let slot = flake_slot_in(&home, &flake_dir).unwrap_or_else(|| {
-        panic!(
-            "no template slot built from {flake_dir} under {}",
-            home.join("templates").display()
-        )
-    });
+    let build = world
+        .last_run
+        .as_ref()
+        .expect("a build ran before the seal");
+    assert!(build.status.success(), "the manifest build must succeed");
+    let slot = crate::live_artifacts::built_manifest_slot(&build.stdout)
+        .expect("the live manifest build must report its completed slot in JSON");
     let dir = tempfile::tempdir().expect("create the sealed-bundle directory");
     let bundle = dir.path().join("build.mvmpkg");
     let output = mvmctl_command()

@@ -46,13 +46,22 @@ pub(in crate::commands) fn resolve_run_mode(
         return Ok(Some(RunMode::Live));
     }
     if run.prod {
-        if run.image.is_some() {
+        // A production run names what it boots, as an image, a catalogued
+        // runtime, or a positional image or artifact, and goes on to the
+        // image run, which applies the production rules. Anything else, a
+        // script path included, was asking for record mode.
+        let names_a_boot_source = run.image.is_some()
+            || run.runtime.is_some()
+            || run
+                .source
+                .as_deref()
+                .is_some_and(super::positional_source::names_a_boot_source);
+        if names_a_boot_source {
             return Ok(None);
         }
         anyhow::bail!(
             "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl build compile`, where \
-             record is the default mode. Re-run as `mvmctl build compile <script>` (the trailing argv \
-             on `mvmctl run` is for the live sandbox runner, not for SDK record-mode)."
+             record is the default mode. Re-run as `mvmctl build compile <script>`."
         );
     }
     match sdk.mode {

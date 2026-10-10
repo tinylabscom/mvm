@@ -151,6 +151,9 @@ pub enum LocalAuditKind {
     /// A verified revocation feed advanced the local rollback checkpoint.
     /// Detail carries the accepted sequence and document digest.
     RegistryPackRevocationUpdate,
+    /// A verified image-set revocation list advanced the local rollback
+    /// checkpoint. Detail carries the publication, issue time and digest.
+    ImageSetRevocationUpdate,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -1264,6 +1267,7 @@ mod tests {
             LocalAuditKind::RegistryPackPin,
             LocalAuditKind::RegistryPackRemove,
             LocalAuditKind::RegistryPackRevocationUpdate,
+            LocalAuditKind::ImageSetRevocationUpdate,
             // Session lifecycle.
             LocalAuditKind::SessionStart,
             LocalAuditKind::SessionAttach,

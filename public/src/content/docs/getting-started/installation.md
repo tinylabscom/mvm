@@ -163,10 +163,13 @@ cargo build --release
 cp target/release/mvmctl ~/.local/bin/
 ```
 
-## Cargo Install
+## Cargo Install From Git
+
+`mvmctl` is not published to crates.io (only the public `mvm-contract` library
+is), so `cargo install` builds it from the repository:
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 ## Optional Nix Packages
