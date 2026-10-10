@@ -28,6 +28,21 @@ an explicit immutable mvm flake input. Callers must still generate and verify
 `flake.lock` inside the builder before publishing. Unpinned entrypoints retain
 the existing `MVM_FLAKE_URL` override behavior.
 
+## Packs
+
+`pack` lowers a `PackSpec` to a command-entrypoint `Workload` and renders it
+with `compile_pinned`; it has no renderer of its own. `lock_pack` snapshots the
+source tree (refusing a root or symlink that escapes it) and returns a
+`PackLock` binding the pack identity, target, canonical spec digest, snapshot
+digest over file paths, modes and contents, lowered workload digest, compiler
+version and mvm revision. `compile_frozen` recomputes that lock, names every
+stale field, and compiles from the verified snapshot only when nothing differs.
+
+Lowering refuses build-scoped packages, exact package versions, language
+dependency files and copy operations, because the IR and Nix factories cannot
+honor them yet. A successful frozen compile resolves no packages, installs no
+dependencies and runs no build.
+
 ## Validation
 
 ```sh
