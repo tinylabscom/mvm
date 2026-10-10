@@ -72,6 +72,31 @@ fn owned_root() -> Result<PathBuf> {
     Ok(root)
 }
 
+fn declare_helpers() -> Result<()> {
+    let supervisor = path_env("MVM_HVF_SUPERVISOR_PATH")?;
+    let directory = supervisor
+        .parent()
+        .context("supervisor has no binary directory")?
+        .canonicalize()?;
+    mvm_vmm::host::aux_bin::declare_library_embedder();
+    mvm_vmm::host::aux_bin::declare_host_binary_dir(directory)?;
+    Ok(())
+}
+
+fn await_controller_record() -> Result<()> {
+    ensure!(
+        std::env::var("MVM_CALLER_WITNESS_START_GATE")?.as_str() == "stdin-v1",
+        "custody controller start gate required"
+    );
+    let mut byte = [0];
+    std::io::stdin().read_exact(&mut byte)?;
+    ensure!(
+        byte == [b'1'],
+        "custody controller did not release the recorded child"
+    );
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Ownership {
@@ -135,10 +160,16 @@ impl Inputs {
             std::env::var("MVM_RESIDENCY")?.as_str() == "cold",
             "cold residency required"
         );
+        ensure!(
+            std::env::var("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE")?.as_str() == "download",
+            "native witness may consume prepared caches but must not build guest runtime"
+        );
         for forbidden in [
             "MVM_SKIP_HASH_VERIFY",
             "MVM_SKIP_COSIGN_VERIFY",
             "MVM_HVF_BOOTARGS",
+            "MVM_IMAGES_DIR",
+            "MVM_ALLOW_LOCAL_BUILDER_BUILD",
         ] {
             ensure!(
                 std::env::var_os(forbidden).is_none(),
@@ -354,6 +385,9 @@ fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitSt
 #[test]
 #[ignore = "explicit real macOS custody + admitted HVF cold witness; missing inputs FAIL"]
 fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
+    // Test-only ownership control, not an admission or caller authority.
+    await_controller_record()?;
+    declare_helpers()?;
     let inputs = Inputs::read()?;
     let owned = Ownership::new();
     owned.validate()?;
@@ -462,6 +496,7 @@ fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
 #[test]
 #[ignore = "explicit companion cleanup for the native cold witness's exact recorded VM names"]
 fn native_caller_registration_cleanup() -> Result<()> {
+    declare_helpers()?;
     let root = owned_root()?;
     let path = root.join("owned-vms.json");
     if !path.exists() {
