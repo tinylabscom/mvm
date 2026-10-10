@@ -14,9 +14,6 @@ use crate::world::CliWorld;
 use super::cli::{install_encrypted_backing_probes, mvmctl_command, workspace_root};
 use mvm_conformance::IsolatedHome;
 
-#[path = "../support/live_runtime.rs"]
-mod live_runtime;
-
 fn isolated_home(world: &CliWorld) -> &Path {
     world
         .isolated_home
@@ -40,44 +37,16 @@ fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
 
 #[given("a cached live workload kernel")]
 fn cached_live_workload_kernel(world: &mut CliWorld) {
-    // The `@workload_kernel` gate guarantees this resolves before the scenario
-    // is selected, so reaching here without one is a harness bug, not an
+    // The `@workload_kernel` gate guarantees a kernel resolves before the
+    // scenario is selected, so a missing one here is a harness bug, not an
     // operator mistake.
-    let source = crate::workload_kernel_path()
-        .expect("`@workload_kernel` scenarios only run when a kernel resolves");
-    let destination = mvm_build::kernel_fetch::cached_kernel_path(
-        &isolated_home(world).join("cache"),
-        std::env::consts::ARCH,
-        "workload",
-    );
-    fs::create_dir_all(
-        destination
-            .parent()
-            .expect("workload kernel cache path has a parent"),
-    )
-    .expect("create isolated workload kernel cache");
-    fs::copy(&source, &destination).unwrap_or_else(|error| {
-        panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
-    });
-    mvm_build::kernel_fetch::record_kernel_digest(&destination)
-        .expect("record isolated workload kernel digest");
-    assert!(
-        matches!(
-            mvm_build::kernel_fetch::resolve_kernel(
-                &isolated_home(world).join("cache"),
-                std::env::consts::ARCH,
-                "workload",
-                false,
-            ),
-            mvm_build::kernel_fetch::KernelResolution::Cached(ref kernel)
-                if kernel.path() == destination
-        ),
-        "isolated workload kernel must resolve from the verified cache"
-    );
-    prepare_live_runtime(world);
-    let output = mvmctl_command()
+    let home = isolated_home(world).to_path_buf();
+    super::live_home::prepare_live_home(&home);
+    let mut command = mvmctl_command();
+    super::live_home::use_seeded_runtime(&mut command);
+    let output = command
         .args(["image", "pull", "alpine"])
-        .isolated_home(isolated_home(world))
+        .isolated_home(&home)
         .output()
         .expect("prepare Alpine in the isolated live home");
     assert!(
@@ -85,76 +54,6 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
         "prepare Alpine in the isolated live home\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn prepare_live_runtime(world: &CliWorld) {
-    use mvm_vmm::host::aux_bin::{self, AuxBin, HostProcess};
-
-    let home = isolated_home(world);
-    let cache = home.join("cache");
-    let cli = super::cli::mvmctl_path();
-    let host = HostProcess::undeclared()
-        .with_binary_dir(cli.parent().expect("mvmctl has a binary directory"));
-    // These daemon binaries do not implement the endpoint's contract probe.
-    // Resolve them without granting permission to compile at launch.
-    for name in ["mvm-host-agent", "mvm-signer-helper"] {
-        assert!(
-            host.binary_named(name).is_some(),
-            "prebuild {name} beside the live mvmctl"
-        );
-    }
-    aux_bin::resolve_verified_for(
-        &AuxBin::new(
-            "mvm-network-endpoint",
-            "MVM_SUBSTITUTION_ENDPOINT_PATH",
-            "mvm-hostd",
-        ),
-        &host,
-    )
-    .expect("prebuilt network endpoint must satisfy the launch contract");
-    // Admit one independently verified archive, not loose executables. Both
-    // assemblers record that archive's digest, including the distinct PID 1
-    // agent that the universal initramfs needs.
-    let runtime = super::cli::seed_live_guest_runtime(home);
-    let (overlay, initramfs) = live_runtime::prepare(&cache, &runtime)
-        .expect("prepare both isolated verified boot artifacts");
-
-    // Exercise the launch's cache-only boundaries before creating a machine.
-    // A missing artifact or stale source fingerprint is a fixture failure,
-    // rather than a request to acquire anything during machine start.
-    let mut env = mvm_core::util::test_env::TestEnv::new();
-    env.isolate_mvm_home(home);
-    env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "build");
-    mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(&cache.join("oci"))
-        .expect("isolated OCI guest runtime must already be prepared");
-    let mut config = mvm_core::vm_backend::VmStartConfig {
-        kernel_path: Some("prepared-workload-kernel".to_string()),
-        rootfs_path: "prepared-workload-rootfs".to_string(),
-        ..Default::default()
-    };
-    mvm_client::launch::runtime_source::attach_runtime_overlay_if_cached(
-        &mut config,
-        "firecracker",
-    )
-    .expect("isolated runtime overlay must attach without acquisition");
-    mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached(
-        &mut config,
-        "firecracker",
-    )
-    .expect("isolated universal initramfs must attach without acquisition");
-    assert_eq!(config.initrd_path.as_deref(), initramfs.image_path.to_str());
-    assert_eq!(
-        config.runtime_overlay_path.as_deref(),
-        overlay.overlay_ext4.to_str()
-    );
-    assert_eq!(
-        config.runtime_overlay_verity_path.as_deref(),
-        overlay.sidecar.to_str()
-    );
-    assert_eq!(
-        config.runtime_overlay_roothash.as_deref(),
-        Some(overlay.roothash.as_str())
     );
 }
 

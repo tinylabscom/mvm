@@ -125,6 +125,9 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     cmd.args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path());
+    if super::live_home::is_prepared_live_home(home.path()) {
+        super::live_home::use_seeded_runtime(&mut cmd);
+    }
     apply_encrypted_volume_probe_path(world, &mut cmd);
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
@@ -353,6 +356,25 @@ fn run_mvmctl_isolated_live_home_without_terminal(world: &mut CliWorld, args: St
     );
 }
 
+/// Pull an image into the live home the next launch boots from. A launch only
+/// boots an image already prepared in its own home, so a scenario that boots
+/// one prepares it first, through the same verb an operator runs.
+#[given(expr = "the image {string} is prepared in the live home")]
+fn image_prepared_in_live_home(world: &mut CliWorld, image: String) {
+    run_live_home(
+        world,
+        vec!["image".into(), "pull".into(), image.clone()],
+        Terminal::Inherited,
+    );
+    let output = world.last_run.take().expect("image pull ran");
+    assert!(
+        output.status.success(),
+        "prepare {image} in the live home\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Whether a live-home run keeps the controlling terminal of the process
 /// running the suite.
 enum Terminal {
@@ -404,8 +426,9 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // then assert on it, and honouring the warm home over that put `machine
     // create` and `machine start` in two different directories.
     let home = selected_live_home(world);
-    seed_live_guest_runtime(&home);
+    super::live_home::prepare_live_home(&home);
     let mut command = mvmctl_command();
+    super::live_home::use_seeded_runtime(&mut command);
     command
         .current_dir(workspace_root())
         .args(&argv)

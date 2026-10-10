@@ -55,14 +55,19 @@ live-ci TAG="ci_live":
     # admits the `@live` set, which reaches the builder VM. Without the payload
     # mvmctl refuses at bootstrap. The hermetic `just bdd::run` lane skips those
     # scenarios and so deliberately does not pay the cross-compile.
+    #
+    # A launch boots only what its home already holds, so the live home is
+    # prepared from bytes built here: the workload kernel below, and the host
+    # helpers mvmctl spawns per VM, built beside it so no launch compiles one.
     cargo build --bin mvmctl --features user,embed-host-bins
+    cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
     "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG={{ TAG }} MVM_BDD_STRICT_SKIPS=1 MVM_BDD_ALLOWED_SKIPS=outside-selected-tag cargo test -p mvm-conformance --test conformance --features bdd
 
 # Nightly KVM witness for the one scenario that runs a warm claim end to end:
 # warm a parent, claim it, and require the child's run to be anchored in the
-# audit chain. Kept out of the merge queue because it acquires its image from a
-# fresh home, which would add minutes to every merge. The run must report
+# audit chain. Kept out of the merge queue because it prepares its kernel and
+# image in a fresh home, which would add minutes to every merge. The run must report
 # exactly that scenario passing, so a tag or gate change that quietly skips it
 # fails this recipe instead of passing it.
 
@@ -71,6 +76,8 @@ live-warm-claim:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo build --bin mvmctl --features user,embed-host-bins
+    cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
+    "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
     log="$(mktemp)"
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_WARM_CLAIM=1 \
       MVM_BDD_ONLY_TAG=warm_claim cargo test -p mvm-conformance --test conformance --features bdd 2>&1 | tee "$log"
