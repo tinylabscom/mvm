@@ -227,6 +227,7 @@ fn spawn_prepared(
     config: &[u8],
     timeout: Duration,
 ) -> Result<OwnedEndpoint> {
+    let deadline = handshake_deadline(timeout)?;
     let log = create_evidence(&endpoint_stderr_log_path(params.state_dir))?;
     let child = endpoint_command(bin, params.lifetime, params.state_dir, log)
         .spawn()
@@ -238,7 +239,7 @@ fn spawn_prepared(
         create_evidence(&params.state_dir.join(SUBST_PID_FILE))?
             .write_all(endpoint.id().to_string().as_bytes())?;
         endpoint.arm()?;
-        let handshake = exchange(&mut endpoint, config, timeout)?;
+        let handshake = exchange_until(&mut endpoint, config, deadline)?;
         if let Some(parent) = env_path.parent() {
             std::fs::create_dir_all(parent).context("create endpoint environment directory")?;
         }
@@ -356,12 +357,17 @@ fn ready(fd: libc::c_int, events: libc::c_short, deadline: Instant) -> Result<()
     }
 }
 
-fn exchange(
+fn handshake_deadline(timeout: Duration) -> Result<Instant> {
+    Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| anyhow!("owned endpoint handshake timeout exceeds clock range"))
+}
+
+fn exchange_until(
     endpoint: &mut OwnedEndpoint,
     config: &[u8],
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<EndpointHandshake> {
-    let deadline = Instant::now() + timeout;
     let mut stdin = endpoint
         .child
         .stdin

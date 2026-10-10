@@ -1,6 +1,24 @@
 use super::*;
 use std::process::{Command, Stdio};
 
+fn exchange(
+    endpoint: &mut OwnedEndpoint,
+    config: &[u8],
+    timeout: Duration,
+) -> Result<EndpointHandshake> {
+    exchange_until(endpoint, config, handshake_deadline(timeout)?)
+}
+
+#[test]
+fn unrepresentable_handshake_deadline_is_a_redacted_error() {
+    let error = handshake_deadline(Duration::from_secs(u64::MAX)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "owned endpoint handshake timeout exceeds clock range"
+    );
+    assert!(handshake_deadline(Duration::from_secs(60)).is_ok());
+}
+
 // These helpers are direct owned children. `exec` replaces the shell; no
 // background grandchildren, VMs, runtime commands or credential resolution.
 fn helper(script: &str) -> OwnedEndpoint {
