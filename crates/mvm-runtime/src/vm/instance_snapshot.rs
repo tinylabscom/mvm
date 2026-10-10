@@ -663,6 +663,31 @@ mod tests {
         assert_eq!(dir_mode, 0o700, "snapshot dir should be mode 0700");
     }
 
+    /// Encryption rewrites both artifacts at 0600, which hides this step
+    /// from `pause_and_seal_creates_files_with_mode_0600`. The plaintext the
+    /// VMM wrote sits on disk until then, so it is tightened on its own.
+    #[test]
+    fn plaintext_artifacts_are_tightened_before_encryption() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in [VMSTATE_FILENAME, MEM_FILENAME] {
+            let p = tmp.path().join(name);
+            std::fs::write(&p, b"plaintext").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        tighten_snapshot_file_modes(tmp.path()).unwrap();
+        for name in [VMSTATE_FILENAME, MEM_FILENAME] {
+            let mode = std::fs::metadata(tmp.path().join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name} should be mode 0600");
+        }
+
+        let empty = tempfile::tempdir().unwrap();
+        tighten_snapshot_file_modes(empty.path()).expect("an absent artifact is skipped");
+    }
+
     #[test]
     fn pause_and_seal_advances_epoch() {
         let _g = DataDirGuard::new();
