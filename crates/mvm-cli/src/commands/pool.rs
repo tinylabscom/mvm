@@ -1350,6 +1350,11 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
+        // The production store encrypts every capture under the host key.
+        env.set(
+            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
 
         let store = CheckpointStore::open();
         let ckpt = write_captured_parent(&store, "standby-standby-abc");
@@ -1418,6 +1423,11 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
+        // The production store encrypts every capture under the host key.
+        env.set(
+            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
 
         let store = CheckpointStore::open();
         let ckpt = write_captured_parent(&store, "standby-standby-doomed");
@@ -1439,6 +1449,11 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(tmp.path());
+        // The production store encrypts every capture under the host key.
+        env.set(
+            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
 
         let store = CheckpointStore::open();
         let mut handle = captured_handle("standby-nockpt", &CheckpointId::new("x".to_string()));

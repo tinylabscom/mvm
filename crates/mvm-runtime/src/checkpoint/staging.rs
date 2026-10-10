@@ -111,12 +111,10 @@ impl<'a> StagedCapture<'a> {
 
     pub(super) fn begin(store: &'a CheckpointStore, id: &CheckpointId) -> Result<Self> {
         ensure_capturable_id(id)?;
-        let staging_root = store.root().join(STAGING_DIR);
-        std::fs::create_dir_all(&staging_root)
-            .with_context(|| format!("creating {}", staging_root.display()))?;
+        let staging_root = admit_private_staging(store)?;
         sweep_abandoned(&staging_root);
         let dir = staging_root.join(staging_name(std::process::id(), id));
-        std::fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        create_private_dir_new(&dir)?;
         let staged = Self {
             store,
             id: id.clone(),
@@ -124,8 +122,7 @@ impl<'a> StagedCapture<'a> {
             replaced: None,
             published: false,
         };
-        std::fs::create_dir(staged.content_dir())
-            .with_context(|| format!("creating {}", staged.content_dir().display()))?;
+        create_private_dir_new(&staged.content_dir())?;
         Ok(staged)
     }
 
@@ -238,6 +235,52 @@ impl Drop for StagedCapture<'_> {
 
 /// Refuse an id that would land outside the store root, or collide with the
 /// staging directory.
+/// Admit the staging area a capture writes plaintext into: a real directory,
+/// not a link to one, readable by this user alone. Created private when it
+/// does not exist yet and narrowed when it was left wider.
+pub(super) fn admit_private_staging(store: &CheckpointStore) -> Result<PathBuf> {
+    let staging_root = store.root().join(STAGING_DIR);
+    mvm_core::config::create_private_dir(&staging_root)
+        .with_context(|| format!("creating {}", staging_root.display()))?;
+    let metadata = std::fs::symlink_metadata(&staging_root)
+        .with_context(|| format!("reading {}", staging_root.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_dir(),
+        "checkpoint staging {} is not a directory",
+        staging_root.display()
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        anyhow::ensure!(
+            metadata.mode() & 0o077 == 0,
+            "checkpoint staging {} is readable by other users",
+            staging_root.display()
+        );
+        let store_owner = std::fs::metadata(store.root())
+            .with_context(|| format!("reading {}", store.root().display()))?
+            .uid();
+        anyhow::ensure!(
+            metadata.uid() == store_owner,
+            "checkpoint staging {} belongs to another user than the store",
+            staging_root.display()
+        );
+    }
+    Ok(staging_root)
+}
+
+fn create_private_dir_new(dir: &Path) -> Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
+
 fn ensure_capturable_id(id: &CheckpointId) -> Result<()> {
     let raw = id.as_str();
     anyhow::ensure!(
