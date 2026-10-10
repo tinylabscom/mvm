@@ -63,7 +63,7 @@ fn do_exec_streaming(
 fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
     do_run_detached_with(
         argv,
-        env,
+        crate::handlers::overlay_env(env),
         std::path::Path::new("/dev/console"),
         std::path::Path::new("/usr/local/bin/mvm-exit-report"),
     )
