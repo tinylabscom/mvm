@@ -58,6 +58,36 @@ impl CaptureDirectory {
         Ok(Self { dir })
     }
 
+    /// Read one bounded private metadata member through the held directory,
+    /// without following links or allocating from an untrusted file length.
+    pub fn read_private_member(&self, name: &str, maximum: usize) -> io::Result<Vec<u8>> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(invalid("private metadata name must be one component"));
+        }
+        let mut file = open_at(&self.dir, name.as_ref(), OFlags::empty())?;
+        let metadata = file.metadata()?;
+        regular_single_link(&metadata)?;
+        if metadata.mode() & 0o777 != 0o600
+            || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.len() > maximum as u64
+        {
+            return Err(invalid("private metadata exceeds its bound or permissions"));
+        }
+        let limit = maximum
+            .checked_add(1)
+            .ok_or_else(|| invalid("private metadata bound overflow"))?;
+        let mut bytes = Vec::new();
+        (&mut file).take(limit as u64).read_to_end(&mut bytes)?;
+        if bytes.len() > maximum || bytes.len() as u64 != metadata.len() {
+            return Err(invalid(
+                "private metadata changed length or exceeds its bound",
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub fn read_manifest(&self) -> io::Result<TranscriptManifest> {
         let mut file = open_at(
             &self.dir,
@@ -252,6 +282,23 @@ mod tests {
         AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME,
         RetentionPolicy, TranscriptWriter, TranscriptWriterConfig,
     };
+
+    #[test]
+    fn private_metadata_reads_are_bounded_private_and_descriptor_relative() {
+        let root = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(root.path()).unwrap();
+        let path = root.path().join("metadata");
+        crate::atomic_io::write_private(&path, b"1234").unwrap();
+        let lease = CaptureDirectory::for_writer(root.path()).unwrap();
+        assert_eq!(lease.read_private_member("metadata", 4).unwrap(), b"1234");
+        assert!(lease.read_private_member("metadata", 3).is_err());
+        assert!(lease.read_private_member("../metadata", 4).is_err());
+        crate::private_fs::set_mode(&path, 0o644).unwrap();
+        assert!(lease.read_private_member("metadata", 4).is_err());
+        crate::private_fs::set_mode(&path, 0o600).unwrap();
+        std::fs::hard_link(&path, root.path().join("alias")).unwrap();
+        assert!(lease.read_private_member("metadata", 4).is_err());
+    }
 
     fn fixture() -> (tempfile::TempDir, TranscriptManifest) {
         let dir = tempfile::tempdir().unwrap();

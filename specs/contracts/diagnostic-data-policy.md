@@ -84,13 +84,25 @@ boundary. Putting an expectation beside a proof is not an independent trust
 anchor against replacement of both by a compromised launcher. Later producer
 input cannot install or replace the owner's caller identity.
 
-One private, create-only `caller-registration.used` slot in the managed VM
-directory rejects concurrent consumption and replay across supervisor restart.
-It contains only an opaque run identifier and is replay bookkeeping, not an
-authorization permit. Failed setup remains spent; recovery requires normal
-instance teardown and fresh admission, never deleting the slot to retry the
-same launch bytes. The slot is bounded to one per managed instance and is
-removed with that instance's ordinary state lifecycle.
+A bounded private consumed-registration ledger lives outside runtime VM state,
+under the configured MVM home's `caller-registration` directory. It stores
+only purpose-domain-separated commitments to the canonical challenge and signed
+expiry times, not keys or raw plans. Exclusive directory locking, bounded reads,
+and a synced atomic replacement complete before owner activation. At 4096
+unexpired entries or 1 MiB the ledger refuses new consumption rather than evicting
+an unexpired record. Expiry pruning and a persistent clock high-water advance
+are one transaction; a backward clock refuses instead of reviving pruned records.
+Corrupt storage, or missing storage after recorded initialization, is never
+silently reset.
+
+A private, create-only `caller-registration.used` slot in each managed VM
+directory separately guards immutable installation in that instance. Both
+mechanisms are replay bookkeeping, not authorization permits. Failed setup may
+remain spent; recovery requires repairing the underlying failure, normal instance
+teardown, and fresh admission. Ordinary teardown removes the per-instance slot
+but not the durable ledger, so the old still-valid registration remains refused
+while a fresh registration can be admitted. Never erase replay bookkeeping to
+retry the same launch bytes.
 
 Caller registration is currently cold-only. Opted-in standby preparation and
 warm claims are refused before changing pool or guest state; no legacy standby

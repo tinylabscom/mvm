@@ -1366,8 +1366,10 @@ mod tests {
             .expect("an accepted handoff claims");
 
         let requests = parent.requests();
-        let mut expected = serde_json::to_vec(&handoff_request()).expect("serialize request");
-        expected.push(b'\n');
+        let expected = format!(
+            "{{\"child_vm_name\":\"child\",\"parent_pid\":1,\"channel_mask\":0,\"signature\":\"{}\"}}\n",
+            "00".repeat(64),
+        ).into_bytes();
         assert_eq!(requests, vec![expected]);
     }
 
@@ -1527,6 +1529,20 @@ mod tests {
 
     fn sample_paths() -> SupervisorPaths {
         SupervisorPaths::resolve(PathBuf::from("/state/w"), 0)
+    }
+
+    #[test]
+    fn opted_out_cold_driver_keeps_exact_legacy_startup_bytes() {
+        let spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
+        let config = relay_supervisor_config(&spec, &sample_paths()).unwrap();
+        let expected = concat!(
+            r#"{"console_capture":"encrypted","vm_name":"w","kernel":"/k/Image","cmdline":null,"memory_mib":256,"vcpus":1,"initramfs":"/img/initrd.cpio","disks":[],"vsock":true,"trusted_builder_egress":false,"#,
+            r#""console_log":"/state/w/console.log","pid_file":"/state/w/hvf.pid","workload_exit":"/state/w/workload.exit","pause_state":"/state/w/pause.state","#,
+            r#""snapshot_request":"/state/w/snapshot.request","snapshot_ram":"/state/w/snapshot.ram","snapshot_frame":"/state/w/snapshot.frame","restore_ram":null,"restore_frame":null,"restore_fds":null,"timeout_secs":0,"plan":null,"#,
+            r#""audit_dir":null,"signing_key_path":null,"builder_egress_endpoint":null,"agent_socket":"/state/w/hvf-agent.sock","substitution_socket":null,"egress_relay_socket":null,"broker_socket":null,"display_socket":null,"gpu_socket":null,"#,
+            r#""console_data_sockets":[],"builder_control_sockets":[],"exclusive_image_lock":null,"handoff_socket":null,"handoff_root":null,"handoff_verify_key":null,"cpu_millicores":null,"quota_record":null}"#,
+        );
+        assert_eq!(serde_json::to_string(&config).unwrap(), expected);
     }
 
     #[test]

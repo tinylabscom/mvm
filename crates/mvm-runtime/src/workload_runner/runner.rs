@@ -4135,6 +4135,44 @@ mod tests {
             grant_issuer: Some(&grant_issuer),
         };
 
+        let mut opted_in = claim.clone();
+        let config = opted_in.start_config.as_mut().unwrap();
+        let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json).unwrap();
+        let installation =
+            serde_json::from_str("\"bdf189ab-9a9a-440b-a266-e95b19e58a5e\"").unwrap();
+        let identity =
+            mvm_core::crypto::entrypoint_delegation::test_support::identity([3; 32], installation);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected =
+            mvm_core::vm_backend::caller_registration::CallerRegistration::challenge_for_plan(
+                &config.name,
+                &plan,
+                identity,
+                now,
+            )
+            .unwrap();
+        let proof =
+            mvm_core::crypto::entrypoint_delegation::test_support::proof([3; 32], &expected, now)
+                .unwrap();
+        config.caller_registration = Some(
+            mvm_core::vm_backend::caller_registration::CallerRegistration {
+                vm: config.name.clone(),
+                expected,
+                proof,
+            },
+        );
+        assert!(runner.claim_standby(&ctx, &handle, &opted_in).is_err());
+        assert_eq!(pool.load("warm-parent").unwrap().state, StandbyState::Idle);
+        assert!(
+            !registry_path.exists(),
+            "refusal must precede child identity allocation"
+        );
+        assert!(runner.driver.forked_children().is_empty());
+        assert!(runner.spawner.seen_vm.lock().unwrap().is_none());
+
         let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
 
         // Fresh identity: the child differs from the parent and gets a fresh name.
