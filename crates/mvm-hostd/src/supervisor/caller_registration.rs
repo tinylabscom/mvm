@@ -113,6 +113,13 @@ pub fn verify_cold_start(
 impl VerifiedCallerLaunch {
     pub(crate) fn consume(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
         anyhow::ensure!(self.vm == vm, "caller launch owner mismatch");
+        mvm_core::plan::validity::check_window(&self.plan, chrono::Utc::now())
+            .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
+        self.caller
+            .proof
+            .proof()
+            .verify(self.caller.challenge(), unix_now()?)
+            .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
         mvm_core::naming::validate_vm_name(vm)?;
         let state = config::vm_state_dir(vm);
         match std::fs::symlink_metadata(&state) {
