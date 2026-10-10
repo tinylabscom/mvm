@@ -18,6 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+pub mod caller_registration;
+
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
 pub use mvm_contract::protocol::resource_controls::{
     CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
@@ -173,6 +175,9 @@ pub struct VmStartConfig {
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
+    /// Optional caller registration from the trusted entrypoint admission path.
+    /// This is not producer readiness and is not accepted by warm launches.
+    pub caller_registration: Option<caller_registration::CallerRegistration>,
     /// JSON-encoded `PlanArtifact` (bundle pin)
     /// when `admitted.plan.bundle.is_some()`. `None` when the plan
     /// has no `.mvmpkg` pin (the common case). Same "do not log"

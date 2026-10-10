@@ -265,6 +265,7 @@ pub fn hvf_child_restore_config(
         // The child is still admission-bounded; this mirrors the host-side CPU
         // control, which a restore does not re-arm either.
         plan: None,
+        caller_registration: None,
         audit_dir: None,
         signing_key_path: None,
         agent_socket: Some(mvm_core::config::vm_hvf_agent_socket_at(req.state_dir)),
@@ -579,6 +580,7 @@ mod tests {
             gpu_socket: None,
             timeout_secs: 0,
             plan: None,
+            caller_registration: None,
             audit_dir: None,
             signing_key_path: None,
             agent_socket: Some(PathBuf::from("/parent/hvf-agent.sock")),

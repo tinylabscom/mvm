@@ -257,6 +257,7 @@ fn main() -> anyhow::Result<()> {
         .context("read HvfSupervisorConfig from stdin")?;
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    let registered_launch = mvm_hostd::supervisor::caller_registration::verify_startup(&cfg)?;
     if let Some(state_dir) = cfg.pid_file.parent() {
         let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
             state_dir,
@@ -422,12 +423,16 @@ fn main() -> anyhow::Result<()> {
         .as_ref()
         .map(|plan| plan.redaction.clone())
         .unwrap_or_default();
-    let authority = match admitted_plan.as_ref() {
-        Some(plan) => CaptureAuthority::Admitted(plan),
-        None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
-            CaptureAuthority::OperationalLiveOnly
+    let authority = if let Some(launch) = registered_launch {
+        CaptureAuthority::CallerRegistered(launch)
+    } else {
+        match admitted_plan.as_ref() {
+            Some(plan) => CaptureAuthority::Admitted(plan),
+            None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
+                CaptureAuthority::OperationalLiveOnly
+            }
+            None => anyhow::bail!("workload protected capture requires an admitted plan"),
         }
-        None => anyhow::bail!("workload protected capture requires an admitted plan"),
     };
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {

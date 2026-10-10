@@ -257,6 +257,10 @@ fn relay_supervisor_config_with_handoff(
         // The supervisor owns the guest for its whole life, so it holds the
         // only timer that can still fire once `mvmctl` is gone.
         plan: spec.plan_binding.as_ref().map(|b| b.plan_json.clone()),
+        caller_registration: spec
+            .plan_binding
+            .as_ref()
+            .and_then(|b| b.caller_registration.clone()),
         audit_dir: spec.plan_binding.as_ref().map(|b| b.audit_dir.clone()),
         signing_key_path: spec
             .plan_binding
@@ -1479,6 +1483,7 @@ mod tests {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            caller_registration: None,
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });
@@ -1507,6 +1512,7 @@ mod tests {
         let mut spec = spec_with(KernelImage::Path("/k/Image".into()), vec![], vec![]);
         spec.plan_binding = Some(mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            caller_registration: None,
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         });

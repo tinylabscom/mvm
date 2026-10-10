@@ -24,6 +24,15 @@ use crate::admission::{
 /// The tenant every locally admitted entrypoint VM is scoped under.
 const LOCAL_TENANT: &str = "local";
 
+#[derive(Clone)]
+struct ProducerIdentity(mvm_core::crypto::entrypoint_identity::EnrolledIdentity);
+
+impl std::fmt::Debug for ProducerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProducerIdentity(<redacted>)")
+    }
+}
+
 /// The policy an entrypoint VM is admitted under. Built once per boot; the
 /// facts only the boot can know (rootfs, kernel, name, volumes) arrive at
 /// [`EntrypointAdmission::admit`] time.
@@ -38,6 +47,7 @@ pub struct EntrypointAdmission {
     dev: bool,
     network_policy: NetworkPolicy,
     stream_stdin: bool,
+    producer_identity: Option<ProducerIdentity>,
 }
 
 /// An admitted entrypoint boot: the context the audit narrative binds to, and
@@ -65,6 +75,7 @@ impl EntrypointAdmission {
             dev: false,
             network_policy: NetworkPolicy::deny_all(),
             stream_stdin: false,
+            producer_identity: None,
         })
     }
 
@@ -102,6 +113,10 @@ impl EntrypointAdmission {
     /// stdin grant over a shell-shaped or unresolvable entrypoint, or a plan
     /// that cannot be persisted ahead of the egress moat.
     pub fn admit(&self, inputs: AdmitInputs<'_>) -> Result<AdmittedEntrypoint> {
+        anyhow::ensure!(
+            self.producer_identity.is_none() || self.backend_name == "hvf",
+            "caller registration currently requires a cold HVF entrypoint launch"
+        );
         let AdmitInputs {
             rootfs,
             kernel,
@@ -189,10 +204,41 @@ impl EntrypointAdmission {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for the entrypoint VM")?;
+        let caller_registration = self
+            .producer_identity
+            .as_ref()
+            .map(|identity| {
+                use mvm_core::vm_backend::caller_registration::CallerRegistration;
+                use mvm_hostd::caller_identity::IdentityClient;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let credential = IdentityClient::native()?
+                    .load(&identity.0, deadline)?
+                    .wait()?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_secs();
+                let challenge = CallerRegistration::challenge_for_plan(
+                    vm_name,
+                    ctx.admitted.plan(),
+                    credential.identity(),
+                    now,
+                )?;
+                let proof = credential
+                    .prove_registration(&challenge, now)?
+                    .verify(&challenge, now)?;
+                mvm_hostd::supervisor::caller_registration::admit_caller(
+                    &ctx.admitted,
+                    vm_name,
+                    challenge,
+                    proof,
+                )
+            })
+            .transpose()?;
         Ok(AdmittedEntrypoint {
             substrate: SessionAuditSubstrate {
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,
+                caller_registration,
                 bundle_json,
                 config_files: start_config.config_files,
                 read_only_materialized_images: ctx
@@ -213,6 +259,18 @@ impl EntrypointAdmission {
 pub struct EntrypointAdmissionBuilder(EntrypointAdmission);
 
 impl EntrypointAdmissionBuilder {
+    /// Opt into immutable caller registration on a cold HVF launch. Enrollment
+    /// is explicit and must already exist in native custody at this exact pin.
+    /// Registration alone does not enable producer ingress or protected output.
+    #[must_use]
+    pub fn producer_identity(
+        mut self,
+        identity: mvm_core::crypto::entrypoint_identity::EnrolledIdentity,
+    ) -> Self {
+        self.0.producer_identity = Some(ProducerIdentity(identity));
+        self
+    }
+
     /// vCPUs the plan admits.
     #[must_use]
     pub fn cpus(mut self, cpus: u32) -> Self {
