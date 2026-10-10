@@ -4,12 +4,10 @@ use super::*;
 use crate::registry_pack_image::{BuiltImageAsset, MAX_BUILT_IMAGE_METADATA_BYTES};
 use std::io::Read;
 
-// SHA-256 of `mvmctl` from the official v0.22.0 Linux x86_64 release. The
-// release checksum file and archive were verified against the release workflow
-// identity. Advance this pin only with a released verifier that accepts the
-// current compiled image lock.
-const TRUSTED_IMAGE_VERIFIER_SHA256: &str =
-    "c92c89ef61724388875ce8e17cbce4bf614019fcc7ad7139b5d660c0dba81bd8";
+// Keep this empty until a checksum- and signature-verified released verifier
+// accepts the image-set lock compiled into this client. v0.22.0 is authentic
+// but pins image-set/v0.2.3; v0.23.0 has no published release asset yet.
+const TRUSTED_IMAGE_VERIFIER_SHA256: Option<&str> = None;
 
 /// Authenticate a built image's statement against its verified pack publisher.
 pub fn verify_built_image_provenance(
@@ -97,7 +95,14 @@ pub(super) fn verify_built_image_authenticity(
 fn verify_trusted_image_verifier(
     verifier_sha256: &Sha256Hex,
 ) -> Result<(), RegistryPackVerificationError> {
-    if verifier_sha256.as_str() == TRUSTED_IMAGE_VERIFIER_SHA256 {
+    let Some(expected) = TRUSTED_IMAGE_VERIFIER_SHA256 else {
+        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+            reason:
+                "no released image verifier compatible with the current image-set lock is trusted"
+                    .to_string(),
+        });
+    };
+    if verifier_sha256.as_str() == expected {
         return Ok(());
     }
     Err(RegistryPackVerificationError::InvalidImageDeclaration {

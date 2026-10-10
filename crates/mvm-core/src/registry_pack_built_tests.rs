@@ -50,14 +50,18 @@ fn fixture() -> (tempfile::TempDir, VerifiedRegistryPack) {
 }
 
 #[test]
-fn provenance_verifier_must_match_the_approved_released_binary() {
-    let trusted = Sha256Hex::new(TRUSTED_IMAGE_VERIFIER_SHA256.to_string()).unwrap();
-    verify_trusted_image_verifier(&trusted).expect("approved release verifier");
-
-    let untrusted = Sha256Hex::from_bytes(b"another verifier");
+fn built_image_verification_stays_fail_closed_without_a_compatible_release() {
     assert!(
-        verify_trusted_image_verifier(&untrusted).is_err(),
-        "a publisher-signed but unapproved verifier digest must be refused"
+        TRUSTED_IMAGE_VERIFIER_SHA256.is_none(),
+        "pin only a published verifier compatible with the current image-set lock"
+    );
+    let claimed = Sha256Hex::from_bytes(b"any claimed verifier");
+    let error = verify_trusted_image_verifier(&claimed).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("no released image verifier compatible"),
+        "the missing compatible release must fail with an actionable error: {error}"
     );
 }
 
