@@ -90,7 +90,7 @@ fn consume_challenge(challenge: &RegistrationChallenge, now: u64) -> Result<()> 
             .entries
             .iter()
             .any(|entry| entry.commitment == commitment),
-        "caller registration was already consumed; obtain fresh admission"
+        super::CALLER_REGISTRATION_REPLAY_DENIED
     );
     // Expiry pruning and the high-water advance are one durable transaction.
     // Clock rollback can therefore never revive a registration we pruned.

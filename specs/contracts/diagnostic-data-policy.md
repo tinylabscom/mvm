@@ -134,6 +134,16 @@ resolution and include admission, native custody, verification, durable replay
 bookkeeping, producer readiness, and guest readiness. Registration-only timing
 cannot establish that full-readiness target.
 
+The real cold-launch witness and startup-performance measurement are blocked by
+[lifetime-safe HVF stop and fail-closed cleanup](https://github.com/tinylabscom/mvm/issues/4276).
+The current driver drops its owned supervisor child after readiness, while the
+public stop path signals a numeric PID. Best-effort transient cleanup may remove
+process evidence after a failed stop. The ignored caller-registration witness
+therefore returns `Unsupported` before launch, and its cleanup companion refuses
+to erase an existing ownership record without proof of quiescence. These refusals
+are not native-boot passes. Scoped admission/owner/replay tests and separate
+native-custody tests do not establish a full native launch or readiness latency.
+
 ## Private creation and replacement
 
 Managed payload files and key material must be created at `0600`; managed
