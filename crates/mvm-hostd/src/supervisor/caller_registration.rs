@@ -49,6 +49,7 @@ pub struct ConsumedCallerLaunch {
     plan: ExecutionPlan,
     caller: RegisteredCaller,
     vm: String,
+    consumed_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub struct PreparedCallerStartup {
@@ -154,12 +155,15 @@ pub fn verify_cold_start(
 impl VerifiedCallerLaunch {
     pub(crate) fn consume(self, vm: &str) -> Result<Box<ConsumedCallerLaunch>> {
         anyhow::ensure!(self.vm == vm, "caller launch owner mismatch");
-        mvm_core::plan::validity::check_window(&self.plan, chrono::Utc::now())
+        let consumed_at = chrono::Utc::now();
+        let consumed_secs =
+            u64::try_from(consumed_at.timestamp()).context("caller launch clock is invalid")?;
+        mvm_core::plan::validity::check_window(&self.plan, consumed_at)
             .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
         self.caller
             .proof
             .proof()
-            .verify(self.caller.challenge(), unix_now()?)
+            .verify(self.caller.challenge(), consumed_secs)
             .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
         mvm_core::naming::validate_vm_name(vm)?;
         let state = config::vm_state_dir(vm);
@@ -179,7 +183,7 @@ impl VerifiedCallerLaunch {
             std::fs::canonicalize(&state)? == std::fs::canonicalize(parent)?.join(vm),
             "caller launch state is not contained"
         );
-        replay::consume(&self.caller, unix_now()?)?;
+        replay::consume(&self.caller, consumed_secs)?;
         // One fixed private replay slot per managed VM, not attacker-selected
         // filenames or an unbounded nonce directory. Failed setup stays spent:
         // retrying those same launch bytes must never restore authority. Normal
@@ -198,15 +202,35 @@ impl VerifiedCallerLaunch {
             plan: self.plan,
             caller: self.caller,
             vm: self.vm,
+            consumed_at,
         }))
     }
 }
 
 impl ConsumedCallerLaunch {
     pub(crate) fn into_owner(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
+        self.into_owner_at(vm, chrono::Utc::now())
+    }
+
+    fn into_owner_at(
+        self,
+        vm: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(ExecutionPlan, RegisteredCaller)> {
         anyhow::ensure!(self.vm == vm, "consumed caller launch owner mismatch");
-        mvm_core::plan::validity::check_window(&self.plan, chrono::Utc::now())
+        let now_secs =
+            u64::try_from(now.timestamp()).context("caller activation clock is invalid")?;
+        anyhow::ensure!(
+            now >= self.consumed_at,
+            "caller activation clock moved backwards"
+        );
+        mvm_core::plan::validity::check_window(&self.plan, now)
             .map_err(|_| anyhow::anyhow!("caller launch expired during boot setup"))?;
+        self.caller
+            .proof
+            .proof()
+            .verify(self.caller.challenge(), now_secs)
+            .map_err(|_| anyhow::anyhow!("caller registration expired during boot setup"))?;
         Ok((self.plan, self.caller))
     }
 }

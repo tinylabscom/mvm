@@ -105,6 +105,10 @@ A non-cloneable consumed-launch capability is passed to the capture owner;
 the owner cannot substitute verification-only state or consume it a second time.
 Missing kernel or initramfs failures after successful consumption remain spent
 even though no capture owner or guest has yet started.
+Owner installation rechecks both the signed plan window and the exact caller
+registration deadline after setup, without rounding that deadline up. A clock
+earlier than the observed consumption time refuses activation; consumption never
+extends validity.
 
 A private, create-only `caller-registration.used` slot in each managed VM
 directory separately guards immutable installation in that instance. Both
