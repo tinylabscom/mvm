@@ -157,6 +157,7 @@ pub(super) fn verify_manifest_signature(
             train: manifest.train,
         },
     )
+    .map(|_| ())
     .map_err(|error| {
         bump_verify_outcome("sig_invalid");
         anyhow::Error::new(error).context(format!(
