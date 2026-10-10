@@ -40,9 +40,6 @@ pub struct BackendDescriptor {
     pub include_in_list_all: bool,
     pub include_in_balloon_support: bool,
     pub include_in_warm_start_support: bool,
-    /// This backend boots a kernel it bundles itself (no on-disk kernel
-    /// path to hash for a compat key). True only for libkrun today.
-    pub bundled_kernel: bool,
     /// This backend needs the admitted plan JSON stashed to disk for its
     /// external-VMM bridge to read at spawn time, rather than taking it
     /// in-process. False for every runner-driven backend — the runner takes the
@@ -88,7 +85,6 @@ macro_rules! backend_catalog {
             list_all: $list_all:expr,
             balloon_support: $balloon_support:expr,
             warm_start_support: $warm_start_support:expr,
-            bundled_kernel: $bundled_kernel:expr,
             needs_plan_json: $needs_plan_json:expr,
             is_workload: $is_workload:expr
         }
@@ -105,7 +101,6 @@ macro_rules! backend_catalog {
                     include_in_list_all: $list_all,
                     include_in_balloon_support: $balloon_support,
                     include_in_warm_start_support: $warm_start_support,
-                    bundled_kernel: $bundled_kernel,
                     needs_plan_json: $needs_plan_json,
                     is_workload: $is_workload,
                 },
@@ -157,7 +152,6 @@ backend_catalog![
         // recovery truth is `VmCapabilities` on the constructed backend.
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
     },
@@ -174,7 +168,6 @@ backend_catalog![
         // selectable workload runner does not expose those paths yet.
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: true,
         needs_plan_json: false,
         is_workload: true
     },
@@ -189,7 +182,6 @@ backend_catalog![
         list_all: true,
         balloon_support: true,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: false
     },
@@ -204,7 +196,6 @@ backend_catalog![
         list_all: false,
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: false
     },
@@ -219,7 +210,6 @@ backend_catalog![
         list_all: true,
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
     },
@@ -236,7 +226,6 @@ backend_catalog![
         list_all: true,
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
     },
@@ -255,7 +244,6 @@ backend_catalog![
         list_all: true,
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
     },    {
@@ -269,7 +257,6 @@ backend_catalog![
         list_all: true,
         balloon_support: false,
         warm_start_support: false,
-        bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
     },

@@ -72,19 +72,10 @@ pub fn fresh_binding_nonce() -> String {
     hex_lower(&buf)
 }
 
-/// The compat-key kernel identity, computed identically at claim **and** replenish time.
-/// For **libkrun** a workload microVM always boots the bundled libkrunfw kernel (mkGuest
-/// images ship none; the builder VM uses a custom kernel but never the warm pool), so the
-/// identity is a constant — crucially the same whether the workload's `kernel_path` is
-/// absent (claim, pre-boot) or present (replenish, after libkrun materialized the bundled
-/// kernel). That's what makes the libkrun warm claim *fire* instead of fail-open to cold
-/// because the absent path can't be hashed. Other backends boot a real on-disk kernel → sha.
-const LIBKRUN_BUNDLED_KERNEL_ID: &str = "libkrun-bundled-kernel";
-
-pub fn kernel_identity(backend: &dyn VmBackend, kernel_path: Option<&str>) -> Result<String> {
-    if mvm_runtime::catalog::descriptor(backend.kind()).bundled_kernel {
-        return Ok(LIBKRUN_BUNDLED_KERNEL_ID.to_string());
-    }
+/// The compat-key kernel identity, computed identically at claim **and** replenish time:
+/// the sha256 of the on-disk kernel the workload boots. Every workload backend boots an
+/// explicit kernel file, libkrun included.
+pub fn kernel_identity(kernel_path: Option<&str>) -> Result<String> {
     let kernel = kernel_path.context("launch config has no kernel path for the compat key")?;
     kernel_sha256_hex(Path::new(kernel))
 }
@@ -97,11 +88,9 @@ pub struct StandbySpecParams<'a> {
     pub template_id: Option<&'a str>,
     /// `~/.mvm/vms/` root — the standby's runtime state dir lives at `vms_root/<id>/`.
     pub vms_root: &'a Path,
-    /// Kernel image the standby pre-loads (the path; for libkrun mkGuest the bundled kernel
-    /// is materialized here at boot).
+    /// Kernel image the standby pre-loads.
     pub kernel: &'a Path,
-    /// Compat-key identity (see [`kernel_identity`]) — not necessarily a hash of `kernel`
-    /// (for libkrun it's the bundled-kernel constant).
+    /// Compat-key identity (see [`kernel_identity`]).
     pub kernel_sha256: &'a str,
     pub vcpus: u8,
     pub mem_mib: u32,
@@ -613,7 +602,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     let kernel = Path::new(p.launch.kernel_path.as_deref().ok_or_else(|| {
         anyhow::anyhow!("the launch config names no kernel for its warm parents to boot")
     })?);
-    let want = compat_for_launch(p.backend.as_vm_backend(), p.launch)?;
+    let want = compat_for_launch(p.launch)?;
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::vms_dir();
@@ -936,10 +925,10 @@ fn parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId> {
 /// computed one side independently would be free to disagree with the other,
 /// and `StandbyHandle::is_compatible` is exact equality — a disagreement is a
 /// pool that never drains, with no error anywhere.
-fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<StandbyCompat> {
+fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
     Ok(StandbyCompat {
         template_id: cfg.template_id.clone(),
-        kernel_sha256: kernel_identity(backend, cfg.kernel_path.as_deref())?,
+        kernel_sha256: kernel_identity(cfg.kernel_path.as_deref())?,
         vcpus: u8::try_from(cfg.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX),
         mem_mib: cfg.memory_mib,
         image_sha256: Some(image_identity(Path::new(cfg.rootfs_path.as_str()))?),
@@ -1044,7 +1033,7 @@ pub fn try_warm_claim(
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
     // admission just populated, so this costs a read, not a re-hash.
-    let want = compat_for_launch(backend.as_vm_backend(), cfg)?;
+    let want = compat_for_launch(cfg)?;
     let rootfs = cfg.rootfs_path.clone();
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
@@ -1517,11 +1506,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"root").unwrap();
-        let backend = AnyBackend::from_hypervisor("libkrun");
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
         let mut cfg = eligible_cfg();
         cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+        cfg.kernel_path = Some(kernel.to_string_lossy().into_owned());
 
-        let key = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let key = compat_for_launch(&cfg).unwrap();
 
         // There is one root shape now. A parent warmed under any other one
         // still declares it on its recorded spec, so the compat check keeps
@@ -1548,22 +1539,14 @@ mod tests {
         cfg.kernel_path = Some(kernel.to_string_lossy().into_owned());
         cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
 
-        // Firecracker keys on the pack's own vmlinux sha, and on the pack
-        // rootfs's own sha — a parent is a full-state capture of one particular
-        // rootfs, so the image is part of the identity, not incidental to it.
-        let fc = AnyBackend::from_hypervisor("firecracker");
-        let want = compat_for_launch(fc.as_vm_backend(), &cfg).unwrap();
+        // The key is the pack's own vmlinux sha and the pack rootfs's own
+        // sha — a parent is a full-state capture of one particular rootfs, so
+        // the image is part of the identity, not incidental to it.
+        let want = compat_for_launch(&cfg).unwrap();
         assert_eq!(want.kernel_sha256, sha256_hex_of(b"pack-kernel"));
         assert_eq!(want.vcpus, 2);
         assert_eq!(want.mem_mib, 1024);
         assert_eq!(want.image_sha256, Some(sha256_hex_of(b"pack-rootfs")));
-
-        // libkrun boots its bundled kernel, so the kernel half of the key is the
-        // constant; the image half is still the pack rootfs.
-        let lk = AnyBackend::from_hypervisor("libkrun");
-        let lk_want = compat_for_launch(lk.as_vm_backend(), &cfg).unwrap();
-        assert_eq!(lk_want.kernel_sha256, LIBKRUN_BUNDLED_KERNEL_ID);
-        assert_eq!(lk_want.image_sha256, Some(sha256_hex_of(b"pack-rootfs")));
     }
 
     #[test]
@@ -1738,7 +1721,6 @@ mod tests {
         std::fs::write(&kernel, b"kernel").unwrap();
         let rootfs = tmp.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
-        let fc = AnyBackend::from_hypervisor("firecracker");
 
         for policy in [
             NetworkPolicy::deny_all(),
@@ -1753,7 +1735,7 @@ mod tests {
                 cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
                 cfg.network_policy = policy.clone();
                 cfg.plan_json = plan;
-                let want = compat_for_launch(fc.as_vm_backend(), &cfg).unwrap();
+                let want = compat_for_launch(&cfg).unwrap();
                 assert_eq!(
                     want.vsock_egress,
                     mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg),
@@ -1776,7 +1758,6 @@ mod tests {
         std::fs::write(&kernel, b"kernel").unwrap();
         let rootfs = tmp.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
-        let fc = AnyBackend::from_hypervisor("firecracker");
 
         let mut deny = eligible_cfg();
         deny.kernel_path = Some(kernel.to_string_lossy().into_owned());
@@ -1785,8 +1766,8 @@ mod tests {
         egress.network_policy =
             NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
 
-        let deny_key = compat_for_launch(fc.as_vm_backend(), &deny).unwrap();
-        let egress_key = compat_for_launch(fc.as_vm_backend(), &egress).unwrap();
+        let deny_key = compat_for_launch(&deny).unwrap();
+        let egress_key = compat_for_launch(&egress).unwrap();
         assert!(!deny_key.vsock_egress);
         assert!(egress_key.vsock_egress);
         assert_ne!(
@@ -1892,32 +1873,17 @@ mod tests {
     }
 
     #[test]
-    fn kernel_identity_is_constant_for_libkrun_and_sha_elsewhere() {
+    fn kernel_identity_is_the_sha_of_the_booted_kernel() {
         let tmp = tempfile::tempdir().unwrap();
         let kp = tmp.path().join("vmlinux");
         std::fs::write(&kp, b"real-kernel").unwrap();
         let kps = kp.to_string_lossy();
-
-        // libkrun: the bundled-kernel constant, computable even when the workload kernel is
-        // absent (the mkGuest claim/replenish symmetry fix).
-        let libkrun = AnyBackend::from_hypervisor("libkrun");
         assert_eq!(
-            kernel_identity(libkrun.as_vm_backend(), None).unwrap(),
-            LIBKRUN_BUNDLED_KERNEL_ID
-        );
-        assert_eq!(
-            kernel_identity(libkrun.as_vm_backend(), Some("/nonexistent/vmlinux")).unwrap(),
-            LIBKRUN_BUNDLED_KERNEL_ID
-        );
-
-        // firecracker: the real on-disk kernel's sha.
-        let fc = AnyBackend::from_hypervisor("firecracker");
-        assert_eq!(
-            kernel_identity(fc.as_vm_backend(), Some(&kps)).unwrap(),
+            kernel_identity(Some(&kps)).unwrap(),
             sha256_hex_of(b"real-kernel")
         );
-        // …and it errors if a real-kernel backend has no path.
-        assert!(kernel_identity(fc.as_vm_backend(), None).is_err());
+        // A launch with no kernel path has no identity to key a claim on.
+        assert!(kernel_identity(None).is_err());
     }
 
     fn idle_handle(id: &str, kernel: &str) -> StandbyHandle {
@@ -2063,7 +2029,7 @@ mod tests {
         .unwrap();
         assert_eq!(result.spawned, 1, "the spawn must record one standby");
 
-        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let want = compat_for_launch(&cfg).unwrap();
         let claimed = pool
             .claim_idle_compatible(&want)
             .unwrap()
@@ -2085,7 +2051,7 @@ mod tests {
         std::fs::write(&other_rootfs, b"other-rootfs").unwrap();
         let mut other = cfg.clone();
         other.rootfs_path = other_rootfs.display().to_string();
-        let other_want = compat_for_launch(backend.as_vm_backend(), &other).unwrap();
+        let other_want = compat_for_launch(&other).unwrap();
         assert_ne!(other_want, want);
     }
 
@@ -2155,9 +2121,8 @@ mod tests {
         let launched = resolve(Some("the-launch"));
         assert_ne!(warmed.start_config.name, launched.start_config.name);
 
-        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
-        let warm_key = compat_for_launch(backend.as_vm_backend(), &warmed.start_config).unwrap();
-        let claim_key = compat_for_launch(backend.as_vm_backend(), &launched.start_config).unwrap();
+        let warm_key = compat_for_launch(&warmed.start_config).unwrap();
+        let claim_key = compat_for_launch(&launched.start_config).unwrap();
         assert_eq!(
             warm_key, claim_key,
             "a parent warmed for this image must be found by the launch that boots it"
@@ -2223,7 +2188,7 @@ mod tests {
             "the fixture must warm one parent, or this asserts nothing"
         );
 
-        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let want = compat_for_launch(&cfg).unwrap();
         let observed: std::cell::Cell<Option<StandbyState>> = std::cell::Cell::new(None);
         let decision = claim_or_cold(&pool, &backend, &want, |handle| {
             observed.set(Some(pool.load(&handle.id).unwrap().state));
@@ -2311,7 +2276,7 @@ mod tests {
         let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         // Pre-fill the pool with 1 idle standby carrying the launch's own compat
         // key, so the warm below sees the target already met.
-        let want = compat_for_launch(backend.as_vm_backend(), &cfg).unwrap();
+        let want = compat_for_launch(&cfg).unwrap();
         let mut h = idle_handle("s1", &want.kernel_sha256);
         h.vcpus = want.vcpus;
         h.mem_mib = want.mem_mib;
@@ -2389,7 +2354,7 @@ mod tests {
         });
 
         let want = StandbyCompat {
-            ..compat_for_launch(backend.as_vm_backend(), &cfg).unwrap()
+            ..compat_for_launch(&cfg).unwrap()
         };
         assert_eq!(
             pool.idle_count_compatible(&want).unwrap(),

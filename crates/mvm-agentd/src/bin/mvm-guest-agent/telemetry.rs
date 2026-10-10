@@ -9,9 +9,12 @@
 //! Boot readiness never gates on this module: the listener is spawned after
 //! PID-1 activation, a bind failure is logged and abandoned rather than
 //! surfaced, and the control plane is already serving before this thread
-//! exists. Keys are loaded lazily per connection because the identity drive's
-//! material lands in `/run/mvm` during boot — a host that dials before the
-//! keys exist gets a dropped connection and dials again.
+//! exists. On the initramfs path PID 1 reads this boot's keys during
+//! activation, while it is still root: the signing key belongs to the egress
+//! client's uid at mode 0400, so the agent cannot read it once it has dropped
+//! to its own identity. Without that capture every session would be refused.
+//! A guest whose agent is not PID 1 still loads the keys per connection — a
+//! host that dials before they exist gets a dropped connection and dials again.
 //!
 //! The listener is opt-in, launch-asserted: it binds and spawns only when the
 //! kernel cmdline carries `mvm.telemetry=1` — the same host→guest assertion
@@ -25,6 +28,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_agentd::flowmux_sync::{load_guest_signing_key, load_host_anchor};
 use mvm_agentd::telemetry_capture::session::serve_capture_session;
 use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, ProducerId};
@@ -59,6 +63,50 @@ const CAPTURE_RECORDS: usize = 128;
 
 /// The process capture state, present only on telemetry-asserted boots.
 static CAPTURE: OnceLock<Arc<CaptureState>> = OnceLock::new();
+
+/// This boot's session keys, read by PID 1 before its privilege drop.
+static SESSION_KEYS: OnceLock<SessionKeys> = OnceLock::new();
+
+/// The guest signing key a session signs its handshake with, and the
+/// host-signer anchor it verifies the host against.
+#[derive(Clone)]
+struct SessionKeys {
+    signing_key: SigningKey,
+    anchor: VerifyingKey,
+}
+
+impl SessionKeys {
+    fn load(key_dir: &Path) -> Result<Self, String> {
+        let signing_key =
+            load_guest_signing_key(key_dir).map_err(|e| format!("no guest signing key: {e}"))?;
+        let anchor = load_host_anchor(key_dir).map_err(|e| format!("no host anchor: {e}"))?;
+        Ok(Self {
+            signing_key,
+            anchor,
+        })
+    }
+}
+
+/// Read this boot's session keys while the caller can still read them.
+///
+/// PID 1 calls this during activation, after the identity drive has been
+/// copied into `/run/mvm` and before the agent drops to its own uid. Only a
+/// telemetry-asserted boot keeps the keys: a boot that serves no telemetry has
+/// no reason to hold the egress client's signing key in the agent's memory.
+pub(crate) fn capture_session_keys_before_privilege_drop() {
+    let asserted = std::fs::read_to_string("/proc/cmdline")
+        .map(|cmdline| telemetry_asserted(&cmdline))
+        .unwrap_or(false);
+    if !asserted {
+        return;
+    }
+    match SessionKeys::load(Path::new(KEY_DIR)) {
+        Ok(keys) => {
+            let _ = SESSION_KEYS.set(keys);
+        }
+        Err(e) => eprintln!("mvm-guest-agent: telemetry keys not captured at activation: {e}"),
+    }
+}
 
 /// One agent-diagnostics coverage emission; the record is queued and rides
 /// the next session. A shed is already counted by the capture state.
@@ -159,9 +207,11 @@ fn accept_loop(listener_fd: RawFd, capture: &CaptureState) {
             use std::os::fd::AsRawFd as _;
             set_read_timeout(stream.as_raw_fd());
         };
-        if serve_accepted(&mut stream, Path::new(KEY_DIR), capture, bound)
-            == Some(SessionEnd::Failed)
-        {
+        let keys = match SESSION_KEYS.get() {
+            Some(keys) => Ok(keys.clone()),
+            None => SessionKeys::load(Path::new(KEY_DIR)),
+        };
+        if serve_accepted(&mut stream, keys, capture, bound) == Some(SessionEnd::Failed) {
             eprintln!("mvm-guest-agent: telemetry session failed");
         }
     }
@@ -189,35 +239,27 @@ fn set_read_timeout(fd: RawFd) {
     }
 }
 
-/// Load this boot's identity and serve one telemetry session over an
-/// accepted, peer-gated stream. `None` means the keys were unavailable and
-/// the connection was dropped before any handshake byte; the listener keeps
-/// serving either way. Split from [`accept_loop`] so a test can drive it
-/// over a socket pair with keys in a temp directory.
+/// Serve one telemetry session over an accepted, peer-gated stream with this
+/// boot's keys. `None` means the keys were unavailable and the connection was
+/// dropped before any handshake byte; the listener keeps serving either way.
+/// Split from [`accept_loop`] so a test can drive it over a socket pair.
 fn serve_accepted<S: Read + Write>(
     stream: &mut S,
-    key_dir: &Path,
+    keys: Result<SessionKeys, String>,
     capture: &CaptureState,
     bound_reads: impl FnOnce(&mut S),
 ) -> Option<SessionEnd> {
-    let signing_key = match load_guest_signing_key(key_dir) {
-        Ok(key) => key,
+    let keys = match keys {
+        Ok(keys) => keys,
         Err(e) => {
-            eprintln!("mvm-guest-agent: telemetry session refused, no guest signing key: {e}");
-            return None;
-        }
-    };
-    let anchor = match load_host_anchor(key_dir) {
-        Ok(anchor) => anchor,
-        Err(e) => {
-            eprintln!("mvm-guest-agent: telemetry session refused, no host anchor: {e}");
+            eprintln!("mvm-guest-agent: telemetry session refused, {e}");
             return None;
         }
     };
     Some(serve_capture_session(
         stream,
-        signing_key,
-        &anchor,
+        keys.signing_key,
+        &keys.anchor,
         capture,
         &SHUTDOWN_REQUESTED,
         bound_reads,
@@ -306,7 +348,7 @@ mod tests {
         let (mut guest, host) = UnixStream::pair().unwrap();
         let collector = host_side(host, anchor_key, guest_key.verifying_key());
         let capture = test_capture();
-        let end = serve_accepted(&mut guest, dir.path(), &capture, bound);
+        let end = serve_accepted(&mut guest, SessionKeys::load(dir.path()), &capture, bound);
         assert_eq!(end, Some(SessionEnd::PeerClosed));
         let record = collector.join().unwrap().expect("coverage record");
         match *record.body() {
@@ -318,12 +360,35 @@ mod tests {
         }
     }
 
+    /// Keys captured at activation serve a session after the files are gone
+    /// from the agent's view, which is the state after the privilege drop:
+    /// the signing key is the egress client's, mode 0400.
+    #[test]
+    fn keys_captured_before_the_drop_serve_a_session_the_files_no_longer_can() {
+        let dir = tempfile::tempdir().unwrap();
+        let (guest_key, anchor_key) = provision_keys(dir.path());
+        let captured = SessionKeys::load(dir.path()).expect("keys readable before the drop");
+        std::fs::remove_file(dir.path().join(GUEST_SIGNING_KEY_FILE)).unwrap();
+        assert!(SessionKeys::load(dir.path()).is_err());
+
+        let (mut guest, host) = UnixStream::pair().unwrap();
+        let collector = host_side(host, anchor_key, guest_key.verifying_key());
+        let end = serve_accepted(&mut guest, Ok(captured), &test_capture(), bound);
+        assert_eq!(end, Some(SessionEnd::PeerClosed));
+        assert!(collector.join().unwrap().is_some(), "coverage record");
+    }
+
     #[test]
     fn a_connection_before_keys_exist_is_dropped_without_a_handshake_byte() {
         let dir = tempfile::tempdir().unwrap();
         let (mut guest, mut host) = UnixStream::pair().unwrap();
         assert_eq!(
-            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            serve_accepted(
+                &mut guest,
+                SessionKeys::load(dir.path()),
+                &test_capture(),
+                bound
+            ),
             None
         );
         drop(guest);
@@ -344,7 +409,12 @@ mod tests {
         .unwrap();
         let (mut guest, mut host) = UnixStream::pair().unwrap();
         assert_eq!(
-            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            serve_accepted(
+                &mut guest,
+                SessionKeys::load(dir.path()),
+                &test_capture(),
+                bound
+            ),
             None
         );
         drop(guest);
@@ -359,7 +429,12 @@ mod tests {
         std::fs::write(dir.path().join(HOST_SIGNER_PUB_FILE), [22u8; 32]).unwrap();
         let (mut guest, _host) = UnixStream::pair().unwrap();
         assert_eq!(
-            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            serve_accepted(
+                &mut guest,
+                SessionKeys::load(dir.path()),
+                &test_capture(),
+                bound
+            ),
             None
         );
     }

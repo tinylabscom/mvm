@@ -174,9 +174,9 @@ What only the shell `/init` still does is this workstream's real scope:
   powering off. On the universal path the host drives this through
   `RunEntrypoint`; the open question is whether anything besides dev boots
   and `mvm-images`' own e2e boots still needs the autostart;
-- `mvm.secret_env`, which the runner still emits but no agent code reads,
+- `mvm.secret_env`, which the runner emitted but no agent code read,
   because the universal path delivers the environment per `RunEntrypoint`.
-  The emitter can be deleted.
+  The emitter and the shell consumer are deleted.
 
 The identity files need a choice: either the agent provisions `/etc/passwd`
 and `/etc/group` read-only at boot, which claim 2 relies on, or the base root

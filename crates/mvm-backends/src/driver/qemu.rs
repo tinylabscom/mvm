@@ -426,8 +426,7 @@ impl VmmDriver for QemuDriver {
                 spec.shares.len()
             );
         }
-        // QEMU has no bundled kernel (libkrun's libkrunfw is the only
-        // bundled-kernel backend): a `Bundled` spec takes the same cached
+        // QEMU has no bundled kernel: a `Bundled` spec takes the same cached
         // builder-kernel fallback the raw path uses for a kernel-less
         // workload rootfs.
         let kernel = match &spec.kernel {

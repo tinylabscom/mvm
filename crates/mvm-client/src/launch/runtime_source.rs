@@ -62,7 +62,10 @@ pub fn attach_runtime_overlay(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<()> {
-    if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
+    // Every backend that boots a kernel boots the universal initramfs, and
+    // that initramfs mounts the overlay. `apple-container` is the HVF runner
+    // with another kernel image, so it needs the overlay exactly as HVF does.
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&hypervisor) {
         return Ok(());
     }
     match mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch) {
@@ -954,6 +957,27 @@ mod runtime_overlay_attach_tests {
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some());
+        assert!(sc.runtime_overlay_verity_path.is_some());
+        assert!(sc.runtime_overlay_roothash.is_some());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
+    }
+
+    /// `apple-container` is the HVF runner with Apple's kernel: the same
+    /// initramfs, the same activation, and the same overlay-contract gate. A
+    /// launch that attached no overlay reached that gate with no egress client
+    /// and failed activation on any boot that admitted egress.
+    #[test]
+    fn apple_container_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "apple-container", &resolver, arch).unwrap();
         assert!(sc.runtime_overlay_path.is_some());
         assert!(sc.runtime_overlay_verity_path.is_some());
         assert!(sc.runtime_overlay_roothash.is_some());

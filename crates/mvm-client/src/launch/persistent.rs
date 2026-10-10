@@ -68,8 +68,8 @@ pub struct PersistentImageStartParams<'a> {
     pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
-    /// The workload kernel to boot, or `None` for a backend that carries its
-    /// own (libkrun's bundled kernel, the in-memory mock). Resolved by the
+    /// The workload kernel to boot, or `None` for the in-memory mock, which
+    /// boots nothing. Resolved by the
     /// caller: the CLI may build one through the builder VM, and a library
     /// embedder never builds.
     pub kernel_path: Option<String>,

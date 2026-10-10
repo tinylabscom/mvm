@@ -391,9 +391,8 @@ pub(crate) struct BootParams {
 }
 
 impl LocalBackend {
-    /// Resolve the per-backend workload kernel: every explicit-kernel backend
-    /// boots a verified kernel from the CLI-populated cache; bundled-kernel
-    /// backends carry their own.
+    /// Resolve the per-backend workload kernel: every kernel-booting backend
+    /// boots a verified kernel from the CLI-populated cache.
     ///
     /// One arm serves all of them. Firecracker and the qemu dev tier used to
     /// take a separate branch that accepted the cache path on `is_file()`, so

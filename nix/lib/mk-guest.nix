@@ -704,37 +704,6 @@ let
     # copied out until the runtime overlay has been mounted and its Rust helper
     # resolved.
 
-    # Stage 2.47 — inject the per-run secret PLACEHOLDER env.
-    # The host minted the workload's placeholders BEFORE boot (so they can ride
-    # the cmdline — a fresh FC boot has no secrets drive) and passed them as
-    # `mvm.secret_env=<hex(VAR=placeholder\n…)>`. NEVER a value — only the opaque
-    # `mvm-secret-…` placeholder (claim 13); the host substitutes the real
-    # credential at egress. We decode + export each so an SDK-free workload reads
-    # `$VAR`. Absent token ⇒ no-op (no-secret guests boot byte-identically).
-    #
-    # We redirect a tmpfs file into the `while` (NOT a `... | while` pipe), so the
-    # `export`s land in THIS shell — a pipe would run the loop in a subshell and
-    # the env would never reach the entrypoint.
-    MVM_SECRET_ENV_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.secret_env=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_SECRET_ENV_HEX" ]; then
-      /bin/busybox mkdir -p /run/mvm
-      printf '%b' "$(echo "$MVM_SECRET_ENV_HEX" | /bin/busybox sed 's/../\\x&/g')" \
-        > /run/mvm/secret-env
-      while IFS= read -r mvm_kv; do
-        [ -n "$mvm_kv" ] || continue
-        mvm_k=''${mvm_kv%%=*}
-        mvm_v=''${mvm_kv#*=}
-        # Reject a non-identifier name so a malformed token can't smuggle a shell
-        # construct into `export`.
-        case "$mvm_k" in
-          ""|[0-9]*|*[!A-Za-z0-9_]*) echo "mvm-init: skipping malformed secret env name"; continue ;;
-        esac
-        export "$mvm_k=$mvm_v"
-      done < /run/mvm/secret-env
-      /bin/busybox rm -f /run/mvm/secret-env
-      echo "mvm-init: injected per-run secret placeholder env"
-    fi
-
     # Stage 2.475 — provision the per-run verb-grant inputs.
     #
     # The launcher writes `mvm.verb_grant=<base64(JSON)>` onto the kernel
@@ -917,8 +886,8 @@ let
 
     # Stage 2.55 — decode the vsock-egress opt-in. Backends that route outbound
     # egress through the host vsock gate set `mvm.vsock_egress=1` on the kernel
-    # cmdline; export the env var Stage 2.6 keys on. Mirrors the mvm.secret_env
-    # / mvm.verb_grant cmdline parsers above. Absent token ⇒ no-op.
+    # cmdline; export the env var Stage 2.6 keys on. Mirrors the
+    # mvm.verb_grant cmdline parser above. Absent token ⇒ no-op.
     MVM_VSOCK_EGRESS=
     if /bin/busybox grep -qE ' mvm\.vsock_egress=1( |$)' /proc/cmdline 2>/dev/null; then
       export MVM_VSOCK_EGRESS=1
