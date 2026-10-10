@@ -85,6 +85,16 @@ evidence. Error cleanup and destructors have the same obligations as explicit
 stop. Never-launched resources may be cleaned only when launch admission is
 known not to have occurred.
 
+Attestation publication has a distinct post-publication outcome. Guest quiescence
+and durable capture, status and workload outcome are prerequisites to minting its
+signature. A failure before the attestation is published cannot create successful
+evidence. If its own directory sync fails after the signed record becomes visible,
+the owner reports `PublishedDurabilityUnconfirmed`, not rollback or capture failure.
+That already-visible valid attestation can still prove quiescence when combined
+with the normal authentication, exact-generation and independently observed exit
+checks. It is not a promise that the attestation itself survives a host crash.
+The supervisor reports the durability error and does not delete runtime evidence.
+
 ## Delivery gate
 
 The pre-activation checkpoints supply typed wire messages, signature/binding

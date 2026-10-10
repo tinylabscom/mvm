@@ -170,7 +170,10 @@ fn finalized_record_requires_explicit_owner_call_and_names_current_generation() 
         .authority()
         .transfer("terminal-child", || Ok(()))
         .unwrap();
-    owner.publish_finalized().unwrap();
+    assert!(matches!(
+        owner.publish_finalized().unwrap(),
+        FinalizationPublication::Durable
+    ));
     let terminal: SignedControl = wire::read_record(
         &wire::state_dir("terminal-child")
             .unwrap()
@@ -219,6 +222,104 @@ fn terminal_publication_failure_keeps_evidence_and_refuses_success() {
     assert_eq!(wire::read_instance("failed-terminal").unwrap(), instance);
     assert!(marker.is_dir());
     assert!(owner.publish_finalized().is_err());
+}
+
+#[test]
+fn post_publication_directory_failure_is_not_a_claim_of_rollback() {
+    let _home = home();
+    let (owner, _) = control("published-uncertain");
+    let outcome = owner
+        .publish_finalized_with(|_| anyhow::bail!("injected directory sync failure"))
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        FinalizationPublication::PublishedDurabilityUnconfirmed(_)
+    ));
+    let terminal: SignedControl = wire::read_record(
+        &wire::state_dir("published-uncertain")
+            .unwrap()
+            .join(wire::FINALIZED_FILE),
+    )
+    .unwrap();
+    let (_, root) = wire::existing_operator().unwrap();
+    verify_finalized(
+        &terminal,
+        &root,
+        &wire::read_instance("published-uncertain").unwrap(),
+    )
+    .unwrap();
+    // A valid attestation is not process-exit evidence: this owner is still live.
+    assert!(!owner.authority.0.closed.load(Ordering::Acquire));
+    assert!(owner.publish_finalized().is_err());
+}
+
+#[test]
+fn status_directory_sync_or_capture_failure_prevents_attestation() {
+    use mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus;
+    let _home = home();
+    let (owner, _) = control("status-sync-failed");
+    assert!(
+        owner
+            .publish_terminal_status_with(ProtectedSupervisorStatus::Stopped, |_| {
+                anyhow::bail!("injected status directory sync failure")
+            })
+            .is_err()
+    );
+    assert!(owner.publish_finalized().is_err());
+    assert!(
+        !wire::state_dir("status-sync-failed")
+            .unwrap()
+            .join(wire::FINALIZED_FILE)
+            .exists()
+    );
+    let (owner, _) = control("capture-failed");
+    owner
+        .publish_terminal_status(ProtectedSupervisorStatus::CaptureFailed)
+        .unwrap();
+    assert!(owner.publish_finalized().is_err());
+    assert!(
+        !wire::state_dir("capture-failed")
+            .unwrap()
+            .join(wire::FINALIZED_FILE)
+            .exists()
+    );
+}
+
+#[test]
+fn commit_holding_the_gate_linearizes_before_close_and_close_prevents_later_commit() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let _home = home();
+    let (owner, _) = control("commit-parent");
+    let authority = owner.authority();
+    let retained = authority.clone();
+    let (entered, entered_rx) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    owner.authority.0.state.lock().unwrap().before_commit = Some((entered, release_rx));
+    let (closing, closing_rx) = mpsc::sync_channel(1);
+    *owner.authority.0.close_attempt.lock().unwrap() = Some(closing);
+    let transfer = std::thread::spawn(move || authority.transfer("commit-child", || Ok(())));
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let (dropped, dropped_rx) = mpsc::sync_channel(1);
+    let shutdown = std::thread::spawn(move || {
+        drop(owner);
+        dropped.send(()).unwrap();
+    });
+    closing_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    let close_waited_for_commit_gate = dropped_rx.try_recv().is_err();
+    release.send(()).unwrap();
+    let committed = transfer.join().unwrap();
+    shutdown.join().unwrap();
+    assert!(close_waited_for_commit_gate);
+    assert!(
+        committed.is_ok(),
+        "the gate owner committed before close linearized"
+    );
+    assert!(retained.0.closed.load(Ordering::Acquire));
+    assert!(retained.transfer("after-close", || Ok(())).is_err());
+    let state = retained.0.state.lock().unwrap();
+    assert_eq!(state.instance.vm_id, "commit-child");
+    assert!(state.phase == Phase::Failed);
 }
 
 #[test]
