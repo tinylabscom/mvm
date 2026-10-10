@@ -2121,7 +2121,6 @@ mod tests {
         let launched = resolve(Some("the-launch"));
         assert_ne!(warmed.start_config.name, launched.start_config.name);
 
-        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
         let warm_key = compat_for_launch(&warmed.start_config).unwrap();
         let claim_key = compat_for_launch(&launched.start_config).unwrap();
         assert_eq!(
