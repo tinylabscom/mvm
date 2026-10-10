@@ -91,7 +91,7 @@ fn await_controller_record() -> Result<()> {
     let mut byte = [0];
     std::io::stdin().read_exact(&mut byte)?;
     ensure!(
-        byte == [b'1'],
+        byte == *b"1",
         "custody controller did not release the recorded child"
     );
     Ok(())
