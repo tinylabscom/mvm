@@ -192,9 +192,10 @@ impl Snapshot {
             home.is_dir() && fs::metadata(&home)?.uid() == rustix::process::geteuid().as_raw(),
             "HOME must name the current user's existing home directory"
         );
-        let default = match home.join(".mvm").canonicalize() {
+        let default_root = mvm_core::config::default_mvm_home_at(&home);
+        let default = match default_root.canonicalize() {
             Ok(path) => path,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => home.join(".mvm"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => default_root,
             Err(error) => return Err(error.into()),
         };
         let root = canonical_owned(get("MVM_CALLER_WITNESS_ROOT")?)?;
@@ -345,7 +346,9 @@ impl Snapshot {
 
     pub(super) fn check_native_home(&self) -> Result<()> {
         self.revalidate()?;
-        let actual = canonical(&text(std::env::var_os("HOME").context("HOME required")?)?)?;
+        let actual = canonical(&text(
+            mvm_core::config::user_home_dir_strict()?.into_os_string(),
+        )?)?;
         ensure!(
             self.values
                 .iter()
@@ -357,7 +360,7 @@ impl Snapshot {
 
     pub(super) fn command(&self, program: &Path) -> Result<Command> {
         self.revalidate()?;
-        let mut command = Command::new(program);
+        let mut command = mvm_core::env_hygiene::helper_command(program);
         command
             .env_clear()
             .envs(self.values.iter().cloned())

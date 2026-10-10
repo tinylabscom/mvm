@@ -271,7 +271,7 @@ impl Drop for Fixture {
 }
 
 fn require_native_lifecycle_ready() -> Result<()> {
-    // The current companion cannot prove lifetime-safe HVF teardown (#4276).
+    // The current companion cannot prove lifetime-safe HVF teardown.
     // Test-name discovery or an environment override must not release this hold.
     anyhow::bail!(
         "NativeLifecycleUnsupported: lifetime-safe HVF teardown is not available; fixture enrollment is held"
