@@ -28,6 +28,10 @@ fn owned_process_helper() {
     if mode == "natural" || mode == "ack-hold" {
         // Test-owned pipe is the fixture's explicit release event, not a stop
         // protocol shortcut. Production stop still has to observe real death.
+        if mode == "ack-hold" {
+            println!("OWNED_STOP_DISPATCHED");
+            std::io::stdout().flush().unwrap();
+        }
         let mut release = [0];
         wait_readable(
             std::io::stdin().as_raw_fd(),
@@ -213,5 +217,37 @@ fn native_peer_pid_mismatch_refuses_without_consuming_owned_child() {
     helper.wait().unwrap();
     assert!(refused);
     assert!(unrelated_still_live);
+    assert!(stopped.is_ok());
+}
+
+#[test]
+#[ignore = "requires scoped control review before owned native execution"]
+fn native_concurrent_stop_does_not_block_an_expired_owned_wait() {
+    let mut env = TestEnv::new();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let mut child = spawn("concurrent-peer", "ack-hold");
+    let mut input = child.stdin.take().unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let mut child = Some(child);
+    let owner = Arc::new(OwnedInstance::adopt(&mut child, "concurrent-peer").unwrap());
+    let stopping = owner.clone();
+    let stop = std::thread::spawn(move || stopping.stop());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut marker = Vec::new();
+    while !marker.ends_with(b"OWNED_STOP_DISPATCHED\n") {
+        wait_readable(output.as_raw_fd(), deadline);
+        let mut byte = [0];
+        output.read_exact(&mut byte).unwrap();
+        marker.push(byte[0]);
+        assert!(marker.len() <= 4096);
+    }
+    let start = Instant::now();
+    let expired = owner.wait(start);
+    let elapsed = start.elapsed();
+    input.write_all(&[1]).unwrap();
+    let stopped = stop.join().unwrap();
+    assert!(expired.is_err());
+    assert!(elapsed < Duration::from_secs(1));
     assert!(stopped.is_ok());
 }
