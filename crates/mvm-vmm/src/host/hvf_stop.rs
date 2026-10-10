@@ -144,6 +144,7 @@ impl ConnectedInstance {
 pub struct OwnedInstance {
     child: Mutex<Child>,
     observer: ProcessExitObserver,
+    passive_wait: Mutex<()>,
     instance: HvfInstance,
     root: VerifyingKey,
 }
@@ -152,10 +153,14 @@ impl OwnedInstance {
     /// Consume the Child only after its peer and instance are authenticated.
     /// On refusal the caller retains its exact owned handle for error cleanup.
     pub fn adopt(child: &mut Option<Child>, vm: &str) -> Result<Self> {
-        let pid = child
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("owned child missing"))?
-            .id();
+        let process = child
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("owned child missing"))?;
+        ensure!(
+            process.try_wait()?.is_none(),
+            "cannot adopt an already-exited owned child"
+        );
+        let pid = process.id();
         let peer = ConnectedInstance::connect_owned(vm, pid)?;
         Ok(Self {
             child: Mutex::new(
@@ -164,6 +169,7 @@ impl OwnedInstance {
                     .ok_or_else(|| anyhow::anyhow!("owned child missing"))?,
             ),
             observer: peer.observer,
+            passive_wait: Mutex::new(()),
             instance: peer.instance,
             root: peer.root,
         })
@@ -174,11 +180,14 @@ impl OwnedInstance {
     }
 
     pub fn try_exited(&self) -> Result<bool> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
-        if child.try_wait()?.is_none() {
+        let exited = {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+            child.try_wait()?.is_some()
+        };
+        if !exited {
             return Ok(false);
         }
         terminal_proof(
@@ -192,6 +201,14 @@ impl OwnedInstance {
 
     pub fn wait(&self, deadline: Instant) -> Result<ConfirmedExit> {
         let started = Instant::now();
+        ensure!(started < deadline, "owned HVF supervisor exit deadline");
+        // A kqueue event can be consumed once. Concurrent passive waits refuse
+        // promptly rather than silently sharing/stealing that event. Explicit
+        // stop uses its own fresh connected-peer observer and does not take this.
+        let _wait = self
+            .passive_wait
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("another owned HVF exit wait is active"))?;
         if self.try_exited()? {
             return terminal_proof(
                 self.instance.clone(),
@@ -204,11 +221,16 @@ impl OwnedInstance {
             self.observer.wait_event(deadline)? == ProcessExitWait::Exited,
             "owned HVF supervisor exit deadline"
         );
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
-        child.wait()?;
+        {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+            ensure!(
+                child.try_wait()?.is_some(),
+                "owned child exit status is not ready"
+            );
+        }
         terminal_proof(
             self.instance.clone(),
             &self.root,
@@ -218,11 +240,14 @@ impl OwnedInstance {
     }
 
     pub fn stop(&self) -> Result<ConfirmedExit> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
-        if child.try_wait()?.is_some() {
+        let (pid, exited) = {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+            (child.id(), child.try_wait()?.is_some())
+        };
+        if exited {
             return terminal_proof(
                 self.instance.clone(),
                 &self.root,
@@ -230,10 +255,19 @@ impl OwnedInstance {
                 Duration::ZERO,
             );
         }
-        let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(pid))?;
         let proof = peer.stop()?;
         // wait_event deliberately did not reap this owned child's status.
-        child.wait()?;
+        {
+            let mut child = self
+                .child
+                .lock()
+                .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+            ensure!(
+                child.try_wait()?.is_some(),
+                "owned child exit status is not ready"
+            );
+        }
         Ok(proof)
     }
 }
@@ -254,4 +288,30 @@ fn terminal_proof(
     };
     proof.verify_current()?;
     Ok(proof)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reaped_child_is_refused_before_any_instance_lookup_and_retains_status() {
+        let mut process = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 23"])
+            .spawn()
+            .unwrap();
+        assert_eq!(process.wait().unwrap().code(), Some(23));
+        let mut process = Some(process);
+        assert!(OwnedInstance::adopt(&mut process, "not-an-existing-instance").is_err());
+        assert_eq!(
+            process
+                .as_mut()
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .unwrap()
+                .code(),
+            Some(23)
+        );
+    }
 }
