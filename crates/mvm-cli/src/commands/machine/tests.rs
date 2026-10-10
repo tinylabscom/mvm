@@ -577,6 +577,31 @@ fn fresh_boot_without_image_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn the_run_alias_boots_the_default_image_when_no_source_is_named() {
+    // `mvmctl run -- <cmd>` dispatches through `machine run` but has always
+    // booted the default image when given no source; the documented-surface
+    // e2e and the CLI reference both rely on it.
+    let mut args = parse_run(&["run", "--no-detect", "--", "/bin/true"]).expect("parse");
+    args.default_image_when_sourceless = true;
+    assert_eq!(
+        args.resolve_mode(false)
+            .expect("the run alias boots the default image"),
+        MachineRunMode::Transient
+    );
+
+    // It waives only the source: a command is still required.
+    let mut args = parse_run(&["run", "--no-detect"]).expect("parse");
+    args.default_image_when_sourceless = true;
+    let err = args
+        .resolve_mode(false)
+        .expect_err("a sourceless run still needs a command");
+    assert!(
+        err.to_string().contains("command"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn transient_run_without_argv_is_rejected_at_dispatch() {
     // Argv is no longer clap-required (persistent/interactive modes boot
     // without a command), so a bare transient run parses and is refused at

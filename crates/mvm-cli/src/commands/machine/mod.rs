@@ -313,6 +313,12 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Apply the machine's workspace changes at exit without asking.
     #[arg(long, requires = "attach", conflicts_with = "json")]
     pub apply: bool,
+    /// Internal (not a CLI flag): a fresh boot that names no source boots the
+    /// default image. `mvmctl run` sets it, so `mvmctl run -- <cmd>` keeps
+    /// booting the default image; `machine run` leaves it unset and requires
+    /// a source.
+    #[arg(skip)]
+    pub default_image_when_sourceless: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -344,6 +350,7 @@ impl Default for MachineRunArgs {
             stdin: None,
             attach: false,
             apply: false,
+            default_image_when_sourceless: false,
         }
     }
 }
@@ -492,9 +499,11 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image, manifest, flake, or runtime pack is mandatory.
+    /// back on, so an image, manifest, flake, or runtime pack is mandatory,
+    /// unless the verb boots the default image when none is named.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.run.image.is_none()
+        if !self.default_image_when_sourceless
+            && self.run.image.is_none()
             && self.run.manifest.is_none()
             && self.run.flake.is_none()
             && self.run.deployment.is_none()
