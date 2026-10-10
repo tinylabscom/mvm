@@ -134,9 +134,9 @@ signed checksum manifest, and build provenance. The pins that move with it:
 
 ### #4104: mvmctl assembles the guest runtime
 
-- **Runtime overlay.** The host build
-  (`build_runtime_overlay_from_guest_binaries`: cargo-zigbuild binaries, the
-  pure-Rust ext4 writer, in-process verity) gains the GPU shims under
+- **Runtime overlay.** The host build (then from loose cargo-zigbuild
+  binaries; now `build_runtime_overlay_from_guest_runtime`: the pure-Rust ext4
+  writer, in-process verity) gains the GPU shims under
   `gpu/{glibc,musl}` and the Python SDK tree, so its contents match what the
   image set publishes today.
 - **Initramfs.** Built from the archive's initramfs agent with the existing

@@ -1374,8 +1374,8 @@ pub fn enforce_sdk_sidecar_attachment(
             "refusing to launch: the signed ExecutionPlan binds SDK host service(s) [{}], which \
              need the SDK sidecar mounted read-only at {SDK_SIDECAR_GUEST_PATH}, and no such \
              attachment is present. The launch path resolves the sidecar from the version-keyed \
-             cache under the mvm cache dir; build it with \
-             `mvmctl build sdk-sidecar build` and retry.",
+             cache under the mvm cache dir; prepare it with \
+             `mvmctl bootstrap` and retry.",
             bound.join(", "),
         );
     };
@@ -1460,8 +1460,8 @@ fn enforce_sidecar_libc(
         }
         (_, GuestLibc::Unknown) => {
             "the attached sidecar is not filed under a libc this host recognises, so which \
-             variant it holds cannot be established. Rebuild the cache with \
-             `mvmctl build sdk-sidecar build`, which files each variant under its own libc"
+             variant it holds cannot be established. Prepare the cache with \
+             `mvmctl bootstrap`, which files each variant under its own libc"
         }
         _ => {
             "a process under one libc cannot dlopen an object built for the other — the guest \
@@ -2862,7 +2862,7 @@ mod tests {
             .expect_err("a sidecar of unknown variant must not be attached");
 
         assert!(
-            err.to_string().contains("sdk-sidecar build"),
+            err.to_string().contains("`mvmctl bootstrap`"),
             "the refusal must say how to repopulate the cache: {err}"
         );
     }

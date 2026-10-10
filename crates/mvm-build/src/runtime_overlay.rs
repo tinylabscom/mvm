@@ -36,7 +36,6 @@ pub use mvm_fs::overlay::{
     RuntimeOverlayResolver, read_overlay_artifact_from_dir,
 };
 
-use crate::guest_agent_build::RuntimeOverlayGuestBinaries;
 use crate::published_image_set::{MemberVersion, PublishedImageSet, SetMemberCache};
 use mvm_core::image_set::{ImageSetRole, MemberTarget};
 
@@ -190,7 +189,12 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
 ];
-const GPU_SHIM_SONAMES: [&str; 3] = ["libcuda.so.1", "libcudart.so", "libnvidia-ml.so.1"];
+/// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
+/// archive's own cdylib table so the two cannot name different libraries.
+const GPU_SHIM_SONAMES: [&str; 3] = {
+    let [cuda, cudart, nvml] = crate::guest_bins::GPU_SHIM_CDYLIBS;
+    [cuda.soname, cudart.soname, nvml.soname]
+};
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
 /// non-default cache root (e.g. a worktree-isolated `MVM_HOME`), seed
@@ -271,35 +275,6 @@ pub fn resolve_cached_runtime_overlay(
     })
 }
 
-pub fn build_runtime_overlay_from_guest_binaries(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    bins: &RuntimeOverlayGuestBinaries,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let staging = tempfile::tempdir()?;
-    let root = staging.path().join("overlay-root");
-    std::fs::create_dir_all(&root)?;
-
-    let binaries = [
-        (&bins.agent, root.join("agent")),
-        (&bins.netinit, root.join("netinit")),
-        (&bins.ping, root.join("ping")),
-        (&bins.seccomp_apply, root.join("seccomp-apply")),
-        (&bins.display_bridge, root.join("display-bridge")),
-        (&bins.runner, root.join("runner")),
-        (&bins.egress_client, root.join("egress-client")),
-        (&bins.addon_dns, root.join("addon-dns")),
-        (&bins.exit_report, root.join("exit-report")),
-    ];
-    par_map(binaries.to_vec(), |(src, dst)| {
-        stage_runtime_overlay_binary(src, &dst)
-    })
-    .into_iter()
-    .collect::<Result<(), _>>()?;
-    assemble_runtime_overlay(cache_root, version, arch, &root, &staging)
-}
-
 /// Assemble the runtime overlay from one verified guest-runtime tree. The
 /// archive member names are the only source of files admitted to the image;
 /// the staging tree does not inherit unrelated files from a source checkout.
@@ -327,12 +302,64 @@ pub fn build_runtime_overlay_from_guest_runtime(
     let staging = tempfile::tempdir()?;
     let root = staging.path().join("overlay-root");
     std::fs::create_dir_all(&root)?;
-    stage_guest_runtime_overlay_tree(runtime, arch, &root)?;
+    stage_runtime_overlay_root(runtime, arch, &root)?;
     let artifact = assemble_runtime_overlay(cache_root, version, arch, &root, &staging)?;
     verify_guest_runtime_overlay_verity(&artifact)?;
     write_local_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
     write_local_build_epoch(cache_root, version, arch)?;
     Ok(artifact)
+}
+
+/// Every file the overlay carries, staged under `root` exactly as the guest
+/// sees it at `/mvm/runtime`: the archive's members plus `VERSION`. The ext4
+/// image and the directory tree a preopening tier uses are both built from
+/// this one staging, so they cannot carry different files.
+fn stage_runtime_overlay_root(
+    runtime: &crate::guest_runtime::GuestRuntime,
+    arch: GuestArch,
+    root: &Path,
+) -> Result<(), RuntimeOverlayError> {
+    stage_guest_runtime_overlay_tree(runtime, arch, root)?;
+    std::fs::write(
+        root.join("VERSION"),
+        format!("{}\n", runtime.manifest.version),
+    )?;
+    Ok(())
+}
+
+/// Top-level cache directory holding [`resolve_runtime_overlay_tree`]'s trees.
+pub const RUNTIME_OVERLAY_TREE_CACHE_DIR: &str = "runtime-overlay-tree";
+
+/// The overlay's file tree as a host directory, for a tier that preopens a
+/// directory at `/mvm/runtime` instead of attaching the ext4 image (Wasm has
+/// no block devices). Staged once per guest-runtime digest from the same
+/// staging the ext4 is built from, and published by a single rename, so a
+/// tree that exists is complete.
+pub fn resolve_runtime_overlay_tree(
+    cache_root: &Path,
+    arch: GuestArch,
+    runtime: &crate::guest_runtime::GuestRuntime,
+) -> Result<PathBuf, RuntimeOverlayError> {
+    let trees = cache_root
+        .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+        .join(arch.to_string());
+    let tree = trees.join(&runtime.digest);
+    if tree.is_dir() {
+        return Ok(tree);
+    }
+    std::fs::create_dir_all(&trees)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(&trees)?;
+    stage_runtime_overlay_root(runtime, arch, staging.path())?;
+    if let Err(error) = std::fs::rename(staging.path(), &tree) {
+        // Another process published the same digest first; its tree is the
+        // same staging of the same verified members.
+        if !tree.is_dir() {
+            return Err(error.into());
+        }
+    }
+    Ok(tree)
 }
 
 fn stage_guest_runtime_overlay_tree(
@@ -432,8 +459,6 @@ fn assemble_runtime_overlay(
     root: &Path,
     staging: &tempfile::TempDir,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
-
     let image = mvm_fs::ext4::build_image(collect_overlay_nodes(root)?, &Default::default())
         .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
             reason: format!("build ext4 image: {e}"),
@@ -487,24 +512,6 @@ fn verify_guest_runtime_overlay_verity(
         return Err(RuntimeOverlayError::DirectBuildFailed {
             reason: "runtime overlay ext4, verity tree, and roothash disagree".into(),
         });
-    }
-    Ok(())
-}
-
-fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
-    if !src.is_file() {
-        return Err(RuntimeOverlayError::DirectBuildFailed {
-            reason: format!(
-                "required runtime-overlay binary missing at {}",
-                src.display()
-            ),
-        });
-    }
-    std::fs::copy(src, dst)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o555))?;
     }
     Ok(())
 }
@@ -1587,6 +1594,9 @@ mod tests {
             .collect();
         expected_root.sort();
         assert_eq!(names_in("/"), expected_root);
+        // Every path the resolver demands of a cached overlay is staged.
+        mvm_fs::overlay::validate_overlay_payload(&a.overlay_ext4)
+            .expect("the archive-staged overlay carries every required guest path");
         assert_eq!(names_in("/gpu"), vec![b"glibc".to_vec(), b"musl".to_vec()]);
         assert_eq!(names_in("/sdk-py"), vec![b"mvm".to_vec()]);
         assert_eq!(
@@ -1659,6 +1669,102 @@ mod tests {
             .unwrap()
             .trim(),
             runtime.digest,
+        );
+    }
+
+    /// Every file under `root`, as relative path → (bytes, permission bits).
+    fn tree_files(root: &Path) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                out.insert(rel, (std::fs::read(&path).unwrap(), mode));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn overlay_tree_holds_exactly_what_the_overlay_image_holds() {
+        let (_source, runtime) = guest_runtime_fixture();
+        let cache = TempDir::new().unwrap();
+        let tree = resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        assert_eq!(
+            tree,
+            cache
+                .path()
+                .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+                .join("x86_64")
+                .join(&runtime.digest)
+        );
+
+        let artifact = build_runtime_overlay_from_guest_runtime(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        let fs = ext4_view::Ext4::load_from_path(&artifact.overlay_ext4).unwrap();
+        let files = tree_files(&tree);
+        assert!(files.contains_key("agent") && files.contains_key("VERSION"));
+        for (rel, (bytes, mode)) in &files {
+            let guest_path = format!("/{rel}");
+            assert_eq!(&fs.read(guest_path.as_str()).unwrap(), bytes, "{rel}");
+            assert_eq!(
+                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
+                *mode as u16,
+                "{rel}"
+            );
+        }
+        let staged = TempDir::new().unwrap();
+        stage_runtime_overlay_root(&runtime, GuestArch::X86_64, staged.path()).unwrap();
+        assert_eq!(
+            files,
+            tree_files(staged.path()),
+            "the tree is the image's staging"
+        );
+    }
+
+    #[test]
+    fn overlay_tree_is_staged_once_per_runtime_digest() {
+        let (_source, mut runtime) = guest_runtime_fixture();
+        let cache = TempDir::new().unwrap();
+        let first =
+            resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        // A published tree is reused, not restaged: a member removed from the
+        // source after publication is still present in the reused tree.
+        std::fs::remove_file(runtime.root.join("x86_64/bin/mvm-guest-agent")).unwrap();
+        let again =
+            resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        assert_eq!(first, again);
+        assert!(again.join("agent").is_file());
+
+        // A different digest is a different tree, staged from its own members,
+        // so the missing member now fails the stage and publishes nothing.
+        runtime.digest = "e".repeat(64);
+        resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime)
+            .expect_err("a missing member refuses the tree");
+        let trees = cache
+            .path()
+            .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+            .join("x86_64");
+        let published: Vec<String> = std::fs::read_dir(&trees)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            published,
+            vec!["d".repeat(64)],
+            "no partial tree and no staging left"
         );
     }
 
@@ -2644,49 +2750,6 @@ mod tests {
         let mut h = Sha256::new();
         h.update(bytes);
         hex::encode(h.finalize())
-    }
-
-    #[test]
-    fn direct_overlay_build_writes_cache_layout() {
-        let cache = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let make_bin = |name: &str| {
-            let path = src.path().join(name);
-            std::fs::write(&path, format!("fake-{name}")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            path
-        };
-        let bins = RuntimeOverlayGuestBinaries {
-            agent: make_bin("agent"),
-            netinit: make_bin("netinit"),
-            ping: make_bin("ping"),
-            seccomp_apply: make_bin("seccomp-apply"),
-            display_bridge: make_bin("display-bridge"),
-            runner: make_bin("runner"),
-            egress_client: make_bin("egress-client"),
-            addon_dns: make_bin("addon-dns"),
-            exit_report: make_bin("exit-report"),
-        };
-
-        let artifact = build_runtime_overlay_from_guest_binaries(
-            cache.path(),
-            "1.2.3",
-            GuestArch::X86_64,
-            &bins,
-        )
-        .expect("build direct overlay");
-
-        assert!(artifact.overlay_ext4.is_file());
-        assert!(artifact.sidecar.is_file());
-        assert_eq!(artifact.version, "1.2.3");
-        assert_eq!(artifact.roothash.len(), 64);
-
-        mvm_fs::overlay::validate_overlay_payload(&artifact.overlay_ext4)
-            .expect("direct overlay carries all required guest paths");
     }
 
     /// The overlay's per-file mode is copied from the staged file, masked
