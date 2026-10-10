@@ -76,3 +76,35 @@ pub(super) fn delete_test_entry(service: &str, account: &str) -> Result<()> {
         _ => Err(IdentityError::Unavailable),
     }
 }
+
+#[cfg(test)]
+pub(super) fn delete_production_fixture(identity: &super::EnrolledIdentity) -> Result<()> {
+    if identity.installation.to_string() != super::production_fixture::INSTALLATION {
+        return Err(IdentityError::Conflict);
+    }
+    let account = super::account(identity.installation)?;
+    let chain = keychain()?;
+    let (password, item) = match chain.find_generic_password(SERVICE, &account) {
+        Ok(found) => found,
+        Err(error) if error.code() == -25300 => return Ok(()),
+        Err(_) => return Err(IdentityError::Unavailable),
+    };
+    let seed: &[u8; 32] = password
+        .as_ref()
+        .try_into()
+        .map_err(|_| IdentityError::Conflict)?;
+    let actual = super::CallerCredential {
+        installation: identity.installation,
+        key: ed25519_dalek::SigningKey::from_bytes(seed),
+    }
+    .identity();
+    if &actual != identity {
+        return Err(IdentityError::Conflict);
+    }
+    // Verify the pin on the same native item reference that is deleted.
+    item.delete();
+    match chain.find_generic_password(SERVICE, &account) {
+        Err(error) if error.code() == -25300 => Ok(()),
+        _ => Err(IdentityError::Unavailable),
+    }
+}
