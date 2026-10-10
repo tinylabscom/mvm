@@ -135,8 +135,18 @@ fn read_parent_config(state_dir: &Path) -> Result<HvfSupervisorConfig> {
     let path = state_dir.join(SUPERVISOR_CONFIG_BLOB);
     let raw = std::fs::read(&path)
         .with_context(|| format!("reading the captured HVF launch config {}", path.display()))?;
-    serde_json::from_slice(&raw)
-        .with_context(|| format!("parsing the captured HVF launch config {}", path.display()))
+    let parent = serde_json::from_slice(&raw)
+        .with_context(|| format!("parsing the captured HVF launch config {}", path.display()))?;
+    require_unregistered_restore(&parent)?;
+    Ok(parent)
+}
+
+fn require_unregistered_restore(parent: &HvfSupervisorConfig) -> Result<()> {
+    anyhow::ensure!(
+        parent.caller_registration.is_none(),
+        "caller-registered checkpoints require a fresh cold launch; restore is unsupported"
+    );
+    Ok(())
 }
 
 /// Read the absolute device paths the saved state embeds.
@@ -205,6 +215,7 @@ pub fn hvf_child_restore_config(
     anchors: &DeviceAnchors,
     req: &HvfRestoreRequest<'_>,
 ) -> Result<HvfSupervisorConfig> {
+    require_unregistered_restore(parent)?;
     if !parent.kernel.is_file() {
         bail!(
             "HVF restore needs the captured kernel {}, which is not on disk",
@@ -443,13 +454,13 @@ fn restore_hvf_vm_with(
             req.state_dir.display()
         );
     }
+    let parent = read_parent_config(req.state_dir)?;
     // The private copies are created in the state dir under a temporary name,
     // so it has to be reachable by this user alone before anything reads or
     // writes it. State dirs are created at the process umask; this puts it,
     // and every directory above it inside the mvm home, at 0700.
     mvm_core::config::create_private_dir(req.state_dir)
         .with_context(|| format!("making {} private", req.state_dir.display()))?;
-    let parent = read_parent_config(req.state_dir)?;
     let anchors = read_anchors(req.state_dir)?;
     let mut cfg = hvf_child_restore_config(&parent, &anchors, req)?;
 
@@ -625,6 +636,47 @@ mod tests {
             cpu_grant: None,
             content: &[],
         }
+    }
+
+    #[test]
+    fn registered_checkpoint_refuses_public_restore_before_child_state_changes() {
+        use mvm_core::crypto::entrypoint_delegation::test_support;
+        use mvm_core::vm_backend::caller_registration::CallerRegistration;
+        let dir = tempfile::tempdir().unwrap();
+        let anchors = materialized(dir.path());
+        let mut parent = parent_config(dir.path(), vec![]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let installation =
+            serde_json::from_str("\"bdf189ab-9a9a-440b-a266-e95b19e58a5e\"").unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected = CallerRegistration::challenge_for_plan(
+            "parent",
+            &plan,
+            test_support::identity([3; 32], installation),
+            now,
+        )
+        .unwrap();
+        let proof = test_support::proof([3; 32], &expected, now).unwrap();
+        parent.caller_registration = Some(CallerRegistration {
+            vm: "parent".into(),
+            expected,
+            proof,
+        });
+        let config_path = dir.path().join(SUPERVISOR_CONFIG_BLOB);
+        let original = serde_json::to_vec(&parent).unwrap();
+        std::fs::write(&config_path, &original).unwrap();
+        let before = std::fs::read_dir(dir.path()).unwrap().count();
+        let req = request("child", dir.path());
+        let direct = hvf_child_restore_config(&parent, &anchors, &req).unwrap_err();
+        assert!(direct.to_string().contains("restore is unsupported"));
+        let public = restore_hvf_vm(&req).unwrap_err();
+        assert!(public.to_string().contains("restore is unsupported"));
+        assert_eq!(std::fs::read(config_path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), before);
+        assert!(!dir.path().join(PID_FILE_NAME).exists());
     }
 
     /// The predicate decides whether the operator is warned that every restore
