@@ -93,18 +93,11 @@ pub fn files_for(vm_name: &str) -> SnapshotFiles {
     files_in(&snapshot_dir(vm_name))
 }
 
-/// Pause + seal one VM's snapshot under the host's snapshot key. Returns the
-/// sealed sidecar so callers can record what they sealed.
+/// Pause + seal one VM's snapshot under an admitted snapshot `key`. Returns
+/// the sealed sidecar so callers can record what they sealed.
 ///
-/// The key is admitted first; without one nothing is captured. See
-/// [`pause_and_seal_with_key`] for the steps after admission.
-pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result<IntegritySidecar> {
-    let key = admit_host_snapshot_key()
-        .with_context(|| format!("refusing to snapshot VM {vm_name:?}"))?;
-    pause_and_seal_with_key(vm_name, io, &key)
-}
-
-/// Pause + seal one VM's snapshot under an already admitted `key`.
+/// Callers admit the key first ([`admit_host_snapshot_key`]), before anything
+/// else touches the VM, so that without a usable key nothing is captured.
 ///
 /// 1. Ensure the snapshot dir exists (mode 0700).
 /// 2. Ask the IO impl to write `vmstate.bin` + `mem.bin`.
@@ -112,7 +105,7 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
 /// 4. Encrypt both artifacts in place under `key`.
 /// 5. Bump the per-instance epoch counter.
 /// 6. Seal the HMAC envelope over the ciphertext with the new epoch.
-pub fn pause_and_seal_with_key<IO: SnapshotIO + ?Sized>(
+pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(
     vm_name: &str,
     io: &IO,
     key: &SnapshotKey,
@@ -621,6 +614,12 @@ mod tests {
         }
     }
 
+    /// Admit the host's snapshot key and pause under it, as a pause does.
+    fn seal_under_host_key(vm: &str, io: &CannedIO) -> Result<IntegritySidecar> {
+        let key = admit_host_snapshot_key()?;
+        pause_and_seal(vm, io, &key)
+    }
+
     fn canned() -> CannedIO {
         CannedIO::new(b"vmstate-bytes".to_vec(), b"memory-image".to_vec())
     }
@@ -652,7 +651,7 @@ mod tests {
     #[test]
     fn pause_and_seal_creates_files_with_mode_0600() {
         let _g = DataDirGuard::new();
-        let sidecar = pause_and_seal("vm-1", &canned()).unwrap();
+        let sidecar = seal_under_host_key("vm-1", &canned()).unwrap();
         assert_eq!(sidecar.epoch, 1);
         let dir = snapshot_dir("vm-1");
         for name in [VMSTATE_FILENAME, MEM_FILENAME, SIDECAR_FILENAME] {
@@ -667,9 +666,9 @@ mod tests {
     #[test]
     fn pause_and_seal_advances_epoch() {
         let _g = DataDirGuard::new();
-        let s1 = pause_and_seal("vm-1", &canned()).unwrap();
-        let s2 = pause_and_seal("vm-1", &canned()).unwrap();
-        let s3 = pause_and_seal("vm-1", &canned()).unwrap();
+        let s1 = seal_under_host_key("vm-1", &canned()).unwrap();
+        let s2 = seal_under_host_key("vm-1", &canned()).unwrap();
+        let s3 = seal_under_host_key("vm-1", &canned()).unwrap();
         assert_eq!(s1.epoch, 1);
         assert_eq!(s2.epoch, 2);
         assert_eq!(s3.epoch, 3);
@@ -678,7 +677,7 @@ mod tests {
     #[test]
     fn verify_and_resume_accepts_freshly_sealed_snapshot() {
         let _g = DataDirGuard::new();
-        let sealed = pause_and_seal("vm-1", &canned()).unwrap();
+        let sealed = seal_under_host_key("vm-1", &canned()).unwrap();
         let verified = verify_and_resume("vm-1", &canned()).unwrap();
         assert_eq!(verified, sealed);
     }
@@ -686,7 +685,7 @@ mod tests {
     #[test]
     fn verify_and_resume_rejects_tampered_mem() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-1", &canned()).unwrap();
+        seal_under_host_key("vm-1", &canned()).unwrap();
         let mem_path = snapshot_dir("vm-1").join(MEM_FILENAME);
         let mut bytes = std::fs::read(&mem_path).unwrap();
         bytes[0] ^= 0xff;
@@ -706,12 +705,12 @@ mod tests {
         // counter still reads 2, so the verifier must refuse.
         let _g = DataDirGuard::new();
         let dir = snapshot_dir("vm-1");
-        let _ = pause_and_seal("vm-1", &canned()).unwrap();
+        let _ = seal_under_host_key("vm-1", &canned()).unwrap();
         let v1_vmstate = std::fs::read(dir.join(VMSTATE_FILENAME)).unwrap();
         let v1_mem = std::fs::read(dir.join(MEM_FILENAME)).unwrap();
         let v1_sidecar = std::fs::read(dir.join(SIDECAR_FILENAME)).unwrap();
 
-        let _ = pause_and_seal("vm-1", &canned()).unwrap();
+        let _ = seal_under_host_key("vm-1", &canned()).unwrap();
         // Roll the visible files back to the epoch-1 state, but
         // leave the persisted epoch counter at 2.
         std::fs::write(dir.join(VMSTATE_FILENAME), &v1_vmstate).unwrap();
@@ -739,7 +738,7 @@ mod tests {
     #[test]
     fn verify_and_resume_refuses_nic_on_restore() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-nic", &canned()).unwrap();
+        seal_under_host_key("vm-nic", &canned()).unwrap();
         let spy =
             CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec()).with_network_interfaces(1);
         let err = verify_and_resume("vm-nic", &spy).unwrap_err();
@@ -758,7 +757,7 @@ mod tests {
     #[test]
     fn verify_and_resume_resumes_vsock_only_restore() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-clean", &canned()).unwrap();
+        seal_under_host_key("vm-clean", &canned()).unwrap();
         let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-clean", &spy).expect("a no-NIC restore must resume");
         let calls = spy.calls();
@@ -775,7 +774,7 @@ mod tests {
     #[test]
     fn load_guard_resume_ordering() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-order", &canned()).unwrap();
+        seal_under_host_key("vm-order", &canned()).unwrap();
         let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-order", &spy).unwrap();
         assert_eq!(
@@ -876,7 +875,7 @@ mod tests {
     #[test]
     fn delete_instance_snapshot_removes_files() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-1", &canned()).unwrap();
+        seal_under_host_key("vm-1", &canned()).unwrap();
         assert!(delete_instance_snapshot("vm-1").unwrap());
         assert!(!snapshot_dir("vm-1").exists());
         // Idempotent — second delete returns false.
@@ -886,8 +885,8 @@ mod tests {
     #[test]
     fn list_instance_snapshots_returns_each_sealed_vm() {
         let _g = DataDirGuard::new();
-        pause_and_seal("alpha", &canned()).unwrap();
-        pause_and_seal("beta", &canned()).unwrap();
+        seal_under_host_key("alpha", &canned()).unwrap();
+        seal_under_host_key("beta", &canned()).unwrap();
         let entries = list_instance_snapshots().unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.vm_name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
@@ -932,7 +931,7 @@ mod tests {
     fn pause_and_seal_encrypts_vmstate_and_mem_when_key_is_configured() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        let _s = pause_and_seal("vm-encrypt", &canned()).unwrap();
+        let _s = seal_under_host_key("vm-encrypt", &canned()).unwrap();
         let dir = snapshot_dir("vm-encrypt");
         // Both artifact files must now begin with the MVSE magic.
         for name in [VMSTATE_FILENAME, MEM_FILENAME] {
@@ -960,7 +959,7 @@ mod tests {
     fn pause_and_seal_refuses_before_capture_when_no_key() {
         let mut g = DataDirGuard::new();
         g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
-        let err = pause_and_seal("vm-plain", &canned()).unwrap_err();
+        let err = seal_under_host_key("vm-plain", &canned()).unwrap_err();
         assert_eq!(
             err.downcast_ref::<SnapshotKeyError>(),
             Some(&SnapshotKeyError::Missing),
@@ -977,7 +976,7 @@ mod tests {
         let mut g = DataDirGuard::new();
         let bad = "9z".repeat(32);
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, &bad);
-        let err = pause_and_seal("vm-badkey", &canned()).unwrap_err();
+        let err = seal_under_host_key("vm-badkey", &canned()).unwrap_err();
         assert!(
             matches!(
                 err.downcast_ref::<SnapshotKeyError>(),
@@ -992,11 +991,11 @@ mod tests {
     /// A pause under an admitted key encrypts with that key, whatever the
     /// host's sources say afterwards.
     #[test]
-    fn pause_and_seal_with_key_encrypts_under_the_admitted_key() {
+    fn pause_and_seal_encrypts_under_the_admitted_key() {
         let mut g = DataDirGuard::new();
         let key = admit_host_snapshot_key().expect("admitted");
         g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
-        pause_and_seal_with_key("vm-held", &canned(), &key).expect("sealed");
+        pause_and_seal("vm-held", &canned(), &key).expect("sealed");
         let mem = snapshot_dir("vm-held").join(MEM_FILENAME);
         let copy = g._tmp.path().join("mem.copy");
         std::fs::copy(&mem, &copy).unwrap();
@@ -1017,7 +1016,7 @@ mod tests {
         forged[4] = SCHEMA_VERSION;
         forged.extend_from_slice(b"guest-secret-memory");
         let io = CannedIO::new(b"vmstate-bytes".to_vec(), forged.clone());
-        pause_and_seal("vm-forged", &io).expect("sealed");
+        seal_under_host_key("vm-forged", &io).expect("sealed");
         let stored = std::fs::read(snapshot_dir("vm-forged").join(MEM_FILENAME)).unwrap();
         assert!(
             !stored.windows(19).any(|w| w == b"guest-secret-memory"),
@@ -1064,7 +1063,7 @@ mod tests {
     #[test]
     fn verify_and_resume_refuses_when_the_key_is_invalid() {
         let mut g = DataDirGuard::new();
-        pause_and_seal("vm-badkey-rs", &canned()).unwrap();
+        seal_under_host_key("vm-badkey-rs", &canned()).unwrap();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, "not-hex");
         let err = verify_and_resume("vm-badkey-rs", &canned()).unwrap_err();
         assert!(
@@ -1140,7 +1139,7 @@ mod tests {
     fn verify_and_resume_round_trips_encrypted_snapshot() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        let sealed = pause_and_seal("vm-rt", &canned()).unwrap();
+        let sealed = seal_under_host_key("vm-rt", &canned()).unwrap();
         let probe = LoadProbe::new();
         let verified = verify_and_resume("vm-rt", &probe).unwrap();
         assert_eq!(verified, sealed);
@@ -1159,7 +1158,7 @@ mod tests {
     fn an_encrypted_snapshot_resumes_again_and_leaves_no_plaintext() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        let sealed = pause_and_seal("vm-again", &canned()).unwrap();
+        let sealed = seal_under_host_key("vm-again", &canned()).unwrap();
         let dir = snapshot_dir("vm-again");
         let ciphertext = std::fs::read(dir.join(MEM_FILENAME)).unwrap();
 
@@ -1181,7 +1180,7 @@ mod tests {
     fn a_failed_load_leaves_no_plaintext() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        pause_and_seal("vm-fail", &canned()).unwrap();
+        seal_under_host_key("vm-fail", &canned()).unwrap();
         let refusing = canned().with_network_interfaces(1);
         verify_and_resume("vm-fail", &refusing).expect_err("the device-model guard refuses");
         assert!(staging_dirs("vm-fail").is_empty(), "no plaintext left");
@@ -1223,7 +1222,7 @@ mod tests {
     fn an_interrupt_mid_load_removes_the_plaintext() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        pause_and_seal("vm-int", &canned()).unwrap();
+        seal_under_host_key("vm-int", &canned()).unwrap();
         verify_and_resume("vm-int", &InterruptedLoad(canned())).expect_err("interrupted");
         assert!(staging_dirs("vm-int").is_empty(), "no plaintext left");
     }
@@ -1252,7 +1251,7 @@ mod tests {
     fn an_abandoned_staging_directory_is_removed() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        pause_and_seal("vm-stale", &canned()).unwrap();
+        seal_under_host_key("vm-stale", &canned()).unwrap();
         let parent = snapshot_dir("vm-stale").parent().unwrap().to_path_buf();
         // No process has this pid: it is above the kernel's pid limit.
         let abandoned = parent.join(format!("{RESTORE_STAGING_PREFIX}{}-x", i32::MAX));
@@ -1269,7 +1268,7 @@ mod tests {
     fn verify_and_resume_rejects_encrypted_snapshot_with_wrong_key() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        pause_and_seal("vm-wk", &canned()).unwrap();
+        seal_under_host_key("vm-wk", &canned()).unwrap();
         // Swap to a different DEK and try to resume. HMAC verify
         // passes (it's keyed on the host HMAC key, not the DEK), so
         // we fail at the AEAD step.
@@ -1330,7 +1329,7 @@ mod tests {
     fn verify_and_resume_refuses_encrypted_snapshot_when_key_missing() {
         let mut g = DataDirGuard::new();
         g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
-        pause_and_seal("vm-lost", &canned()).unwrap();
+        seal_under_host_key("vm-lost", &canned()).unwrap();
         // Operator lost the key. Resume must refuse rather than
         // silently produce gibberish.
         g.env.remove(SNAPSHOT_TENANT_KEY_ENV);

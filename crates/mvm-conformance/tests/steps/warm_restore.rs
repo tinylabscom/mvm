@@ -14,7 +14,8 @@ use mvm_core::crypto::snapshot_hmac::{MEM_FILENAME, VMSTATE_FILENAME};
 use mvm_core::plan::{SignedImageRef, TenantId};
 use mvm_runtime::microvm::{RestoredDeviceModel, assert_vsock_only_device_model};
 use mvm_runtime::vm::instance_snapshot::{
-    CannedIO, pause_and_seal, verify_and_resume, verify_and_resume_from_dir,
+    CannedIO, admit_host_snapshot_key, pause_and_seal, verify_and_resume,
+    verify_and_resume_from_dir,
 };
 
 use crate::world::{CliWorld, ScenarioEnvGuard};
@@ -44,7 +45,12 @@ fn isolated_mvm_home() -> (tempfile::TempDir, ScenarioEnvGuard) {
 fn sealed_warm_snapshot(world: &mut CliWorld, vm_name: String) {
     let (home, guard) = isolated_mvm_home();
     let io = CannedIO::new(b"vmstate-for-seal".to_vec(), b"mem-for-seal".to_vec());
-    let sidecar = pause_and_seal(&vm_name, &io).expect("seal the warm snapshot");
+    let sidecar = pause_and_seal(
+        &vm_name,
+        &io,
+        &admit_host_snapshot_key().expect("scenario key"),
+    )
+    .expect("seal the warm snapshot");
     let dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
     world.warm_restore_home_guard = Some(guard);
     world.warm_restore_home = Some(home);
@@ -59,7 +65,12 @@ fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
     // second seal bumps the per-instance epoch high-water mark.
     let (home, guard) = isolated_mvm_home();
     let io = CannedIO::new(b"vmstate-epoch1".to_vec(), b"mem-epoch1".to_vec());
-    let sidecar = pause_and_seal(&vm_name, &io).expect("seal the first warm snapshot");
+    let sidecar = pause_and_seal(
+        &vm_name,
+        &io,
+        &admit_host_snapshot_key().expect("scenario key"),
+    )
+    .expect("seal the first warm snapshot");
     assert_eq!(sidecar.epoch, 1, "first seal must produce epoch 1");
     let live_dir = mvm_runtime::vm::instance_snapshot::snapshot_dir(&vm_name);
     let saved_dir = live_dir.with_file_name("epoch1-snapshot");
@@ -74,7 +85,12 @@ fn sealed_warm_snapshot_epoch_one(world: &mut CliWorld, vm_name: String) {
 fn same_vm_sealed_again(_world: &mut CliWorld) {
     let vm_name = "epoch-vm";
     let io = CannedIO::new(b"vmstate-epoch2".to_vec(), b"mem-epoch2".to_vec());
-    let sidecar = pause_and_seal(vm_name, &io).expect("seal the second warm snapshot");
+    let sidecar = pause_and_seal(
+        vm_name,
+        &io,
+        &admit_host_snapshot_key().expect("scenario key"),
+    )
+    .expect("seal the second warm snapshot");
     assert!(
         sidecar.epoch > 1,
         "second seal must bump the epoch high-water mark"

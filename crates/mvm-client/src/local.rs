@@ -48,7 +48,7 @@ use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
     FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, PostRestoreSignal, SnapshotIO,
     VsockPostRestoreSignal, VsockPrimedSignalSource, admit_host_snapshot_key, await_primed_barrier,
-    describe_missing_reseed, pause_and_seal_with_key, signal_post_restore, verify_and_resume,
+    describe_missing_reseed, pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::VmNameRegistry;
 
@@ -1329,7 +1329,7 @@ impl MvmClient for LocalBackend {
 
         let outcome = if let Some(key) = &snapshot_key {
             let io = self.snapshot_io_for(&backend, name)?;
-            let sidecar = pause_and_seal_with_key(name, &*io, key)
+            let sidecar = pause_and_seal(name, &*io, key)
                 .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
             write_fc_paused_marker(name)?;
             set_registry_paused(name, true)?;
@@ -1837,7 +1837,8 @@ mod tests {
     fn a_sealed_resume_refuses_a_machine_that_is_not_paused() {
         let _data = IsolatedDataDir::new();
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned, &test_snapshot_key())
+            .expect("sealed");
         let before = canned.calls().len();
 
         let unregistered = resume_sealed("vm-run", &canned, Guest::Reseeded, QUICK)
@@ -1914,7 +1915,12 @@ mod tests {
         let _data = IsolatedDataDir::new();
         let registry_path = register("vm-seal");
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-seal", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal(
+            "vm-seal",
+            &canned,
+            &test_snapshot_key(),
+        )
+        .expect("sealed");
         let state_dir = vm_state_dir("vm-seal");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
@@ -1990,6 +1996,12 @@ mod tests {
         _lock: std::sync::MutexGuard<'static, ()>,
         env: TestEnv,
         dir: tempfile::TempDir,
+    }
+
+    /// The snapshot key [`IsolatedDataDir`] selects, admitted.
+    #[cfg(feature = "test-support")]
+    fn test_snapshot_key() -> mvm_runtime::vm::instance_snapshot::SnapshotKey {
+        admit_host_snapshot_key().expect("IsolatedDataDir selects a snapshot key")
     }
 
     /// The snapshot key every isolated test pauses under.
