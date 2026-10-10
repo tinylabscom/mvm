@@ -87,11 +87,7 @@ impl IdentityClient {
         CLIENT.get(super::native_store)
     }
 
-    #[cfg(all(
-        test,
-        feature = "native-caller-identity",
-        any(target_os = "macos", target_os = "linux")
-    ))]
+    #[cfg(all(test, feature = "native-caller-identity", target_os = "macos"))]
     pub(super) fn shares_worker_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.busy, &other.busy)
     }

@@ -235,10 +235,7 @@ fn loaded_and_late_key_types_have_zeroizing_drop_contracts() {
     zeroizes_on_drop::<Zeroizing<Vec<u8>>>();
 }
 
-#[cfg(all(
-    feature = "native-caller-identity",
-    any(target_os = "macos", target_os = "linux")
-))]
+#[cfg(all(feature = "native-caller-identity", target_os = "macos"))]
 #[test]
 fn repeated_native_construction_shares_the_bounded_lane_without_store_access() {
     let first = IdentityClient::native().unwrap();
@@ -293,7 +290,7 @@ fn a_pinned_worker_result_proves_only_its_exact_registration_identity() {
     let challenge = RegistrationChallenge::fresh(
         RegistrationBinding {
             tenant: "test-tenant".into(),
-            instance: Uuid::new_v4().to_string(),
+            instance: format!("test-vm/{}", Uuid::new_v4()),
             plan_id: "test-plan".into(),
             plan_nonce: mvm_core::plan::Nonce::from_bytes([4; 16]),
             run: Uuid::new_v4(),
@@ -319,10 +316,7 @@ fn a_pinned_worker_result_proves_only_its_exact_registration_identity() {
     ));
 }
 
-#[cfg(not(all(
-    feature = "native-caller-identity",
-    any(target_os = "macos", target_os = "linux")
-)))]
+#[cfg(not(all(feature = "native-caller-identity", target_os = "macos")))]
 #[test]
 fn no_native_build_refuses_instead_of_selecting_mock() {
     assert!(matches!(
