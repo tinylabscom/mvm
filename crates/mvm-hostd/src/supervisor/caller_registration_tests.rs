@@ -14,7 +14,10 @@ fn isolate() -> (TestEnv, tempfile::TempDir) {
 }
 
 fn admit_fixture(vm: &str, nonce: u8) -> AdmittedPlan {
-    let mut plan = PlanFixture::new().workload(vm).nonce([nonce; 16]).build();
+    admit_fixture_plan(PlanFixture::new().workload(vm).nonce([nonce; 16]).build())
+}
+
+fn admit_fixture_plan(mut plan: ExecutionPlan) -> AdmittedPlan {
     plan.plan_id = mvm_core::plan::content_id::compute_plan_id(&plan);
     admit_plan_for_run(
         &plan,
@@ -41,6 +44,45 @@ fn registration_fixture(admitted: &AdmittedPlan, vm: &str, seed: u8) -> CallerRe
 
 fn launch(admitted: &AdmittedPlan, registration: &CallerRegistration) -> VerifiedCallerLaunch {
     verify_cold_start(&registration.vm, admitted.signed(), registration).unwrap()
+}
+
+#[test]
+fn activation_checks_exact_registration_deadline_and_rejects_clock_rollback() {
+    let (_env, _home) = isolate();
+    for case in 0..4 {
+        let vm = format!("activation-{case}");
+        let deadline = chrono::Utc::now().timestamp() + 300;
+        let mut plan = PlanFixture::new()
+            .workload(&vm)
+            .nonce([case + 1; 16])
+            .build();
+        plan.valid_until = chrono::DateTime::from_timestamp(deadline, 500_000_000).unwrap();
+        let admitted = admit_fixture_plan(plan);
+        let registration = registration_fixture(&admitted, &vm, 1);
+        assert_eq!(
+            registration.expected.binding.not_after,
+            u64::try_from(deadline).unwrap()
+        );
+        let consumed = launch(&admitted, &registration).consume(&vm).unwrap();
+        let activation = match case {
+            0 => chrono::DateTime::from_timestamp(deadline - 1, 999_999_999).unwrap(),
+            1 => chrono::DateTime::from_timestamp(deadline, 1).unwrap(),
+            2 => consumed.consumed_at - chrono::Duration::nanoseconds(1),
+            3 => chrono::DateTime::from_timestamp(-1, 0).unwrap(),
+            _ => unreachable!(),
+        };
+        if case == 1 {
+            assert!(
+                mvm_core::plan::validity::check_window(admitted.plan(), activation).is_ok(),
+                "the signed plan alone still permits the final fractional second"
+            );
+        }
+        assert_eq!(consumed.into_owner_at(&vm, activation).is_ok(), case == 0);
+        assert!(
+            launch(&admitted, &registration).consume(&vm).is_err(),
+            "activation refusal must never undo durable consumption"
+        );
+    }
 }
 
 fn startup_config(
