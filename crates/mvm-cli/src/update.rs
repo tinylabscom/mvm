@@ -696,13 +696,23 @@ pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
 }
 
 fn source_helper_commit() -> Result<Option<String>> {
-    if mvm_build::artifact_acquisition::compiled_channel()
-        == mvm_build::artifact_acquisition::DistributionChannel::Release
-    {
+    source_helper_commit_for(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        env!("MVM_SOURCE_COMMIT"),
+        env!("MVM_SOURCE_DIRTY"),
+    )
+}
+
+/// The commit a source build's host helpers must match, or `None` for a
+/// release build, whose helpers come from its own signed release.
+fn source_helper_commit_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    commit: &str,
+    dirty: &str,
+) -> Result<Option<String>> {
+    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
         return Ok(None);
     }
-    let commit = env!("MVM_SOURCE_COMMIT");
-    let dirty = env!("MVM_SOURCE_DIRTY");
     validate_source_helper_identity(commit, dirty).map(Some)
 }
 
@@ -1146,9 +1156,40 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAction, decide_update, source_helper_marker_matches, validate_source_helper_bundle,
+        UpdateAction, decide_update, source_helper_commit, source_helper_commit_for,
+        source_helper_marker_matches, validate_source_helper_bundle,
         validate_source_helper_identity,
     };
+    use mvm_build::artifact_acquisition::DistributionChannel;
+
+    #[test]
+    fn the_helper_commit_is_this_builds_own_channel_and_identity() {
+        let own = source_helper_commit_for(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            env!("MVM_SOURCE_COMMIT"),
+            env!("MVM_SOURCE_DIRTY"),
+        );
+        assert_eq!(
+            source_helper_commit().map_err(|e| e.to_string()),
+            own.map_err(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn only_a_source_build_pins_its_helpers_to_a_commit() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Source, &commit, "false").unwrap(),
+            Some(commit.clone())
+        );
+        assert!(source_helper_commit_for(DistributionChannel::Source, &commit, "true").is_err());
+        // A release build takes its helpers from its own signed release, so
+        // even unidentified source metadata asks nothing of it.
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Release, "", "true").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn source_helper_identity_requires_a_clean_full_commit() {
