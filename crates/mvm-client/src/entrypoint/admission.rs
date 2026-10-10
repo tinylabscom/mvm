@@ -405,10 +405,10 @@ mod tests {
             .producer_identity(identity)
             .build()
             .unwrap();
-        let error = admission
-            .admit(inputs(std::path::Path::new("/unopened"), "refused"))
-            .err()
-            .expect("unsupported backend must refuse before custody or image access");
+        let Err(error) = admission.admit(inputs(std::path::Path::new("/unopened"), "refused"))
+        else {
+            panic!("unsupported backend must refuse before custody or image access");
+        };
         assert_eq!(
             error.to_string(),
             "caller registration currently requires a cold HVF entrypoint launch"

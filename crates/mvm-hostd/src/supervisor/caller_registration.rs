@@ -44,11 +44,24 @@ pub struct VerifiedCallerLaunch {
     vm: String,
 }
 
-/// Validate opt-in before the supervisor publishes startup state, opens disks,
-/// arms workload timers, publishes a PID, or enters the guest.
-pub fn verify_startup(
+/// Only durable consumption can mint this non-cloneable owner capability.
+pub struct ConsumedCallerLaunch {
+    plan: ExecutionPlan,
+    caller: RegisteredCaller,
+    vm: String,
+}
+
+pub struct PreparedCallerStartup {
+    pub launch: Box<ConsumedCallerLaunch>,
+    pub initramfs: Option<Vec<u8>>,
+}
+
+/// Verify and durably consume opt-in before any boot setup, status publication,
+/// timers, PID, or guest execution. Later input/setup failures remain spent.
+/// Opt-out returns without touching its legacy setup order.
+pub fn prepare_startup(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
-) -> Result<Option<VerifiedCallerLaunch>> {
+) -> Result<Option<PreparedCallerStartup>> {
     let Some(registration) = cfg.caller_registration.as_ref() else {
         return Ok(None);
     };
@@ -71,7 +84,26 @@ pub fn verify_startup(
             .context("caller registration requires a signed plan")?,
     )
     .map_err(|_| anyhow::anyhow!("caller registration requires a signed plan"))?;
-    verify_cold_start(&cfg.vm_name, &signed, registration).map(Some)
+    let launch = verify_cold_start(&cfg.vm_name, &signed, registration)?.consume(&cfg.vm_name)?;
+    let initramfs = load_boot_inputs(cfg)?;
+    Ok(Some(PreparedCallerStartup { launch, initramfs }))
+}
+
+/// The actual supervisor input read, shared with opt-out startup at its existing
+/// point in that path. No capture owner or guest is created by this function.
+pub fn load_boot_inputs(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> Result<Option<Vec<u8>>> {
+    anyhow::ensure!(
+        cfg.kernel.is_file(),
+        "kernel {} is not a readable file",
+        cfg.kernel.display()
+    );
+    cfg.initramfs
+        .as_ref()
+        .map(std::fs::read)
+        .transpose()
+        .context("read initramfs")
 }
 
 /// Mint only after actual plan admission and possession of the pinned native key.
@@ -120,7 +152,7 @@ pub fn verify_cold_start(
 }
 
 impl VerifiedCallerLaunch {
-    pub(crate) fn consume(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
+    pub(crate) fn consume(self, vm: &str) -> Result<Box<ConsumedCallerLaunch>> {
         anyhow::ensure!(self.vm == vm, "caller launch owner mismatch");
         mvm_core::plan::validity::check_window(&self.plan, chrono::Utc::now())
             .map_err(|_| anyhow::anyhow!("caller launch expired before installation"))?;
@@ -162,6 +194,19 @@ impl VerifiedCallerLaunch {
             ),
             "caller launch was already consumed; tear down the failed instance and obtain fresh admission"
         );
+        Ok(Box::new(ConsumedCallerLaunch {
+            plan: self.plan,
+            caller: self.caller,
+            vm: self.vm,
+        }))
+    }
+}
+
+impl ConsumedCallerLaunch {
+    pub(crate) fn into_owner(self, vm: &str) -> Result<(ExecutionPlan, RegisteredCaller)> {
+        anyhow::ensure!(self.vm == vm, "consumed caller launch owner mismatch");
+        mvm_core::plan::validity::check_window(&self.plan, chrono::Utc::now())
+            .map_err(|_| anyhow::anyhow!("caller launch expired during boot setup"))?;
         Ok((self.plan, self.caller))
     }
 }

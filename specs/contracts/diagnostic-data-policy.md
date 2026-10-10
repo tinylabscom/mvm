@@ -88,12 +88,20 @@ A bounded private consumed-registration ledger lives outside runtime VM state,
 under the configured MVM home's `caller-registration` directory. It stores
 only purpose-domain-separated commitments to the canonical challenge and signed
 expiry times, not keys or raw plans. Exclusive directory locking, bounded reads,
-and a synced atomic replacement complete before owner activation. At 4096
+and a synced atomic replacement complete before startup status, boot-input reads,
+or owner activation. The replay directory's canonical ancestor chain is synced
+as well, so first-use creation does not rely only on syncing files inside an
+unanchored directory. At 4096
 unexpired entries or 1 MiB the ledger refuses new consumption rather than evicting
 an unexpired record. Expiry pruning and a persistent clock high-water advance
 are one transaction; a backward clock refuses instead of reviving pruned records.
 Corrupt storage, or missing storage after recorded initialization, is never
 silently reset.
+
+A non-cloneable consumed-launch capability is passed to the capture owner;
+the owner cannot substitute verification-only state or consume it a second time.
+Missing kernel or initramfs failures after successful consumption remain spent
+even though no capture owner or guest has yet started.
 
 A private, create-only `caller-registration.used` slot in each managed VM
 directory separately guards immutable installation in that instance. Both

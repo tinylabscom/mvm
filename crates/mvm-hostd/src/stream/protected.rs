@@ -32,8 +32,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// independently of the logical workload named by an admitted plan.
 pub enum CaptureAuthority<'a> {
     Admitted(&'a ExecutionPlan),
-    /// Verified only at the trusted cold-start boundary.
-    CallerRegistered(crate::supervisor::caller_registration::VerifiedCallerLaunch),
+    /// Verified and durably consumed before trusted cold-start setup.
+    CallerRegistered(Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>),
     /// Only a validated builder/standby launch role may select this variant.
     OperationalLiveOnly,
 }
@@ -71,7 +71,7 @@ impl CaptureOwner {
         let (plan, retention, caller) = match authority {
             CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention, None),
             CaptureAuthority::CallerRegistered(launch) => {
-                let (plan, caller) = launch.consume(vm)?;
+                let (plan, caller) = launch.into_owner(vm)?;
                 let retention = plan.stream_retention;
                 (Some(plan), retention, Some(caller))
             }
