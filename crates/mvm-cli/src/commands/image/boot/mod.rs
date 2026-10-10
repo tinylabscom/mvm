@@ -64,6 +64,11 @@ pub(in crate::commands) enum BootAction {
         /// Also refuse a set missing any member the current release train needs
         #[arg(long)]
         require_complete: bool,
+        /// Also refuse a revoked set or member, under the signed image-set
+        /// revocation list applied with `mvmctl image revocations update`.
+        /// Fails when no current list has been applied
+        #[arg(long)]
+        check_revocations: bool,
         /// Output as JSON (printed for a refusal too; the exit code still fails)
         #[arg(long)]
         json: bool,
@@ -82,6 +87,7 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
             artifacts,
             artifact,
             require_complete,
+            check_revocations,
             json,
         } => verify::run(&verify::VerifyRequest {
             manifest,
@@ -90,6 +96,7 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
             artifacts,
             artifact,
             require_complete,
+            check_revocations,
             json,
         }),
     }

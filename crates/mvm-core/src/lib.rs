@@ -52,6 +52,9 @@ pub mod image_lineage;
 /// The signed, atomic image set: a manifest indexing every member pack, the
 /// lock that pins one set, and the pure checks that gate a set before boot.
 pub mod image_set;
+/// The signed image-set revocation list: its authority, freshness and
+/// rollback checks, and the prepared on-disk copy admission reads.
+pub mod image_set_revocation;
 pub mod kernel_advisory;
 pub mod kernel_format;
 /// Backend-recorded launch phases, so a caller can see inside `start`.
@@ -97,6 +100,8 @@ pub mod registry_pack_image;
 pub mod registry_pack_revocation;
 pub mod registry_pack_revocation_store;
 pub mod registry_pack_store;
+/// Crash-ordered, fail-closed on-disk cache shared by signed revocation feeds.
+pub(crate) mod signed_feed_store;
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.
 pub mod workload_address;
