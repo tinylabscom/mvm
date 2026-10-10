@@ -1,11 +1,11 @@
 //! Workload kernel-cmdline assembly.
 //!
-//! Every guest kernel-cmdline security token — dm-verity roothash, plan-bound
-//! verb grant + enforcement assertion + host-signer trust anchor, the in-guest
-//! vsock egress client, and the runtime-source
-//! policy / overlay knobs — is strung together here, once, so the raw HVF
-//! backend and `WorkloadRunner::start` boot with the identical cmdline. Pure
-//! string assembly (cfg-free) so it stays unit-testable with no hypervisor.
+//! Guest kernel-cmdline tokens — the plan-bound verb grant, its enforcement
+//! assertion and host-signer trust anchor, the in-guest vsock egress client,
+//! and the non-verity runtime-overlay device — are strung together here, once,
+//! so the raw HVF backend and `WorkloadRunner::start` boot with the identical
+//! cmdline. Pure string assembly (cfg-free) so it stays unit-testable with no
+//! hypervisor.
 //!
 //! One token is deliberately NOT in that shared list: `mvm.uvols=`, the
 //! user-volume mount manifest. The raw HVF backend calls `workload_cmdline`

@@ -502,7 +502,7 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 |----------|---------|--------------|
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
-| `publish-crates.yml` | Release published | Publishes to crates.io in dependency order |
+| `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
 
 ### Website deployment

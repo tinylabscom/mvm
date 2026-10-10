@@ -50,6 +50,9 @@ pub mod lifecycle;
 pub mod merkle;
 /// OCI distribution types with no host dependency (manifest parsing).
 pub mod oci;
+/// Frozen resolution of an authored pack, checked before every frozen build.
+#[cfg(feature = "protocol")]
+pub mod pack_lock;
 /// Language-neutral authored pack input, not a resolved build or release.
 #[cfg(feature = "protocol")]
 pub mod pack_spec;

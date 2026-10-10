@@ -1,5 +1,6 @@
 [package]
 name = "mvm-vmm"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Backend-agnostic VMM device model and hypervisor seam"

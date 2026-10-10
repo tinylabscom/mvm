@@ -51,6 +51,15 @@ pub fn load_or_init(secret_path: &Path, public_path: &Path) -> Result<(SigningKe
     Ok((signing, derived))
 }
 
+/// Load an existing identity without creating, replacing, or repairing either
+/// half. Evidence maintenance must not mint a new signer when custody is lost.
+pub fn load_existing(secret_path: &Path, public_path: &Path) -> Result<(SigningKey, VerifyingKey)> {
+    let signing = load_secret_half(secret_path)?;
+    let derived = signing.verifying_key();
+    check_public_half(secret_path, public_path, &derived)?;
+    Ok((signing, derived))
+}
+
 fn mint_seed() -> Zeroizing<Vec<u8>> {
     let mut seed = Zeroizing::new(vec![0u8; KEY_BYTES]);
     rand::rng().fill_bytes(&mut seed);

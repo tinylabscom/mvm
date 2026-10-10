@@ -76,7 +76,7 @@ env:
 #   1. e2e-docs                                         (~140 min, the pole)
 #   2. source-bootstrap-linux                           (40-105 min)
 #   3. no-kvm-prepare → bootstrap → build → smoke       (~60 min)
-#   4. bdd-live-warm-claim → bdd-live-readme, one leg at a time  (~90 min)
+#   4. bdd-live-warm-claim → bdd-live-readme, one leg at a time  (~105 min)
 #   5. apple → libkrun-macos → e2e → workload-spawn-smoke
 #      → crates-publish-dry-run                         (~45 min)
 #
@@ -146,7 +146,10 @@ jobs:
     name: BDD live warm claim (Linux, Firecracker)
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.tool_live_only }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The scenario enforces the 300 ms startup ceiling, so the recipe builds an
+    # optimized mvmctl beside the debug test harness; the second profile is
+    # what the extra quarter hour pays for.
+    timeout-minutes: 60
     env:
       # Must track `FC_VERSION_DEFAULT` in mvm-core, as the merge-queue lane does.
       FC_VERSION: v1.17.0
@@ -484,9 +487,10 @@ jobs:
     with:
       dry_run: true
 
-  # Packages and build-verifies every crate the crates.io plan would upload,
-  # with no token, so a crate that stops being publishable is caught nightly
-  # rather than on the tag that tries to publish it.
+  # Packages and build-verifies every crate the crates.io plan would upload
+  # (the public crates only), with no token, so a crate that stops being
+  # publishable is caught nightly rather than on the tag that tries to publish
+  # it. A called workflow never uploads, so no secret is passed.
   crates-publish-dry-run:
     name: crates.io publish dry-run
     needs: workload-spawn-smoke-linux

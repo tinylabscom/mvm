@@ -126,13 +126,20 @@ fn commit_all(dir: &Path, message: &str) {
     git(dir, &["commit", "-q", "-m", message]);
 }
 
-/// An image checkout whose builder source is `builder_image_nix`.
-fn images_checkout_reading(dir: &Path, builder_image_nix: &str) {
+/// An image checkout whose builder source is `builder_image_nix`, built to
+/// builder boot ABI `boot_abi` (`None`: a checkout predating the marker).
+fn images_checkout_reading(dir: &Path, builder_image_nix: &str, boot_abi: Option<u32>) {
     std::fs::create_dir_all(dir).unwrap();
     for marker in IMAGES_CHECKOUT_MARKERS {
         write(&dir.join(marker), &format!("# {marker}\n"));
     }
     write(&dir.join("images/builder-vm/image.nix"), builder_image_nix);
+    if let Some(abi) = boot_abi {
+        write(
+            &dir.join(crate::image_source::build::BUILDER_BOOT_ABI_FILE),
+            &format!("{abi}\n"),
+        );
+    }
     commit_all(dir, "images");
 }
 
@@ -147,8 +154,16 @@ impl Pair {
     }
 
     fn reading(builder_image_nix: &str) -> Self {
+        Self::with(builder_image_nix, None)
+    }
+
+    fn at_boot_abi(abi: u32) -> Self {
+        Self::with(BUILDER_IMAGE_NIX, Some(abi))
+    }
+
+    fn with(builder_image_nix: &str, boot_abi: Option<u32>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        images_checkout_reading(&tmp.path().join("mvm-images"), builder_image_nix);
+        images_checkout_reading(&tmp.path().join("mvm-images"), builder_image_nix, boot_abi);
         mvm_checkout(&tmp.path().join("mvm"));
         let images = LocalImageCheckout::open(&tmp.path().join("mvm-images")).unwrap();
         Self { tmp, images }
@@ -283,6 +298,66 @@ fn an_edit_to_each_source_the_builder_image_reads_changes_its_key() {
             "an edit to {what} must change the builder image key"
         );
     }
+}
+
+fn edit_setpriv(mvm: &Path) {
+    write(
+        &mvm.join("crates/mvm-setpriv/src/lib.rs"),
+        "pub fn g() {}\n",
+    );
+}
+
+/// Below ABI 2 the image compiles `mvm-setpriv` from the mvm tree, so its
+/// source is part of what the image is built from.
+#[test]
+fn an_image_that_bakes_setpriv_is_keyed_on_its_source() {
+    for abi in [0, 1] {
+        let pair = Pair::at_boot_abi(abi);
+        let before = pair.builder_key();
+
+        edit_setpriv(&pair.mvm());
+
+        assert_ne!(
+            pair.builder_key().digest(),
+            before.digest(),
+            "ABI {abi}: a setpriv edit must change the builder image key"
+        );
+    }
+}
+
+/// From ABI 2 on `mvm-setpriv` arrives in the boot payload, so the image is
+/// built from no mvm source it compiles and a setpriv edit cannot change it.
+#[test]
+fn an_image_without_mvm_binaries_is_not_keyed_on_setprivs_source() {
+    let pair = Pair::at_boot_abi(2);
+    let before = pair.builder_key();
+    let checkout_before = pair.whole_checkout();
+
+    edit_setpriv(&pair.mvm());
+    write(
+        &pair.mvm().join("Cargo.lock"),
+        &cargo_lock("0.2.1", "4.0.0"),
+    );
+
+    assert_ne!(
+        pair.whole_checkout(),
+        checkout_before,
+        "the edit must change the checkout, or this proves nothing"
+    );
+    assert_eq!(
+        pair.builder_key(),
+        before,
+        "an ABI 2 builder image key must not follow mvm-setpriv's sources"
+    );
+    write(
+        &pair.mvm().join("nix/flake.nix"),
+        "{ outputs = _: { x = 1; }; }\n",
+    );
+    assert_ne!(
+        pair.builder_key().digest(),
+        before.digest(),
+        "the Nix sources the image evaluates still key it"
+    );
 }
 
 #[test]

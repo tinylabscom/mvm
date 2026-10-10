@@ -112,6 +112,22 @@ pub fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
+    if let Some(pin) = &start_config.bundle_boot_assets {
+        anyhow::ensure!(
+            pin.arch == mvm_core::arch::GuestArch::host(),
+            "bundle boot-assets architecture differs from host"
+        );
+        let path = start_config
+            .initrd_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("verified bundle initrd is missing"))?;
+        let digest = mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(path))?;
+        anyhow::ensure!(
+            digest == pin.initrd_sha256.as_str(),
+            "verified bundle initrd changed; refusing runtime fallback"
+        );
+        return Ok(());
+    }
     // `wasm` runs a WASI module directly and `mock` records calls without
     // starting a guest. Neither can mount an initramfs, so attaching one is
     // meaningless and resolving one is pure cost.
@@ -262,6 +278,32 @@ mod tests {
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn bundle_initrd_is_preserved_and_tampering_never_falls_back() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let image = tmp.path().join("bundle-initrd");
+        std::fs::write(&image, b"signed initrd").unwrap();
+        let mut config = VmStartConfig {
+            initrd_path: Some(image.display().to_string()),
+            bundle_boot_assets: Some(mvm_core::vm_backend::BundleBootAssetsPin {
+                manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"original set"),
+                arch: GuestArch::host(),
+                initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"signed initrd"),
+            }),
+            ..Default::default()
+        };
+        attach_universal_initramfs_if_cached(&mut config, "firecracker").unwrap();
+        assert_eq!(config.initrd_path.as_deref(), image.to_str());
+        std::fs::write(&image, b"replaced initrd").unwrap();
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
+        std::fs::remove_file(&image).unwrap();
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
+        config.initrd_path = None;
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
+    }
 
     /// The resolver failure a cold cache produces, as the real ladder now
     /// reports it (both acquisition arms having failed).

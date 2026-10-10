@@ -214,7 +214,11 @@ impl AuditSandbox {
             // runner must never intercept the fixture request (real hosts still
             // route through the proxy — this is a bypass list, not a disable).
             .env("no_proxy", "127.0.0.1,localhost,::1")
-            .env("NO_PROXY", "127.0.0.1,localhost,::1");
+            .env("NO_PROXY", "127.0.0.1,localhost,::1")
+            // A sealed pause requires a snapshot key. Selecting one
+            // explicitly also keeps the suite off the host's keystore and
+            // key directory.
+            .env("MVM_TENANT_KEY_LOCAL", SANDBOX_SNAPSHOT_KEY_HEX);
         c
     }
 
@@ -1257,6 +1261,41 @@ fn set_ttl_clear_emits_vm_ttl_set_with_cleared_detail() {
         log.contains("expires_at=cleared"),
         "set-ttl --clear must record expires_at=cleared. Full log:\n{log}"
     );
+}
+
+/// The snapshot key every sandboxed `mvmctl` pauses and resumes under.
+const SANDBOX_SNAPSHOT_KEY_HEX: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+/// Without a snapshot key, `machine pause` refuses before capturing anything,
+/// says how to provision one, and records no sleep.
+#[test]
+#[cfg(feature = "test-support")]
+fn pause_without_a_snapshot_key_is_refused_before_capture() {
+    let sandbox = AuditSandbox::new();
+    bring_up_mock_vm(&sandbox, "nokey-vm");
+
+    let output = sandbox
+        .mvmctl()
+        .env_remove("MVM_TENANT_KEY_LOCAL")
+        .args(["machine", "pause", "nokey-vm", "--hypervisor", "mock"])
+        .output()
+        .expect("spawn mvmctl pause");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "pause must refuse: {stderr}");
+    assert!(
+        stderr.contains("no snapshot key is configured") && stderr.contains("MVM_TENANT_KEY_LOCAL"),
+        "the refusal must say how to provision a key: {stderr}"
+    );
+    assert!(
+        !sandbox
+            .mvm_root()
+            .join("instances/nokey-vm/snapshot")
+            .exists(),
+        "nothing was captured"
+    );
+    let log = read_audit_log(&sandbox.audit_log_path());
+    assert_eq!(count_entries_with_kind(&log, "workload_sleep"), 0, "{log}");
 }
 
 #[test]

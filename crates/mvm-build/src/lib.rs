@@ -12,6 +12,9 @@ pub mod base_image_gate;
 /// against OSV over `mvm_http::blocking` and render the app-deps-shaped
 /// `cve.json` + CycloneDX SBOM sidecar pair.
 pub mod base_image_scan;
+/// Synthetic boot archives shared by offline admission tests.
+#[cfg(any(test, feature = "test-support"))]
+pub mod boot_asset_fixture;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
@@ -195,6 +198,8 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
+/// Process-lifetime memo for answers every call site of one command shares.
+mod process_memo;
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.

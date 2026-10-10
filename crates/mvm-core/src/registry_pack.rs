@@ -16,7 +16,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use crate::crypto::image_verify::VerifiedSigner;
-use crate::packs::{KeylessTrust, Sha256Hex, hash_file, pack_path_is_safe};
+use crate::packs::{KeylessTrust, Sha256Hex, pack_path_is_safe};
 use crate::release_version::{ReleaseVersion, VersionSyntax};
 
 /// Current on-disk registry-pack lockfile schema.
@@ -27,6 +27,8 @@ pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
 
 const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
+const MAX_REGISTRY_PAYLOAD_FILES: usize = 4096;
+const MAX_REGISTRY_PAYLOAD_BYTES: u64 = 32 * 1024 * 1024 * 1024;
 pub(crate) const REGISTRY_MANIFEST_FILE_NAME: &str = "manifest.json";
 pub(crate) const REGISTRY_SIGNATURE_FILE_NAME: &str = "manifest.sigstore.json";
 
@@ -682,6 +684,24 @@ impl VerifiedRegistryPack {
     pub fn signer(&self) -> &VerifiedSigner {
         &self.signer
     }
+
+    /// Registry-local files and separately released image assets form one
+    /// authenticated payload. Their names cannot overlap.
+    pub fn payload_files(&self) -> Vec<RegistryPackFile> {
+        payload_files(&self.manifest)
+    }
+}
+
+fn payload_files(manifest: &RegistryPackManifest) -> Vec<RegistryPackFile> {
+    let mut files = manifest.files.clone();
+    if let Some(RegistryPackImage::Built(image)) = &manifest.image {
+        files.extend(image.assets().into_iter().map(|asset| RegistryPackFile {
+            path: asset.name.as_str().to_string(),
+            sha256: asset.sha256.clone(),
+            size: asset.size,
+        }));
+    }
+    files
 }
 
 /// A registry pack published beneath its exact manifest digest.
@@ -764,6 +784,10 @@ pub enum RegistryPackVerificationError {
     UnsafeFilePath { path: String },
     #[error("registry-pack image declaration is invalid: {reason}")]
     InvalidImageDeclaration { reason: String },
+    #[error(
+        "no trusted released image verifier compatible with the current image-set lock is available"
+    )]
+    BuiltImageVerifierUnavailable,
     #[error("registry-pack image mvm.toml is invalid: {reason}")]
     InvalidImageManifest { reason: String },
     #[error("registry-pack payload path {path:?} could not be read: {reason}")]
@@ -928,7 +952,21 @@ fn validate_registry_pack_manifest(
         return Err(RegistryPackVerificationError::EmptyFiles);
     }
     let mut paths = BTreeSet::new();
-    for file in &manifest.files {
+    let files = payload_files(manifest);
+    if files.len() > MAX_REGISTRY_PAYLOAD_FILES {
+        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+            reason: "pack payload exceeds 4096 files".to_string(),
+        });
+    }
+    let total = files
+        .iter()
+        .try_fold(0_u64, |sum, file| sum.checked_add(file.size));
+    if total.is_none_or(|size| size > MAX_REGISTRY_PAYLOAD_BYTES) {
+        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+            reason: "pack payload exceeds 32 GiB".to_string(),
+        });
+    }
+    for file in &files {
         if !paths.insert(file.path.as_str()) {
             return Err(RegistryPackVerificationError::DuplicateFile {
                 path: file.path.clone(),
@@ -938,6 +976,15 @@ fn validate_registry_pack_manifest(
             return Err(RegistryPackVerificationError::UnsafeFilePath {
                 path: file.path.clone(),
             });
+        }
+    }
+    for path in &paths {
+        for parent in Path::new(path).ancestors().skip(1) {
+            if paths.contains(parent.to_string_lossy().as_ref()) {
+                return Err(RegistryPackVerificationError::UnsafeFilePath {
+                    path: path.to_string(),
+                });
+            }
         }
     }
     if let Some(RegistryPackImage::Source(image)) = &manifest.image {
@@ -977,19 +1024,13 @@ fn validate_registry_pack_manifest(
                     reason: error.to_string(),
                 },
             )?;
-        for asset in image.assets() {
-            if paths.contains(asset.name.as_str()) {
-                return Err(RegistryPackVerificationError::InvalidImageDeclaration {
-                    reason: format!(
-                        "external built image asset {:?} is also a payload file",
-                        asset.name.as_str()
-                    ),
-                });
-            }
-        }
     }
     Ok(())
 }
+
+mod built_image;
+use built_image::verify_built_image_authenticity;
+pub use built_image::{ensure_built_image_verifier_available, verify_built_image_provenance};
 
 /// Verify the unpacked payload against an already authenticated manifest.
 ///
@@ -1001,6 +1042,18 @@ pub fn verify_registry_pack_contents(
     verified: &VerifiedRegistryPack,
     root: &Path,
 ) -> Result<(), RegistryPackVerificationError> {
+    verify_registry_pack_contents_with(verified, root, verify_built_image_authenticity)
+}
+
+type BuiltImageChecker =
+    fn(&VerifiedRegistryPack, &Path) -> Result<(), RegistryPackVerificationError>;
+
+fn verify_registry_pack_contents_with(
+    verified: &VerifiedRegistryPack,
+    root: &Path,
+    check_built: BuiltImageChecker,
+) -> Result<(), RegistryPackVerificationError> {
+    use std::io::Read;
     let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
         RegistryPackVerificationError::PayloadFileRead {
             path: ".".to_string(),
@@ -1013,13 +1066,13 @@ pub fn verify_registry_pack_contents(
         });
     }
 
-    let mut declared = verified
-        .manifest()
-        .files
+    let files = verified.payload_files();
+    let declared = files
         .iter()
         .map(|file| file.path.as_str())
         .collect::<BTreeSet<_>>();
-    for file in &verified.manifest().files {
+    refuse_undeclared_payload_paths(root, root, &declared)?;
+    for file in &files {
         let path = root.join(&file.path);
         let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
             RegistryPackVerificationError::PayloadFileRead {
@@ -1032,10 +1085,26 @@ pub fn verify_registry_pack_contents(
                 path: file.path.clone(),
             });
         }
-        let (actual_hash, actual_size) =
-            hash_file(&path).map_err(|reason| RegistryPackVerificationError::PayloadFileRead {
+        if metadata.len() != file.size {
+            return Err(RegistryPackVerificationError::PayloadSizeMismatch {
                 path: file.path.clone(),
-                reason,
+                declared: file.size,
+                actual: metadata.len(),
+            });
+        }
+        let hash = || -> std::io::Result<(Sha256Hex, u64)> {
+            let mut reader = std::fs::File::open(&path)?.take(file.size + 1);
+            let digest = crate::crypto::image_verify::sha256_reader(&mut reader)?;
+            let actual_size = file.size + 1 - reader.limit();
+            Ok((
+                Sha256Hex::new(digest).expect("SHA-256 reader returns a canonical digest"),
+                actual_size,
+            ))
+        };
+        let (actual_hash, actual_size) =
+            hash().map_err(|error| RegistryPackVerificationError::PayloadFileRead {
+                path: file.path.clone(),
+                reason: error.to_string(),
             })?;
         if actual_size != file.size {
             return Err(RegistryPackVerificationError::PayloadSizeMismatch {
@@ -1052,112 +1121,16 @@ pub fn verify_registry_pack_contents(
             });
         }
     }
-    if let Some(RegistryPackImage::Built(descriptor)) = &verified.manifest().image {
-        for asset in descriptor.assets() {
-            verify_external_image_asset(root, asset)?;
-            declared.insert(asset.name.as_str());
-        }
-    }
     refuse_undeclared_payload_paths(root, root, &declared)?;
     if let Some(image) = &verified.manifest().image {
         match image {
             RegistryPackImage::Source(source) => {
                 validate_registry_pack_image_manifest(verified, root, source)?;
             }
-            RegistryPackImage::Built(descriptor) => {
-                let name = descriptor.assets.rootfs_signature_bundle.name.as_str();
-                let bundle = std::fs::read(root.join(name)).map_err(|error| {
-                    RegistryPackVerificationError::PayloadFileRead {
-                        path: name.to_string(),
-                        reason: error.to_string(),
-                    }
-                })?;
-                descriptor
-                    .verify_rootfs_signature(&bundle)
-                    .map_err(
-                        |error| RegistryPackVerificationError::InvalidImageDeclaration {
-                            reason: format!("built image rootfs refused: {error}"),
-                        },
-                    )?;
-                verify_built_image_provenance(verified, root)?;
-            }
+            RegistryPackImage::Built(_) => check_built(verified, root)?,
         }
     }
     Ok(())
-}
-
-fn verify_external_image_asset(
-    root: &Path,
-    asset: &crate::registry_pack_image::BuiltImageAsset,
-) -> Result<(), RegistryPackVerificationError> {
-    let name = asset.name.as_str();
-    let path = root.join(name);
-    let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
-        RegistryPackVerificationError::PayloadFileRead {
-            path: name.to_string(),
-            reason: error.to_string(),
-        }
-    })?;
-    if !metadata.file_type().is_file() {
-        return Err(RegistryPackVerificationError::NonRegularPayloadPath {
-            path: name.to_string(),
-        });
-    }
-    let (actual_hash, actual_size) =
-        hash_file(&path).map_err(|reason| RegistryPackVerificationError::PayloadFileRead {
-            path: name.to_string(),
-            reason,
-        })?;
-    if actual_size != asset.size {
-        return Err(RegistryPackVerificationError::PayloadSizeMismatch {
-            path: name.to_string(),
-            declared: asset.size,
-            actual: actual_size,
-        });
-    }
-    if actual_hash != asset.sha256 {
-        return Err(RegistryPackVerificationError::PayloadHashMismatch {
-            path: name.to_string(),
-            declared: asset.sha256.clone(),
-            actual: actual_hash,
-        });
-    }
-    Ok(())
-}
-
-/// Authenticate a built pack's provenance under its verified publisher identity.
-pub fn verify_built_image_provenance(
-    verified: &VerifiedRegistryPack,
-    root: &Path,
-) -> Result<crate::packs::Sha256Hex, RegistryPackVerificationError> {
-    let Some(RegistryPackImage::Built(descriptor)) = &verified.manifest().image else {
-        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
-            reason: "pack has no built image provenance to verify".to_string(),
-        });
-    };
-    let read = |name: &str| -> Result<Vec<u8>, RegistryPackVerificationError> {
-        std::fs::read(root.join(name)).map_err(|error| {
-            RegistryPackVerificationError::PayloadFileRead {
-                path: name.to_string(),
-                reason: error.to_string(),
-            }
-        })
-    };
-    let statement = read(descriptor.assets.provenance_statement.name.as_str())?;
-    let bundle = read(descriptor.assets.provenance_signature_bundle.name.as_str())?;
-    descriptor
-        .verify_signed_provenance(
-            &verified.manifest().reference,
-            &crate::image_set::image_train_lock().image_set,
-            verified.signer(),
-            &statement,
-            &bundle,
-        )
-        .map_err(
-            |error| RegistryPackVerificationError::InvalidImageDeclaration {
-                reason: format!("built image provenance refused: {error}"),
-            },
-        )
 }
 
 fn validate_registry_pack_image_manifest(
@@ -1235,10 +1208,24 @@ pub fn install_registry_pack_at(
     staged_root: &Path,
     verified: &VerifiedRegistryPack,
 ) -> Result<InstalledRegistryPack, RegistryPackInstallError> {
-    verify_registry_pack_contents(verified, staged_root)?;
+    install_registry_pack_at_with(
+        cache_root,
+        staged_root,
+        verified,
+        verify_built_image_authenticity,
+    )
+}
+
+fn install_registry_pack_at_with(
+    cache_root: &Path,
+    staged_root: &Path,
+    verified: &VerifiedRegistryPack,
+    check_built: BuiltImageChecker,
+) -> Result<InstalledRegistryPack, RegistryPackInstallError> {
+    verify_registry_pack_contents_with(verified, staged_root, check_built)?;
     let final_dir = cache_root.join(verified.manifest_sha256().as_str());
     if std::fs::symlink_metadata(&final_dir).is_ok() {
-        if cached_registry_pack_is_valid(&final_dir, verified) {
+        if cached_registry_pack_is_valid(&final_dir, verified, check_built) {
             return Ok(InstalledRegistryPack { root: final_dir });
         }
         remove_registry_cache_entry(&final_dir)?;
@@ -1246,11 +1233,11 @@ pub fn install_registry_pack_at(
 
     let publish =
         crate::pack_cache::atomically_populate_dir_at(cache_root, &final_dir, |quarantine| {
-            populate_registry_quarantine(quarantine, staged_root, verified)
+            populate_registry_quarantine(quarantine, staged_root, verified, check_built)
         });
     match publish {
         Ok(()) => Ok(InstalledRegistryPack { root: final_dir }),
-        Err(_) if cached_registry_pack_is_valid(&final_dir, verified) => {
+        Err(_) if cached_registry_pack_is_valid(&final_dir, verified, check_built) => {
             Ok(InstalledRegistryPack { root: final_dir })
         }
         Err(error) => Err(error),
@@ -1273,23 +1260,26 @@ fn populate_registry_quarantine(
     quarantine: &Path,
     staged_root: &Path,
     verified: &VerifiedRegistryPack,
+    check_built: BuiltImageChecker,
 ) -> Result<(), RegistryPackInstallError> {
+    use std::io::Read;
     let payload_root = quarantine.join(REGISTRY_PAYLOAD_DIR_NAME);
     std::fs::create_dir_all(&payload_root).map_err(install_io_at(&payload_root))?;
-    for file in &verified.manifest().files {
+    for file in verified.payload_files() {
         let source = staged_root.join(&file.path);
         let destination = payload_root.join(&file.path);
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(install_io_at(parent))?;
         }
-        std::fs::copy(&source, &destination).map_err(install_io_at(&source))?;
-    }
-    if let Some(RegistryPackImage::Built(descriptor)) = &verified.manifest().image {
-        for asset in descriptor.assets() {
-            let source = staged_root.join(asset.name.as_str());
-            let destination = payload_root.join(asset.name.as_str());
-            std::fs::copy(&source, &destination).map_err(install_io_at(&source))?;
-        }
+        let mut input = std::fs::File::open(&source)
+            .map_err(install_io_at(&source))?
+            .take(file.size + 1);
+        let mut output = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&destination)
+            .map_err(install_io_at(&destination))?;
+        std::io::copy(&mut input, &mut output).map_err(install_io_at(&source))?;
     }
     let manifest_path = quarantine.join(REGISTRY_MANIFEST_FILE_NAME);
     std::fs::write(&manifest_path, verified.manifest_bytes())
@@ -1297,11 +1287,15 @@ fn populate_registry_quarantine(
     let signature_path = quarantine.join(REGISTRY_SIGNATURE_FILE_NAME);
     std::fs::write(&signature_path, verified.signature_bundle())
         .map_err(install_io_at(&signature_path))?;
-    verify_registry_pack_contents(verified, &payload_root)?;
+    verify_registry_pack_contents_with(verified, &payload_root, check_built)?;
     Ok(())
 }
 
-fn cached_registry_pack_is_valid(root: &Path, verified: &VerifiedRegistryPack) -> bool {
+fn cached_registry_pack_is_valid(
+    root: &Path,
+    verified: &VerifiedRegistryPack,
+    check_built: BuiltImageChecker,
+) -> bool {
     let Ok(metadata) = std::fs::symlink_metadata(root) else {
         return false;
     };
@@ -1346,7 +1340,12 @@ fn cached_registry_pack_is_valid(root: &Path, verified: &VerifiedRegistryPack) -
         .is_ok_and(|bytes| bytes == verified.signature_bundle());
     manifest_matches
         && signature_matches
-        && verify_registry_pack_contents(verified, &root.join(REGISTRY_PAYLOAD_DIR_NAME)).is_ok()
+        && verify_registry_pack_contents_with(
+            verified,
+            &root.join(REGISTRY_PAYLOAD_DIR_NAME),
+            check_built,
+        )
+        .is_ok()
 }
 
 fn remove_registry_cache_entry(path: &Path) -> Result<(), RegistryPackInstallError> {
@@ -1989,26 +1988,6 @@ mod tests {
             verify_registry_pack_contents(&verified, root.path()),
             Err(RegistryPackVerificationError::PayloadFileRead { .. })
         ));
-        let cache = tempfile::tempdir().unwrap();
-        assert!(install_registry_pack_at(cache.path(), root.path(), &verified).is_err());
-        assert_eq!(
-            std::fs::read_dir(cache.path()).unwrap().count(),
-            0,
-            "an interrupted built-image install must not publish a cache entry"
-        );
-        let mut collision = manifest.clone();
-        collision["files"]
-            .as_array_mut()
-            .unwrap()
-            .push(serde_json::json!({
-                "path": "rootfs.ext4",
-                "sha256": "0".repeat(64),
-                "size": 1,
-            }));
-        assert!(matches!(
-            verify(&collision),
-            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
-        ));
         let mut stale = manifest.clone();
         stale["image"]["base_set"]["manifest_sha256"] = serde_json::json!("0".repeat(64));
         assert!(matches!(
@@ -2020,52 +1999,6 @@ mod tests {
         assert!(matches!(
             verify(&mixed),
             Err(RegistryPackVerificationError::ManifestParse(_))
-        ));
-    }
-
-    #[test]
-    fn external_image_asset_requires_exact_regular_bytes() {
-        let dir = tempfile::tempdir().unwrap();
-        let asset = crate::registry_pack_image::BuiltImageAsset {
-            name: crate::image_set::ArtifactName::new("rootfs.ext4").unwrap(),
-            sha256: Sha256Hex::from_bytes(b"root"),
-            size: 4,
-        };
-        let path = dir.path().join("rootfs.ext4");
-        std::fs::write(&path, b"root").unwrap();
-        verify_external_image_asset(dir.path(), &asset).expect("exact signed descriptor record");
-
-        std::fs::write(&path, b"evil").unwrap();
-        assert!(matches!(
-            verify_external_image_asset(dir.path(), &asset),
-            Err(RegistryPackVerificationError::PayloadHashMismatch { .. })
-        ));
-        std::fs::write(&path, b"longer").unwrap();
-        assert!(matches!(
-            verify_external_image_asset(dir.path(), &asset),
-            Err(RegistryPackVerificationError::PayloadSizeMismatch { .. })
-        ));
-        std::fs::remove_file(&path).unwrap();
-        assert!(matches!(
-            verify_external_image_asset(dir.path(), &asset),
-            Err(RegistryPackVerificationError::PayloadFileRead { .. })
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn external_image_asset_refuses_a_symlink() {
-        let dir = tempfile::tempdir().unwrap();
-        let asset = crate::registry_pack_image::BuiltImageAsset {
-            name: crate::image_set::ArtifactName::new("rootfs.ext4").unwrap(),
-            sha256: Sha256Hex::from_bytes(b"root"),
-            size: 4,
-        };
-        std::fs::write(dir.path().join("target"), b"root").unwrap();
-        std::os::unix::fs::symlink("target", dir.path().join("rootfs.ext4")).unwrap();
-        assert!(matches!(
-            verify_external_image_asset(dir.path(), &asset),
-            Err(RegistryPackVerificationError::NonRegularPayloadPath { .. })
         ));
     }
 

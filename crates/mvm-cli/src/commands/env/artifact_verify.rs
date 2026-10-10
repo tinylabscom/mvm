@@ -2,9 +2,9 @@
 //! / builder-VM fetch paths.
 //!
 //! These are the generic "pull a file over curl and check it against the
-//! published checksum manifest" helpers that back hash-verified downloads;
-//! the dev-image and builder-VM download orchestration in
-//! `builder_vm.rs` calls them.
+//! published checksum manifest" helpers that back hash-verified downloads.
+//! `mvmctl update` takes the archive digest it installs against from
+//! [`fetch_expected_hashes`].
 //!
 //! The manifest is itself signature-verified before it is parsed, so the
 //! digests every artifact is held to come from the publisher rather than from
@@ -26,7 +26,6 @@ use crate::ui;
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
 /// so `mvmctl trust audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
-#[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
     let m = mvm_core::observability::metrics::global();
     let counter = match outcome {
@@ -60,7 +59,6 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// URL is not enough — splitting one back apart would have to guess where the
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
-#[cfg(test)]
 pub(crate) struct ChecksumManifest<'a> {
     /// Per-version release base URL, no trailing slash.
     pub base_url: &'a str,
@@ -73,7 +71,6 @@ pub(crate) struct ChecksumManifest<'a> {
     pub train: mvm_build::release_signature::ReleaseTrain,
 }
 
-#[cfg(test)]
 impl ChecksumManifest<'_> {
     fn url(&self) -> String {
         format!("{}/{}", self.base_url, self.asset)
@@ -98,7 +95,6 @@ impl ChecksumManifest<'_> {
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
-#[cfg(test)]
 pub(crate) fn fetch_expected_hashes(
     manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
@@ -148,7 +144,6 @@ pub(crate) fn fetch_expected_hashes(
 ///
 /// A refusal here is attack-shaped, so it feeds the same counter and audit
 /// line as a bad artifact signature rather than looking like a network blip.
-#[cfg(test)]
 pub(super) fn verify_manifest_signature(
     manifest: &ChecksumManifest<'_>,
     staged: &std::path::Path,
@@ -241,7 +236,7 @@ pub(crate) fn verify_artifact_hash(
 /// Transient transport failures are retried three times with a short fixed
 /// delay. HTTP failures remain visible through `-f`, and no downloaded bytes
 /// are trusted until the existing signature and digest gates accept them.
-pub(super) fn curl_download_args(dest: &str, url: &str, max_bytes: Option<u64>) -> Vec<String> {
+pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
     let mut args = vec![
         "-fSL".to_string(),
         "--progress-bar".to_string(),
@@ -255,9 +250,6 @@ pub(super) fn curl_download_args(dest: &str, url: &str, max_bytes: Option<u64>) 
         "-o".to_string(),
         dest.to_string(),
     ];
-    if let Some(max_bytes) = max_bytes {
-        args.extend(["--max-filesize".to_string(), max_bytes.to_string()]);
-    }
     args.push(url.to_string());
     args
 }
@@ -293,17 +285,8 @@ fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
 
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
-    download_file_with_limit(url, dest, None)
-}
-
-/// Download one descriptor-pinned release asset with a hard byte ceiling.
-pub(crate) fn download_file_bounded(url: &str, dest: &str, max_bytes: u64) -> Result<()> {
-    download_file_with_limit(url, dest, Some(max_bytes))
-}
-
-fn download_file_with_limit(url: &str, dest: &str, max_bytes: Option<u64>) -> Result<()> {
     let status = mvm_core::env_hygiene::helper_command("curl")
-        .args(curl_download_args(dest, url, max_bytes))
+        .args(curl_download_args(dest, url))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
@@ -315,9 +298,6 @@ fn download_file_with_limit(url: &str, dest: &str, max_bytes: Option<u64>) -> Re
         // run. It's never hash-accepted while incomplete — verify runs
         // only after a successful download, and the SHA-256 gate deletes
         // on mismatch — so leaving it is safe and saves re-fetching.
-        if max_bytes.is_some() {
-            anyhow::bail!("bounded release asset download failed: curl exited {status}");
-        }
         anyhow::bail!("{}", download_failure_message());
     }
     Ok(())
@@ -331,7 +311,7 @@ mod tests {
 
     #[test]
     fn curl_download_args_request_resume() {
-        let args = curl_download_args("/tmp/out", "https://example/x", None);
+        let args = curl_download_args("/tmp/out", "https://example/x");
         assert!(
             args.contains(&"-C".to_string()),
             "must pass -C for resume: {args:?}"
@@ -354,26 +334,6 @@ mod tests {
             "connection resets must be retried: {args:?}"
         );
         assert_eq!(args.last().unwrap(), "https://example/x");
-    }
-
-    #[test]
-    fn bounded_curl_download_caps_untrusted_release_bytes() {
-        let args = curl_download_args("/tmp/out", "https://example/x", Some(42));
-        assert!(args.windows(2).any(|pair| pair == ["--max-filesize", "42"]));
-        assert_eq!(args.last().map(String::as_str), Some("https://example/x"));
-    }
-
-    #[test]
-    fn bounded_release_download_accepts_exact_size_and_refuses_oversize() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("source");
-        std::fs::write(&source, b"12345").unwrap();
-        let url = format!("file://{}", source.display());
-        let destination = dir.path().join("destination");
-        let target = destination.to_str().unwrap();
-        download_file_bounded(&url, target, 4).expect_err("oversize release asset must refuse");
-        download_file_bounded(&url, target, 5).expect("exact-size asset is allowed");
-        assert_eq!(std::fs::read(destination).unwrap(), b"12345");
     }
 
     #[test]

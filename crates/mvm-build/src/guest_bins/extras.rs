@@ -20,9 +20,10 @@ use sha2::{Digest, Sha256};
 use super::cdylib::{GPU_SHIM_CDYLIBS, GuestCdylib, guest_cdylibs};
 use super::member::GuestBinsMember;
 use crate::guest_agent_build::{
-    self, GuestAgentBuildError, GuestAgentBuildSpec, gnu_target_triple, musl_target_triple,
-    package_bin_args,
+    self, Freshness, GuestAgentBuildError, GuestAgentBuildSpec, gnu_target_triple,
+    musl_target_triple, package_bin_args,
 };
+use crate::process_memo::ProcessMemo;
 
 /// The glibc version the guest shared objects are linked against, passed to
 /// cargo-zigbuild as the target suffix. The objects then use no symbol newer
@@ -202,15 +203,47 @@ pub(crate) fn extra_builds(arch: GuestArch) -> Result<Vec<ExtraBuild>, GuestAgen
     Ok(builds)
 }
 
+/// [`extras_source_fingerprint`] answers, by workspace root.
+static EXTRAS_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
+
 /// A content fingerprint over everything the extra builds read: the guest
 /// and host-services sources (their own fingerprints), the GPU shim crates,
 /// the cargo configuration that adds target flags, and this recipe.
+///
+/// Memoized for the lifetime of the process, for the reasons
+/// [`guest_agent_build::guest_source_fingerprint`] gives.
 pub fn extras_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
+    extras_source_fingerprint_with(workspace_root, Freshness::Memoized)
+}
+
+/// [`extras_source_fingerprint`], or a new walk — of its own inputs and of the
+/// two fingerprints it folds in — when `freshness` asks for one.
+pub fn extras_source_fingerprint_with(
+    workspace_root: &Path,
+    freshness: Freshness,
+) -> Result<String, GuestAgentBuildError> {
+    guest_agent_build::memoized_fingerprint(
+        &EXTRAS_SOURCE_FINGERPRINTS,
+        workspace_root,
+        freshness,
+        |root| compute_extras_source_fingerprint(root, freshness),
+    )
+}
+
+fn compute_extras_source_fingerprint(
+    workspace_root: &Path,
+    freshness: Freshness,
+) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-guest-bins-extras-input-v1\0");
-    hasher.update(guest_agent_build::guest_source_fingerprint(workspace_root)?.as_bytes());
+    hasher.update(
+        guest_agent_build::guest_source_fingerprint_with(workspace_root, freshness)?.as_bytes(),
+    );
     hasher.update(b"\0");
-    hasher.update(guest_agent_build::sdk_cdylib_source_fingerprint(workspace_root)?.as_bytes());
+    hasher.update(
+        guest_agent_build::sdk_cdylib_source_fingerprint_with(workspace_root, freshness)?
+            .as_bytes(),
+    );
     hasher.update(b"\0");
     guest_agent_build::hash_inputs(
         &mut hasher,

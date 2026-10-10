@@ -61,6 +61,17 @@ fn arrayref_package(lockfile_path: &Path) -> toml::Value {
     matches.into_iter().next().expect("one package was found")
 }
 
+/// Whether the graph actually resolves arrayref. A graph that no longer
+/// reaches it keeps the patch only as `[[patch.unused]]`, which is not a
+/// package and so not a source to pin.
+fn resolves_arrayref(lockfile_path: &Path) -> bool {
+    parse_toml(lockfile_path)["package"]
+        .as_array()
+        .expect("Cargo.lock package must be an array")
+        .iter()
+        .any(|package| package["name"].as_str() == Some("arrayref"))
+}
+
 fn assert_arrayref_lock(lockfile_path: &Path) {
     let package = arrayref_package(lockfile_path);
     assert_eq!(package["version"].as_str(), Some("0.3.9"));
@@ -129,7 +140,7 @@ fn every_arrayref_graph_uses_the_vendored_reviewed_source() {
     collect_lockfiles(&workspace.join("crates"), &mut lockfiles);
     let affected: Vec<_> = lockfiles
         .into_iter()
-        .filter(|lockfile| read(lockfile).contains("name = \"arrayref\""))
+        .filter(|lockfile| resolves_arrayref(lockfile))
         .collect();
 
     assert!(!affected.is_empty(), "the workspace must contain arrayref");

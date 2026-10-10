@@ -165,16 +165,10 @@ pub const FLOW_CLOSED_EVENT: &str = "gateway.flow_closed";
 /// fail-closed flow kill.
 pub const FLOW_OBSERVER_FAULT_EVENT: &str = "gateway.flow_observer_fault";
 
-/// Canonical chain event and labels for a sealed transcript content address.
-pub const TRANSCRIPT_SEALED_EVENT: &str = "gateway.transcript_sealed";
-/// Label containing the transcript capture identifier.
-pub const LABEL_CAPTURE_ID: &str = "capture_id";
-/// Label containing the VM identity bound into the transcript root.
-pub const LABEL_VM_NAME: &str = "vm_name";
-/// Label containing the authenticated ciphertext-manifest root.
-pub const LABEL_TRANSCRIPT_ROOT: &str = "transcript_root";
-/// Label containing the number of ordered ciphertext chunks.
-pub const LABEL_CHUNK_COUNT: &str = "chunk_count";
+pub use mvm_core::transcript::evidence::{
+    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
+    TRANSCRIPT_SEALED_EVENT,
+};
 
 /// Whether the seal was rebuilt from the journal rather than written by the
 /// process that owned the capture. `true` marks an incomplete record.

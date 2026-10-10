@@ -17,6 +17,7 @@ pub mod hooks;
 pub mod launch;
 pub mod mvm_pin;
 pub mod orchestrator;
+pub mod pack;
 pub mod reachability;
 pub mod source;
 pub mod strip_framework;

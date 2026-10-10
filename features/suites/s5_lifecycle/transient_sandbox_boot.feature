@@ -109,7 +109,8 @@ Feature: Transient sandbox boot
   # one.
   @live @warm_claim
   Scenario: machine run cleans the request state after claiming a warm standby
-    Given the live mvm home request state is recorded
+    Given the image "alpine" is prepared in the live home
+    And the live mvm home request state is recorded
     And warm residency is enabled
     When I run mvmctl in an isolated live home with "pool warm 1 --image alpine"
     Then the command exits with code 0

@@ -14,6 +14,15 @@ pub(super) struct BootAttempt<'a> {
     pub(super) backend: &'a AnyBackend,
     pub(super) start_config: &'a VmStartConfig,
     pub(super) resolved: &'a ResolvedImage,
+    /// The caller named this VM. A named run has an identity a shared standby
+    /// cannot take on, so it keeps its cold path instead of requiring a claim.
+    pub(super) user_named: bool,
+}
+
+/// Claim a warm standby for this attempt, or `None` when its shape keeps the
+/// cold path.
+fn claim_warm_standby(attempt: &BootAttempt<'_>) -> Result<Option<VmId>> {
+    crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, attempt.user_named)
 }
 
 /// Boot the transient VM: try to claim a warm standby first, then a
@@ -80,18 +89,17 @@ pub(super) fn boot_transient_vm(
     // supports the pool). An explicitly configured but unsupported standby pool
     // is returned as an actionable error; only an ineligible launch shape
     // proceeds cold.
-    let (vm_name, warm_claimed) =
-        match crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, false) {
-            Ok(Some(id)) => {
-                ui::info(&format!(
-                    "Claimed a warm standby ({}) — skipping cold boot.",
-                    id.0
-                ));
-                (id.0, true)
-            }
-            Ok(None) => (vm_name, false),
-            Err(e) => return Err(e).context("claiming configured warm standby"),
-        };
+    let (vm_name, warm_claimed) = match claim_warm_standby(attempt) {
+        Ok(Some(id)) => {
+            ui::info(&format!(
+                "Claimed a warm standby ({}) — skipping cold boot.",
+                id.0
+            ));
+            (id.0, true)
+        }
+        Ok(None) => (vm_name, false),
+        Err(e) => return Err(e).context("claiming configured warm standby"),
+    };
     report_phase("warm_claim");
 
     let booted = warm_claimed
@@ -420,6 +428,65 @@ mod tests {
         let error = combine_run_and_flush::<i32>(Err(anyhow::anyhow!("workload failed")), Ok(()))
             .expect_err("a flush must not hide the workload failure");
         assert!(error.to_string().contains("workload failed"), "{error:#}");
+    }
+
+    fn resolved_image() -> ResolvedImage {
+        ResolvedImage {
+            vmlinux: "/k/vmlinux".into(),
+            initrd: None,
+            rootfs: "/vol/rootfs.ext4".into(),
+            revision: "rev".into(),
+            flake_ref: "image".into(),
+            profile: None,
+            snap_info: None,
+            template_id: None,
+        }
+    }
+
+    /// A shape the pool could serve, on a host holding no standbys.
+    fn claimable_config_without_a_pool() -> VmStartConfig {
+        VmStartConfig {
+            warm_pool_size: 0,
+            kernel_path: Some("/k/vmlinux".into()),
+            rootfs_path: "/vol/rootfs.ext4".into(),
+            cpus: 2,
+            memory_mib: 1024,
+            tenant_id: Some("tenant-a".into()),
+            plan_json: Some("{}".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_named_transient_run_keeps_its_cold_path_without_a_standby() {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        let start_config = claimable_config_without_a_pool();
+        let resolved = resolved_image();
+        let attempt = BootAttempt {
+            backend: &backend,
+            start_config: &start_config,
+            resolved: &resolved,
+            user_named: true,
+        };
+        assert!(claim_warm_standby(&attempt).unwrap().is_none());
+    }
+
+    #[test]
+    fn an_unnamed_transient_run_still_requires_a_prepared_standby() {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        let start_config = claimable_config_without_a_pool();
+        let resolved = resolved_image();
+        let attempt = BootAttempt {
+            backend: &backend,
+            start_config: &start_config,
+            resolved: &resolved,
+            user_named: false,
+        };
+        let error = claim_warm_standby(&attempt).unwrap_err().to_string();
+        assert!(
+            error.contains("strict startup requires a prepared warm standby"),
+            "{error}"
+        );
     }
 
     #[test]

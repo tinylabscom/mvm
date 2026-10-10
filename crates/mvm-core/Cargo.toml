@@ -1,5 +1,6 @@
 [package]
 name = "mvm-core"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Core types, IDs, config, and utilities for mvm"
@@ -77,6 +78,9 @@ rcgen = { workspace = true, optional = true }
 # remote gateway. Both optional so a default/guest build pulls neither.
 async-trait = { workspace = true, optional = true }
 mvm-http = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
 
 # `default` is empty: the default `mvm-core` build is runtime-free.
 # The hostd IPC transport pulls tokio only behind

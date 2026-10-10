@@ -91,13 +91,6 @@ fn strip_v_prefix(tag: &str) -> &str {
     tag.strip_prefix('v').unwrap_or(tag)
 }
 
-/// Download a release checksum manifest and prove the publisher signed it
-/// before any of its bytes are read.
-///
-/// The manifest decides which artifact bytes are acceptable, so whoever can
-/// serve one picks the artifact; TLS says nothing about who wrote it. Refuses
-/// on a missing, unparseable, or foreign-signed bundle — the shared release
-/// verifier does the deciding.
 /// Download a GitHub release asset.
 ///
 /// Release asset URLs always answer `302` and redirect to blob storage, and
@@ -156,91 +149,79 @@ fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String
     ))
 }
 
-/// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
-///
-/// Each line is: `<64 hex chars>  <filename>`  (two spaces, shasum format).
-/// Returns the raw 32-byte digest.
-fn parse_checksum_line(line: &str) -> Result<[u8; 32]> {
-    let hex = line
-        .split_whitespace()
-        .next()
-        .context("Empty checksum line")?;
-    if hex.len() != 64 {
-        anyhow::bail!("Expected 64 hex chars in checksum, got {}", hex.len());
-    }
-    let mut digest = [0u8; 32];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let s = std::str::from_utf8(chunk).context("Non-UTF8 in checksum hex")?;
-        digest[i] =
-            u8::from_str_radix(s, 16).with_context(|| format!("Invalid hex byte: {}", s))?;
-    }
-    Ok(digest)
-}
+/// The combined checksum manifest every CLI release publishes, signed by the
+/// release workflow beside the archives it lists.
+const CHECKSUM_MANIFEST: &str = "checksums-sha256.txt";
 
-/// Verify the SHA256 digest of a downloaded archive against `checksums-sha256.txt`.
-///
-/// Downloads the combined checksum file, finds the line for `archive_name`,
-/// and confirms it matches the digest of the file at `archive_path`.
-fn verify_checksum(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
-    let checksum_url = format!(
-        "{}/{}/releases/download/{}/checksums-sha256.txt",
+/// Per-version release directory the archive, its manifest, and both
+/// signature bundles are published under.
+fn release_base(tag: &str) -> String {
+    format!(
+        "{}/{}/releases/download/{}",
         github_download_base(),
         GITHUB_REPO,
-        version
-    );
+        tag
+    )
+}
 
-    let checksum_text = http::fetch_text(&checksum_url)
-        .context("Failed to download checksum file — cannot verify integrity")?;
+/// The SHA-256 the release at `tag` publishes for `archive_name`, read from a
+/// checksum manifest whose signature has already been proven.
+///
+/// The manifest decides which archive bytes are acceptable, and it arrives
+/// over the same channel as the archive, so whoever can serve one could serve
+/// a matching pair. Its Sigstore bundle is therefore verified under the
+/// release workflow's identity at exactly `tag` before a line of it is parsed.
+/// A missing, unparseable, foreign-signed, or other-tag bundle refuses the
+/// update. `MVM_SKIP_HASH_VERIFY` does not reach this check, and neither does
+/// `--skip-verify`: that flag waives only the archive's own bundle, so the
+/// archive stays authenticated through this manifest.
+fn signed_archive_digest(tag: &str, archive_name: &str) -> Result<String> {
+    let base = release_base(tag);
+    let manifest = crate::commands::env::artifact_verify::ChecksumManifest {
+        base_url: &base,
+        asset: CHECKSUM_MANIFEST,
+        version: strip_v_prefix(tag),
+        train: mvm_build::release_signature::ReleaseTrain::Cli,
+    };
+    let mut digests =
+        crate::commands::env::artifact_verify::fetch_expected_hashes(&manifest, &[archive_name])
+            .with_context(|| {
+                format!("refusing to update: the {tag} checksum manifest is not authenticated")
+            })?;
+    digests
+        .remove(archive_name)
+        .with_context(|| format!("{CHECKSUM_MANIFEST} for {tag} has no entry for {archive_name}"))
+}
 
-    // Find the line that corresponds to this archive.
-    let expected_digest = checksum_text
-        .lines()
-        .find(|line| line.contains(archive_name))
-        .with_context(|| {
-            format!(
-                "Checksum for '{}' not found in checksums-sha256.txt",
-                archive_name
-            )
-        })
-        .and_then(parse_checksum_line)?;
+/// Hold a downloaded archive to the digest the signed manifest publishes for it.
+fn verify_checksum(tag: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+    let expected = signed_archive_digest(tag, archive_name)?;
 
-    // Compute the SHA256 of the downloaded file.
     let bytes = std::fs::read(archive_path).with_context(|| {
         format!(
             "Failed to read archive for checksum: {}",
             archive_path.display()
         )
     })?;
-    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let actual = hex::encode(Sha256::digest(&bytes));
 
-    if actual_digest != expected_digest {
+    if actual != expected {
         anyhow::bail!(
             "Checksum mismatch for {}!\n  expected: {}\n  actual:   {}\nThe download may be corrupted or tampered with.",
             archive_name,
-            hex_encode(&expected_digest),
-            hex_encode(&actual_digest),
+            expected,
+            actual,
         );
     }
 
-    ui::success("Checksum verified.");
+    ui::success("Checksum verified against the signed manifest.");
     Ok(())
-}
-
-/// Hex-encode a byte slice for display.
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Download the release archive into the given temp directory.
 fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
-    let download_url = format!(
-        "{}/{}/releases/download/{}/{}",
-        github_download_base(),
-        GITHUB_REPO,
-        version,
-        archive_name
-    );
+    let download_url = format!("{}/{}", release_base(version), archive_name);
     let dest = tmp_dir.join(&archive_name);
 
     let sp = ui::spinner(&format!("Downloading {}...", download_url));
@@ -715,13 +696,23 @@ pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
 }
 
 fn source_helper_commit() -> Result<Option<String>> {
-    if mvm_build::artifact_acquisition::compiled_channel()
-        == mvm_build::artifact_acquisition::DistributionChannel::Release
-    {
+    source_helper_commit_for(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        env!("MVM_SOURCE_COMMIT"),
+        env!("MVM_SOURCE_DIRTY"),
+    )
+}
+
+/// The commit a source build's host helpers must match, or `None` for a
+/// release build, whose helpers come from its own signed release.
+fn source_helper_commit_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    commit: &str,
+    dirty: &str,
+) -> Result<Option<String>> {
+    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
         return Ok(None);
     }
-    let commit = env!("MVM_SOURCE_COMMIT");
-    let dirty = env!("MVM_SOURCE_DIRTY");
     validate_source_helper_identity(commit, dirty).map(Some)
 }
 
@@ -917,18 +908,11 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// The Sigstore bundle published beside the archive is checked in-process
 /// against the embedded trust root, so a host without `cosign` gets the same
 /// verdict as one with it. A missing, unparseable, or foreign-signed bundle
-/// refuses the update; the SHA-256 checked before this comes from a manifest
-/// fetched over the same channel, so on its own it says nothing about who
-/// published the archive.
+/// refuses the update. The SHA-256 checked before this already came from a
+/// signed manifest; this binds the archive to the workflow directly as well.
 fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
-    let release_base = format!(
-        "{}/{}/releases/download/{}",
-        github_download_base(),
-        GITHUB_REPO,
-        version
-    );
     ui::info("Verifying release signature...");
-    verify_archive_signature_at(&release_base, version, archive_name, archive_path)?;
+    verify_archive_signature_at(&release_base(version), version, archive_name, archive_path)?;
     ui::success("Signature verified.");
     Ok(())
 }
@@ -1172,9 +1156,40 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAction, decide_update, source_helper_marker_matches, validate_source_helper_bundle,
+        UpdateAction, decide_update, source_helper_commit, source_helper_commit_for,
+        source_helper_marker_matches, validate_source_helper_bundle,
         validate_source_helper_identity,
     };
+    use mvm_build::artifact_acquisition::DistributionChannel;
+
+    #[test]
+    fn the_helper_commit_is_this_builds_own_channel_and_identity() {
+        let own = source_helper_commit_for(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            env!("MVM_SOURCE_COMMIT"),
+            env!("MVM_SOURCE_DIRTY"),
+        );
+        assert_eq!(
+            source_helper_commit().map_err(|e| e.to_string()),
+            own.map_err(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn only_a_source_build_pins_its_helpers_to_a_commit() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Source, &commit, "false").unwrap(),
+            Some(commit.clone())
+        );
+        assert!(source_helper_commit_for(DistributionChannel::Source, &commit, "true").is_err());
+        // A release build takes its helpers from its own signed release, so
+        // even unidentified source metadata asks nothing of it.
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Release, "", "true").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn source_helper_identity_requires_a_clean_full_commit() {
@@ -1635,59 +1650,154 @@ mod tests {
         assert!(format!("{err:#}").contains("v0.18.0"));
     }
 
-    // --- checksum verification ---
+    // --- checksum manifest signature ---
 
-    fn sha256_of(data: &[u8]) -> String {
-        let digest: [u8; 32] = Sha256::digest(data).into();
-        hex_encode(&digest)
-    }
+    /// The archive the manifest fixtures below are asked about.
+    const MANIFEST_ARCHIVE: &str = "mvmctl-aarch64-apple-darwin.tar.gz";
 
-    #[test]
-    fn test_parse_checksum_line_valid() {
-        let hex = "a".repeat(64);
-        let line = format!("{}  mvmctl-aarch64-apple-darwin.tar.gz", hex);
-        let digest = parse_checksum_line(&line).unwrap();
-        assert_eq!(digest, [0xaa; 32]);
-    }
-
-    #[test]
-    fn test_parse_checksum_line_wrong_length() {
-        let err = parse_checksum_line("abc  file.tar.gz").unwrap_err();
-        assert!(err.to_string().contains("64 hex chars"));
-    }
-
-    #[test]
-    fn test_checksum_correct_digest_passes() {
-        let data = b"hello binary";
-        let hash = sha256_of(data);
-
-        // Write the "archive" to a temp file
-        let mut tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.write_all(data).unwrap();
-        tmp.flush().unwrap();
-
-        // Build a checksums-sha256.txt line that matches
-        let checksum_line = format!("{}  mvmctl-test.tar.gz\n", hash);
-
-        // parse_checksum_line + manual comparison (verify_checksum needs HTTP)
-        let expected = parse_checksum_line(checksum_line.trim()).unwrap();
-        let actual: [u8; 32] = Sha256::digest(data).into();
-        assert_eq!(expected, actual, "Correct digest should match");
-    }
-
-    #[test]
-    fn test_checksum_tampered_bytes_fail() {
-        let data = b"hello binary";
-        let tampered = b"TAMPERED!!!!";
-        let hash_of_original = sha256_of(data);
-        let checksum_line = format!("{}  mvmctl-test.tar.gz", hash_of_original);
-
-        let expected = parse_checksum_line(&checksum_line).unwrap();
-        let actual: [u8; 32] = Sha256::digest(tampered).into();
-        assert_ne!(
-            expected, actual,
-            "Tampered bytes should produce different digest"
+    /// Stage a release directory under `tag` holding `manifest` as the
+    /// release's combined checksum manifest, beside `bundle` when given, and
+    /// point the download base at it.
+    fn stage_manifest_release(
+        env: &mut TestEnv,
+        tag: &str,
+        manifest: &[u8],
+        bundle: Option<&[u8]>,
+    ) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root
+            .path()
+            .join(GITHUB_REPO)
+            .join("releases/download")
+            .join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(CHECKSUM_MANIFEST), manifest).unwrap();
+        if let Some(bundle) = bundle {
+            let name = mvm_build::release_signature::bundle_asset_name(CHECKSUM_MANIFEST);
+            std::fs::write(dir.join(name), bundle).unwrap();
+        }
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            format!("file://{}", root.path().display()),
         );
+        root
+    }
+
+    /// The committed `v0.18.0-rc.1` manifest and the bundle `release.yml`
+    /// published for it. The signature covers bytes, not a file name, so it
+    /// stands in for that release's combined manifest.
+    #[cfg(feature = "manifest-verify")]
+    fn signed_fixture() -> (Vec<u8>, Vec<u8>) {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1");
+        let asset = "builder-vm-aarch64-checksums-sha256.txt";
+        (
+            std::fs::read(dir.join(asset)).unwrap(),
+            std::fs::read(dir.join(format!("{asset}.bundle"))).unwrap(),
+        )
+    }
+
+    /// The staged manifest has no entry for the archive, so a refusal that
+    /// came from parsing it would say so; this one must come from the
+    /// signature check, before any digest is read.
+    #[test]
+    fn self_update_refuses_an_unsigned_checksum_manifest_before_parsing() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        env.remove("MVM_SKIP_HASH_VERIFY");
+        let manifest = format!("{}  some-other-archive.tar.gz\n", "d".repeat(64));
+        let _release = stage_manifest_release(&mut env, "v9.9.9", manifest.as_bytes(), None);
+
+        let msg = format!(
+            "{:#}",
+            signed_archive_digest("v9.9.9", MANIFEST_ARCHIVE)
+                .expect_err("an unsigned manifest must not supply a digest")
+        );
+
+        assert!(
+            msg.contains("unauthenticated checksum manifest"),
+            "the refusal must name the reason: {msg}"
+        );
+        assert!(
+            !msg.contains("did not include") && !msg.contains("no entry"),
+            "the manifest must be refused before it is parsed: {msg}"
+        );
+        assert!(msg.contains("v9.9.9"), "names the release: {msg}");
+    }
+
+    /// Waiving the digest comparison is not a waiver of who published the
+    /// digests.
+    #[test]
+    fn self_update_hash_skip_does_not_waive_the_manifest_signature() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        env.set("MVM_SKIP_HASH_VERIFY", "1");
+        let manifest = format!("{}  {MANIFEST_ARCHIVE}\n", "e".repeat(64));
+        let _release = stage_manifest_release(&mut env, "v9.9.9", manifest.as_bytes(), None);
+
+        let msg = format!(
+            "{:#}",
+            signed_archive_digest("v9.9.9", MANIFEST_ARCHIVE)
+                .expect_err("MVM_SKIP_HASH_VERIFY must not admit an unsigned manifest")
+        );
+        assert!(msg.contains("unauthenticated checksum manifest"), "{msg}");
+    }
+
+    /// Control for the two refusals below: the real bundle verifies under its
+    /// own tag and the digest comes out of the manifest it signs.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn self_update_reads_digests_from_a_manifest_signed_under_its_tag() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let (manifest, bundle) = signed_fixture();
+        let _release = stage_manifest_release(&mut env, "v0.18.0-rc.1", &manifest, Some(&bundle));
+
+        let digest = signed_archive_digest("v0.18.0-rc.1", "builder-vm-aarch64.cmdline.txt")
+            .expect("the release workflow's own manifest signature must verify");
+        assert_eq!(
+            digest,
+            "5e186ff06b2c723c6cacd55497a3b053d65602314ca44dcccf3860e9a411afe5"
+        );
+    }
+
+    /// A genuine bundle served beside edited manifest bytes: the edit adds a
+    /// digest for the archive being installed, which is exactly what an
+    /// attacker swapping the archive would need.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn self_update_refuses_a_tampered_checksum_manifest() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let (mut manifest, bundle) = signed_fixture();
+        manifest.extend_from_slice(format!("{}  {MANIFEST_ARCHIVE}\n", "f".repeat(64)).as_bytes());
+        let _release = stage_manifest_release(&mut env, "v0.18.0-rc.1", &manifest, Some(&bundle));
+
+        let msg = format!(
+            "{:#}",
+            signed_archive_digest("v0.18.0-rc.1", MANIFEST_ARCHIVE)
+                .expect_err("edited manifest bytes must not verify")
+        );
+        assert!(msg.contains("unauthenticated checksum manifest"), "{msg}");
+    }
+
+    /// The identity is tag-bound: another release's genuine manifest, served
+    /// under this tag, is refused.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn self_update_refuses_a_checksum_manifest_signed_for_another_tag() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let (manifest, bundle) = signed_fixture();
+        let _release = stage_manifest_release(&mut env, "v0.18.0", &manifest, Some(&bundle));
+
+        let msg = format!(
+            "{:#}",
+            signed_archive_digest("v0.18.0", "builder-vm-aarch64.cmdline.txt")
+                .expect_err("a manifest signed for v0.18.0-rc.1 must not verify as v0.18.0")
+        );
+        assert!(msg.contains("unauthenticated checksum manifest"), "{msg}");
+        assert!(msg.contains("v0.18.0"), "names the release: {msg}");
     }
 
     // --- Existing tests ---
@@ -1845,19 +1955,25 @@ mod tests {
         );
     }
 
+    /// The digest comparison itself, with the publisher check waived through
+    /// its documented escape so the loopback server need not sign anything.
     #[test]
     fn verify_checksum_holds_the_archive_to_the_manifest_digest() {
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("mvmctl-unit.tar.gz");
         std::fs::write(&archive, b"release bytes").unwrap();
-        let matching = hex_encode(&Sha256::digest(b"release bytes"));
+        let matching = hex::encode(Sha256::digest(b"release bytes"));
 
         let mut env = TestEnv::new();
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
         env.set(
             "MVM_UPDATE_DOWNLOAD_URL",
             loopback_release_server(1, {
                 let matching = matching.clone();
-                move |_| format!("{matching}  mvmctl-unit.tar.gz\n").into_bytes()
+                move |line| {
+                    assert!(line.contains(CHECKSUM_MANIFEST), "{line}");
+                    format!("{matching}  mvmctl-unit.tar.gz\n").into_bytes()
+                }
             }),
         );
         verify_checksum("v9.9.9", "mvmctl-unit.tar.gz", &archive)

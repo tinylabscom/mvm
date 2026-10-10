@@ -226,7 +226,7 @@ fn restore_image_from(
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn main() -> anyhow::Result<()> {
-    use std::io::{Read, Write};
+    use std::io::Read;
     use std::time::Duration;
 
     use anyhow::Context;
@@ -263,10 +263,18 @@ fn main() -> anyhow::Result<()> {
         ));
     }
 
-    // Announce launch: the backend polls for this PID file to confirm boot, then
-    // reads it to stop/status the VM.
-    std::fs::write(&cfg.pid_file, std::process::id().to_string())
-        .with_context(|| format!("write pid file {}", cfg.pid_file.display()))?;
+    use mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus as CaptureStatus;
+    let state_dir = cfg
+        .pid_file
+        .parent()
+        .context("supervisor state directory missing")?;
+    CaptureStatus::Starting.publish(state_dir)?;
+    // Only a planless resident standby may be reassigned. An admitted
+    // workload already has bounds tied to its original owner.
+    if cfg.handoff_socket.is_some() && (cfg.plan.is_some() || !cfg.vsock) {
+        CaptureStatus::UnsafeHandoffRefused.publish(state_dir)?;
+        anyhow::bail!("protected handoff requires a planless vsock standby");
+    }
     if let Some(path) = &cfg.pause_state {
         let _ = std::fs::remove_file(path);
     }
@@ -395,18 +403,54 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    // A resident standby parent boots with no plan, so nothing above armed
-    // anything. If a claim hands it to a child, that child's plan arrives with
-    // the handoff and its bounds are armed then, exactly as at a cold boot.
-    let handoff_accepted = (cfg.plan.is_none() && cfg.handoff_socket.is_some()).then(|| {
-        let (sender, accepted) = std::sync::mpsc::channel();
-        mvm_hostd::supervisor::claimed_child::arm_on_handoff(accepted, cfg.pid_file.clone());
-        sender
-    });
-
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
+    use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
+    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
+    anyhow::ensure!(
+        state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
+        "supervisor instance does not match its managed state directory"
+    );
+    let admitted_plan = cfg
+        .plan
+        .as_ref()
+        .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?;
+    let redaction = admitted_plan
+        .as_ref()
+        .map(|plan| plan.redaction.clone())
+        .unwrap_or_default();
+    let authority = match admitted_plan.as_ref() {
+        Some(plan) => CaptureAuthority::Admitted(plan),
+        None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
+            CaptureAuthority::OperationalLiveOnly
+        }
+        None => anyhow::bail!("workload protected capture requires an admitted plan"),
+    };
+    let (capture_owner, console_sink) =
+        match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {
+            vm: &cfg.vm_name,
+            authority,
+            redaction: &redaction,
+        }) {
+            Ok(capture) => capture,
+            Err(_) => {
+                let _ = CaptureStatus::CaptureSetupFailed.publish(state_dir);
+                anyhow::bail!("required protected console owner could not be provisioned");
+            }
+        };
+    let capture_owner = mvm_hostd::supervisor::protected_handoff::CaptureRoute::start(
+        capture_owner,
+        cfg.pid_file.clone(),
+        &STOP,
+    )?;
+    let capture_control = cfg.handoff_socket.as_ref().map(|_| capture_owner.control());
+    // Only a provisioned capture owner may announce this boot.
+    CaptureStatus::Running.publish(state_dir)?;
+    std::fs::write(&cfg.pid_file, std::process::id().to_string())
+        .context("publish protected supervisor PID")?;
     let result = mvm_runtime::backends::hvf::boot_kernel_until(
         mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
             .initramfs(initramfs.as_deref())
@@ -437,11 +481,8 @@ fn main() -> anyhow::Result<()> {
                 cmdline: cfg.cmdline.clone(),
                 mem_mib: cfg.memory_mib,
                 vcpus: cfg.vcpus,
-                // Streamed as the guest emits it, so the log is readable while
-                // the VM is still running — which is when a boot that never
-                // reaches the agent has to be diagnosed. The authoritative
-                // rewrite after the run loop returns is unchanged.
-                console_log: Some(cfg.console_log.clone()),
+                console_log: None,
+                console_sink: Some(Box::new(console_sink)),
                 pause_state: cfg.pause_state.clone(),
                 snapshot_request: cfg.snapshot_request.clone(),
                 snapshot_ram: cfg.snapshot_ram.clone(),
@@ -451,21 +492,32 @@ fn main() -> anyhow::Result<()> {
                 handoff_socket: cfg.handoff_socket.clone(),
                 handoff_root: cfg.handoff_root.clone(),
                 handoff_verify_key: cfg.handoff_verify_key.clone(),
-                handoff_accepted,
+                handoff_accepted: None,
+                capture_control,
             })
             .build(),
     );
 
-    // The VM has stopped. Persist the outputs (console + workload exit code)
-    // BEFORE removing the PID file: the backend keys "stopped" on the PID file via
-    // status/wait, so dropping it first races a reader to an empty console.
-    let r = result.map_err(|e| anyhow::anyhow!("hvf boot failed: {e:?}"))?;
+    // The UART was dropped (and its final line enqueued) on both success and
+    // error. Drain and seal before announcing stop; never rewrite raw console.
     let console_write_started = std::time::Instant::now();
-    if let Ok(mut f) = std::fs::File::create(&cfg.console_log) {
-        let _ = f.write_all(&r.console);
-        let _ = f.flush();
-    }
+    let complete = capture_owner.finish();
     let console_write = console_write_started.elapsed();
+    let status = if !complete {
+        CaptureStatus::CaptureFailed
+    } else if result.is_err() {
+        CaptureStatus::BootFailed
+    } else {
+        CaptureStatus::Stopped
+    };
+    let _ = status.publish(state_dir);
+    let r = match result {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = std::fs::remove_file(&cfg.pid_file);
+            anyhow::bail!("HVF boot failed; inspect protected supervisor status");
+        }
+    };
     // Transient run-to-exit: persist the workload exit code (the backend's `wait`
     // reads this) so it is durable before "stopped" is observable.
     let workload_exit_write_started = std::time::Instant::now();

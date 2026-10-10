@@ -1,6 +1,6 @@
 //! Map a command or a project file to the OCI image that can run it.
 //!
-//! `mvmctl run npm test` should boot a Node image without the user naming one.
+//! `mvmctl run -- npm test` should boot a Node image without the user naming one.
 //! The mapping is a curated, in-tree table — versioned with the code, reviewed
 //! like code, never fetched at runtime — for the same reason the service-binding
 //! catalog is: a security-relevant default that can change under you between two
@@ -363,7 +363,7 @@ impl RuntimeCatalog {
 
     /// Detect a runtime from the command being run and the files present.
     ///
-    /// Command wins over project file: `mvmctl run python3 script.py` inside a
+    /// Command wins over project file: `mvmctl run -- python3 script.py` inside a
     /// Node project means Python, because argv is what the user just typed and
     /// the directory is only where they happen to be standing.
     ///

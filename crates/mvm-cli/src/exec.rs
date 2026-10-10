@@ -645,6 +645,7 @@ fn run_inner(
         backend: &backend,
         start_config: &start_config,
         resolved: &resolved,
+        user_named: req.name.is_some(),
     };
     let (vm_name, launch_mode) = boot_transient_vm(
         vm_name,

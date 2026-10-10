@@ -396,6 +396,7 @@ mod tests {
     fn stage_bins(dir: &Path) {
         std::fs::write(dir.join("mvm-host-vm-init"), b"INIT-ELF").unwrap();
         std::fs::write(dir.join("mvm-builderd"), b"BUILDERD-ELF").unwrap();
+        std::fs::write(dir.join("mvm-setpriv"), b"SETPRIV-ELF").unwrap();
         // Embedded alongside, never part of the payload.
         std::fs::write(dir.join("stage0-init"), b"SEED").unwrap();
     }
@@ -433,6 +434,7 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         stage_bins(a.path());
         // A different directory, written in a different order.
+        std::fs::write(b.path().join("mvm-setpriv"), b"SETPRIV-ELF").unwrap();
         std::fs::write(b.path().join("mvm-builderd"), b"BUILDERD-ELF").unwrap();
         std::fs::write(b.path().join("mvm-host-vm-init"), b"INIT-ELF").unwrap();
 
@@ -459,6 +461,7 @@ mod tests {
                 "mvm/host-bins",
                 "mvm/host-bins/mvm-builderd",
                 "mvm/host-bins/mvm-host-vm-init",
+                "mvm/host-bins/mvm-setpriv",
                 "mvm/host-bins/MANIFEST",
             ]
         );
@@ -471,6 +474,7 @@ mod tests {
         };
         assert_eq!(data("init"), b"INIT-ELF");
         assert_eq!(data("mvm/host-bins/mvm-host-vm-init"), b"INIT-ELF");
+        assert_eq!(data("mvm/host-bins/mvm-setpriv"), b"SETPRIV-ELF");
         assert!(!names.iter().any(|n| n.contains("stage0-init")));
     }
 
@@ -480,9 +484,10 @@ mod tests {
         stage_bins(dir.path());
         let payload = payload_from(dir.path());
         let expected = format!(
-            "mvm-builderd {}\nmvm-host-vm-init {}\n",
+            "mvm-builderd {}\nmvm-host-vm-init {}\nmvm-setpriv {}\n",
             sha256_hex(b"BUILDERD-ELF"),
-            sha256_hex(b"INIT-ELF")
+            sha256_hex(b"INIT-ELF"),
+            sha256_hex(b"SETPRIV-ELF")
         );
         assert_eq!(payload.manifest().render(), expected);
         assert_eq!(payload.digest().as_str(), sha256_hex(expected.as_bytes()));
@@ -497,7 +502,7 @@ mod tests {
         let payload = payload_from(dir.path());
         assert_eq!(
             payload.digest().as_str(),
-            "15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0"
+            "07a36ded224d40a6ae9d107f39d5ae7c08e0c4e9aca86a4295bcec82c22e0f58"
         );
         assert_eq!(sha256_hex(payload.cpio()), GOLDEN_CPIO_SHA256);
     }
@@ -505,7 +510,7 @@ mod tests {
     /// The archive bytes for [`stage_bins`]. Two hosts running the same
     /// `mvmctl` must hand their guests the same archive.
     const GOLDEN_CPIO_SHA256: &str =
-        "8fcc05ccd8c0baeae948212cd5dd4cd92f974657c89ae3b855bda3d6351a0bd9";
+        "e721b6ac4a1b7be97b896ef2d3c5dfa56e444b7b351381215e1aaf8c4e24ae58";
 
     #[test]
     fn a_member_that_does_not_match_its_compiled_digest_is_refused() {

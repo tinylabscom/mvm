@@ -14,8 +14,10 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+pub(crate) mod oci;
 mod state;
 
+use oci::pull_image_to_dir;
 pub(crate) use state::map_status;
 use state::to_state;
 
@@ -27,10 +29,7 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_fs::oci::{
-    ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
-    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
-};
+use mvm_fs::oci::{ImageReference, LayerDescriptor, UnpackOptions, UnpackReport, unpack_layer};
 use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
@@ -47,8 +46,8 @@ use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
     FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, PostRestoreSignal, SnapshotIO,
-    VsockPostRestoreSignal, VsockPrimedSignalSource, await_primed_barrier, describe_missing_reseed,
-    pause_and_seal, signal_post_restore, verify_and_resume,
+    VsockPostRestoreSignal, VsockPrimedSignalSource, admit_host_snapshot_key, await_primed_barrier,
+    describe_missing_reseed, pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::VmNameRegistry;
 
@@ -937,8 +936,19 @@ pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Re
         RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
         RootfsPlan::Pull(image_ref) => {
             let staging = tempfile::tempdir().map_err(backend_err)?;
-            let layers = pull_image_to_dir(&image_ref, staging.path()).await?;
-            materialize_from_dir(staging.path(), name, layers)
+            let pulled = pull_image_to_dir(&image_ref, staging.path()).await?;
+            let output = run_rootfs_output(name);
+            materialize_tree(
+                staging.path(),
+                &output,
+                name,
+                pulled.layers,
+                TreeMaterializeOptions {
+                    config: Some(&pulled.config),
+                    ..TreeMaterializeOptions::default()
+                },
+            )?;
+            Ok(output)
         }
     }
 }
@@ -967,52 +977,47 @@ struct UnpackedLayers {
 /// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
 fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
+    materialize_tree(
+        dir,
+        &output,
+        name,
+        layers,
+        TreeMaterializeOptions::default(),
+    )?;
+    Ok(output)
+}
+
+#[derive(Default)]
+struct TreeMaterializeOptions<'a> {
+    config: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
+    sealed: bool,
+    runtime_binaries: Option<&'a mvm_build::oci_runtime_inject::MvmRuntimeBinaries>,
+    policy: mvm_build::run_image::RootfsMaterializationPolicy,
+}
+
+fn materialize_tree(
+    dir: &Path,
+    output: &Path,
+    name: &str,
+    layers: UnpackedLayers,
+    options: TreeMaterializeOptions<'_>,
+) -> Result<()> {
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no guest binaries; remaining legacy injection needs
     // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .sealed(false)
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
+            .sealed(options.sealed)
+            .entrypoint(options.config)
+            .runtime_binaries(options.runtime_binaries)
+            .materialization_policy(options.policy)
+            .reuse_published(false)
             .deferred_nodes(layers.deferred_nodes)
             .owners(layers.owners)
             .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
-    Ok(output)
-}
-
-/// Pull a public OCI registry reference and unpack every layer into `dest`,
-/// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
-/// crate boundary, keeping mvm-oci decompressor-free by design).
-async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<UnpackedLayers> {
-    let reference = image_ref.canonical();
-    let manifest_fetcher = OciManifestFetcher::new();
-    let manifest = manifest_fetcher
-        .fetch_linux_platform_manifest(image_ref, &current_linux_platform())
-        .await
-        .map_err(|e| backend_err(format!("fetch manifest for {reference}: {e}")))?;
-    let layers = manifest
-        .layers()
-        .map_err(|e| backend_err(format!("parse layers for {reference}: {e}")))?;
-    if layers.is_empty() {
-        return Err(backend_err(format!("OCI image {reference} has no layers")));
-    }
-    let layer_fetcher =
-        OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
-    let mut prior_layer_paths = std::collections::HashSet::new();
-    let mut unpacked = UnpackedLayers::default();
-    for layer in &layers {
-        let mut bytes = Vec::new();
-        layer_fetcher
-            .fetch_layer(image_ref, layer, &mut bytes)
-            .await
-            .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
-        let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
-        unpacked.owners.absorb(&report.ownership);
-        prior_layer_paths.extend(report.paths_written);
-        unpacked.deferred_nodes.extend(report.deferred_nodes);
-    }
-    Ok(unpacked)
+    Ok(())
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
@@ -1303,6 +1308,18 @@ impl MvmClient for LocalBackend {
         let _lifecycle = mvm_runtime::vm::instance_snapshot::lock_resume(name)
             .map_err(|e| backend_err(format!("{e:#}")))?;
 
+        // A sealed snapshot is always encrypted. Its key is admitted before
+        // anything else happens, and that same key encrypts the capture, so a
+        // pause without usable key material refuses with nothing captured.
+        let snapshot_key = if Self::uses_sealed_snapshot(&backend) {
+            Some(
+                admit_host_snapshot_key()
+                    .map_err(|e| backend_err(format!("pausing VM {name:?}: {e}")))?,
+            )
+        } else {
+            None
+        };
+
         // Opt-in warm-base barrier: wait for the workload to signal "primed"
         // before sealing. Fails closed — a timeout propagates so no half-warmed
         // snapshot is sealed. Skipped for the mock (no guest agent to answer).
@@ -1315,9 +1332,9 @@ impl MvmClient for LocalBackend {
                 .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
         }
 
-        let outcome = if Self::uses_sealed_snapshot(&backend) {
+        let outcome = if let Some(key) = &snapshot_key {
             let io = self.snapshot_io_for(&backend, name)?;
-            let sidecar = pause_and_seal(name, &*io)
+            let sidecar = pause_and_seal(name, &*io, key)
                 .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
             write_fc_paused_marker(name)?;
             set_registry_paused(name, true)?;
@@ -1825,7 +1842,8 @@ mod tests {
     fn a_sealed_resume_refuses_a_machine_that_is_not_paused() {
         let _data = IsolatedDataDir::new();
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned, &test_snapshot_key())
+            .expect("sealed");
         let before = canned.calls().len();
 
         let unregistered = resume_sealed("vm-run", &canned, Guest::Reseeded, QUICK)
@@ -1902,7 +1920,12 @@ mod tests {
         let _data = IsolatedDataDir::new();
         let registry_path = register("vm-seal");
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-seal", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal(
+            "vm-seal",
+            &canned,
+            &test_snapshot_key(),
+        )
+        .expect("sealed");
         let state_dir = vm_state_dir("vm-seal");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
@@ -1976,9 +1999,20 @@ mod tests {
     #[cfg(feature = "test-support")]
     struct IsolatedDataDir {
         _lock: std::sync::MutexGuard<'static, ()>,
-        _env: TestEnv,
+        env: TestEnv,
         dir: tempfile::TempDir,
     }
+
+    /// The snapshot key [`IsolatedDataDir`] selects, admitted.
+    #[cfg(feature = "test-support")]
+    fn test_snapshot_key() -> mvm_runtime::vm::instance_snapshot::SnapshotKey {
+        admit_host_snapshot_key().expect("IsolatedDataDir selects a snapshot key")
+    }
+
+    /// The snapshot key every isolated test pauses under.
+    #[cfg(feature = "test-support")]
+    const TEST_SNAPSHOT_KEY_HEX: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     #[cfg(feature = "test-support")]
     impl IsolatedDataDir {
@@ -1989,9 +2023,15 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut env = TestEnv::new();
             env.set("MVM_HOME", dir.path());
+            // Sealing a snapshot requires a key; tests that exercise its
+            // absence remove it.
+            env.set(
+                mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+                TEST_SNAPSHOT_KEY_HEX,
+            );
             Self {
                 _lock: lock,
-                _env: env,
+                env,
                 dir,
             }
         }
@@ -2644,9 +2684,15 @@ mod tests {
             .pause_machine(&id, PauseOpts::default())
             .await
             .expect("pause seals the canned snapshot");
-        // CannedIO writes 12-byte vmstate + 8-byte mem stubs and seals epoch 1.
-        assert_eq!(outcome.vmstate_len, b"mock-vmstate".len() as u64);
-        assert_eq!(outcome.mem_len, b"mock-mem".len() as u64);
+        // CannedIO writes 12-byte vmstate + 8-byte mem stubs; the seal records
+        // the lengths of their ciphertext, which carries a header, a nonce
+        // and a tag on top.
+        let sealed_len = |stub: &[u8]| {
+            use mvm_core::crypto::snapshot_encryption::{HEADER_SIZE, NONCE_SIZE, TAG_SIZE};
+            (HEADER_SIZE + NONCE_SIZE + stub.len() + TAG_SIZE) as u64
+        };
+        assert_eq!(outcome.vmstate_len, sealed_len(b"mock-vmstate"));
+        assert_eq!(outcome.mem_len, sealed_len(b"mock-mem"));
         assert!(outcome.epoch >= 1);
 
         // Plain resume drives the replay-refusal gate (`verify_and_resume`) and,
@@ -2769,6 +2815,69 @@ mod tests {
         let msg = error.to_string();
         assert!(msg.contains("Do not run resume again"), "{msg}");
         assert!(msg.contains("guest is running"), "{msg}");
+    }
+
+    /// The sealed pause encrypts the capture, and the resume decrypts it.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_sealed_pause_stores_only_ciphertext() {
+        let _data = IsolatedDataDir::new();
+        std::fs::create_dir_all(mvm_runtime::MockBackend::vm_dir("snap-enc")).unwrap();
+        register("snap-enc");
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-enc".into());
+        be.pause_machine(&id, PauseOpts::default())
+            .await
+            .expect("paused");
+        let dir = mvm_runtime::vm::instance_snapshot::snapshot_dir("snap-enc");
+        for name in [
+            mvm_core::crypto::snapshot_hmac::VMSTATE_FILENAME,
+            mvm_core::crypto::snapshot_hmac::MEM_FILENAME,
+        ] {
+            assert!(
+                mvm_core::crypto::snapshot_encryption::probe(&dir.join(name))
+                    .unwrap()
+                    .is_some(),
+                "{name} is encrypted"
+            );
+        }
+        be.resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect("the resume decrypts under the same key");
+    }
+
+    /// A pause whose key is missing or malformed is refused before the
+    /// machine is touched: nothing is captured, it is not marked paused, and
+    /// no sleep is recorded.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_pause_without_a_usable_key_is_refused_before_capture() {
+        use mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV;
+        let mut data = IsolatedDataDir::new();
+        std::fs::create_dir_all(mvm_runtime::MockBackend::vm_dir("snap-nokey")).unwrap();
+        let registry_path = register("snap-nokey");
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-nokey".into());
+        let bad = "7q".repeat(32);
+        for (value, expect) in [
+            (None, "no snapshot key is configured"),
+            (Some(&bad), "not a usable key"),
+        ] {
+            match value {
+                Some(value) => data.env.set(SNAPSHOT_TENANT_KEY_ENV, value),
+                None => data.env.remove(SNAPSHOT_TENANT_KEY_ENV),
+            }
+            let msg = be
+                .pause_machine(&id, PauseOpts::default())
+                .await
+                .expect_err("refused")
+                .to_string();
+            assert!(msg.contains(expect), "{msg}");
+            assert!(!msg.contains("7q"), "the key is not echoed: {msg}");
+        }
+        assert!(!mvm_runtime::vm::instance_snapshot::snapshot_dir("snap-nokey").exists());
+        assert!(!audit_log().contains("\"workload_sleep\""));
+        assert!(!is_paused(&registry_path, "snap-nokey"));
     }
 
     #[tokio::test]

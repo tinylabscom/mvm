@@ -94,11 +94,13 @@ mod high_capability_tests;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
 mod cgroup2;
+mod extensions;
 mod service_identity;
 pub use cgroup2::{
     CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
     mount_and_delegate_cgroup2,
 };
+pub use extensions::mount_extensions;
 #[cfg(any(target_os = "linux", test))]
 pub use service_identity::TOOL_HELPER_IDENTITY;
 pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity};

@@ -177,23 +177,24 @@ The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the
 
 **mvm's builder binaries travel beside the builder image, not inside it.**
 Every builder boot on every backend carries a *builder boot payload*: an
-initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init` and
-`mvm-builderd`, digest-checked by the guest before it pivots into the
-read-only image and runs them from `/run/mvm/host-bins`. The image and the
-payload agree on a versioned builder boot ABI (`/etc/mvm/builder-boot-abi`;
-`builder_boot_abi` in a signed image set): 0 is a legacy image that bakes the
-binaries (the payload's copies still win), 1 is an image that carries none.
+initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init`,
+`mvm-builderd` and `mvm-setpriv`, digest-checked by the guest before it
+pivots into the read-only image and runs them from `/run/mvm/host-bins`. The
+image and the payload agree on a versioned builder boot ABI
+(`/etc/mvm/builder-boot-abi`; `builder_boot_abi` in a signed image set): 0 is
+a legacy image that bakes the builder binaries and `mvm-setpriv`, 1 bakes
+only `mvm-setpriv`, and 2 carries no mvm binary.
 The contract lives in `mvm_build::builder_boot` and is recorded in ADR-004;
 `builder_boot_cmdline` is the one kernel command line every backend boots
 with, and `stage_builder_boot` decides each boot. A persistent builder booted
 with other builder binaries is stopped rather than reused.
 
-One mvm binary is still inside the image: an ABI 1 builder image bakes
-`mvm-setpriv`, compiled from this tree by mvm-images, and `mvm-host-vm-init`
-runs it from `/sbin`. Builder boot ABI 2
-([#4107](https://github.com/tinylabscom/mvm/issues/4107)) is decided but not
-built: it adds `mvm-setpriv` to the payload so the image carries no mvm binary
-at all.
+The currently published ABI 1 builder image still bakes `mvm-setpriv`,
+compiled from this tree by mvm-images. `mvm-host-vm-init` forks the guest
+agent under the payload's copy and falls back to the image's `/sbin` copy only
+when the boot carried none. mkGuest's `withSetpriv = false` builds an image
+without the baked copy; declaring ABI 2 for the published builder image is
+mvm-images' change to make.
 
 Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
@@ -226,7 +227,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
-- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`, and it has to stay one: today the builder image in mvm-images compiles it from this tree's source, so its closure is part of the builder image's cache key, and every crate it reaches is a crate whose edits rebuild that image. ADR-054 moves it into the guest runtime that ships with `mvmctl` — reaching workloads through the runtime overlay ([#4106](https://github.com/tinylabscom/mvm/issues/4106)) and the builder through boot ABI 2 ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) — after which its closure leaves that key. `mvm-agentd` depends on it, never the reverse.
+- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`. The published ABI 1 builder image still compiles it from this tree, so its closure is part of that image's cache key. At ABI 2 it arrives in the builder boot payload and leaves the image's key. ADR-054 also moves it into the guest runtime that ships with `mvmctl` for workloads through the runtime overlay ([#4106](https://github.com/tinylabscom/mvm/issues/4106)). `mvm-agentd` depends on it, never the reverse.
 - `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
 - `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`, plus the admitted local launch (`machine.run`/`machine.create`, through `LaunchRequest`), the DevOnly `guest.*` process and file methods, answered by `mvm_client::guest` (the implementation `mvmctl machine proc`/`fs`/`cp` use), and handle-and-poll process output streams (`guest.proc.stream.*`). A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. The SDKs never run `mvmctl` and have no subprocess fallback; `xtask check-no-cli-shellout` fails the build if SDK source reaches for a process API. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.
@@ -290,7 +291,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **No `clippy::too_many_arguments`**: `#[allow(clippy::too_many_arguments)]` is banned outright — no exceptions in hand-written code (the only legitimate use is bindgen-generated FFI like `crates/deps/libkrun-sys/src/sys.rs`). When a function trips the lint, introduce a dedicated struct with a builder (Rust best practice) carrying those arguments and pass the built value. See AGENTS.md §"Clippy: Zero Warnings, Always".
 - **Reuse first — never reimplement what exists**: before writing anything, search the workspace (`rg`, the facade re-exports, the owning module) for a helper, type, trait impl, or crate that already does the job, and call it. Duplicated logic drifts and is this repo's most common bug source. If an existing helper is _almost_ right, extend it — don't fork a second copy. Concrete standing rules: all `~/.mvm` paths go through `mvm-core::config` helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) — never build them inline with `std::env::var("HOME")` + `.join(...)` (that ignores `MVM_HOME` and breaks worktree isolation); shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
 - **Best-practice construction**: prefer many small single-purpose functions (each trivially unit-testable) over large branchy ones; use the **builder pattern** for types with more than a couple of (especially optional) fields instead of long positional constructors; express behavior that varies by backend/env/mode as a **trait with impls** (`VmBackend`, `ShellEnvironment`), not a `match` scattered across call sites; group related values into named config/params **structs** rather than threading bare arguments through layers; make illegal states unrepresentable with newtypes/enums over stringly-typed flags; and don't over-abstract (YAGNI) — reach for a trait/builder only when there's a real second case. If you can't write a focused test for a function, it's too big — split it. (See AGENTS.md §"Reuse First; Compose Small, Testable Units".)
-- **Images are built in mvm-images; a contributor build builds them from a checkout of it when one is present**: the compiled distribution channel is authoritative. Image construction — the builder image, workload images, kernels — lives in the [mvm-images](https://github.com/tinylabscom/mvm-images) repository, and so, today, does the published build of the runtime overlay, the SDK sidecars and the initramfs. Two of those already have a host build in this tree: a source checkout with no mvm-images checkout selected builds the runtime overlay (cargo-zigbuild binaries, the pure-Rust ext4 writer, in-process verity; `build_runtime_overlay_from_guest_binaries`) and the universal initramfs (a Rust newc cpio) itself. The SDK sidecar has none. A contributor-built `mvmctl` that finds an mvm-images checkout (named by `MVM_IMAGES_DIR`, or a sibling `../mvm-images`) pair-builds source-matched workload images, the overlay and the sidecars from it against this checkout; it builds the builder image from that checkout only when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` is set, and fetches the pinned one otherwise. Without a checkout it fetches and verifies the published image set `crates/mvm-core/images.lock` pins. Guest program source — the guest agent and runtime binaries, the SDK host-services library — is still this tree's and still builds from it. An official release binary always downloads verified, version-matched artifacts even when invoked from inside a clone. Filesystem proximity must never turn an official binary into a compiler frontend. A contributor modifying the builder flake in their mvm-images checkout sees their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build, with local builder builds enabled — with no release-pipeline round-trip. ADR-030 §Decision records that resolution rule and ADR-030 §Consequences records the rationale. **Decided, not yet built** (ADR-054, which amends ADR-030 decision 4; [#4100](https://github.com/tinylabscom/mvm/issues/4100)): mvm-images builds only the Linux layer and stops reading this tree, the guest runtime ships as a signed asset with each `mvmctl` release, and `mvmctl` assembles the overlay, initramfs and sidecar from that asset or a source build, so pair builds of those three go away. Until those workstreams land, the image set still carries all three and is where a release binary gets them. **One contributor opt-out exists**: `MVM_BOOT_IMAGE=fetch` fetches the published boot image even when a checkout is selected, when the image is not what is being worked on and an unconditional image build is pure cost. The fetched image records `source: fetched` in its sidecar, so a stale prebuilt cannot later be mistaken for a build of the working tree; and `mvmctl doctor`'s `boot image` line reports which arm ran and why. Explicit acquisition overrides remain explicit; the channel governs automatic defaults.
+- **Images are built in mvm-images; a contributor build builds them from a checkout of it when one is present**: the compiled distribution channel is authoritative. Image construction — the builder image, workload images, kernels — lives in the [mvm-images](https://github.com/tinylabscom/mvm-images) repository, and so, today, does the published build of the runtime overlay, the SDK sidecars and the initramfs. Two of those already have a host build in this tree: a source checkout with no mvm-images checkout selected builds the runtime overlay (cargo-zigbuild binaries, the pure-Rust ext4 writer, in-process verity; `build_runtime_overlay_from_guest_binaries`) and the universal initramfs (a Rust newc cpio) itself. The SDK sidecar has none. A contributor-built `mvmctl` that finds an mvm-images checkout (named by `MVM_IMAGES_DIR`, or a sibling `../mvm-images`) pair-builds source-matched workload images, the overlay and the sidecars from it against this checkout; it builds the builder image from that checkout only when `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` is set, and fetches the pinned one otherwise. Without a checkout it fetches and verifies the published image set `crates/mvm-core/images.lock` pins. Guest program source — the guest agent and runtime binaries, the SDK host-services library — is still this tree's and still builds from it. An official release binary always downloads verified, version-matched artifacts even when invoked from inside a clone. Filesystem proximity must never turn an official binary into a compiler frontend. A contributor modifying the builder flake in their mvm-images checkout sees their change the next time the builder VM boots — via `mvmctl bootstrap` or auto-bootstrap on the next build, with local builder builds enabled — with no release-pipeline round-trip. ADR-030 §Decision records that resolution rule and ADR-030 §Consequences records the rationale. **Decided, not yet built** (ADR-054, which amends ADR-030 decision 4; [#4100](https://github.com/tinylabscom/mvm/issues/4100)): mvm-images builds only the Linux layer and stops reading this tree, the guest runtime ships as a signed asset with each `mvmctl` release, and `mvmctl` assembles the overlay, initramfs and sidecar from that asset or a source build, so pair builds of those three go away. Until those workstreams land, the image set still carries all three and is where a release binary gets them. **`MVM_BOOT_IMAGE=fetch` is narrower than it sounds**: the builder image honours it even with a checkout selected, but the default workload image refuses it while a checkout is selected (`default_microvm.rs`), because the selector is explicit in both directions — to compare against a signed release, deselect the checkout instead. Without a checkout, a fetched default image records `source: fetched` in its sidecar, so a stale prebuilt cannot later be mistaken for a build of the working tree; and `mvmctl doctor`'s `boot image` line reports which arm ran and why. Explicit acquisition overrides remain explicit; the channel governs automatic defaults.
 - **Host Nix is never used by mvmctl**, even when present: `mvmctl` does not shell out to a host `nix` binary, does not consult `nix-darwin`'s `linux-builder`, and does not honor `nix-daemon` URLs in any code path. Every Nix evaluation goes through a VM we launched; builds run inside that builder VM via HVF, Firecracker, or explicitly selected QEMU/libkrun. The reason is determinism and consistency: the same `mvmctl` produces the same artifacts on every host regardless of what the host happens to have installed. A contributor with host Nix installed must not see different behavior from a contributor without it. ADR-004 §Decision and ADR-030 §Decision both record this invariant.
 
 ## Security model
@@ -377,15 +378,20 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    read-only bind-mounts so a compromised service can't mint a uid 0
    entry.
 3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
-   kernel-cmdline roothash + `mvm-verity-init` initramfs (shipped
-   2026-04-30; see plan 27 and the claim-3 row of
-   `specs/adrs/001-microvm-security-posture.md`'s "Claims ledger
+   roothash delivered in `ActivateEnvironment` over vsock + the universal
+   initramfs agent's verity check (the separate verity-init PID 1 is gone;
+   ADR-018 records the change). The runtime overlay's roothash today
+   comes with the overlay itself — from the signed image set on a release
+   binary, or from the host build in a source checkout; ADR-054 moves it to
+   the CLI-assembled overlay once the guest runtime ships with `mvmctl`.
+   See the claim-3 row of `specs/adrs/001-microvm-security-posture.md`'s "Claims ledger
    (claim → witness)" table — there is no separate runbook section).
    CI lane `verified-boot-artifacts` in `security.yml` asserts the
    artifacts are emitted; `verify_and_resume_rejects_tampered_mem`
-   confirms a tampered snapshot is rejected before resume, and
-   live-KVM tamper regression confirms the kernel panics before
-   userspace on a flipped data block.
+   confirms a tampered snapshot is rejected before resume, and the
+   verified-boot conformance scenario confirms a flipped data byte no
+   longer matches the recorded root hash. No CI lane boots a tampered
+   rootfs under KVM today.
 4. **A production-safe run cannot invoke DevOnly guest-agent verbs.**
    `scripts/check-prod-agent-no-exec.sh`, run by the
    `guest-agent-runtime-boundary` job in `.github/workflows/security.yml`,
@@ -415,16 +421,18 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
    defines nothing and never did; the five doc comments that named it were
    corrected on 2026-09-01, along with a second fabricated name they carried.
-   The real pipeline is
-   `fetch_expected_hashes` + `verify_artifact_hash`
-   (`crates/mvm-cli/src/commands/env/artifact_verify.rs`), which fetch
-   the per-arch `*-checksums-sha256.txt` manifest, stream the
-   artifact through SHA-256, and reject + delete on mismatch.
-   The builder-VM/dev-image orchestration in
-   `crates/mvm-cli/src/commands/env/builder_vm/stage0_cache.rs`
-   (`download_builder_vm_image`) and `.../builder_vm/default_microvm.rs`
-   call them. `MVM_SKIP_HASH_VERIFY=1` is the documented emergency
-   escape; never set it in CI.
+   The production path is `acquire_image_set()` in
+   `crates/mvm-cli/src/commands/env/artifact_verify.rs`, which calls
+   `PublishedImageSet::acquire_from`. It checks the pinned manifest digest
+   and publisher signature before parsing, then verifies each fetched
+   member's declared size and digest; a mismatched member is removed.
+   `fetch_expected_hashes` and `verify_artifact_hash` in that CLI module
+   are test-only helpers and are not evidence for the production path.
+   Image-set acquisition does not read `MVM_SKIP_HASH_VERIFY`
+   (`the_hash_skip_hatch_does_not_admit_a_member_the_root_does_not_describe`);
+   the hatch still skips the bootstrap-kernel checks and the per-binary
+   checksums inside an already digest-verified overlay archive. Never set
+   it in CI.
 
 7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
    and `audit` jobs in CI. Reproducibility double-build catches
@@ -757,10 +765,10 @@ this row as enforced without it.
     (`a_missing_bundle_refuses_and_names_the_asset`) and accepts only the
     versioned release workflow
     (`accepted_identities_are_the_versioned_release_workflow`); the
-    fetch gate refuses an unsigned manifest before parsing it
-    (`fetch_expected_hashes_refuses_an_unsigned_manifest_before_parsing`) and
+    image-set acquisition refuses an unsigned pinned root before parsing it
+    (`acquire_refuses_a_root_without_a_signature`) and
     the hash-skip hatch does not waive the signature
-    (`skip_hash_verify_does_not_waive_the_manifest_signature`).
+    (`the_hash_skip_hatch_does_not_waive_the_root_signature`).
 
     The self-update path used to be the exception: `verify_signature` shelled
     out to `cosign` and returned `Ok` with a warning when it was absent. It now
@@ -768,7 +776,13 @@ this row as enforced without it.
     refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
     verifies a real one only under its own tag
     (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
-    `manifest-verify` therefore cannot self-update. `install.sh` verifies an
+    `manifest-verify` therefore cannot self-update. The `checksums-sha256.txt`
+    it compares the tarball against is verified first, under the same
+    tag-bound identity and before a line of it is parsed
+    (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`,
+    `self_update_refuses_a_checksum_manifest_signed_for_another_tag`);
+    `MVM_SKIP_HASH_VERIFY` does not waive it, and `--skip-verify` waives only
+    the tarball's own bundle. `install.sh` verifies an
     upgrade with the installed `mvmctl env verify-release`, or with `cosign`, and
     is best-effort only on a first install to a host with neither. ADR-001's "Claim 20
     limits" note records both; do not paraphrase this row as covering the
