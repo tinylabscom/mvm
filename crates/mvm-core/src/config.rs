@@ -87,6 +87,24 @@ pub fn fc_version() -> String {
 /// Basename used by the default host-state root.
 pub const DEFAULT_MVM_HOME_DIR_NAME: &str = ".mvm";
 
+/// Default host-state root beneath an explicitly supplied user home.
+///
+/// This pure derivation ignores the ambient `MVM_HOME` override so isolation
+/// checks can identify the default state they must never touch.
+pub fn default_mvm_home_at(user_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    user_home.as_ref().join(DEFAULT_MVM_HOME_DIR_NAME)
+}
+
+/// Read the user home without a fallback or an `MVM_HOME` override.
+///
+/// Native credential custody uses this context independently of relocated mvm
+/// state. Callers requiring an absolute, UTF-8, existing home must validate it.
+pub fn user_home_dir_strict() -> std::io::Result<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "$HOME unset"))
+}
+
 /// The single root directory for ALL host-side mvm state.
 ///
 /// Resolution order:
@@ -139,13 +157,13 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
     {
         return Ok(std::path::PathBuf::from(d));
     }
-    let home = std::env::var_os("HOME").ok_or_else(|| {
+    let home = user_home_dir_strict().map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "$HOME unset and MVM_HOME not set; cannot locate ~/.mvm",
         )
     })?;
-    Ok(std::path::PathBuf::from(home).join(".mvm"))
+    Ok(default_mvm_home_at(home))
 }
 
 // `~/.mvm` holds the dev VM's GC root, the host-backed Nix store disk image,
@@ -1622,6 +1640,70 @@ mod tests {
     }
 
     // --- Single-root layout tests ---
+
+    #[test]
+    fn default_mvm_home_at_uses_only_the_supplied_user_home() {
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", "/isolated/runtime");
+        env.set("HOME", "/ambient/user");
+        assert_eq!(
+            default_mvm_home_at("/explicit/user"),
+            std::path::PathBuf::from("/explicit/user/.mvm")
+        );
+        assert_eq!(default_mvm_home_at(""), std::path::PathBuf::from(".mvm"));
+        assert_eq!(
+            default_mvm_home_at("relative"),
+            std::path::PathBuf::from("relative/.mvm")
+        );
+    }
+
+    #[test]
+    fn strict_user_home_is_independent_of_the_state_override() {
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", "/isolated/runtime");
+        env.remove("HOME");
+        assert_eq!(
+            user_home_dir_strict().unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            mvm_home_strict().unwrap(),
+            std::path::PathBuf::from("/isolated/runtime")
+        );
+        env.remove("MVM_HOME");
+        let missing = mvm_home_strict().unwrap_err();
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            missing.to_string(),
+            "$HOME unset and MVM_HOME not set; cannot locate ~/.mvm"
+        );
+        for home in ["", "/explicit/user", "relative"] {
+            env.set("HOME", home);
+            env.set("MVM_HOME", "");
+            assert_eq!(
+                user_home_dir_strict().unwrap(),
+                std::path::PathBuf::from(home)
+            );
+            assert_eq!(mvm_home_strict().unwrap(), default_mvm_home_at(home));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_user_home_preserves_non_utf8_and_ignores_non_utf8_state_override() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut env = TestEnv::new();
+        let raw = std::ffi::OsString::from_vec(vec![b'/', 0xff]);
+        env.set("HOME", &raw);
+        env.set("MVM_HOME", &raw);
+        assert_eq!(user_home_dir_strict().unwrap().as_os_str(), &raw);
+        assert_eq!(mvm_home_strict().unwrap(), default_mvm_home_at(&raw));
+        env.set("MVM_HOME", "/isolated/runtime");
+        assert_eq!(
+            mvm_home_strict().unwrap(),
+            std::path::PathBuf::from("/isolated/runtime")
+        );
+    }
 
     #[test]
     fn test_mvm_home_env_override() {

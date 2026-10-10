@@ -25,7 +25,7 @@ fn invoke(
     operation: &str,
     pin: Option<&EnrolledIdentity>,
 ) -> std::process::Output {
-    let mut child = Command::new(std::env::current_exe().unwrap());
+    let mut child = native_child_command(std::env::vars_os());
     child.args(["--exact", CHILD, "--ignored", "--nocapture"]);
     child.env("MVM_NATIVE_CALLER_TEST_NAMESPACE", namespace.to_string());
     child.env("MVM_NATIVE_CALLER_TEST_OPERATION", operation);
@@ -40,6 +40,59 @@ fn invoke(
     }
     child.output().expect("run native credential witness child")
 }
+
+fn native_child_command(
+    environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Command {
+    let mut child = mvm_core::env_hygiene::helper_command(std::env::current_exe().unwrap());
+    child.env_clear();
+    // Retain native custody's HOME but only explicitly isolated runtime paths;
+    // no loader overrides, unrelated credentials, or ambient test pins.
+    let allowed = [
+        "HOME",
+        "PATH",
+        "TMPDIR",
+        "MVM_HOME",
+        "CARGO_HOME",
+        "CARGO_TARGET_DIR",
+        "RUSTUP_HOME",
+    ];
+    for (name, value) in environment {
+        if allowed.iter().any(|allowed| name == *allowed) {
+            child.env(name, value);
+        }
+    }
+    child
+}
+
+#[test]
+fn native_child_environment_preserves_only_explicit_custody_and_runtime_paths() {
+    let child = native_child_command(
+        [
+            ("HOME", "/native/user"),
+            ("MVM_HOME", "/isolated/state"),
+            ("TMPDIR", "/isolated/tmp"),
+            ("LD_PRELOAD", "/untrusted/loader"),
+            ("BASH_ENV", "/untrusted/shell"),
+            ("MVM_NATIVE_CALLER_TEST_PIN", "untrusted-pin"),
+            ("UNRELATED_SECRET", "not-inherited"),
+        ]
+        .map(|(name, value)| (name.into(), value.into())),
+    );
+    let explicit: std::collections::BTreeMap<_, _> = child.get_envs().collect();
+    assert_eq!(explicit.len(), 3);
+    for (name, expected) in [
+        ("HOME", "/native/user"),
+        ("MVM_HOME", "/isolated/state"),
+        ("TMPDIR", "/isolated/tmp"),
+    ] {
+        assert_eq!(
+            explicit[std::ffi::OsStr::new(name)],
+            Some(std::ffi::OsStr::new(expected))
+        );
+    }
+}
+
 struct Cleanup(Uuid);
 impl Drop for Cleanup {
     fn drop(&mut self) {

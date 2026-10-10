@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 
 use super::*;
+use mvm_core::config::default_mvm_home_at;
 
 const LOCK_CHILD: &str = "caller_identity::production_fixture::review_tests::record_lock_child";
 const GATE_CHILD: &str = "caller_identity::production_fixture::review_tests::gated_child";
@@ -29,7 +30,7 @@ impl Inputs {
         let root = base.path().join("mvm-caller-native.case");
         for path in [
             home.clone(),
-            home.join(".mvm"),
+            default_mvm_home_at(&home),
             root.clone(),
             root.join("mvm"),
             root.join("tmp"),
@@ -43,7 +44,8 @@ impl Inputs {
             b"native-cold-registration-v1\n",
         )
         .unwrap();
-        atomic_io::write_private(&home.join(".mvm/untouched"), b"user-state").unwrap();
+        atomic_io::write_private(&default_mvm_home_at(&home).join("untouched"), b"user-state")
+            .unwrap();
         let program = base.path().join("prepared-program");
         atomic_io::write_new_with_mode(&program, b"prepared", 0o700).unwrap();
         let values = [
@@ -137,7 +139,7 @@ fn refuses_before_effects(inputs: &Inputs) {
     assert_eq!(store.load(Ordering::SeqCst), 0);
     assert_eq!(spawn.load(Ordering::SeqCst), 0);
     assert_eq!(
-        fs::read(inputs.home.join(".mvm/untouched")).unwrap(),
+        fs::read(default_mvm_home_at(&inputs.home).join("untouched")).unwrap(),
         b"user-state"
     );
 }
@@ -166,26 +168,32 @@ fn invalid_writable_paths_refuse_before_store_or_child_seams() {
     inputs.set("MVM_HOME", inputs.root.join("tmp/../mvm").into_os_string());
     refuses_before_effects(&inputs);
     let mut inputs = Inputs::new();
-    inputs.set("MVM_HOME", inputs.home.join(".mvm").into_os_string());
+    inputs.set(
+        "MVM_HOME",
+        default_mvm_home_at(&inputs.home).into_os_string(),
+    );
     refuses_before_effects(&inputs);
 }
 
 #[test]
 fn default_home_descendants_and_symlink_aliases_never_become_fixture_state() {
     let mut inputs = Inputs::new();
-    mvm_core::private_fs::ensure_private_dir(inputs.home.join(".mvm/descendant")).unwrap();
+    mvm_core::private_fs::ensure_private_dir(default_mvm_home_at(&inputs.home).join("descendant"))
+        .unwrap();
     inputs.set(
         "MVM_HOME",
-        inputs.home.join(".mvm/descendant").into_os_string(),
+        default_mvm_home_at(&inputs.home)
+            .join("descendant")
+            .into_os_string(),
     );
     refuses_before_effects(&inputs);
     let inputs = Inputs::new();
     fs::remove_dir(inputs.root.join("mvm")).unwrap();
-    symlink(inputs.home.join(".mvm"), inputs.root.join("mvm")).unwrap();
+    symlink(default_mvm_home_at(&inputs.home), inputs.root.join("mvm")).unwrap();
     refuses_before_effects(&inputs);
     let inputs = Inputs::new();
     fs::remove_dir(inputs.root.join("tmp")).unwrap();
-    symlink(inputs.home.join(".mvm"), inputs.root.join("tmp")).unwrap();
+    symlink(default_mvm_home_at(&inputs.home), inputs.root.join("tmp")).unwrap();
     refuses_before_effects(&inputs);
     let mut inputs = Inputs::new();
     let alias = inputs.root.join("alias");
@@ -197,13 +205,38 @@ fn default_home_descendants_and_symlink_aliases_never_become_fixture_state() {
 #[test]
 fn a_default_home_symlink_into_the_fixture_is_still_default_user_state() {
     let inputs = Inputs::new();
-    fs::rename(inputs.home.join(".mvm"), inputs.home.join("original-state")).unwrap();
-    symlink(inputs.root.join("mvm"), inputs.home.join(".mvm")).unwrap();
+    fs::rename(
+        default_mvm_home_at(&inputs.home),
+        inputs.home.join("original-state"),
+    )
+    .unwrap();
+    symlink(inputs.root.join("mvm"), default_mvm_home_at(&inputs.home)).unwrap();
     assert!(inputs.snapshot().is_err());
     assert_eq!(
         fs::read(inputs.home.join("original-state/untouched")).unwrap(),
         b"user-state"
     );
+}
+
+#[test]
+fn fixture_child_command_carries_only_the_validated_snapshot() {
+    let inputs = Inputs::new();
+    let snapshot = inputs.snapshot().unwrap();
+    let command = snapshot.command(snapshot.program()).unwrap();
+    let actual: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+    assert_eq!(actual.len(), snapshot.values().len() + 2);
+    for (name, value) in snapshot.values() {
+        assert_eq!(
+            actual[std::ffi::OsStr::new(name)],
+            Some(std::ffi::OsStr::new(value))
+        );
+    }
+    for (name, value) in [
+        ("MVM_CALLER_WITNESS_BIN", snapshot.program()),
+        ("MVM_CALLER_FIXTURE_RECORD", snapshot.record()),
+    ] {
+        assert_eq!(actual[std::ffi::OsStr::new(name)], Some(value.as_os_str()));
+    }
 }
 
 #[test]
@@ -239,7 +272,7 @@ fn canonical_snapshot_revalidates_records_instead_of_trusting_record_strings() {
             .is_err()
     );
     fs::remove_dir(inputs.root.join("mvm")).unwrap();
-    symlink(inputs.home.join(".mvm"), inputs.root.join("mvm")).unwrap();
+    symlink(default_mvm_home_at(&inputs.home), inputs.root.join("mvm")).unwrap();
     assert!(snapshot.command(snapshot.program()).is_err());
 }
 
