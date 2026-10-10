@@ -234,7 +234,10 @@ hash pin, while `nix/#mvmctl` builds the checkout's source.
 `mvmctl env update` is the self-update command: it fetches the latest release
 tarball and swaps the install in place. `--check` reports whether a newer
 release exists without installing it, `--force` reinstalls even when already
-current, and `--skip-verify` bypasses checksum verification (don't).
+current. Before installing, it verifies the signature on the release's
+`checksums-sha256.txt` under that release's tag, checks the tarball against the
+digest it lists, and verifies the tarball's own signature. `--skip-verify` skips
+only that last check; the signed manifest still binds the tarball.
 
 An `install.sh` install is upgraded by re-running `install.sh`, which moves
 `mvmctl`, its host binaries and `assets/` together and can roll back. `env update`

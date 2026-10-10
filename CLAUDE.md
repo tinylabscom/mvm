@@ -776,10 +776,13 @@ this row as enforced without it.
     refuses a missing bundle (`an_archive_without_a_bundle_is_refused`) and
     verifies a real one only under its own tag
     (`a_real_release_bundle_verifies_under_its_tag`). An `mvmctl` built without
-    `manifest-verify` therefore cannot self-update. What it verifies is each
-    tarball's own bundle: the `checksums-sha256.txt` it compares the tarball
-    against first is fetched over TLS and its signature is not checked on this
-    path. `install.sh` verifies an
+    `manifest-verify` therefore cannot self-update. The `checksums-sha256.txt`
+    it compares the tarball against is verified first, under the same
+    tag-bound identity and before a line of it is parsed
+    (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`,
+    `self_update_refuses_a_checksum_manifest_signed_for_another_tag`);
+    `MVM_SKIP_HASH_VERIFY` does not waive it, and `--skip-verify` waives only
+    the tarball's own bundle. `install.sh` verifies an
     upgrade with the installed `mvmctl env verify-release`, or with `cosign`, and
     is best-effort only on a first install to a host with neither. ADR-001's "Claim 20
     limits" note records both; do not paraphrase this row as covering the
