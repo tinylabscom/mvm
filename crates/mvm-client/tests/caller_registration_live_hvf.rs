@@ -3,6 +3,10 @@
 //! Requires an operator-prepared isolated artifact/slot fixture, freshly built
 //! entitled helpers, and a public pin provisioned by the native-custody owner.
 //! This test only loads that existing key. Missing inputs fail, never skip.
+//! Live execution is currently unavailable: the public HVF stop path cannot
+//! establish lifetime-safe teardown. Both entrypoints fail closed rather than
+//! erasing process evidence or treating missing state as proof of death.
+//! Tracked by https://github.com/tinylabscom/mvm/issues/4276.
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
@@ -27,6 +31,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 const REPLAY_LIMIT: Duration = Duration::from_secs(30);
+const REPLAY_DIAGNOSTIC_LIMIT: usize = 4096;
+
+fn require_lifetime_safe_teardown() -> Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native witness blocked by #4276: lifetime-safe HVF teardown unavailable; owned evidence retained",
+    )
+    .into())
+}
 
 fn path_env(name: &str) -> Result<PathBuf> {
     let path = PathBuf::from(std::env::var_os(name).with_context(|| format!("{name} required"))?);
@@ -249,6 +262,7 @@ impl OwnedVm {
     }
 
     fn stop(&mut self) -> Result<()> {
+        require_lifetime_safe_teardown()?;
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -269,8 +283,10 @@ impl OwnedVm {
 
 impl Drop for OwnedVm {
     fn drop(&mut self) {
-        if !self.cleaned && self.client.cleanup_transient(&self.name).is_err() {
-            eprintln!("owned caller witness cleanup failed for {}", self.name);
+        if !self.cleaned {
+            // Best-effort cleanup may erase PID evidence after a failed stop.
+            // Never call it without independent proof of supervisor death.
+            eprintln!("owned caller witness evidence retained; quiescence unproven");
         }
     }
 }
@@ -377,7 +393,19 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
     })
 }
 
+fn require_replay_denial(status: ExitStatus, diagnostic: &[u8]) -> Result<()> {
+    let category = mvm_hostd::supervisor::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
+    ensure!(
+        !status.success()
+            && diagnostic.len() <= REPLAY_DIAGNOSTIC_LIMIT
+            && diagnostic == format!("Error: {category}\n").as_bytes(),
+        "owned child did not report the fixed spent-registration refusal category"
+    );
+    Ok(())
+}
+
 fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitStatus> {
+    use tokio::io::AsyncReadExt as _;
     use tokio::io::AsyncWriteExt as _;
     let bytes = serde_json::to_vec(cfg)?;
     let command = mvm_core::env_hygiene::helper_command(supervisor);
@@ -389,14 +417,20 @@ fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitSt
             let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()?;
             let result = tokio::time::timeout(REPLAY_LIMIT, async {
                 let mut stdin = child.stdin.take().context("owned replay stdin missing")?;
+                let stderr = child.stderr.take().context("owned replay stderr missing")?;
                 stdin.write_all(&bytes).await?;
                 drop(stdin);
-                child.wait().await.context("wait for owned replay process")
+                let mut diagnostic = Vec::new();
+                let mut bounded_stderr = stderr.take((REPLAY_DIAGNOSTIC_LIMIT + 1) as u64);
+                let (status, _) =
+                    tokio::try_join!(child.wait(), bounded_stderr.read_to_end(&mut diagnostic),)?;
+                require_replay_denial(status, &diagnostic)?;
+                Ok(status)
             })
             .await;
             match result {
@@ -414,6 +448,7 @@ fn replay_process(supervisor: &Path, cfg: &HvfSupervisorConfig) -> Result<ExitSt
 fn native_cold_entrypoint_registration_and_replay() -> Result<()> {
     // Test-only ownership control, not an admission or caller authority.
     await_controller_record()?;
+    require_lifetime_safe_teardown()?;
     declare_helpers()?;
     let inputs = Inputs::read()?;
     let owned = Ownership::new();
@@ -533,6 +568,9 @@ fn native_caller_registration_cleanup() -> Result<()> {
     }
     let owned: Ownership = read_json(&path)?;
     owned.validate()?;
+    // A retained ownership record may refer to a detached live supervisor.
+    // Refuse before any public cleanup can erase its PID/config evidence.
+    require_lifetime_safe_teardown()?;
     let client = LocalBackend::with_hypervisor("hvf");
     for name in &owned.names {
         client.cleanup_transient(name)?;
@@ -579,5 +617,43 @@ fn witness_directories_refuse_symlink_aliases_and_nonprivate_modes() -> Result<(
         canonical_private_directory(&canonical).is_err(),
         "nonprivate directory accepted"
     );
+    Ok(())
+}
+
+#[test]
+fn unsupported_teardown_guard_cannot_reach_a_launch_or_cleanup_effect() {
+    let mut effect = false;
+    let result = require_lifetime_safe_teardown().map(|()| effect = true);
+    let error = result.expect_err("unsupported lifecycle must refuse");
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert!(!effect);
+}
+
+#[test]
+fn replay_evidence_rejects_disabled_guard_and_unrelated_child_failures() -> Result<()> {
+    // Owned, unreaped subprocesses only; no VM, registration, or production
+    // bypass. Omitting the denial models a disabled replay guard at the witness
+    // assertion boundary and must fail even when the child exits nonzero.
+    let run = |script: &str| -> Result<std::process::Output> {
+        Ok(std::process::Command::new("/bin/sh")
+            .args(["-c", script])
+            .env_clear()
+            .output()?)
+    };
+    let category = mvm_hostd::supervisor::caller_registration::CALLER_REGISTRATION_REPLAY_DENIED;
+    let denied = run(&format!("printf 'Error: {category}\\n' >&2; exit 1"))?;
+    require_replay_denial(denied.status, &denied.stderr)?;
+    for script in [
+        "exit 0",
+        "exit 1",
+        "printf 'unrelated error\\n' >&2; exit 1",
+    ] {
+        let child = run(script)?;
+        assert!(require_replay_denial(child.status, &child.stderr).is_err());
+    }
+    assert!(require_replay_denial(denied.status, &vec![0; REPLAY_DIAGNOSTIC_LIMIT + 1]).is_err());
     Ok(())
 }

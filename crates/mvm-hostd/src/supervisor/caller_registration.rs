@@ -19,6 +19,10 @@ use crate::plan_admission::AdmittedPlan;
 #[path = "caller_replay.rs"]
 mod replay;
 
+/// Fixed, payload-free category emitted only when durable replay consumption
+/// rejects an already-spent registration.
+pub const CALLER_REGISTRATION_REPLAY_DENIED: &str = "MVM_CALLER_REGISTRATION_REPLAY_DENIED";
+
 /// Immutable verified registration, owned by exactly one capture owner.
 /// Deliberately not deserializable, cloneable, or constructible by a producer.
 pub struct RegisteredCaller {
