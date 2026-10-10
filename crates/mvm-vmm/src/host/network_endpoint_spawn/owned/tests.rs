@@ -282,6 +282,8 @@ fn params<'a>(
         .tenant("fixture")
         .secrets(&[])
         .redaction(redaction)
+        .network_limits(mvm_core::plan::NetworkLimits::default())
+        .ingress(&[])
         .transport(EndpointTransport::Uds {
             path: state.join("endpoint.sock"),
         })
