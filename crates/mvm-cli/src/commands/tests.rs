@@ -37,6 +37,35 @@ fn registry_revocation_update_requires_both_local_files() {
 }
 
 #[test]
+fn image_revocation_commands_parse() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "image",
+            "revocations",
+            "update",
+            "--document",
+            "/tmp/revocations.json",
+            "--bundle",
+            "/tmp/revocations.json.bundle",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "image",
+            "revocations",
+            "update",
+            "--bundle",
+            "/tmp/revocations.json.bundle",
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["mvmctl", "image", "revocations", "status", "--json"]).is_ok());
+}
+
+#[test]
 fn installed_pack_inspection_commands_parse() {
     let info = Cli::try_parse_from(["mvmctl", "pack", "info", "runtime/go", "--json"])
         .expect("pack info parse");

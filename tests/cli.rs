@@ -2508,3 +2508,42 @@ fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
         .unwrap_or(0);
     assert_eq!(installed, 0, "a refused archive installs nothing");
 }
+
+#[test]
+fn image_revocations_fail_closed_without_an_applied_signed_list() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let missing = mvmctl_isolated(home.path())
+        .args(["image", "revocations", "status"])
+        .output()
+        .expect("run status");
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("mvmctl image revocations update"),
+        "{stderr}"
+    );
+
+    let document = home.path().join("revocations.json");
+    let bundle = home.path().join("revocations.json.bundle");
+    std::fs::write(
+        &document,
+        br#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00Z","not_after":"2026-02-01T00:00:00Z"}"#,
+    )
+    .expect("document");
+    std::fs::write(&bundle, b"not a sigstore bundle").expect("bundle");
+    let refused = mvmctl_isolated(home.path())
+        .args(["image", "revocations", "update", "--document"])
+        .arg(&document)
+        .arg("--bundle")
+        .arg(&bundle)
+        .output()
+        .expect("run update");
+    assert!(!refused.status.success());
+    assert!(
+        !home
+            .path()
+            .join("image-set-revocations/checkpoint.json")
+            .exists(),
+        "a refused list must not advance the checkpoint"
+    );
+}
