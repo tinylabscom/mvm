@@ -1,64 +1,44 @@
 //! Deliberate prefix pruning with protected-capture evidence admission.
-use super::{default_audit_dir, host_signer, ui};
-use anyhow::{Context, Result};
+use super::ui;
+use anyhow::Result;
+use mvm_client::audit::{AuditPruneMode, AuditPruneOutcome, prune_audit};
 
 /// Dry-run unless acknowledged. The signer rechecks pins inside its commit lock.
 pub(super) fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
-    mvm_hostd::audit::validate_prune_tenant(tenant)?;
-    let dir = default_audit_dir()?;
-    let keys = host_signer::default_keys_dir()?;
-    let (signing, verifying) = mvm_core::crypto::ed25519_keypair::load_existing(
-        &keys.join(host_signer::SECRET_FILENAME),
-        &keys.join(host_signer::PUBLIC_FILENAME),
-    )
-    .map_err(|_| anyhow::anyhow!("existing audit authority is unavailable; refusing prune"))?;
-    let verified = mvm_hostd::supervisor::verify_segment_set(&dir, tenant, &verifying)
-        .map_err(|_| anyhow::anyhow!("refusing to prune: the audit chain does not verify"))?;
-    let floor = verified.pruned.map_or(1, |p| p.through + 1);
-    let doomed: Vec<_> = verified
-        .segments
-        .iter()
-        .filter(|s| !s.active && s.seq >= floor && s.seq <= through)
-        .collect();
-    if doomed.is_empty() {
-        ui::info(&format!(
+    let mode = if ack {
+        AuditPruneMode::Commit
+    } else {
+        AuditPruneMode::Preview
+    };
+    match prune_audit(tenant, through, mode)? {
+        AuditPruneOutcome::NothingToPrune { floor, through } => ui::info(&format!(
             "Nothing to prune for tenant '{tenant}': no retired segments in {floor}..={through}."
-        ));
-        return Ok(());
-    }
-    let entries: usize = doomed.iter().filter_map(|s| s.entries).sum();
-    let file_signer = mvm_hostd::supervisor::FileAuditSigner::open(signing, &dir)
-        .context("opening the audit signer to assess the prune")?;
-    if !ack {
-        file_signer
-            .check_prune_pins(&mvm_core::plan::TenantId(tenant.to_string()), through)
-            .context("dry-run blocked; no audit or payload evidence removed")?;
-        ui::warn(&format!(
+        )),
+        AuditPruneOutcome::WouldPrune {
+            floor,
+            through,
+            segments,
+            entries,
+        } => ui::warn(&format!(
             "Would remove {} segment(s) ({}..={}) and {entries} entries from tenant \
              '{tenant}'.\nThose entries stop being independently verifiable — the surviving \
              chain will attest that they were removed, and how many, but never again what \
              they said.\nRe-run with --ack to proceed.",
-            doomed.len(),
-            floor,
-            through
-        ));
-        return Ok(());
+            segments, floor, through
+        )),
+        AuditPruneOutcome::Pruned { through, entries } => ui::success(&format!(
+            "Pruned segments 1..={through} from tenant '{tenant}': {entries} entries removed and recorded in \
+             the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
+             deliberate gap."
+        )),
     }
-    let pruned = file_signer
-        .prune_through(&mvm_core::plan::TenantId(tenant.to_string()), through)
-        .context("pruning audit segments")?;
-    ui::success(&format!(
-        "Pruned segments 1..={} from tenant '{tenant}': {} entries removed and recorded in \
-         the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
-         deliberate gap.",
-        pruned.through, pruned.entries
-    ));
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_hostd::audit::host_keypair as host_signer;
     use mvm_hostd::supervisor::audit::{AuditSigner, for_plan};
     use mvm_hostd::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
 
