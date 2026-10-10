@@ -26,6 +26,12 @@ impl RegisteredCaller {
     pub fn challenge(&self) -> &RegistrationChallenge {
         self.proof.challenge()
     }
+
+    /// Preserve the existing numeric-only protected routing format without
+    /// weakening its path validation. Decimal u128 is a lossless UUID encoding.
+    pub(crate) fn capture_run(&self) -> String {
+        self.challenge().binding.run.as_u128().to_string()
+    }
 }
 
 /// Verified cold-start state. This still must consume its one-shot startup slot.
