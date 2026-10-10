@@ -167,6 +167,27 @@ the guest as files and an outcome; the host verifies them, and only then does
 `mvmctl bundle export` or `mvm_client::builder_bundle` sign a `.mvmpkg`
 under the host signer.
 
+**The host reads builder output only as regular files.** Every transport
+returns the output as a tar the guest wrote, and a tar can name a symbolic
+link. A link followed on the host would let a guest that cannot read the
+host signing key have the host read it into the template cache, or into a
+bundle signed by that same key. So the host never follows one: mirroring an
+output directory recreates a link as a link and refuses a FIFO, socket or
+device, and every member a build result names — rootfs, kernel, sidecar —
+must be a regular file, inspected without following, or the build fails as
+an output-contract failure. Owner: `mvm_build::builder_output`.
+
+Signing adds one more step. `verify_builder_output` holds every member a
+bundle carries to that rule in the output directory itself, requires the
+sidecar to pass the same runtime-overlay gate a boot applies, and requires a
+dm-verity pair to be complete with a well-formed root hash rather than
+silently exporting the rootfs unsealed. Its result, `VerifiedBuilderOutput`,
+has no other constructor, and `export_builder_result` takes nothing else, so
+builder output reaches the signer only through that check. None of it has to
+guard against the guest changing a file afterwards: the host reads only what
+the guest wrote before it powered off, extracted where the guest never had a
+handle.
+
 **Building an artifact is two phases, and only one of them has to happen
 inside a VM.** Evaluating and running Nix build logic — fetching sources,
 compiling, executing arbitrary derivation or package-install code —
