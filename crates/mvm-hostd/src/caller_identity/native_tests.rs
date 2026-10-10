@@ -161,10 +161,7 @@ fn native_child() {
             if operation == "wrong-pin" {
                 assert!(matches!(result, Err(IdentityError::Conflict)));
             } else {
-                assert_eq!(
-                    result.expect("native load refused").identity(),
-                    identity
-                );
+                assert_eq!(result.expect("native load refused").identity(), identity);
             }
         }
         _ => panic!("unknown native witness operation"),
