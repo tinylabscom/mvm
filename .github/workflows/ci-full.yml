@@ -450,9 +450,10 @@ jobs:
     with:
       dry_run: true
 
-  # Packages and build-verifies every crate the crates.io plan would upload,
-  # with no token, so a crate that stops being publishable is caught nightly
-  # rather than on the tag that tries to publish it.
+  # Packages and build-verifies every crate the crates.io plan would upload
+  # (the public crates only), with no token, so a crate that stops being
+  # publishable is caught nightly rather than on the tag that tries to publish
+  # it. A called workflow never uploads, so no secret is passed.
   crates-publish-dry-run:
     name: crates.io publish dry-run
     needs: workload-spawn-smoke-linux

@@ -1,5 +1,6 @@
 [package]
 name = "mvm-core"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Core types, IDs, config, and utilities for mvm"

@@ -34,7 +34,7 @@ Pin a version, or build from a checkout:
 
 \`\`\`bash
 curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 \`\`\`
 
 You do not need Nix on the host. Flake-backed builds run inside a Linux builder

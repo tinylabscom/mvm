@@ -86,7 +86,7 @@ with the id of an earlier release run to smoke the archive that run built:
 |------|---------------|
 | `install.sh` (curl one-liner) | the newest full `v*` release publishing `mvmctl-<target>.tar.gz` (or `MVM_VERSION`): that tarball + `checksums-sha256.txt` + its `.bundle` |
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
-| `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
+| `cargo install --git https://github.com/tinylabscom/mvm mvmctl` | source from the repository (CLI binary only; no adjacent helper bundle). `mvmctl` is not on crates.io; only `mvm-contract` is published there |
 | `mvmctl env update` | the tarball for the latest release, in-place swap |
 | `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
 | `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` |
