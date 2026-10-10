@@ -1308,7 +1308,7 @@ mod protocol {
             "{error}"
         );
         assert_eq!(error.stage(), ImageSetStage::ProtocolCompatibility);
-        assert!(error.to_string().contains("0..=1"), "{error}");
+        assert!(error.to_string().contains("0..=2"), "{error}");
     }
 
     /// An image with no builder binaries of its own needs a host that can

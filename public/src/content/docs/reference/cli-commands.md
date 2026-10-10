@@ -202,7 +202,7 @@ removes the installed `mvmctl` and its host binaries too.
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl machine run [PATH]` and `mvmctl run [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl machine build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
+`mvmctl machine run --manifest PATH -- <cmd>` and `mvmctl run --manifest PATH -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. A positional source before `--` is an OCI image or a signed `.mvmpkg`, never a manifest; a manifest path there is refused with a pointer to `--manifest`. If no current revision exists, they error with a hint to run `mvmctl machine build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
 
@@ -538,7 +538,9 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl image boot check [--json]`                                                                                | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code                                                                                                                                           |
 | `mvmctl image boot update [--tag <t>] [--force]`                                                                  | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative                                                                                          |
 | `mvmctl image dev ensure`                                                                                          | Ensure the writable dev default-tenant image is installed in the local cache: adopt the pinned image set's `dev` members when `MVM_FETCH_UNCHANGED_IMAGES` asks for them (`1`: built from this tree's sources; `pinned`: whatever they were built from), otherwise pair-build from the selected mvm-images checkout, or answer an already-complete cache                         |
-| `mvmctl image boot verify --manifest <f> --bundle <f> [--lock <f>] --artifacts <dir> [--artifact <name> ...] [--require-complete] [--json]` | Verify a published image set offline. Without `--artifact`, verify every member artifact. With repeatable `--artifact`, verify only the named declared artifact bytes while still checking the signed manifest against the lock, its producer, structure, and signature; output explicitly marks unselected artifacts as unverified. The omitted lock uses the pin compiled into `mvmctl`. This command does not check revocation status. No network or cache writes; a refusal names its stage and exits nonzero. |
+| `mvmctl image boot verify --manifest <f> --bundle <f> [--lock <f>] --artifacts <dir> [--artifact <name> ...] [--require-complete] [--check-revocations] [--json]` | Verify a published image set offline. Without `--artifact`, verify every member artifact. With repeatable `--artifact`, verify only the named declared artifact bytes while still checking the signed manifest against the lock, its producer, structure, and signature; output explicitly marks unselected artifacts as unverified. The omitted lock uses the pin compiled into `mvmctl`. With `--check-revocations`, also refuse a revoked set or member under the signed image-set revocation list applied with `mvmctl image revocations update`; a missing, expired, or modified list fails the command rather than being treated as empty. Without it, revocation status is not checked. No network or cache writes; a refusal names its stage and exits nonzero. |
+| `mvmctl image revocations update --document <revocations.json> --bundle <revocations.json.bundle>` | Apply the signed image-set revocation list published at `https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json`. The bundle must name the mvm-images `revocations.yml` workflow at a `revocation-list/v<N>` tag under the GitHub Actions issuer; any other signer, including the registry-pack revocation authority, is refused. The list must be inside its own validity window (at most 62 days), and neither the publication number `N` nor `issued_at` may go back from the last applied list. Two different lists at the same `N` or `issued_at` are refused. A refused list leaves the local copy unchanged. No network. |
+| `mvmctl image revocations status [--json]` | Re-verify the applied image-set revocation list and report its publication, validity window, digest, signer, and entry count. A missing, expired, incomplete, or modified local copy exits nonzero and names the command that fixes it. |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
@@ -583,9 +585,30 @@ sealed VMs refuse all of these verbs.
 
 ## One-shot Run (transient runner)
 
-`mvmctl run` is the one-shot sandbox UX: it boots a fresh transient microVM,
-runs one command, and tears the VM down on exit — like `docker run --rm` but
-with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
+`mvmctl run` is an alias of `mvmctl machine run`. It takes the same flags and
+follows the same path, plus the SDK `--mode`/`--dev` transport, which only
+`run` carries. Both name what to boot before `--` and the guest command after
+it:
+
+```sh
+mvmctl run alpine:3.20 -- echo hi          # an OCI image
+mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
+mvmctl run -- npm test                     # infer the runtime from the command
+```
+
+The positional source is classified by its shape, never by what exists on
+disk. A path ending in `.mvmpkg` is a signed bundle, and anything else is an
+image reference, as `--image` takes it. A bundle is verified against the trust
+store every time it runs and installed into the content-addressed bundle
+registry on first use, then booted the way `--manifest <bundle-sha256>` boots an
+installed bundle; it is the same run as `--manifest ./app.mvmpkg`. Any other path is refused with a pointer to `--manifest` or
+`--deployment`, and `app.mvmpkg` without a leading `./` is refused rather than
+pulled from a registry. The guest command must follow `--`: a command written
+without it is a parse error.
+
+Without `-d` or another persistent flag, it is the one-shot sandbox UX: it
+boots a fresh transient microVM, runs one command, and tears the VM down on
+exit — like `docker run --rm` but with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 `mvmctl machine exec` into `run` (it was already a strict superset); `run` adds a
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
@@ -599,9 +622,11 @@ into the image; Nix-built production guests may also use
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
+| `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
+| `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
-| `mvmctl run npm test`                                               | Infer the runtime when no source flag is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                      |
+| `mvmctl run -- npm test`                                            | Infer the runtime when no source is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                           |
 | `mvmctl run --runtime <name> -- <cmd>...`                           | Boot a named runtime from the built-in catalog; an unknown name is refused, never defaulted                                                                                                                                                                                                                                                                                           |
 | `mvmctl run --no-detect -- <cmd>...`                                | Skip inference and use the bundled default image                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl run --image <ref> -- <cmd>...`                              | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit                                                                                                                                                    |
@@ -640,19 +665,21 @@ paths.
 
 ### Runtime detection
 
-With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`,
-`mvmctl run` settles the boot source in this order. The order is the contract:
+With no positional source and no `--image` / `--manifest` / `--flake` /
+`--deployment` / `--runtime-pack`, a transient run settles the boot source in
+this order. The order is the contract:
 
-1. **An explicit source flag.** Nothing is inferred.
+1. **An explicit source**, positional or flag. Nothing is inferred.
 2. **`--runtime <name>`** against the built-in catalog. An unknown name is
    refused and lists the known ones — a typo never falls through to a default.
 3. **A first command word that reads as an OCI image reference** — a tag
    colon, a digest, or an explicit registry host before a `/`, and not a
    path — refuses right here, before any inference runs. This is not part
    of inference and is not gated on steps 5–6 below finding nothing: it
-   applies equally to `--no-detect` and to `machine run`, which never reach
-   steps 5 or 6 at all. `mvmctl machine run app:1.0 -- sh` refuses with a
-   hint to pass `--image app:1.0` for exactly this reason. A source flag
+   applies equally to `--no-detect` and to persistent runs, which never reach
+   steps 5 or 6 at all. `mvmctl run -- app:1.0 sh` refuses with a hint to
+   name the image before `--` (`mvmctl run app:1.0 -- sh`) for exactly this
+   reason. A source flag
    from step 1, or `--runtime` from step 2, skips this check entirely, so a
    legitimate command whose first word happens to contain a colon still
    runs. A word that names an existing path relative to the working
@@ -703,13 +730,14 @@ Detection picks a **source**, never a posture. An inferred run admits through
 the same signed `ExecutionPlan`, with the same `--profile standard` default and
 the same deny-all egress, as one that named its image.
 
-**`machine run` does not infer.** Steps 5 and 6 are skipped there: it creates a
-named, possibly persistent machine, and picking its base image from whatever
-directory you were standing in is a footgun — `machine run` inside any Rust
-checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
-naming every way to supply a source. `--runtime <name>` works on both verbs,
-because that is you naming one. The misplaced-image-reference refusal (step 3)
-still runs for `machine run`, exactly as it does for `run`.
+**A persistent run does not infer.** Steps 5 and 6 are skipped for `-d`,
+`--ttl`, `--port`, `--healthcheck` and `--up-json`, on either verb: a machine
+that outlives the command should not take its base image from whatever
+directory you were standing in — inside any Rust checkout it would quietly
+become a machine on `rust:1-alpine`. Such a run keeps its error naming every
+way to supply a source. `--runtime <name>` works either way, because that is
+you naming one. The misplaced-image-reference refusal (step 3) runs for every
+run.
 
 The catalog is curated, in-tree, and versioned with the code; it is never
 fetched at runtime. Its refs are **tags, not digests**, which is deliberate:
@@ -1195,9 +1223,11 @@ exposes named networks and policy bundles.
 
 #### Booting a signed bundle
 
-A signed `.mvmpkg` boots through `--manifest`:
+A signed `.mvmpkg` boots as the positional source, or through `--manifest`;
+the two are the same run:
 
 ```sh
+mvmctl machine run ./app.mvmpkg -- python -m app
 mvmctl machine run --manifest ./app.mvmpkg -- python -m app
 ```
 
@@ -1226,15 +1256,11 @@ The posture never grants anything: a bundle that allows egress still boots
 deny-all unless the launch asks for egress. A manifest edited on disk after
 install fails the signature check and refuses the boot.
 
-The archive is taken through `--manifest` rather than as a positional argument.
-`machine run` already reads its trailing positionals as the guest command, so
-`mvmctl machine run ./app.mvmpkg` would mean "run the program `./app.mvmpkg`",
-and making the first positional sometimes an artifact would change what an
-existing command line means depending on a file extension. `--manifest` already
-names the pre-built workload a run boots, including an installed bundle by its
-sha256, so a bundle archive is one more form of the same thing. A path ending in
-`.mvmpkg` that is not a directory is read as an archive; every other argument
-keeps its existing meaning.
+A positional source is unambiguous because the guest command only ever follows
+`--`: `mvmctl machine run ./app.mvmpkg` names a bundle, and running a program
+called `./app.mvmpkg` is `mvmctl machine run -- ./app.mvmpkg`. As a positional
+or after `--manifest`, a path ending in `.mvmpkg` that is not a directory is read
+as an archive; every other `--manifest` argument keeps its existing meaning.
 
 ### Lineage / time-travel
 

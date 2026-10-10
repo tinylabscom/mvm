@@ -457,36 +457,68 @@ fn public_cve_corpus_is_integrity_checked_and_non_certifying() {
     assert!(guide.contains("non-certifying"));
 }
 
-/// Every signed blob in the release uses the one bundle format this project
-/// ships: `--new-bundle-format`.
+/// The `cosign sign-blob` invocations in a workflow, each with every flag up to
+/// and including the line that ends its shell continuation.
+fn sign_blob_invocations(workflow: &str) -> Vec<String> {
+    workflow
+        .match_indices("cosign sign-blob")
+        .map(|(offset, _)| {
+            let mut invocation = Vec::new();
+            for line in workflow[offset..].lines() {
+                invocation.push(line);
+                if !line.trim_end().ends_with('\\') {
+                    break;
+                }
+            }
+            invocation.join("\n")
+        })
+        .collect()
+}
+
+/// Every blob signed for the in-binary verifier uses the one bundle format this
+/// project ships: `--new-bundle-format`.
 ///
 /// The in-binary Rust sigstore stack parses only that shape, and
 /// `cosign verify-blob --bundle` documents it as the preferred input — so a
 /// single format serves both consumers and there is no legacy fallback to keep
 /// in step. A bare `--bundle` left behind would sign an artifact the in-binary
-/// verifier cannot read, and nothing surfaces that until a real release ships.
+/// verifier cannot read, and nothing surfaces that until a consumer fetches it.
+///
+/// Two workflows feed that verifier: the tagged CLI release, and the rolling
+/// commit-addressed host helpers `mvmctl bootstrap` installs into a source
+/// build. The second once signed with a bare `--bundle`, and every source-built
+/// bootstrap on a host without a local helper build refused the result.
 #[test]
 fn every_signed_release_blob_uses_the_one_bundle_format() {
-    let workflow = release_workflow();
-    let mut checked = 0usize;
-    for (offset, _) in workflow.match_indices("cosign sign-blob") {
-        // The invocation is a line-continued shell command; its flags run up to
-        // the first line that is not a continuation.
-        let invocation: String = workflow[offset..]
-            .lines()
-            .take_while(|line| line.trim_end().ends_with('\\'))
-            .collect::<Vec<_>>()
-            .join("\n");
+    for workflow_path in [
+        ".github/workflows/release.yml",
+        ".github/workflows/source-host-helpers.yml",
+    ] {
+        let workflow = fs::read_to_string(workflow_path)
+            .unwrap_or_else(|error| panic!("failed to read {workflow_path}: {error}"));
+        let invocations = sign_blob_invocations(&workflow);
         assert!(
-            invocation.contains("--new-bundle-format"),
-            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+            !invocations.is_empty(),
+            "expected {workflow_path} to sign its artifacts with `cosign sign-blob`"
         );
-        checked += 1;
+        for invocation in invocations {
+            assert!(
+                invocation.contains("--new-bundle-format"),
+                "every `cosign sign-blob` in {workflow_path} must use --new-bundle-format; \
+                 found one without it:\n{invocation}"
+            );
+        }
     }
-    assert!(
-        checked >= 1,
-        "expected to find the release's signing invocation, found {checked}"
-    );
+}
+
+#[test]
+fn sign_blob_invocations_include_single_line_and_final_continuation_flags() {
+    let workflow = "run: |\n  cosign sign-blob --yes --bundle a.bundle a\n  cosign sign-blob \\\n    --yes \\\n    --bundle b.bundle b --new-bundle-format\n  echo done\n";
+    let invocations = sign_blob_invocations(workflow);
+    assert_eq!(invocations.len(), 2);
+    assert!(!invocations[0].contains("--new-bundle-format"));
+    assert!(invocations[1].contains("--new-bundle-format"));
+    assert!(!invocations[1].contains("echo done"));
 }
 
 /// Build provenance must cover the artifacts the release signs directly, and be

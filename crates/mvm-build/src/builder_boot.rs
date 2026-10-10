@@ -1,12 +1,14 @@
 //! The builder boot contract: what `mvmctl` hands a builder VM at boot, and
 //! what it may assume about the builder image it boots.
 //!
-//! mvm's own builder binaries (`mvm-host-vm-init`, `mvm-builderd`) are not
-//! part of the builder image. Every builder boot carries them beside the image
-//! as a **boot payload**: a deterministic initramfs the running `mvmctl`
-//! assembles from its embedded, digest-verified bytes. The VMM loads it the
-//! way it loads the kernel. Its `/init` is `mvm-host-vm-init` in its stage-1
-//! role: it verifies the payload against the digest on the kernel command
+//! mvm's own builder binaries (`mvm-host-vm-init`, `mvm-builderd`, and the
+//! `mvm-setpriv` helper the guest agent is forked under) need not be part of
+//! the builder image; an image at boot ABI 2 carries none of them. Every
+//! builder boot carries them beside the image as a **boot payload**: a
+//! deterministic initramfs the running `mvmctl` assembles from its embedded,
+//! digest-verified bytes. The VMM loads it the way it loads the kernel. Its
+//! `/init` is `mvm-host-vm-init` in its stage-1 role: it verifies the payload
+//! against the digest on the kernel command
 //! line, mounts the image read-only, checks the image's boot ABI, copies the
 //! binaries to a tmpfs, pivots into the image, and re-executes itself from the
 //! tmpfs as the builder's PID 1. A Rust change to `mvmctl` therefore never

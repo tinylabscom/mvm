@@ -644,18 +644,24 @@ fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// The privilege-drop helper the agent is forked under, by the name the boot
+/// payload and an image that bakes it both use.
+#[cfg(any(target_os = "linux", test))]
+const SETPRIV: &str = "mvm-setpriv";
+
 /// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
 /// the agent uid. Mirrors the workload `/init` invocation in
-/// `nix/lib/mk-guest.nix`; the builder image installs the same static helper at
-/// `/sbin/mvm-setpriv`.
+/// `nix/lib/mk-guest.nix`. `setpriv` is the helper resolved through
+/// `guest_host_binary`: the boot payload's copy, or on an image booted without
+/// one, the copy it bakes at `/sbin`.
 /// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
 /// the authenticated agent to signal PID 1, and the latter corrects a
 /// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
-fn agent_spawn_command(agent_bin: &Path) -> Command {
+fn agent_spawn_command(setpriv: &Path, agent_bin: &Path) -> Command {
     let mut c = Command::new("/bin/busybox");
     c.arg("setsid")
-        .arg("/sbin/mvm-setpriv")
+        .arg(setpriv)
         .arg(format!("--reuid={AGENT_UID}"))
         .arg(format!("--regid={AGENT_UID}"))
         .arg("--clear-groups")
@@ -774,14 +780,17 @@ mod tests {
 
     #[test]
     fn agent_spawn_command_mirrors_workload_init_setpriv() {
-        let cmd = agent_spawn_command(Path::new("/usr/local/bin/mvm-guest-agent"));
+        let cmd = agent_spawn_command(
+            Path::new("/run/mvm/host-bins/mvm-setpriv"),
+            Path::new("/usr/local/bin/mvm-guest-agent"),
+        );
         assert_eq!(cmd.get_program().to_str().unwrap(), "/bin/busybox");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
             args,
             [
                 "setsid",
-                "/sbin/mvm-setpriv",
+                "/run/mvm/host-bins/mvm-setpriv",
                 "--reuid=990",
                 "--regid=990",
                 "--clear-groups",
@@ -795,6 +804,30 @@ mod tests {
                 "/usr/local/bin/mvm-guest-agent",
             ]
         );
+    }
+
+    /// An image that bakes `mvm-setpriv` (ABI 0 and 1) and is booted without
+    /// a payload forks the agent under its own copy; a payload's copy wins
+    /// whenever there is one, which is the only copy an ABI 2 image has.
+    #[test]
+    fn the_agent_runs_under_the_payload_setpriv_or_the_baked_one() {
+        let root = tempfile::tempdir().unwrap();
+        let (run, sbin) = (root.path().join("run"), root.path().join("sbin"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::create_dir_all(&sbin).unwrap();
+        std::fs::write(sbin.join(SETPRIV), b"baked").unwrap();
+        let agent = Path::new("/mvm/runtime/agent");
+        let setpriv_arg = || {
+            let setpriv =
+                mvm_build::builder_guest_paths::guest_host_binary_in(&run, &sbin, SETPRIV);
+            let cmd = agent_spawn_command(&setpriv, agent);
+            cmd.get_args().nth(1).map(PathBuf::from)
+        };
+
+        assert_eq!(setpriv_arg(), Some(sbin.join(SETPRIV)));
+
+        std::fs::write(run.join(SETPRIV), b"payload").unwrap();
+        assert_eq!(setpriv_arg(), Some(run.join(SETPRIV)));
     }
 
     #[test]
@@ -1435,7 +1468,8 @@ mod linux {
             );
             std::process::exit(1);
         };
-        let mut cmd = crate::agent_spawn_command(&agent_bin);
+        let setpriv = mvm_build::builder_boot::guest_host_binary(crate::SETPRIV);
+        let mut cmd = crate::agent_spawn_command(&setpriv, &agent_bin);
         // BusyBox `setsid` puts the agent in a new session, matching the
         // workload init path. Stdio is inherited so logs reach the console.
         match cmd.spawn() {

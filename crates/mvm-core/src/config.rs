@@ -531,6 +531,13 @@ pub fn registry_pack_revocation_store_dir() -> std::path::PathBuf {
         .join("revocations")
 }
 
+/// Owner-only cache for the signed image-set revocation list and its
+/// independently persisted rollback checkpoint. Kept apart from the
+/// registry-pack feed: the two are signed by different authorities.
+pub fn image_set_revocation_store_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("image-set-revocations")
+}
+
 /// Operator-selected release identity for the cached registry-pack revocation
 /// feed. Its absence preserves the existing publisher-only trust model.
 pub fn registry_pack_revocation_trust_path() -> std::path::PathBuf {

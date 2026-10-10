@@ -12,6 +12,7 @@ use mvm_core::image_set::{
     ArtifactName, ImageLock, ImageSetError, ImageSetRequirement, ImageSetVerification,
     VerifiedImageSet, VerifiedSelectedArtifacts, verify_image_set, verify_image_set_artifacts,
 };
+use mvm_core::image_set_revocation::load_image_set_revocations;
 use serde_json::json;
 
 /// What `mvmctl image boot verify` was asked to check.
@@ -24,6 +25,8 @@ pub(in crate::commands) struct VerifyRequest {
     pub artifacts: PathBuf,
     pub artifact: Vec<String>,
     pub require_complete: bool,
+    /// Load the applied image-set revocation list and refuse what it revokes.
+    pub check_revocations: bool,
     pub json: bool,
 }
 
@@ -99,6 +102,13 @@ fn verify(request: &VerifyRequest) -> Result<Result<VerifyOutcome, ImageSetError
     );
     if request.require_complete {
         verification = verification.require(&requirement);
+    }
+    let revocations = request
+        .check_revocations
+        .then(load_image_set_revocations)
+        .transpose()?;
+    if let Some(revocations) = &revocations {
+        verification = verification.with_revocations(revocations);
     }
     if request.artifact.is_empty() {
         Ok(verify_image_set(&verification).map(VerifyOutcome::Full))
@@ -205,6 +215,23 @@ fn selected_text(verified: &VerifiedSelectedArtifacts) -> String {
     text
 }
 
+/// Say whether revocation was checked, so a script reading a success cannot
+/// mistake an unchecked set for one that is known not to be revoked.
+fn with_revocation_status(mut value: serde_json::Value, checked: bool) -> serde_json::Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("revocations_checked".to_string(), checked.into());
+    }
+    value
+}
+
+fn revocation_status_line(checked: bool) -> &'static str {
+    if checked {
+        "revocations: checked against the applied image-set revocation list"
+    } else {
+        "revocations: not checked (pass --check-revocations)"
+    }
+}
+
 pub(super) fn run(request: &VerifyRequest) -> Result<()> {
     let verdict = verify(request)?;
     if request.json {
@@ -213,6 +240,7 @@ pub(super) fn run(request: &VerifyRequest) -> Result<()> {
             Ok(VerifyOutcome::Selected(verified)) => selected_json(verified),
             Err(error) => refused_json(error),
         };
+        let value = with_revocation_status(value, request.check_revocations);
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if let Ok(verified) = &verdict {
         // The report is the command's output, not commentary, so it bypasses
@@ -221,6 +249,7 @@ pub(super) fn run(request: &VerifyRequest) -> Result<()> {
             VerifyOutcome::Full(verified) => print!("{}", verified_text(verified)),
             VerifyOutcome::Selected(verified) => print!("{}", selected_text(verified)),
         }
+        println!("{}", revocation_status_line(request.check_revocations));
     }
     verdict
         .map(drop)
@@ -309,6 +338,7 @@ mod tests {
             artifacts,
             artifact: Vec::new(),
             require_complete: false,
+            check_revocations: false,
             json: false,
         };
         Staged { _dir: dir, request }
@@ -362,6 +392,38 @@ mod tests {
         assert!(
             err.to_string().contains("manifest-digest stage"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn the_report_says_whether_revocations_were_checked() {
+        let checked = with_revocation_status(json!({"verified": true}), true);
+        assert_eq!(checked["revocations_checked"], true);
+        let unchecked = with_revocation_status(json!({"verified": false}), false);
+        assert_eq!(unchecked["revocations_checked"], false);
+        assert!(revocation_status_line(false).contains("not checked"));
+    }
+
+    #[test]
+    fn checking_revocations_without_an_applied_list_fails_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lock = lock_pinning(
+            MANIFEST.as_bytes(),
+            "tinylabscom/mvm",
+            ".github/workflows/release.yml",
+            "v0.0.0-smoke",
+        );
+        let mut staged = stage(MANIFEST.as_bytes(), b"", &lock);
+        staged.request.check_revocations = true;
+
+        let err = verify(&staged.request)
+            .expect_err("a missing revocation list is refused, never treated as empty");
+
+        assert!(
+            format!("{err:#}").contains("mvmctl image revocations update"),
+            "got: {err:#}"
         );
     }
 

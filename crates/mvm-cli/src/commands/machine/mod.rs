@@ -71,7 +71,7 @@ use receipt::{
     print_machine_start_preflight_human, write_machine_start_receipt,
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
-use runtime::run_dispatch;
+pub(in crate::commands) use runtime::run_dispatch;
 use spec_ops::{
     create_machine, inspect_machine, persistent_workload_dir_for_run, remove_machine,
     run_reconfigure,
@@ -471,8 +471,10 @@ impl MachineRunArgs {
                 //     README teaches `machine run --flake examples/<name>`
                 //     with nothing after it;
                 //   - a production OCI image seals its Entrypoint/Cmd into the
-                //     guest and refuses a caller-supplied argv.
+                //     guest and refuses a caller-supplied argv;
+                //   - a `--launch-plan` document names the command itself.
                 let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
+                    || self.run.launch_plan.is_some()
                     || self.run.flake.is_some()
                     || (self.run.prod && (self.run.image.is_some() || self.run.runtime.is_some()))
                     || image_supplies_entrypoint;

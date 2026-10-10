@@ -144,6 +144,7 @@ pub(crate) fn apply_activation(
     } else {
         guest_mount::pivot_to_root(&new_root)?;
     }
+    guest_mount::mount_extensions(&env.extensions, std::path::Path::new("/"))?;
     // The same post-mount setup the legacy per-rootfs init performs: mediated
     // tools, egress CA, verb grant, netinit, loopback + resolver, egress client.
     // It has to land after the pivot (it writes into the workload's root) and

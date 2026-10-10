@@ -7,10 +7,12 @@
 //!
 //! Two role families have such a derived input set. The builder image's
 //! evaluation reads the Nix sources in [`BUILDER_FLAKE_NIX_INPUTS`], compiles
-//! `mvm-setpriv` from source, and, while the image checkout bakes them,
-//! installs host binaries compiled from the `mvm-build` package. Those three
-//! are its consumed inputs. The workload-image roles (`default-tenant`,
-//! `rootless-tenant`, `runtime-overlay`, `initramfs`) evaluate through
+//! `mvm-setpriv` from source below builder boot ABI 2, and, while the image
+//! checkout bakes them (ABI 0), installs host binaries compiled from the
+//! `mvm-build` package. Those three are its consumed inputs. An ABI 2 image
+//! compiles nothing from the mvm tree, so only the Nix sources remain. The
+//! workload-image roles (`default-tenant`, `rootless-tenant`,
+//! `runtime-overlay`, `initramfs`) evaluate through
 //! `nix/lib/workspace-filter.nix`, which admits the workspace sources cargo
 //! can read while building any workspace target; the whole filtered workspace
 //! walk is their consumed input.
@@ -128,17 +130,22 @@ fn consumed_inputs(
             check_reads_are_listed(&mvm_source_reads(&text), BUILDER_FLAKE_NIX_INPUTS)
                 .map_err(|reason| format!("{}: {reason}", image_source.display()))?;
 
+            let boot_abi = crate::image_source::build::checkout_builder_boot_abi(images_root)
+                .map_err(|e| format!("reading the checkout's builder boot ABI: {e:#}"))?;
             let mut hasher = Sha256::new();
             hasher.update(CONSUMED_DOMAIN);
             fold_nix_inputs(&mut hasher, mvm_root, BUILDER_FLAKE_NIX_INPUTS);
-            fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
-                .map_err(|e| format!("{e:#}"))?;
+            // Below ABI 2 the image compiles `mvm-setpriv` from this tree; from
+            // ABI 2 on it arrives at boot in mvmctl's payload, so its sources
+            // cannot affect the built image and stay out of the key.
+            if image_bakes_setpriv(boot_abi) {
+                fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
+                    .map_err(|e| format!("{e:#}"))?;
+            }
             fold_contract_outputs(&mut hasher, contract);
             // ABI 1+ builder images bake no host binaries — they arrive at boot in
             // mvmctl's initramfs payload — so the host-binary sources cannot affect
             // the built image and stay out of the key.
-            let boot_abi = crate::image_source::build::checkout_builder_boot_abi(images_root)
-                .map_err(|e| format!("reading the checkout's builder boot ABI: {e:#}"))?;
             if contract.needs_host_binaries && boot_abi == BuilderBootAbi::LEGACY {
                 fold_package_source_identity(&mut hasher, mvm_root, HOST_BINARY_PACKAGE)
                     .map_err(|e| format!("{e:#}"))?;
@@ -156,6 +163,12 @@ fn consumed_inputs(
         | ImageBuildRole::Initramfs => image_role_consumed_inputs(images_root, mvm_root, target),
         ImageBuildRole::Kernel => Ok(None),
     }
+}
+
+/// Whether a builder image built to `abi` compiles `mvm-setpriv` from the mvm
+/// tree. Every ABI below 2 does; from 2 on the boot payload carries it.
+fn image_bakes_setpriv(abi: BuilderBootAbi) -> bool {
+    abi < BuilderBootAbi::NO_MVM_BINARY
 }
 
 /// The workload-image roles' consumed input: the whole mvm workspace source

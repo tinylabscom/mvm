@@ -205,6 +205,13 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 // does not emit a local audit-chain entry of its own.
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
+// `mvmctl image revocations` — `update` advances the image-set revocation
+// checkpoint and records it; `status` only re-verifies the applied list.
+const IMAGE_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("update", AuditPosture::Emits("ImageSetRevocationUpdate")),
+    ("status", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("build-layer", AuditPosture::InteractiveOrControl),
     ("pull", AuditPosture::Emits("ImageFetch")),
@@ -213,6 +220,10 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("CachePrune")),
     ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
     ("dev", AuditPosture::DelegatesToSub(IMAGE_DEV_SUB)),
+    (
+        "revocations",
+        AuditPosture::DelegatesToSub(IMAGE_REVOCATIONS_SUB),
+    ),
 ];
 
 // `mvmctl pack` manages the versioned attested-pack cache and signed workload
@@ -966,6 +977,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "RegistryPackPin",
         "RegistryPackRemove",
         "RegistryPackRevocationUpdate",
+        "ImageSetRevocationUpdate",
         // Secret-service entries: the recorder emits `secret.<action>`
         // for the action the service names, and a consent run names
         // `oauth_login` whatever its outcome.

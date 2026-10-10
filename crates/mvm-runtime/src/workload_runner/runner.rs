@@ -415,8 +415,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
         // while the broker registration below still has a guard that rolls back
-        // on failure. A legacy per-rootfs verity initramfs (cold universal
-        // cache) keeps its own PID 1 and is never sent this verb.
+        // on failure. A rootfs boot whose universal initramfs could not be
+        // resolved was refused at launch resolution, before the VMM started.
         if crate::microvm::booted_with_universal_initramfs(inputs.config) {
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
