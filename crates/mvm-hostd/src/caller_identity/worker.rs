@@ -14,7 +14,37 @@ use super::{CallerCredential, EnrolledIdentity, IdentityError, Result, Store};
 pub struct IdentityClient {
     requests: mpsc::SyncSender<Request>,
     busy: Arc<AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    owner_pid: u32,
 }
+
+struct ClientFactory(OnceLock<Result<IdentityClient>>);
+
+impl ClientFactory {
+    const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    fn get(&self, store: impl FnOnce() -> Result<Box<dyn Store>>) -> Result<IdentityClient> {
+        let client = self
+            .0
+            .get_or_init(|| IdentityClient::start(store()?))
+            .clone()?;
+        client.check_process()?;
+        Ok(client)
+    }
+}
+
+struct WorkerLiveness(Arc<AtomicBool>);
+impl Drop for WorkerLiveness {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+#[path = "worker_tests.rs"]
+mod tests;
 
 /// Dropping a pending operation cancels result delivery, not the native syscall.
 pub struct PendingCredential {
@@ -35,11 +65,10 @@ struct Request {
 impl IdentityClient {
     /// Select only the dedicated native adapter, never a default/mock/file store.
     /// Repeated construction shares one lane, including after canceled calls.
+    /// Inherited post-fork handles are refused; exec a fresh host process first.
     pub fn native() -> Result<Self> {
-        static CLIENT: OnceLock<Result<IdentityClient>> = OnceLock::new();
-        CLIENT
-            .get_or_init(|| Self::start(super::native_store()?))
-            .clone()
+        static CLIENT: ClientFactory = ClientFactory::new();
+        CLIENT.get(super::native_store)
     }
 
     #[cfg(all(
@@ -57,18 +86,35 @@ impl IdentityClient {
         let (requests, work) = mpsc::sync_channel::<Request>(1);
         let busy = Arc::new(AtomicBool::new(false));
         let occupied = Arc::clone(&busy);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let liveness = WorkerLiveness(Arc::clone(&stopped));
         std::thread::Builder::new()
             .name("mvm-caller-identity".into())
             .spawn(move || {
+                let _liveness = liveness;
                 while let Ok(request) = work.recv() {
                     let credential = execute(store.as_ref(), &request);
                     occupied.store(false, Ordering::Release);
                     // A disconnected receiver drops and zeroizes a late key.
                     let _ = request.result.send(credential);
+                    #[cfg(test)]
+                    store.completed();
                 }
             })
             .map_err(|_| IdentityError::Unavailable)?;
-        Ok(Self { requests, busy })
+        Ok(Self {
+            requests,
+            busy,
+            stopped,
+            owner_pid: std::process::id(),
+        })
+    }
+
+    fn check_process(&self) -> Result<()> {
+        if self.owner_pid != std::process::id() || self.stopped.load(Ordering::Acquire) {
+            return Err(IdentityError::Unavailable);
+        }
+        Ok(())
     }
 
     /// Explicit first enrollment. Existing unpinned namespaces are conflicts;
@@ -94,6 +140,7 @@ impl IdentityClient {
         expected: Option<[u8; 32]>,
         deadline: Instant,
     ) -> Result<PendingCredential> {
+        self.check_process()?;
         if Instant::now() >= deadline {
             return Err(IdentityError::Deadline);
         }

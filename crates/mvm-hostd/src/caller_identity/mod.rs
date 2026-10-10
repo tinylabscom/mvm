@@ -84,6 +84,8 @@ trait Store: Send + 'static {
     fn read(&self, account: &str) -> Result<Zeroizing<Vec<u8>>>;
     /// Create only. Existing items must never be replaced.
     fn create(&self, account: &str, seed: &[u8]) -> Result<()>;
+    #[cfg(test)]
+    fn completed(&self) {}
 }
 
 fn account(installation: Uuid) -> Result<String> {
