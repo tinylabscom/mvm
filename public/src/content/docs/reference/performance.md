@@ -22,6 +22,17 @@ The acquisition lanes (`mount_miss`, `artifact_miss`) publish no budget. Their
 cost is dominated by a registry and a disk, and gating mvm on someone else's
 network would make the gate measure the wrong thing.
 
+`prepared_cold_artifact` measures `mvmctl run ./app.mvmpkg` once the bundle is
+installed. Every such run verifies the archive against the publisher trust store
+before it boots: the signature, the publisher key, and every artifact's hash.
+That verification is real work, so the prepared lanes refuse a sample that did
+it, and this lane refuses a sample that did not. The boot that follows is held
+to the prepared-cold dispatch budgets and the same per-boot ceiling. The
+verification time is published beside it as `bundle_verify_ms`, with its own
+percentiles and maximum, and is not part of the gated window: it reads the whole
+archive, so it scales with the archive's size the way the acquisition lanes
+scale with a disk.
+
 <!-- generated:launch-budgets:begin -->
 
 A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
@@ -30,6 +41,7 @@ A lane result is publishable only when it carries at least 20 measured samples t
 | --- | --- | --- | --- | --- | --- |
 | `prepared_cold` | Cached artifacts, no mount image, new VMM and new guest identity. | 200 ms | 250 ms | 300 ms | < 200 ms |
 | `prepared_cold_mount_hit` | The same launch with an unchanged cached read-only mount image. | 200 ms | 250 ms | 300 ms | < 200 ms |
+| `prepared_cold_artifact` | A signed .mvmpkg already installed: trust-store verification on every run, then a prepared cold boot. | 200 ms | 250 ms | 300 ms | < 200 ms |
 | `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — | — |
 | `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — | — |
 | `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | — |
@@ -106,7 +118,8 @@ mvmctl bench --lane prepared-cold --runs 20 --warmup 2
 ```
 
 `--lane` defaults to `prepared-cold` and accepts `prepared-cold`,
-`prepared-cold-mount-hit`, `mount-miss`, `artifact-miss`, and `warm-claim`.
+`prepared-cold-mount-hit`, `prepared-cold-artifact`, `mount-miss`,
+`artifact-miss`, and `warm-claim`.
 `--runs` defaults to 20 and `--warmup` to 2 — below 20 measured samples the
 report is not publication-grade. `--json` prints the report instead of a human
 summary, `--out <PATH>` redirects where it is written, and a debug build refuses
@@ -118,6 +131,14 @@ reproducible baseline:
 
 ```sh
 mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true
+```
+
+The artifact lane has no built-in baseline, because no archive exists on every
+host. Name one:
+
+```sh
+mvmctl bundle install ./app.mvmpkg
+mvmctl bench --lane prepared-cold-artifact -- run ./app.mvmpkg -- /bin/true
 ```
 
 The same measurement substrate is also driven by a live, `#[ignore]`d test for

@@ -224,6 +224,10 @@ pub(in crate::commands) fn settle_manifest_archive(
     }
     let loaded = load_bundle(arg, LoadOptions::default())?;
     let trust = trust_store(None)?;
+    // Timed from here, after the archive is local: verification is the cost a
+    // launch from a signed artifact pays on every run, and the launch sample
+    // reports it beside the boot so the two are never folded together.
+    let verify_started = std::time::Instant::now();
     let sha256 = if dry_run {
         let sha256 = verify_bundle_file(loaded.path(), &trust)
             .with_context(|| format!("verifying bundle archive {arg}"))?
@@ -255,6 +259,7 @@ pub(in crate::commands) fn settle_manifest_archive(
         }
         bundle.sha256
     };
+    mvm_core::launch_trace::record_bundle_verify(verify_started.elapsed());
     *manifest = Some(sha256);
     Ok(())
 }
@@ -433,6 +438,15 @@ mod tests {
 
         let (manifest, result) = settle(&path, false);
         result.expect("a signed archive settles");
+        // The launch sample reads this to put the artifact launch in its own
+        // lane; an archive that verified without recording it would be
+        // measured as a prepared launch that never verified anything.
+        assert!(
+            mvm_core::launch_trace::recorded_acquisition()
+                .bundle_verify_us
+                .is_some(),
+            "a settled archive must record its verification"
+        );
 
         let sha = bundle_sha256(&bytes);
         assert_eq!(manifest.as_deref(), Some(sha.as_str()));

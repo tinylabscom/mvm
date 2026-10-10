@@ -151,6 +151,14 @@ pub struct LaunchWork {
     /// above — the cost is real, invisible in a digest or a boot, and belongs
     /// to maintenance rather than to the launch.
     pub process_table_scans: u64,
+    /// Microseconds spent verifying a signed `.mvmpkg` archive against the
+    /// publisher trust store before the launch resolved its boot source.
+    ///
+    /// `Some` is the positive statement that verification ran, the way the
+    /// flags above are; `None` means the launch named no archive. It runs
+    /// before the launch's phase buckets begin, so it is carried here rather
+    /// than as a sub-phase of a bucket that does not contain it.
+    pub bundle_verify_us: Option<u64>,
 }
 
 impl LaunchWork {
@@ -177,6 +185,9 @@ impl LaunchWork {
         if self.process_table_scans > 0 {
             names.push("process_table_scan");
         }
+        if self.bundle_verify_us.is_some() {
+            names.push("bundle_verify");
+        }
         names
     }
 
@@ -201,6 +212,7 @@ pub fn recorded_work(mount_materialize: bool, warm_claim: bool) -> LaunchWork {
         warm_claim,
         artifact_bytes_hashed: acquired.artifact_bytes_hashed,
         process_table_scans: acquired.process_table_scans,
+        bundle_verify_us: acquired.bundle_verify_us,
     }
 }
 
@@ -626,6 +638,7 @@ mod tests {
             warm_claim: false,
             artifact_bytes_hashed: 0,
             process_table_scans: 0,
+            bundle_verify_us: None,
         };
         assert!(!contaminated.is_prepared());
         assert_eq!(
@@ -647,6 +660,15 @@ mod tests {
         };
         assert!(!swept.is_prepared());
         assert_eq!(swept.performed(), vec!["process_table_scan"]);
+
+        // A verified archive is work even when it was fast: a launch that
+        // verified one is not the launch that booted from cache directly.
+        let verified = LaunchWork {
+            bundle_verify_us: Some(0),
+            ..LaunchWork::default()
+        };
+        assert!(!verified.is_prepared());
+        assert_eq!(verified.performed(), vec!["bundle_verify"]);
     }
 
     #[test]
