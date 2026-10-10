@@ -727,11 +727,18 @@ jobs:
         # files, and that work is the only evidence of where it went. Without
         # this the directory dies with the runner and the next person starts
         # from the same blank page.
+        #
+        # The isolated HOME the mutants ran under is left out: it is scratch
+        # state, not a result, and its content-addressed image store names
+        # directories `sha256:<digest>`, a colon the artifact service refuses.
+        # Uploading it failed any shard whose tests populated that store.
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: mutants-${{ strategy.job-index }}
-          path: ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/
+          path: |
+            ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/
+            !${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/state-root/
           if-no-files-found: ignore
           retention-days: 7
 
