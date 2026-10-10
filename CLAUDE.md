@@ -585,10 +585,10 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     host-service surface. Plan 104 W5 / ADR-023. Witnesses, per the ADR-001
     row: `handed_placeholders_never_contain_the_secret_value` and
     `endpoint_bin_serves_substitution_and_refuses_unbound_destination`.
-    `encode_secret_env_cmdline_round_trips_pairs_as_single_token` only
-    round-trips an encoder nothing calls: `mvm.secret_env` is built by no
-    backend, so it is not evidence. The six test names this bullet used to list
-    do not exist in the tree:
+    The placeholders reach the workload with each entrypoint call, never on the
+    kernel command line; the `mvm.secret_env` cmdline token and its encoder
+    were deleted because no booted guest read them. The six test names this
+    bullet used to list do not exist in the tree:
 
     <!-- absent:begin -->
 

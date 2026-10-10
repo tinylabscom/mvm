@@ -361,9 +361,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         {
             append_cmdline_token(&mut boot_cmdline, &token);
         }
-        if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
-            append_cmdline_token(&mut boot_cmdline, &token);
-        }
         if let Some(problem) = cmdline::cmdline_overflow(&boot_cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
         }
@@ -1746,87 +1743,17 @@ mod tests {
     #[test]
     fn append_cmdline_token_separates_only_a_non_empty_cmdline() {
         let mut empty = String::new();
-        append_cmdline_token(&mut empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut empty, "mvm.telemetry=1");
         assert_eq!(
-            empty, "mvm.secret_env=ab",
+            empty, "mvm.telemetry=1",
             "no leading space on an empty cmdline"
         );
 
         let mut non_empty = "root=/dev/vda".to_string();
-        append_cmdline_token(&mut non_empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut non_empty, "mvm.telemetry=1");
         assert_eq!(
-            non_empty, "root=/dev/vda mvm.secret_env=ab",
+            non_empty, "root=/dev/vda mvm.telemetry=1",
             "a non-empty cmdline gets exactly one space separator"
-        );
-    }
-
-    #[test]
-    fn a_secret_env_token_rides_the_boot_cmdline() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        let verity = rootfs_dir.path().join("rootfs.verity");
-        let initrd = rootfs_dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run(
-            "runner-secret-env-cmdline-spacing",
-            false,
-            true,
-        )
-        .write_to_dir(rootfs_dir.path())
-        .unwrap();
-
-        let vm_name = "runner-secret-env-cmdline-spacing";
-        seed_grant_sidecar_and_key(vm_name);
-        // A substitution env with one secret-shaped pair: the
-        // `mvm.secret_env` token must reach the booted spec's cmdline.
-        // (The separator rule itself is witnessed directly on
-        // `append_cmdline_token` — the runner path always pre-seeds the
-        // hostepoch token, so the base cmdline is never empty here.)
-        let state_dir = mvm_core::config::vm_state_dir(vm_name);
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("substitution-env.json"),
-            br#"[["API_KEY","mvm-secret-test"]]"#,
-        )
-        .unwrap();
-
-        let cfg = VmStartConfig {
-            name: vm_name.into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
-                home.path(),
-            )),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
-            ..Default::default()
-        };
-
-        let driver = MockDriver::default();
-        let guest = spawn_activation_guest(driver.clone(), vm_name);
-        let runner = WorkloadRunner::new(
-            driver,
-            RecordingSpawner::new("/run/ep.sock"),
-            RecordingBrokerRegistrar::new(),
-        );
-        runner.start(&cfg).expect("start succeeds");
-        guest.join().expect("guest thread");
-
-        let specs = runner.driver.booted_specs();
-        assert_eq!(specs.len(), 1);
-        let cmdline = &specs[0].cmdline;
-        assert!(
-            cmdline.contains("mvm.secret_env="),
-            "booted cmdline missing the secret-env token: {cmdline}"
         );
     }
 
@@ -1874,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workload_threads_minted_placeholders_to_pid1_without_raw_secrets() {
+    fn start_workload_puts_no_secret_environment_on_the_kernel_cmdline() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1913,10 +1840,14 @@ mod tests {
             })
             .expect("secret-bearing workload boots");
 
+        // The placeholders reach the workload with each `RunEntrypoint`, from
+        // the host's environment synthesis. The kernel cmdline used to carry
+        // them hex-encoded for a shell `/init` that no booted guest runs; any
+        // guest process can read `/proc/cmdline`, so nothing of them rides it.
         let specs = runner.driver.booted_specs();
         let cmdline = &specs[0].cmdline;
-        assert!(cmdline.contains("mvm.secret_env="), "{cmdline}");
-        assert!(cmdline.contains("4150495f4b45593d"), "{cmdline}");
+        assert!(!cmdline.contains("mvm.secret_env"), "{cmdline}");
+        assert!(!cmdline.contains("4150495f4b45593d"), "{cmdline}");
         assert!(!cmdline.contains("opaque-placeholder"), "{cmdline}");
     }
 
