@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 use ed25519_dalek::SigningKey;
@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 use super::{CallerCredential, EnrolledIdentity, IdentityError, Result, Store};
 
-/// One bounded worker per client; clone the client to share its single lane.
+/// A handle to the process's single bounded native credential worker.
 #[derive(Clone)]
 pub struct IdentityClient {
     requests: mpsc::SyncSender<Request>,
@@ -34,8 +34,21 @@ struct Request {
 
 impl IdentityClient {
     /// Select only the dedicated native adapter, never a default/mock/file store.
+    /// Repeated construction shares one lane, including after canceled calls.
     pub fn native() -> Result<Self> {
-        Self::start(super::native_store()?)
+        static CLIENT: OnceLock<Result<IdentityClient>> = OnceLock::new();
+        CLIENT
+            .get_or_init(|| Self::start(super::native_store()?))
+            .clone()
+    }
+
+    #[cfg(all(
+        test,
+        feature = "native-caller-identity",
+        any(target_os = "macos", target_os = "linux")
+    ))]
+    pub(super) fn shares_worker_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.busy, &other.busy)
     }
 
     pub(super) fn start(store: Box<dyn Store>) -> Result<Self> {
@@ -60,6 +73,8 @@ impl IdentityClient {
 
     /// Explicit first enrollment. Existing unpinned namespaces are conflicts;
     /// idempotent reuse requires `load` with the saved public enrollment pin.
+    /// A timeout may leave the requested entry in the OS store: retain the
+    /// installation identifier for explicit operator recovery, never overwrite.
     pub fn enroll(&self, installation: Uuid, deadline: Instant) -> Result<PendingCredential> {
         self.request(installation, None, deadline)
     }

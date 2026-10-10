@@ -235,6 +235,17 @@ fn loaded_and_late_key_types_have_zeroizing_drop_contracts() {
     zeroizes_on_drop::<Zeroizing<Vec<u8>>>();
 }
 
+#[cfg(all(
+    feature = "native-caller-identity",
+    any(target_os = "macos", target_os = "linux")
+))]
+#[test]
+fn repeated_native_construction_shares_the_bounded_lane_without_store_access() {
+    let first = IdentityClient::native().unwrap();
+    let second = IdentityClient::native().unwrap();
+    assert!(first.shares_worker_with(&second));
+}
+
 #[test]
 fn dedicated_native_feature_does_not_flip_the_legacy_keyring_factory() {
     let entry = keyring::Entry::new_with_target(
