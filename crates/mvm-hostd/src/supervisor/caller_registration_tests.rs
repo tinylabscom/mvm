@@ -48,10 +48,12 @@ fn startup_config(
     registration: &CallerRegistration,
 ) -> mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig {
     let state = config::vm_state_dir(&registration.vm);
+    let kernel = config::mvm_home_strict().unwrap().join("fixture-kernel");
+    std::fs::write(&kernel, b"synthetic kernel input").unwrap();
     serde_json::from_value(serde_json::json!({
         "console_capture": "encrypted",
         "vm_name": registration.vm,
-        "kernel": "/unopened-test-kernel",
+        "kernel": kernel,
         "console_log": state.join("console.log"),
         "pid_file": state.join("supervisor.pid"),
         "workload_exit": state.join("workload.exit"),
@@ -72,18 +74,78 @@ fn actual_startup_wire_uses_canonical_root_and_refuses_warm_without_state_change
     let bytes = serde_json::to_vec(&cfg).unwrap();
     let mut decoded: mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig =
         serde_json::from_slice(&bytes).unwrap();
-    assert!(verify_startup(&decoded).unwrap().is_some());
     assert!(!config::vm_state_dir("startup-wire").exists());
     decoded.handoff_socket = Some("/unused-handoff.sock".into());
-    assert!(verify_startup(&decoded).is_err());
+    assert!(prepare_startup(&decoded).is_err());
     assert!(!config::vm_state_dir("startup-wire").exists());
     decoded.handoff_socket = None;
     decoded.restore_ram = Some("/unused-restore".into());
-    assert!(verify_startup(&decoded).is_err());
+    assert!(prepare_startup(&decoded).is_err());
     decoded.restore_ram = None;
     decoded.vm_name = "retargeted".into();
-    assert!(verify_startup(&decoded).is_err());
+    assert!(prepare_startup(&decoded).is_err());
     assert!(!config::vm_state_dir("retargeted").exists());
+    decoded.vm_name = "startup-wire".into();
+    assert!(prepare_startup(&decoded).unwrap().is_some());
+    assert!(
+        config::vm_state_dir("startup-wire")
+            .join("caller-registration.used")
+            .exists()
+    );
+    assert!(!decoded.pid_file.exists());
+    assert!(prepare_startup(&decoded).is_err());
+}
+
+#[test]
+fn actual_early_boot_input_failure_is_spent_before_status_or_capture_setup() {
+    let (_env, _home) = isolate();
+    for missing_kernel in [true, false] {
+        let vm = if missing_kernel {
+            "missing-kernel"
+        } else {
+            "missing-initramfs"
+        };
+        let admitted = admit_fixture(vm, 1);
+        let registration = registration_fixture(&admitted, vm, 1);
+        let mut cfg = startup_config(&admitted, &registration);
+        let kernel = cfg.kernel.clone();
+        if missing_kernel {
+            cfg.kernel = kernel.with_file_name("missing-kernel-input");
+        } else {
+            cfg.initramfs = Some(kernel.with_file_name("missing-initramfs-input"));
+        }
+        let Err(error) = prepare_startup(&cfg) else {
+            panic!("missing input must refuse startup")
+        };
+        assert!(error.to_string().contains(if missing_kernel {
+            "kernel"
+        } else {
+            "initramfs"
+        }));
+        assert!(
+            config::vm_state_dir(vm)
+                .join("caller-registration.used")
+                .exists()
+        );
+        assert!(!cfg.pid_file.exists());
+        assert!(!config::vm_protected_stream_dir(vm).exists());
+        cfg.kernel = kernel;
+        cfg.initramfs = None;
+        assert!(
+            prepare_startup(&cfg).is_err(),
+            "repair must not reuse the spent record"
+        );
+        mvm_runtime::vm::reconcile::remove_runtime_dirs(&config::vm_state_dir(vm)).unwrap();
+        assert!(
+            prepare_startup(&cfg).is_err(),
+            "teardown cannot revive that record"
+        );
+        let fresh = admit_fixture(vm, 2);
+        let fresh_registration = registration_fixture(&fresh, vm, 1);
+        let fresh_cfg = startup_config(&fresh, &fresh_registration);
+        assert!(prepare_startup(&fresh_cfg).unwrap().is_some());
+        assert!(!fresh_cfg.pid_file.exists());
+    }
 }
 
 #[test]
@@ -113,10 +175,12 @@ fn actual_admission_installs_once_in_real_owner_without_producer_readiness() {
     let (_env, _home) = isolate();
     let admitted = admit_fixture("registered-cold", 1);
     let registration = registration_fixture(&admitted, "registered-cold", 1);
-    let verified = launch(&admitted, &registration);
+    let startup = prepare_startup(&startup_config(&admitted, &registration))
+        .unwrap()
+        .unwrap();
     let (owner, producer) = CaptureOwner::start(CaptureParams {
         vm: &registration.vm,
-        authority: CaptureAuthority::CallerRegistered(verified),
+        authority: CaptureAuthority::CallerRegistered(startup.launch),
         redaction: &admitted.plan().redaction,
     })
     .unwrap();
@@ -287,7 +351,11 @@ fn setup_failure_stays_spent_and_public_teardown_allows_fresh_admission() {
     assert!(
         CaptureOwner::start(CaptureParams {
             vm: "failed-cold",
-            authority: CaptureAuthority::CallerRegistered(launch(&admitted, &registration)),
+            authority: CaptureAuthority::CallerRegistered(
+                launch(&admitted, &registration)
+                    .consume("failed-cold")
+                    .unwrap(),
+            ),
             redaction: &admitted.plan().redaction,
         })
         .is_err()
@@ -315,7 +383,11 @@ fn setup_failure_stays_spent_and_public_teardown_allows_fresh_admission() {
     );
     let (owner, producer) = CaptureOwner::start(CaptureParams {
         vm: "failed-cold",
-        authority: CaptureAuthority::CallerRegistered(launch(&fresh, &fresh_registration)),
+        authority: CaptureAuthority::CallerRegistered(
+            launch(&fresh, &fresh_registration)
+                .consume("failed-cold")
+                .unwrap(),
+        ),
         redaction: &fresh.plan().redaction,
     })
     .unwrap();

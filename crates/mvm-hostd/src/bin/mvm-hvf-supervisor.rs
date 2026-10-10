@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
         .context("read HvfSupervisorConfig from stdin")?;
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
-    let registered_launch = mvm_hostd::supervisor::caller_registration::verify_startup(&cfg)?;
+    let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
     if let Some(state_dir) = cfg.pid_file.parent() {
         let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
             state_dir,
@@ -288,15 +288,13 @@ fn main() -> anyhow::Result<()> {
         .and(cfg.pid_file.parent())
         .map(mvm_vmm::host::hvf_supervisor::restore_ready_path);
 
-    if !cfg.kernel.is_file() {
-        anyhow::bail!("kernel {} is not a readable file", cfg.kernel.display());
-    }
-    let initramfs = cfg
-        .initramfs
-        .as_ref()
-        .map(std::fs::read)
-        .transpose()
-        .context("read initramfs")?;
+    let (registered_launch, initramfs) = match registered_startup {
+        Some(startup) => (Some(startup.launch), startup.initramfs),
+        None => (
+            None,
+            mvm_hostd::supervisor::caller_registration::load_boot_inputs(&cfg)?,
+        ),
+    };
     // A VM that outlives its launcher owns its egress endpoint *here*, because
     // the endpoint self-reaps when orphaned and this process is the only one
     // whose life is the VM's. It has to run before the disks below: the

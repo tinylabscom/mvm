@@ -37,6 +37,41 @@ fn contents() -> Vec<u8> {
 }
 
 #[test]
+fn first_use_parent_sync_failure_refuses_and_recovery_syncs_new_ancestors() {
+    let (mut env, home) = isolate();
+    let new_home = home.path().join("new-ancestor").join("new-home");
+    env.isolate_mvm_home(&new_home);
+    let record = challenge(500);
+    FAIL_PARENT_SYNC.with(|fail| fail.set(true));
+    let refused = consume_challenge(&record, 100);
+    FAIL_PARENT_SYNC.with(|fail| fail.set(false));
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("parent directory sync")
+    );
+    assert!(!root().join("ledger.json").exists());
+    assert!(!root().join("initialized").exists());
+    SYNCED_DIRECTORIES.with(|paths| paths.borrow_mut().clear());
+    consume_challenge(&record, 100).unwrap();
+    let expected_home = std::fs::canonicalize(&new_home).unwrap();
+    SYNCED_DIRECTORIES.with(|paths| {
+        let paths = paths.borrow();
+        for directory in expected_home.ancestors() {
+            assert!(
+                paths.iter().any(|synced| synced == directory),
+                "missing ancestor sync"
+            );
+        }
+    });
+    assert!(
+        consume_challenge(&record, 100).is_err(),
+        "successful recovery stays spent"
+    );
+}
+
+#[test]
 fn pruning_and_high_water_are_one_commit_and_rollback_cannot_revive_a_record() {
     let (_env, _home) = isolate();
     let old = challenge(200);

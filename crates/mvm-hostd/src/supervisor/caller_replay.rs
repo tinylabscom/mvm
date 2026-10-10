@@ -66,6 +66,7 @@ fn consume_challenge(challenge: &RegistrationChallenge, now: u64) -> Result<()> 
     // fixed purpose directory is never removed by runtime VM teardown.
     let lease =
         CaptureDirectory::for_writer(&root).context("caller replay ledger unavailable or busy")?;
+    sync_directory_chain(&root)?;
     let path = root.join("ledger.json");
     let initialized = match lease.read_private_member("initialized", 3) {
         Ok(bytes) => {
@@ -128,6 +129,24 @@ fn consume_challenge(challenge: &RegistrationChallenge, now: u64) -> Result<()> 
     Ok(())
 }
 
+fn sync_directory_chain(root: &std::path::Path) -> Result<()> {
+    // File/inner-directory fsync cannot anchor a newly created directory's own
+    // name. Sync the complete canonical ancestor chain, including any newly
+    // created MVM home ancestors, before a record can authorize activation.
+    let root = std::fs::canonicalize(root)?;
+    for directory in root.ancestors() {
+        #[cfg(test)]
+        if directory != root && FAIL_PARENT_SYNC.with(std::cell::Cell::get) {
+            anyhow::bail!("injected caller replay parent directory sync failure");
+        }
+        atomic_io::sync_dir(directory)
+            .map_err(|_| anyhow::anyhow!("caller replay directory durability failed"))?;
+        #[cfg(test)]
+        SYNCED_DIRECTORIES.with(|paths| paths.borrow_mut().push(directory.to_path_buf()));
+    }
+    Ok(())
+}
+
 fn read(lease: &CaptureDirectory, initialized: bool) -> Result<Ledger> {
     let bytes = match lease.read_private_member("ledger.json", MAX_BYTES) {
         Ok(bytes) => bytes,
@@ -164,6 +183,9 @@ enum Phase {
 #[cfg(test)]
 thread_local! {
     static CRASH: std::cell::Cell<Option<Phase>> = const { std::cell::Cell::new(None) };
+    static FAIL_PARENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SYNCED_DIRECTORIES: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
