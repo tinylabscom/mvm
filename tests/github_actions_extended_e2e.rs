@@ -274,11 +274,32 @@ fn each_live_job_budget_exceeds_the_suite_deadline() {
         if job == "e2e-docs-linux" {
             assert!(
                 suite_seconds >= 10_800,
-                "{job}: the 120-minute suite reached only 287 of 367 scenarios on 2026-10-08; \
-                 leave enough time to run the remaining documented surface"
+                "{job}: retain a bounded per-shard deadline with headroom for cold live boots"
             );
         }
     }
+}
+
+#[test]
+fn linux_documented_surface_requires_both_complete_inventory_shards() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+    let script = documented_surface_script();
+
+    assert!(
+        linux.contains("shard: [\"0/2\", \"1/2\"]")
+            && linux.contains("MVM_BDD_SHARD: ${{ matrix.shard }}")
+            && linux.contains("fail-fast: false"),
+        "both disjoint shards must be required CI jobs, even when one fails"
+    );
+    assert!(
+        !script.contains("export MVM_BDD_ONLY_TAG="),
+        "the release gate must partition the full inventory, not narrow to a tag"
+    );
+    assert!(
+        script.contains("all shards must pass"),
+        "a single green shard must not be presented as full coverage"
+    );
 }
 
 /// First `key value` occurrence in a job block, as a trimmed string.

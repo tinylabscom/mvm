@@ -48,9 +48,20 @@ Feature: Encrypted block volume lifecycle and attachment
     Given a signed execution plan with no admitted volume shares
     Then the unadmitted volume attachment is refused
 
-  Scenario: a backend reports unsupported block attachment honestly
-    When I ask the Docker backend to attach a block volume
-    Then the backend refuses the unsupported block volume before boot
+  Scenario: the removed Docker backend refuses a volume-bearing launch before boot
+    Given an isolated mvm home on encrypted backing storage
+    When I run mvmctl in the isolated mvm home with "machine create bdd-docker-volume --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume unlock work"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume mount bdd-docker-volume --volume work --guest /data"
+    Then the command exits with code 0
+    When I attempt a direct start of machine "bdd-docker-volume" with backend "docker"
+    Then the command exits with code 1
+    And the error output contains "Docker backend has been removed"
+    And the local volume attachment lease catalog is empty
 
   Scenario: remote volume operations require explicit authenticated configuration
     When I run remote volume catalog without gateway configuration
