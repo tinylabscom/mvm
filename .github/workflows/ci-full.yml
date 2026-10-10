@@ -809,6 +809,11 @@ jobs:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
       MVM_BUILDER_VM_TIMEOUT_SECS: 7200
+      # The guest runtime under test is this checkout's. Launches default to
+      # published artifacts, so name the source arm; without it bootstrap
+      # installs the published overlay and never builds the guest runtime the
+      # cache step below hands to the QEMU smoke.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
 
@@ -1119,6 +1124,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # Resolve the guest runtime restored below rather than the published one.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
       # The QEMU transport re-execs mvmctl as its per-VM vsock bridge. This
       # witness intentionally installs the exact source binary under a unique
       # name, so point helper resolution at those same tested bytes.

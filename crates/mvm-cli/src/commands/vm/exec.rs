@@ -556,6 +556,7 @@ pub(in crate::commands) fn run_verb(
         }
         return super::run_plan::dispatch_sdk_mode(mode, run, &args.sdk);
     }
+    args.machine.default_image_when_sourceless = true;
     crate::commands::machine::run_dispatch(cli, args.machine, cfg)
 }
 
