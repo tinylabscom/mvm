@@ -65,3 +65,11 @@ impl ServiceIdentity {
 /// reserve the same number.
 pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
     ServiceIdentity::new(989, 989, 1u32 << super::CAP_NET_BIND_SERVICE);
+
+/// Identity of the local-addon resolver (`mvm-addon-dns`).
+///
+/// It parses every DNS query the workload sends, so it gets a uid of its own
+/// for the same reason the egress client does, and keeps only
+/// `CAP_NET_BIND_SERVICE` for its port-53 listener. It holds no key.
+pub const ADDON_DNS_IDENTITY: ServiceIdentity =
+    ServiceIdentity::new(987, 987, 1u32 << super::CAP_NET_BIND_SERVICE);

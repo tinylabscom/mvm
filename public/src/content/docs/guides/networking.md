@@ -240,27 +240,29 @@ resolver or guest NIC.
 
 ### Local addon DNS (opt-in)
 
-When a guest declares one or more local development addons via the
-`addon_dns_zone` config-disk field (see
-`specs/contracts/local-addon-dns.md`), `/init` activates the baked
-in-guest resolver `mvm-addon-dns`:
+When an image declares local development addons by baking a zone at
+`/etc/mvm/addon_dns_zone.json`, the guest agent (PID 1 on the universal
+initramfs) starts the resolver `mvm-addon-dns` from the runtime overlay:
 
-1. The pre-existing `/etc/resolv.conf` is snapshotted into
-   `/run/mvm/upstream-resolv.conf` so the resolver has an explicit
-   upstream chain. This must happen before the resolv.conf rewrite or
-   the resolver would recurse into itself.
-2. `/etc/resolv.conf` is bind-mounted from `/run/mvm/resolv.conf` and
-   set to `nameserver 127.0.0.1` + `nameserver ::1`.
-3. `mvm-addon-dns` is forked under `setpriv` to the agent uid with
-   only `CAP_NET_BIND_SERVICE` as an ambient capability (no other
-   privilege is granted). The supervisor itself rejects any non-loopback
-   bind address and refuses upstreams that point back at its own
-   listener.
+1. The zone is copied to `/run/mvm/addon_dns_zone.json`, on tmpfs, so a
+   SIGHUP reload never needs a writable root.
+2. The resolver listens on `127.0.0.2:53`, a loopback address of its own.
+   On a boot with admitted egress, `127.0.0.1:53` belongs to the egress
+   client's DNS stub, and the resolver forwards every name it does not own
+   there. On a boot without egress it forwards to the resolvers the image's
+   own `/etc/resolv.conf` declared, snapshotted into
+   `/run/mvm/upstream-resolv.conf` before the rewrite so it never forwards
+   to itself.
+3. `/etc/resolv.conf` is bind-mounted from `/run/mvm/resolv.conf`, which
+   names `127.0.0.2`.
+4. The resolver runs as its own uid (987) with only
+   `CAP_NET_BIND_SERVICE`, and refuses any non-loopback bind address or an
+   upstream that points back at its own listener.
 
 The resolver answers exact configured addon hostnames authoritatively
 and forwards every other name (including sibling names in the same
-parent domain) to the upstream snapshot. SIGHUP reloads the zone file
-without re-binding sockets; in-flight UDP queries are never dropped.
+parent domain) upstream. SIGHUP reloads the zone file without
+re-binding sockets; in-flight UDP queries are never dropped.
 
 Guests that declare no addons skip the entire bootstrap, so
 `/etc/resolv.conf` stays byte-for-byte the build-time default.
