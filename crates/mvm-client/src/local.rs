@@ -47,8 +47,8 @@ use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
     FirecrackerIO, POST_RESTORE_READY_TIMEOUT, PostRestoreOutcome, PostRestoreSignal, SnapshotIO,
-    VsockPostRestoreSignal, VsockPrimedSignalSource, await_primed_barrier, describe_missing_reseed,
-    pause_and_seal, signal_post_restore, verify_and_resume,
+    VsockPostRestoreSignal, VsockPrimedSignalSource, admit_host_snapshot_key, await_primed_barrier,
+    describe_missing_reseed, pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::VmNameRegistry;
 
@@ -1303,6 +1303,18 @@ impl MvmClient for LocalBackend {
         let _lifecycle = mvm_runtime::vm::instance_snapshot::lock_resume(name)
             .map_err(|e| backend_err(format!("{e:#}")))?;
 
+        // A sealed snapshot is always encrypted. Its key is admitted before
+        // anything else happens, and that same key encrypts the capture, so a
+        // pause without usable key material refuses with nothing captured.
+        let snapshot_key = if Self::uses_sealed_snapshot(&backend) {
+            Some(
+                admit_host_snapshot_key()
+                    .map_err(|e| backend_err(format!("pausing VM {name:?}: {e}")))?,
+            )
+        } else {
+            None
+        };
+
         // Opt-in warm-base barrier: wait for the workload to signal "primed"
         // before sealing. Fails closed — a timeout propagates so no half-warmed
         // snapshot is sealed. Skipped for the mock (no guest agent to answer).
@@ -1315,9 +1327,9 @@ impl MvmClient for LocalBackend {
                 .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
         }
 
-        let outcome = if Self::uses_sealed_snapshot(&backend) {
+        let outcome = if let Some(key) = &snapshot_key {
             let io = self.snapshot_io_for(&backend, name)?;
-            let sidecar = pause_and_seal(name, &*io)
+            let sidecar = pause_and_seal(name, &*io, key)
                 .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
             write_fc_paused_marker(name)?;
             set_registry_paused(name, true)?;
@@ -1825,7 +1837,8 @@ mod tests {
     fn a_sealed_resume_refuses_a_machine_that_is_not_paused() {
         let _data = IsolatedDataDir::new();
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-run", &canned, &test_snapshot_key())
+            .expect("sealed");
         let before = canned.calls().len();
 
         let unregistered = resume_sealed("vm-run", &canned, Guest::Reseeded, QUICK)
@@ -1902,7 +1915,12 @@ mod tests {
         let _data = IsolatedDataDir::new();
         let registry_path = register("vm-seal");
         let canned = CannedIO::new(b"vmstate".to_vec(), b"mem".to_vec());
-        mvm_runtime::vm::instance_snapshot::pause_and_seal("vm-seal", &canned).expect("sealed");
+        mvm_runtime::vm::instance_snapshot::pause_and_seal(
+            "vm-seal",
+            &canned,
+            &test_snapshot_key(),
+        )
+        .expect("sealed");
         let state_dir = vm_state_dir("vm-seal");
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(state_dir.join("fc.pid"), std::process::id().to_string()).unwrap();
@@ -1976,9 +1994,20 @@ mod tests {
     #[cfg(feature = "test-support")]
     struct IsolatedDataDir {
         _lock: std::sync::MutexGuard<'static, ()>,
-        _env: TestEnv,
+        env: TestEnv,
         dir: tempfile::TempDir,
     }
+
+    /// The snapshot key [`IsolatedDataDir`] selects, admitted.
+    #[cfg(feature = "test-support")]
+    fn test_snapshot_key() -> mvm_runtime::vm::instance_snapshot::SnapshotKey {
+        admit_host_snapshot_key().expect("IsolatedDataDir selects a snapshot key")
+    }
+
+    /// The snapshot key every isolated test pauses under.
+    #[cfg(feature = "test-support")]
+    const TEST_SNAPSHOT_KEY_HEX: &str =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 
     #[cfg(feature = "test-support")]
     impl IsolatedDataDir {
@@ -1989,9 +2018,15 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let mut env = TestEnv::new();
             env.set("MVM_HOME", dir.path());
+            // Sealing a snapshot requires a key; tests that exercise its
+            // absence remove it.
+            env.set(
+                mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+                TEST_SNAPSHOT_KEY_HEX,
+            );
             Self {
                 _lock: lock,
-                _env: env,
+                env,
                 dir,
             }
         }
@@ -2644,9 +2679,15 @@ mod tests {
             .pause_machine(&id, PauseOpts::default())
             .await
             .expect("pause seals the canned snapshot");
-        // CannedIO writes 12-byte vmstate + 8-byte mem stubs and seals epoch 1.
-        assert_eq!(outcome.vmstate_len, b"mock-vmstate".len() as u64);
-        assert_eq!(outcome.mem_len, b"mock-mem".len() as u64);
+        // CannedIO writes 12-byte vmstate + 8-byte mem stubs; the seal records
+        // the lengths of their ciphertext, which carries a header, a nonce
+        // and a tag on top.
+        let sealed_len = |stub: &[u8]| {
+            use mvm_core::crypto::snapshot_encryption::{HEADER_SIZE, NONCE_SIZE, TAG_SIZE};
+            (HEADER_SIZE + NONCE_SIZE + stub.len() + TAG_SIZE) as u64
+        };
+        assert_eq!(outcome.vmstate_len, sealed_len(b"mock-vmstate"));
+        assert_eq!(outcome.mem_len, sealed_len(b"mock-mem"));
         assert!(outcome.epoch >= 1);
 
         // Plain resume drives the replay-refusal gate (`verify_and_resume`) and,
@@ -2769,6 +2810,69 @@ mod tests {
         let msg = error.to_string();
         assert!(msg.contains("Do not run resume again"), "{msg}");
         assert!(msg.contains("guest is running"), "{msg}");
+    }
+
+    /// The sealed pause encrypts the capture, and the resume decrypts it.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_sealed_pause_stores_only_ciphertext() {
+        let _data = IsolatedDataDir::new();
+        std::fs::create_dir_all(mvm_runtime::MockBackend::vm_dir("snap-enc")).unwrap();
+        register("snap-enc");
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-enc".into());
+        be.pause_machine(&id, PauseOpts::default())
+            .await
+            .expect("paused");
+        let dir = mvm_runtime::vm::instance_snapshot::snapshot_dir("snap-enc");
+        for name in [
+            mvm_core::crypto::snapshot_hmac::VMSTATE_FILENAME,
+            mvm_core::crypto::snapshot_hmac::MEM_FILENAME,
+        ] {
+            assert!(
+                mvm_core::crypto::snapshot_encryption::probe(&dir.join(name))
+                    .unwrap()
+                    .is_some(),
+                "{name} is encrypted"
+            );
+        }
+        be.resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect("the resume decrypts under the same key");
+    }
+
+    /// A pause whose key is missing or malformed is refused before the
+    /// machine is touched: nothing is captured, it is not marked paused, and
+    /// no sleep is recorded.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn a_pause_without_a_usable_key_is_refused_before_capture() {
+        use mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV;
+        let mut data = IsolatedDataDir::new();
+        std::fs::create_dir_all(mvm_runtime::MockBackend::vm_dir("snap-nokey")).unwrap();
+        let registry_path = register("snap-nokey");
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-nokey".into());
+        let bad = "7q".repeat(32);
+        for (value, expect) in [
+            (None, "no snapshot key is configured"),
+            (Some(&bad), "not a usable key"),
+        ] {
+            match value {
+                Some(value) => data.env.set(SNAPSHOT_TENANT_KEY_ENV, value),
+                None => data.env.remove(SNAPSHOT_TENANT_KEY_ENV),
+            }
+            let msg = be
+                .pause_machine(&id, PauseOpts::default())
+                .await
+                .expect_err("refused")
+                .to_string();
+            assert!(msg.contains(expect), "{msg}");
+            assert!(!msg.contains("7q"), "the key is not echoed: {msg}");
+        }
+        assert!(!mvm_runtime::vm::instance_snapshot::snapshot_dir("snap-nokey").exists());
+        assert!(!audit_log().contains("\"workload_sleep\""));
+        assert!(!is_paused(&registry_path, "snap-nokey"));
     }
 
     #[tokio::test]
