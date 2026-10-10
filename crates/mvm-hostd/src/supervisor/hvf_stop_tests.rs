@@ -205,3 +205,63 @@ fn same_name_start_refuses_without_replacing_original_identity() {
     assert_eq!(wire::read_instance("exclusive").unwrap(), instance);
     assert!(!other_stop.load(Ordering::Acquire));
 }
+
+#[test]
+fn terminal_publication_failure_keeps_evidence_and_refuses_success() {
+    let _home = home();
+    let (owner, _) = control("failed-terminal");
+    let instance = wire::read_instance("failed-terminal").unwrap();
+    let marker = wire::state_dir("failed-terminal")
+        .unwrap()
+        .join(wire::FINALIZED_FILE);
+    std::fs::create_dir(&marker).unwrap();
+    assert!(owner.publish_finalized().is_err());
+    assert_eq!(wire::read_instance("failed-terminal").unwrap(), instance);
+    assert!(marker.is_dir());
+    assert!(owner.publish_finalized().is_err());
+}
+
+#[test]
+fn blocked_owner_callback_does_not_block_clients_or_control_worker_shutdown() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let _home = home();
+    let (owner, stop) = control("blocked-parent");
+    let instance = wire::read_instance("blocked-parent").unwrap();
+    let (mut old_stream, response) = challenge("blocked-parent");
+    let old_request = request(&response, &instance);
+    let authority = owner.authority();
+    let (entered, entered_rx) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let transfer = std::thread::spawn(move || {
+        authority.transfer("blocked-child", || {
+            entered.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+    });
+    entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(!send(&mut old_stream, &old_request));
+    let deadline = Instant::now() + wire::CONNECTION_BUDGET;
+    let mut pending_client = wire::connect("blocked-parent", deadline).unwrap();
+    wire::write_all(&mut pending_client, &[8; 32], deadline).unwrap();
+    assert!(wire::read_frame::<SignedControl>(&mut pending_client, deadline).is_err());
+    let (dropped, dropped_rx) = mpsc::sync_channel(1);
+    let shutdown = std::thread::spawn(move || {
+        drop(owner);
+        dropped.send(()).unwrap();
+    });
+    let completed_while_callback_blocked = dropped_rx.recv_timeout(Duration::from_secs(3)).is_ok();
+    // Always release/join test-owned workers before asserting, even on failure.
+    release.send(()).unwrap();
+    let outcome = transfer.join().unwrap();
+    shutdown.join().unwrap();
+    assert!(completed_while_callback_blocked);
+    assert!(
+        outcome.is_err(),
+        "closed controller cannot commit the pending child"
+    );
+    assert!(stop.load(Ordering::Acquire));
+    assert_eq!(wire::read_instance("blocked-parent").unwrap(), instance);
+}

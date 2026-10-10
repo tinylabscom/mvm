@@ -51,6 +51,13 @@ Stop acceptance and resident ownership transfer share one linearization gate.
 Acceptance rechecks the current generation under that gate. Transfer rotates the
 generation before acknowledging the child; a previously authenticated parent
 command cannot commit after that rotation. Once stop commits, transfer is denied.
+Transfer reserves its generation under a short lock, then releases that lock for
+filesystem and capture work. While preparation is pending, control requests are
+refused rather than waiting for owner I/O. Commit rechecks the reserved generation
+and cancellation under the short lock. Finalization persistence likewise runs
+outside the control lock. The control exchange has a two-second monotonic I/O
+deadline; this does not claim a bound on underlying filesystem operations during
+bootstrap, ownership preparation, root loading or terminal evidence persistence.
 
 Each connection accepts at most one stop command and is then consumed, including
 on refusal. A fresh connection has a fresh random connection nonce. Requests
