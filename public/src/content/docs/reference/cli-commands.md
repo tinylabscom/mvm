@@ -965,14 +965,25 @@ Startup and bounded periodic maintenance use the signed original capture
 authority. Recovery requires exclusive producer leases and a durable signed
 opening; recovered output is explicitly incomplete and retry preserves the
 original staged terminal timestamp. Missing or pruned audit authority refuses
-recovery/retirement; uninterrupted unattended cleanup across audit pruning is
-not guaranteed. Unaccounted interrupted ciphertext tails are preserved for
+recovery/retirement. `mvmctl trust audit prune --through <segment>` is a dry-run;
+`--ack` commits only after repeating verification and protected-evidence admission
+under the audit lock. Original opening, seal and retirement evidence remains
+pinned while enrolled verification metadata is retained, even after ciphertext
+retirement; the containing audit segments may remain indefinitely. Retirement
+records are pre-unlink intent, not proof of completed deletion.
+Busy managed capture inventory refuses pruning with a retryable diagnostic,
+including when its tenant cannot yet be authenticated. Missing/corrupt authority
+and ambiguous legacy enrollment also refuse rather than disposing of metadata
+or manufacturing replacement authority. Known authenticated legacy v6 captures
+remain unenrolled. Unaccounted interrupted ciphertext tails are preserved for
 offline recovery rather than automatically discarded.
+If a verified legacy seal is pruned but its manifest remains, that manifest alone
+cannot authenticate legacy status during a later prune; the later attempt refuses
+for missing authority. Do not treat this refusal as permission to delete metadata.
 Maintenance runs at supervisor startup and while it is alive. There is no
 always-on physical cleanup of stopped, never-restarted captures in this slice:
 read expiry remains enforced, but seven-day physical deletion is not
-guaranteed. Stopped-capture maintenance and audit-pruning continuity remain
-separate follow-ups.
+guaranteed. Always-on stopped-capture maintenance remains a separate follow-up.
 
 Verified history checks signed retirement before decrypting any payload, even
 when deletion was interrupted. Retired/expired history reports an explicit

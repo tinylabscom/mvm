@@ -17,6 +17,8 @@ pub mod leaf_cache;
 pub mod merkle;
 pub mod output_audit;
 pub mod plan_persist;
+#[cfg(unix)]
+pub(crate) mod prune_pins;
 /// Writer for `.mvmev` evidence archives over the chain-signed audit log.
 pub mod receipt_archive;
 /// Verifier for `.mvmev` evidence archives.
