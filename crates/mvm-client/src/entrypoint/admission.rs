@@ -117,6 +117,17 @@ impl EntrypointAdmission {
             self.producer_identity.is_none() || self.backend_name == "hvf",
             "caller registration currently requires a cold HVF entrypoint launch"
         );
+        // Unsupported builds/platforms refuse before admission or managed-state
+        // effects. The native factory shares one bounded process-wide lane;
+        // custody lookup and possession still happen on this measured launch.
+        let producer = self
+            .producer_identity
+            .as_ref()
+            .map(|identity| {
+                mvm_hostd::caller_identity::IdentityClient::native()
+                    .map(|client| (identity, client))
+            })
+            .transpose()?;
         let AdmitInputs {
             rootfs,
             kernel,
@@ -204,16 +215,11 @@ impl EntrypointAdmission {
             .map(serde_json::to_string)
             .transpose()
             .context("serializing admitted policy bundle for the entrypoint VM")?;
-        let caller_registration = self
-            .producer_identity
-            .as_ref()
-            .map(|identity| {
+        let caller_registration = producer
+            .map(|(identity, client)| {
                 use mvm_core::vm_backend::caller_registration::CallerRegistration;
-                use mvm_hostd::caller_identity::IdentityClient;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                let credential = IdentityClient::native()?
-                    .load(&identity.0, deadline)?
-                    .wait()?;
+                let credential = client.load(&identity.0, deadline)?.wait()?;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_secs();
@@ -259,8 +265,9 @@ impl EntrypointAdmission {
 pub struct EntrypointAdmissionBuilder(EntrypointAdmission);
 
 impl EntrypointAdmissionBuilder {
-    /// Opt into immutable caller registration on a cold HVF launch. Enrollment
-    /// is explicit and must already exist in native custody at this exact pin.
+    /// Opt into immutable caller registration on a cold macOS HVF launch with
+    /// the `native-caller-identity` build feature. Enrollment is explicit and
+    /// must already exist in native custody at this exact pin.
     /// Registration alone does not enable producer ingress or protected output.
     #[must_use]
     pub fn producer_identity(
@@ -416,6 +423,34 @@ mod tests {
         let debug = format!("{admission:?}");
         assert!(!debug.contains("bdf189ab"));
         assert!(!debug.contains("public_key"));
+    }
+
+    #[cfg(not(all(feature = "native-caller-identity", target_os = "macos")))]
+    #[test]
+    fn unsupported_caller_registration_refuses_before_admission_or_managed_state() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let identity = serde_json::from_value(serde_json::json!({
+            "installation": "bdf189ab-9a9a-440b-a266-e95b19e58a5e",
+            "public_key": vec![1; 32]
+        }))
+        .unwrap();
+        let admission = EntrypointAdmission::builder("hvf")
+            .producer_identity(identity)
+            .build()
+            .unwrap();
+        let Err(error) = admission.admit(inputs(std::path::Path::new("/unopened"), "refused"))
+        else {
+            panic!("unsupported native custody must refuse");
+        };
+        assert!(matches!(
+            error.downcast_ref::<mvm_hostd::caller_identity::IdentityError>(),
+            Some(mvm_hostd::caller_identity::IdentityError::Unsupported),
+        ));
+        assert!(!mvm_core::config::mvm_keys_dir().exists());
+        assert!(!mvm_core::config::mvm_audit_dir().exists());
+        assert!(!mvm_core::config::vm_state_dir("refused").exists());
     }
 
     #[test]
