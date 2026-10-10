@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::{ImageSetVerification, VerifiedImageSetRoot, verify_image_set_root};
 use crate::image_set::{HostProtocolSupport, ImageLock, ImageSetRequirement};
 use crate::packs::PackRevocationChecker;
-use crate::util::atomic_io::{atomic_write_new, is_already_exists};
+use crate::util::atomic_io::{FileLock, atomic_write_durable, atomic_write_new, is_already_exists};
 
 const MAX_MANIFEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
@@ -49,8 +49,14 @@ fn proof_path(cache: &Path, lock: &ImageLock) -> PathBuf {
 
 /// Authenticate and atomically publish the exact manifest/signature pair.
 ///
-/// An existing entry is never replaced, including a partial or corrupt entry.
-/// Readers must reverify under their current lock and admission policy.
+/// An existing entry that still authenticates is kept; a missing entry is
+/// created no-clobber. A partial or corrupt entry no longer blocks
+/// acquisition: the already-authenticated incoming proof replaces it under a
+/// per-entry lock, so one damaged file cannot fail later valid acquisitions
+/// until an operator removes it. Only authenticated content is ever written —
+/// an incoming proof is verified before any collision handling — and the read
+/// path never repairs: readers must reverify under their current lock and
+/// admission policy.
 pub fn cache_image_set_root(cache: &Path, request: &ImageSetVerification<'_>) -> Result<()> {
     ensure!(
         request.manifest_bytes.len() <= MAX_MANIFEST_BYTES
@@ -68,18 +74,52 @@ pub fn cache_image_set_root(cache: &Path, request: &ImageSetVerification<'_>) ->
     match atomic_write_new(&path, &bytes) {
         Ok(()) => Ok(()),
         Err(error) if is_already_exists(&error) => {
-            let existing = read_proof(&path)?;
-            let existing_request = ImageSetVerification {
-                manifest_bytes: existing.manifest.as_bytes(),
-                signature_bundle: existing.signature_bundle.as_bytes(),
-                ..*request
-            };
-            verify_image_set_root(&existing_request)
-                .context("existing image-set publisher proof failed re-verification")?;
-            Ok(())
+            if cached_proof_authentic(&path, request) {
+                return Ok(());
+            }
+            repair_image_set_root_proof(&path, request, &bytes)
         }
         Err(error) => Err(error).context("publish image-set publisher proof"),
     }
+}
+
+/// Reverify the cached entry under the caller's current lock, requirement,
+/// host protocols, and revocation policy. `false` means missing, unreadable,
+/// or inauthentic — anything short of a confirmed-authentic entry.
+fn cached_proof_authentic(path: &Path, request: &ImageSetVerification<'_>) -> bool {
+    let Ok(existing) = read_proof(path) else {
+        return false;
+    };
+    let existing_request = ImageSetVerification {
+        manifest_bytes: existing.manifest.as_bytes(),
+        signature_bundle: existing.signature_bundle.as_bytes(),
+        ..*request
+    };
+    verify_image_set_root(&existing_request).is_ok()
+}
+
+/// Replace a corrupt entry with an already-authenticated proof, serialized
+/// against other cooperating writers. The entry is rechecked under the lock
+/// so a concurrent repair is not clobbered, and the final on-disk content is
+/// reverified before success is reported; the lock only serializes callers of
+/// this API, so that closing check is what keeps a non-cooperating writer
+/// from turning a reported success into a poisoned cache.
+fn repair_image_set_root_proof(
+    path: &Path,
+    request: &ImageSetVerification<'_>,
+    authenticated: &[u8],
+) -> Result<()> {
+    let _guard =
+        FileLock::acquire(path).context("lock image-set publisher proof for cache repair")?;
+    if cached_proof_authentic(path, request) {
+        return Ok(());
+    }
+    atomic_write_durable(path, authenticated).context("repair image-set publisher proof")?;
+    ensure!(
+        cached_proof_authentic(path, request),
+        "repaired image-set publisher proof failed re-verification"
+    );
+    Ok(())
 }
 
 /// Read a prepared proof with no network or developer fallback.
@@ -217,18 +257,24 @@ mod tests {
         let poison = serde_json::to_vec(&poisoned).unwrap();
         std::fs::write(&path, &poison).unwrap();
         assert!(read_cached_image_set_root(cache.path(), &lock, &host, None).is_err());
-        assert!(cache_image_set_root(cache.path(), &request).is_err());
+        let bad = ImageSetVerification::new(b"{}", b"{}", &lock, cache.path());
+        assert!(cache_image_set_root(cache.path(), &bad).is_err());
         assert_eq!(
             std::fs::read(&path).unwrap(),
             poison,
-            "poison is not overwritten"
+            "an unauthenticated incoming proof never replaces an entry"
         );
+        cache_image_set_root(cache.path(), &request).expect("an authentic collision repairs");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        read_cached_image_set_root(cache.path(), &lock, &host, None)
+            .expect("the repaired entry reverifies offline");
 
         poisoned = serde_json::from_slice(&original).unwrap();
         poisoned.manifest.push(' ');
         std::fs::write(&path, serde_json::to_vec(&poisoned).unwrap()).unwrap();
         assert!(read_cached_image_set_root(cache.path(), &lock, &host, None).is_err());
-        assert!(cache_image_set_root(cache.path(), &request).is_err());
+        cache_image_set_root(cache.path(), &request).expect("a tampered manifest is repaired");
+        assert_eq!(std::fs::read(&path).unwrap(), original);
 
         std::fs::write(&path, &original).unwrap();
         let mut wrong_signer = lock.clone();
