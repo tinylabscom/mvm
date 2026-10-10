@@ -105,9 +105,12 @@ while a fresh registration can be admitted. Never erase replay bookkeeping to
 retry the same launch bytes.
 
 Caller registration is currently cold-only. Opted-in standby preparation and
-warm claims are refused before changing pool or guest state; no legacy standby
-bootstraps a caller key from a supplied signed plan. Opted-out launch defaults
-and handoff bytes remain unchanged.
+warm claims are refused before changing pool or guest state, and restoring a
+checkpoint that carries caller registration is refused before rewriting child
+configuration or spawning a supervisor. Snapshot creation alone does not make
+such a checkpoint restorable; it requires a fresh cold launch. No legacy standby
+bootstraps a caller key from a supplied signed plan. Opted-out launch defaults,
+restore behavior, and handoff bytes remain unchanged.
 
 Registration is a prerequisite, not producer ingress, producer readiness,
 guest readiness, or evidence of protected entrypoint stdout/stderr capture.
