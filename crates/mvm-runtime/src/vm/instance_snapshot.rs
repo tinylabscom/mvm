@@ -15,8 +15,8 @@
 //! ```text
 //! ~/.mvm/instances/<vm-name>/
 //!     snapshot/
-//!         vmstate.bin       (Firecracker VM state, mode 0600)
-//!         mem.bin           (guest memory image, mode 0600)
+//!         vmstate.bin       (encrypted Firecracker VM state, mode 0600)
+//!         mem.bin           (encrypted guest memory image, mode 0600)
 //!         integrity.json    (HMAC sidecar, mode 0600)
 //!         .epoch            (monotonic counter, mode 0600)
 //! ```
@@ -27,22 +27,24 @@
 //! sandbox's memory image even if `~/.mvm/instances/` were ever
 //! made world-readable by mistake.
 //!
-//! # What this module does NOT do (yet)
+//! # Encryption is required
 //!
-//! - AES-GCM encryption of `mem.bin`.
-//!   The HMAC envelope guarantees integrity; confidentiality
-//!   currently rests on the file mode + `~/.mvm` directory perms.
-//!   The natural seam to add it is in `seal_instance_snapshot` /
-//!   `verify_instance_snapshot` so callers don't change.
-//! - Firecracker's actual `create_snapshot` / `load_snapshot` API
-//!   calls. Those land in a follow-up chunk gated on a live KVM
-//!   host; the `SnapshotIO` trait below is the seam.
+//! Both artifacts are always encrypted (AES-256-GCM, chunked) under the
+//! snapshot key, and the HMAC envelope covers the ciphertext. A pause admits
+//! the key ([`super::snapshot_key`]) before it asks the VMM to capture
+//! anything, so a missing, unreadable, or malformed key refuses the pause
+//! with nothing written. There is no setting that writes a plaintext
+//! snapshot.
+//!
+//! Resume decrypts an encrypted snapshot with the same key. A snapshot sealed
+//! unencrypted by an older `mvmctl` still resumes when no key is configured;
+//! once a key is configured it is refused unless
+//! `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` is set for that resume.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use mvm_core::crypto::keystore;
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
     EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
@@ -51,23 +53,15 @@ use mvm_core::crypto::snapshot_hmac::{
 
 use secrecy::ExposeSecret;
 
-/// Tenant id used for snapshot encryption in mvm's single-host
-/// posture. Mirrors the "one guest = one workload" framing —
-/// every snapshot belongs to the local tenant. mvmd's multi-tenant
-/// path uses a different code path that takes a `tenant_id`
-/// explicitly.
-pub const SNAPSHOT_TENANT_ID: &str = "local";
+pub use super::snapshot_key::{
+    SNAPSHOT_TENANT_ID, SNAPSHOT_TENANT_KEY_ENV, SnapshotKey, SnapshotKeyError,
+    admit_host_snapshot_key,
+};
 
-/// Env var that lets operators opt out of the "encrypted snapshot
-/// when a key is configured" guard on resume — for the one-time
-/// v1 → v2 migration after upgrading mvmctl. Defaults to refusing
-/// unencrypted snapshots when a tenant DEK is configured.
+/// Env var that lets a resume load a snapshot sealed unencrypted by an older
+/// `mvmctl` while a snapshot key is configured. It affects resume only: a
+/// pause always encrypts.
 pub const ALLOW_UNENCRYPTED_ENV: &str = "MVM_ALLOW_UNENCRYPTED_SNAPSHOT";
-
-/// Explicit env-var override for the local tenant's snapshot DEK.
-/// This must win over OS-keyring auto-detection so dev/CI and
-/// emergency-recovery workflows can pin the key deterministically.
-pub const SNAPSHOT_TENANT_KEY_ENV: &str = "MVM_TENANT_KEY_LOCAL";
 
 /// Filename of the persistent epoch counter inside an
 /// instance-snapshot dir. Hidden by default (`.epoch`) so a casual
@@ -99,25 +93,31 @@ pub fn files_for(vm_name: &str) -> SnapshotFiles {
     files_in(&snapshot_dir(vm_name))
 }
 
-/// Pause + seal one VM's snapshot. Returns the sealed sidecar so
-/// callers can record what they sealed.
+/// Pause + seal one VM's snapshot under an admitted snapshot `key`. Returns
+/// the sealed sidecar so callers can record what they sealed.
+///
+/// Callers admit the key first ([`admit_host_snapshot_key`]), before anything
+/// else touches the VM, so that without a usable key nothing is captured.
 ///
 /// 1. Ensure the snapshot dir exists (mode 0700).
 /// 2. Ask the IO impl to write `vmstate.bin` + `mem.bin`.
 /// 3. Tighten file modes to 0600.
-/// 4. Bump the per-instance epoch counter.
-/// 5. Seal the HMAC envelope with the new epoch.
-pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result<IntegritySidecar> {
+/// 4. Encrypt both artifacts in place under `key`.
+/// 5. Bump the per-instance epoch counter.
+/// 6. Seal the HMAC envelope over the ciphertext with the new epoch.
+pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(
+    vm_name: &str,
+    io: &IO,
+    key: &SnapshotKey,
+) -> Result<IntegritySidecar> {
     let dir = prepare_instance_snapshot_dir(vm_name)?;
     io.create_snapshot(&dir)
         .with_context(|| format!("Firecracker create_snapshot({})", dir.display()))?;
     tighten_snapshot_file_modes(&dir)?;
 
-    // Encrypt vmstate + mem in place under the tenant DEK if one is
-    // available. The HMAC envelope below then covers the ciphertext,
-    // so any tamper attempt fails the seal check before AEAD
-    // decryption is even attempted on resume.
-    encrypt_artifacts_if_keyed(&dir)
+    // The HMAC envelope below covers the ciphertext, so a tampered artifact
+    // fails the seal check before AEAD decryption is attempted on resume.
+    encrypt_artifacts(&dir, key)
         .with_context(|| format!("encrypting snapshot artifacts at {}", dir.display()))?;
 
     let key_path =
@@ -308,38 +308,23 @@ pub use mvm_vmm::snapshot::{
 // VmmDriver seam can use them without a runtime dependency cycle.
 pub use mvm_vmm::post_restore::*;
 
-/// Encrypt `vmstate.bin` and `mem.bin` in place under the tenant
-/// DEK, when one is available. No-op when no DEK is configured —
-/// the resulting snapshot stays unencrypted, HMAC-only.
-fn encrypt_artifacts_if_keyed(dir: &Path) -> Result<()> {
-    let provider = snapshot_key_provider();
-    let Ok(dek) = provider.get_data_key(SNAPSHOT_TENANT_ID) else {
-        // No tenant DEK configured — leave artifacts unencrypted.
-        // Operators who want at-rest encryption configure a key
-        // via `mvmctl secret put` or the MVM_TENANT_KEY_LOCAL env
-        // var.
-        return Ok(());
-    };
-    let key_bytes = dek.expose_secret();
-    if key_bytes.len() != snapshot_encryption::KEY_SIZE {
-        bail!(
-            "tenant DEK is {} bytes, snapshot encryption requires {}",
-            key_bytes.len(),
-            snapshot_encryption::KEY_SIZE
-        );
-    }
+/// Encrypt the freshly captured `vmstate.bin` and `mem.bin` in place under
+/// `key`. Both must exist: a capture that produced neither is not sealed.
+///
+/// Every capture is encrypted, including bytes that already begin with the
+/// encrypted-file magic. The capture is guest-controlled data, so a guest
+/// could otherwise place a forged header at the start of its memory and have
+/// it stored in the clear.
+fn encrypt_artifacts(dir: &Path, key: &SnapshotKey) -> Result<()> {
     for name in [VMSTATE_FILENAME, MEM_FILENAME] {
         let p = dir.join(name);
         if !p.exists() {
-            continue;
+            bail!(
+                "the VMM did not write {name} into {}; nothing was sealed",
+                dir.display()
+            );
         }
-        // Skip files that already begin with the MVSE magic — this
-        // makes pause_and_seal idempotent on retry after a crash
-        // that successfully encrypted but failed before sealing.
-        if snapshot_encryption::probe(&p)?.is_some() {
-            continue;
-        }
-        snapshot_encryption::encrypt_file_in_place(&p, key_bytes)
+        snapshot_encryption::encrypt_file_in_place(&p, key.expose())
             .with_context(|| format!("encrypting {}", p.display()))?;
     }
     Ok(())
@@ -361,13 +346,21 @@ const RESTORE_STAGING_PREFIX: &str = ".restore-";
 /// and would leave decrypted guest memory on disk. Dropping the returned
 /// directory removes the plaintext.
 ///
-/// Refuses to fall through silently when a DEK *is* configured but the
-/// artifacts are unencrypted (downgrade attack or v1-shape leftover); set
-/// `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` to bypass during the one-time v1 → v2
-/// migration.
+/// The snapshot key comes from the same sources a pause uses. A source that
+/// cannot be read or holds a malformed key refuses the restore, as it refuses
+/// a pause. With no key configured, an encrypted artifact is refused and an
+/// unencrypted one (sealed by an older `mvmctl`) loads as it is.
+///
+/// Refuses to fall through silently when a key *is* configured but the
+/// artifacts are unencrypted (downgrade attack or a snapshot sealed before
+/// encryption was required); set `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` to resume
+/// such a snapshot once.
 fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
-    let provider = snapshot_key_provider();
-    let dek_opt = provider.get_data_key(SNAPSHOT_TENANT_ID).ok();
+    let dek_opt = match admit_host_snapshot_key() {
+        Ok(key) => Some(key),
+        Err(SnapshotKeyError::Missing) => None,
+        Err(refusal) => return Err(refusal.into()),
+    };
 
     let mut present = Vec::new();
     let mut any_encrypted = false;
@@ -381,17 +374,18 @@ fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
             (true, Some(_)) => any_encrypted = true,
             (true, None) => {
                 bail!(
-                    "{} is AES-GCM encrypted but no tenant DEK is configured — \
-                     run `mvmctl secret put` to provision a key, then `mvmctl resume`",
+                    "{} is AES-GCM encrypted but no snapshot key is configured — \
+                     configure the key it was paused under ({SNAPSHOT_TENANT_KEY_ENV}, or \
+                     /var/lib/mvm/keys/{SNAPSHOT_TENANT_ID}.key), then resume again",
                     p.display()
                 );
             }
             (false, Some(_)) => {
                 if std::env::var(ALLOW_UNENCRYPTED_ENV).as_deref() != Ok("1") {
                     bail!(
-                        "{} is not encrypted but a tenant DEK is configured — \
-                         refusing to resume (set {ALLOW_UNENCRYPTED_ENV}=1 to \
-                         force during v1 → v2 migration)",
+                        "{} is not encrypted but a snapshot key is configured — \
+                         refusing to resume (set {ALLOW_UNENCRYPTED_ENV}=1 to resume \
+                         a snapshot sealed by an older mvmctl once)",
                         p.display()
                     );
                 }
@@ -424,7 +418,7 @@ fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
         std::fs::set_permissions(&copy, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .with_context(|| format!("restricting {}", copy.display()))?;
         if is_encrypted {
-            snapshot_encryption::decrypt_file_in_place(&copy, dek.expose_secret())
+            snapshot_encryption::decrypt_file_in_place(&copy, dek.expose())
                 .with_context(|| format!("decrypting {}", dir.join(name).display()))?;
         }
     }
@@ -455,16 +449,6 @@ pub fn remove_abandoned_staging(parent: &Path) {
             let _ = std::fs::remove_dir_all(entry.path());
         }
     }
-}
-
-#[cfg(not(test))]
-fn snapshot_key_provider() -> Box<dyn keystore::KeyProvider> {
-    keystore::default_provider()
-}
-
-#[cfg(test)]
-fn snapshot_key_provider() -> Box<dyn keystore::KeyProvider> {
-    Box::new(keystore::EnvKeyProvider)
 }
 
 /// Drop the on-disk snapshot files + sidecar + epoch counter for
@@ -619,12 +603,21 @@ mod tests {
             let tmp = tempfile::tempdir().expect("tempdir");
             let mut env = TestEnv::new();
             env.set("MVM_HOME", tmp.path());
+            // Pausing requires a snapshot key; tests that exercise its
+            // absence remove it.
+            env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
             DataDirGuard {
                 _guard: lock,
                 env,
                 _tmp: tmp,
             }
         }
+    }
+
+    /// Admit the host's snapshot key and pause under it, as a pause does.
+    fn seal_under_host_key(vm: &str, io: &CannedIO) -> Result<IntegritySidecar> {
+        let key = admit_host_snapshot_key()?;
+        pause_and_seal(vm, io, &key)
     }
 
     fn canned() -> CannedIO {
@@ -658,7 +651,7 @@ mod tests {
     #[test]
     fn pause_and_seal_creates_files_with_mode_0600() {
         let _g = DataDirGuard::new();
-        let sidecar = pause_and_seal("vm-1", &canned()).unwrap();
+        let sidecar = seal_under_host_key("vm-1", &canned()).unwrap();
         assert_eq!(sidecar.epoch, 1);
         let dir = snapshot_dir("vm-1");
         for name in [VMSTATE_FILENAME, MEM_FILENAME, SIDECAR_FILENAME] {
@@ -673,9 +666,9 @@ mod tests {
     #[test]
     fn pause_and_seal_advances_epoch() {
         let _g = DataDirGuard::new();
-        let s1 = pause_and_seal("vm-1", &canned()).unwrap();
-        let s2 = pause_and_seal("vm-1", &canned()).unwrap();
-        let s3 = pause_and_seal("vm-1", &canned()).unwrap();
+        let s1 = seal_under_host_key("vm-1", &canned()).unwrap();
+        let s2 = seal_under_host_key("vm-1", &canned()).unwrap();
+        let s3 = seal_under_host_key("vm-1", &canned()).unwrap();
         assert_eq!(s1.epoch, 1);
         assert_eq!(s2.epoch, 2);
         assert_eq!(s3.epoch, 3);
@@ -684,7 +677,7 @@ mod tests {
     #[test]
     fn verify_and_resume_accepts_freshly_sealed_snapshot() {
         let _g = DataDirGuard::new();
-        let sealed = pause_and_seal("vm-1", &canned()).unwrap();
+        let sealed = seal_under_host_key("vm-1", &canned()).unwrap();
         let verified = verify_and_resume("vm-1", &canned()).unwrap();
         assert_eq!(verified, sealed);
     }
@@ -692,7 +685,7 @@ mod tests {
     #[test]
     fn verify_and_resume_rejects_tampered_mem() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-1", &canned()).unwrap();
+        seal_under_host_key("vm-1", &canned()).unwrap();
         let mem_path = snapshot_dir("vm-1").join(MEM_FILENAME);
         let mut bytes = std::fs::read(&mem_path).unwrap();
         bytes[0] ^= 0xff;
@@ -712,12 +705,12 @@ mod tests {
         // counter still reads 2, so the verifier must refuse.
         let _g = DataDirGuard::new();
         let dir = snapshot_dir("vm-1");
-        let _ = pause_and_seal("vm-1", &canned()).unwrap();
+        let _ = seal_under_host_key("vm-1", &canned()).unwrap();
         let v1_vmstate = std::fs::read(dir.join(VMSTATE_FILENAME)).unwrap();
         let v1_mem = std::fs::read(dir.join(MEM_FILENAME)).unwrap();
         let v1_sidecar = std::fs::read(dir.join(SIDECAR_FILENAME)).unwrap();
 
-        let _ = pause_and_seal("vm-1", &canned()).unwrap();
+        let _ = seal_under_host_key("vm-1", &canned()).unwrap();
         // Roll the visible files back to the epoch-1 state, but
         // leave the persisted epoch counter at 2.
         std::fs::write(dir.join(VMSTATE_FILENAME), &v1_vmstate).unwrap();
@@ -745,7 +738,7 @@ mod tests {
     #[test]
     fn verify_and_resume_refuses_nic_on_restore() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-nic", &canned()).unwrap();
+        seal_under_host_key("vm-nic", &canned()).unwrap();
         let spy =
             CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec()).with_network_interfaces(1);
         let err = verify_and_resume("vm-nic", &spy).unwrap_err();
@@ -764,7 +757,7 @@ mod tests {
     #[test]
     fn verify_and_resume_resumes_vsock_only_restore() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-clean", &canned()).unwrap();
+        seal_under_host_key("vm-clean", &canned()).unwrap();
         let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-clean", &spy).expect("a no-NIC restore must resume");
         let calls = spy.calls();
@@ -781,7 +774,7 @@ mod tests {
     #[test]
     fn load_guard_resume_ordering() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-order", &canned()).unwrap();
+        seal_under_host_key("vm-order", &canned()).unwrap();
         let spy = CannedIO::new(b"spy-vmstate".to_vec(), b"spy-mem".to_vec());
         verify_and_resume("vm-order", &spy).unwrap();
         assert_eq!(
@@ -882,7 +875,7 @@ mod tests {
     #[test]
     fn delete_instance_snapshot_removes_files() {
         let _g = DataDirGuard::new();
-        pause_and_seal("vm-1", &canned()).unwrap();
+        seal_under_host_key("vm-1", &canned()).unwrap();
         assert!(delete_instance_snapshot("vm-1").unwrap());
         assert!(!snapshot_dir("vm-1").exists());
         // Idempotent — second delete returns false.
@@ -892,8 +885,8 @@ mod tests {
     #[test]
     fn list_instance_snapshots_returns_each_sealed_vm() {
         let _g = DataDirGuard::new();
-        pause_and_seal("alpha", &canned()).unwrap();
-        pause_and_seal("beta", &canned()).unwrap();
+        seal_under_host_key("alpha", &canned()).unwrap();
+        seal_under_host_key("beta", &canned()).unwrap();
         let entries = list_instance_snapshots().unwrap();
         let names: Vec<&str> = entries.iter().map(|e| e.vm_name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
@@ -937,8 +930,8 @@ mod tests {
     #[test]
     fn pause_and_seal_encrypts_vmstate_and_mem_when_key_is_configured() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        let _s = pause_and_seal("vm-encrypt", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        let _s = seal_under_host_key("vm-encrypt", &canned()).unwrap();
         let dir = snapshot_dir("vm-encrypt");
         // Both artifact files must now begin with the MVSE magic.
         for name in [VMSTATE_FILENAME, MEM_FILENAME] {
@@ -960,23 +953,126 @@ mod tests {
         );
     }
 
+    /// Without a key, a pause is refused before anything is captured: no
+    /// snapshot directory, so no plaintext guest memory, is ever written.
     #[test]
-    fn pause_and_seal_leaves_artifacts_unencrypted_when_no_key() {
+    fn pause_and_seal_refuses_before_capture_when_no_key() {
         let mut g = DataDirGuard::new();
-        // Defensive: clear the env var in case a parallel test left
-        // it set. The DataDirGuard's lock means we're alone for the
-        // duration of this test.
-        g.env.remove("MVM_TENANT_KEY_LOCAL");
-        let _s = pause_and_seal("vm-plain", &canned()).unwrap();
-        let dir = snapshot_dir("vm-plain");
-        // No MVSE magic — vmstate is raw bytes from CannedIO.
-        assert!(
-            mvm_core::crypto::snapshot_encryption::probe(&dir.join(VMSTATE_FILENAME))
-                .unwrap()
-                .is_none()
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        let err = seal_under_host_key("vm-plain", &canned()).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<SnapshotKeyError>(),
+            Some(&SnapshotKeyError::Missing),
+            "{err:#}"
         );
-        let raw = std::fs::read(dir.join(VMSTATE_FILENAME)).unwrap();
-        assert_eq!(raw, b"vmstate-bytes");
+        assert!(format!("{err:#}").contains(SNAPSHOT_TENANT_KEY_ENV));
+        assert!(!snapshot_dir("vm-plain").exists(), "nothing was captured");
+    }
+
+    /// A malformed key refuses the pause before capture, and the refusal does
+    /// not quote the key.
+    #[test]
+    fn pause_and_seal_refuses_before_capture_when_key_is_invalid() {
+        let mut g = DataDirGuard::new();
+        let bad = "9z".repeat(32);
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, &bad);
+        let err = seal_under_host_key("vm-badkey", &canned()).unwrap_err();
+        assert!(
+            matches!(
+                err.downcast_ref::<SnapshotKeyError>(),
+                Some(SnapshotKeyError::Invalid { .. })
+            ),
+            "{err:#}"
+        );
+        assert!(!format!("{err:#} {err:?}").contains("9z"), "{err:#}");
+        assert!(!snapshot_dir("vm-badkey").exists(), "nothing was captured");
+    }
+
+    /// A pause under an admitted key encrypts with that key, whatever the
+    /// host's sources say afterwards.
+    #[test]
+    fn pause_and_seal_encrypts_under_the_admitted_key() {
+        let mut g = DataDirGuard::new();
+        let key = admit_host_snapshot_key().expect("admitted");
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        pause_and_seal("vm-held", &canned(), &key).expect("sealed");
+        let mem = snapshot_dir("vm-held").join(MEM_FILENAME);
+        let copy = g._tmp.path().join("mem.copy");
+        std::fs::copy(&mem, &copy).unwrap();
+        mvm_core::crypto::snapshot_encryption::decrypt_file_in_place(&copy, key.expose())
+            .expect("decrypts under the admitted key");
+        assert_eq!(std::fs::read(&copy).unwrap(), b"memory-image");
+    }
+
+    /// Guest memory that happens to start with the encrypted-file header is
+    /// still encrypted: the capture is guest-controlled, so a forged header
+    /// must not get it stored in the clear.
+    #[test]
+    fn a_capture_that_looks_encrypted_is_still_encrypted() {
+        use mvm_core::crypto::snapshot_encryption::{HEADER_SIZE, MAGIC, SCHEMA_VERSION};
+        let _g = DataDirGuard::new();
+        let mut forged = vec![0u8; HEADER_SIZE];
+        forged[..4].copy_from_slice(MAGIC);
+        forged[4] = SCHEMA_VERSION;
+        forged.extend_from_slice(b"guest-secret-memory");
+        let io = CannedIO::new(b"vmstate-bytes".to_vec(), forged.clone());
+        seal_under_host_key("vm-forged", &io).expect("sealed");
+        let stored = std::fs::read(snapshot_dir("vm-forged").join(MEM_FILENAME)).unwrap();
+        assert!(
+            !stored.windows(19).any(|w| w == b"guest-secret-memory"),
+            "the forged capture was stored in the clear"
+        );
+        let probe = LoadProbe::new();
+        verify_and_resume("vm-forged", &probe).expect("resumed");
+        let (_, _, mem) = probe.loaded.borrow().clone().expect("loaded");
+        assert_eq!(mem, forged, "the guest gets back exactly what it had");
+    }
+
+    /// Seal a snapshot the way an `mvmctl` that did not require encryption
+    /// did: plaintext artifacts under a valid HMAC envelope.
+    fn seal_legacy_plaintext(vm: &str) {
+        let dir = prepare_instance_snapshot_dir(vm).unwrap();
+        canned().create_snapshot(&dir).unwrap();
+        let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
+            &mvm_core::config::mvm_home(),
+        ));
+        let key = load_or_init_key(&key_path).unwrap();
+        let epoch = EpochStore::new(dir.join(EPOCH_FILENAME)).next().unwrap();
+        seal(
+            &dir,
+            &files_in(&dir),
+            epoch,
+            env!("CARGO_PKG_VERSION"),
+            key.expose_secret(),
+        )
+        .unwrap();
+    }
+
+    /// A snapshot sealed unencrypted by an older `mvmctl` still resumes on a
+    /// host with no key configured.
+    #[test]
+    fn a_legacy_plaintext_snapshot_resumes_without_a_key() {
+        let mut g = DataDirGuard::new();
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        seal_legacy_plaintext("vm-legacy");
+        verify_and_resume("vm-legacy", &canned()).expect("resumed");
+    }
+
+    /// A malformed key refuses a restore as it refuses a pause, rather than
+    /// being treated as no key.
+    #[test]
+    fn verify_and_resume_refuses_when_the_key_is_invalid() {
+        let mut g = DataDirGuard::new();
+        seal_under_host_key("vm-badkey-rs", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, "not-hex");
+        let err = verify_and_resume("vm-badkey-rs", &canned()).unwrap_err();
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<SnapshotKeyError>(),
+                Some(SnapshotKeyError::Invalid { .. })
+            )),
+            "{err:#}"
+        );
     }
 
     /// Loads through [`CannedIO`], recording what the VMM would have read at
@@ -1042,8 +1138,8 @@ mod tests {
     #[test]
     fn verify_and_resume_round_trips_encrypted_snapshot() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        let sealed = pause_and_seal("vm-rt", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        let sealed = seal_under_host_key("vm-rt", &canned()).unwrap();
         let probe = LoadProbe::new();
         let verified = verify_and_resume("vm-rt", &probe).unwrap();
         assert_eq!(verified, sealed);
@@ -1061,8 +1157,8 @@ mod tests {
     #[test]
     fn an_encrypted_snapshot_resumes_again_and_leaves_no_plaintext() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        let sealed = pause_and_seal("vm-again", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        let sealed = seal_under_host_key("vm-again", &canned()).unwrap();
         let dir = snapshot_dir("vm-again");
         let ciphertext = std::fs::read(dir.join(MEM_FILENAME)).unwrap();
 
@@ -1083,8 +1179,8 @@ mod tests {
     #[test]
     fn a_failed_load_leaves_no_plaintext() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        pause_and_seal("vm-fail", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        seal_under_host_key("vm-fail", &canned()).unwrap();
         let refusing = canned().with_network_interfaces(1);
         verify_and_resume("vm-fail", &refusing).expect_err("the device-model guard refuses");
         assert!(staging_dirs("vm-fail").is_empty(), "no plaintext left");
@@ -1125,8 +1221,8 @@ mod tests {
     #[test]
     fn an_interrupt_mid_load_removes_the_plaintext() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        pause_and_seal("vm-int", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        seal_under_host_key("vm-int", &canned()).unwrap();
         verify_and_resume("vm-int", &InterruptedLoad(canned())).expect_err("interrupted");
         assert!(staging_dirs("vm-int").is_empty(), "no plaintext left");
     }
@@ -1137,8 +1233,8 @@ mod tests {
     #[test]
     fn an_unencrypted_restore_still_removes_abandoned_staging() {
         let mut g = DataDirGuard::new();
-        g.env.remove("MVM_TENANT_KEY_LOCAL");
-        pause_and_seal("vm-plain-stale", &canned()).unwrap();
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        seal_legacy_plaintext("vm-plain-stale");
         let parent = snapshot_dir("vm-plain-stale")
             .parent()
             .unwrap()
@@ -1154,8 +1250,8 @@ mod tests {
     #[test]
     fn an_abandoned_staging_directory_is_removed() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        pause_and_seal("vm-stale", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        seal_under_host_key("vm-stale", &canned()).unwrap();
         let parent = snapshot_dir("vm-stale").parent().unwrap().to_path_buf();
         // No process has this pid: it is above the kernel's pid limit.
         let abandoned = parent.join(format!("{RESTORE_STAGING_PREFIX}{}-x", i32::MAX));
@@ -1171,13 +1267,13 @@ mod tests {
     #[test]
     fn verify_and_resume_rejects_encrypted_snapshot_with_wrong_key() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        pause_and_seal("vm-wk", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        seal_under_host_key("vm-wk", &canned()).unwrap();
         // Swap to a different DEK and try to resume. HMAC verify
         // passes (it's keyed on the host HMAC key, not the DEK), so
         // we fail at the AEAD step.
         let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        g.env.set("MVM_TENANT_KEY_LOCAL", wrong);
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, wrong);
         let err = verify_and_resume("vm-wk", &canned()).unwrap_err();
         let s = err.to_string();
         assert!(
@@ -1189,15 +1285,15 @@ mod tests {
     #[test]
     fn verify_and_resume_refuses_unencrypted_snapshot_when_key_configured() {
         let mut g = DataDirGuard::new();
-        // First seal WITHOUT a key — unencrypted, v1-shape.
-        g.env.remove("MVM_TENANT_KEY_LOCAL");
-        pause_and_seal("vm-mix", &canned()).unwrap();
+        // A snapshot sealed unencrypted, before encryption was required.
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        seal_legacy_plaintext("vm-mix");
 
         // Now configure a key and try to resume. Refuse because the
         // snapshot was sealed before the DEK was
         // provisioned (downgrade vs v1 leftover indistinguishable
         // at this layer).
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
         let err = verify_and_resume("vm-mix", &canned()).unwrap_err();
         let chained: String = err
             .chain()
@@ -1205,21 +1301,21 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(
-            chained.contains("not encrypted") || chained.contains("DEK is configured"),
+            chained.contains("not encrypted") && chained.contains("snapshot key is configured"),
             "want unencrypted-with-key refusal, got: {chained}"
         );
     }
 
     #[test]
     fn verify_and_resume_v1_unencrypted_bypass_via_env() {
-        // The one-time v1 → v2 migration escape: operator opts in
-        // via MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1 to resume a legacy
-        // unencrypted snapshot under a key-configured tenant.
+        // The escape for a snapshot sealed before encryption was required:
+        // the operator opts in via MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1 to resume
+        // a legacy unencrypted snapshot under a key-configured tenant.
         let mut g = DataDirGuard::new();
-        g.env.remove("MVM_TENANT_KEY_LOCAL");
-        pause_and_seal("vm-mig", &canned()).unwrap();
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
+        seal_legacy_plaintext("vm-mig");
 
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
         g.env.set(ALLOW_UNENCRYPTED_ENV, "1");
         let result = verify_and_resume("vm-mig", &canned());
         assert!(
@@ -1232,11 +1328,11 @@ mod tests {
     #[test]
     fn verify_and_resume_refuses_encrypted_snapshot_when_key_missing() {
         let mut g = DataDirGuard::new();
-        g.env.set("MVM_TENANT_KEY_LOCAL", TEST_DEK_HEX);
-        pause_and_seal("vm-lost", &canned()).unwrap();
+        g.env.set(SNAPSHOT_TENANT_KEY_ENV, TEST_DEK_HEX);
+        seal_under_host_key("vm-lost", &canned()).unwrap();
         // Operator lost the key. Resume must refuse rather than
         // silently produce gibberish.
-        g.env.remove("MVM_TENANT_KEY_LOCAL");
+        g.env.remove(SNAPSHOT_TENANT_KEY_ENV);
         let err = verify_and_resume("vm-lost", &canned()).unwrap_err();
         let chained: String = err
             .chain()
@@ -1244,7 +1340,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(
-            chained.contains("encrypted") && chained.contains("tenant DEK"),
+            chained.contains("encrypted") && chained.contains("no snapshot key is configured"),
             "want missing-DEK refusal, got: {chained}"
         );
     }

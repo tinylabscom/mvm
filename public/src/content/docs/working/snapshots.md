@@ -38,8 +38,51 @@ mvmctl machine pause agent-sandbox
 ```
 
 `mvmctl machine pause` asks the backend snapshot transport to write `vmstate.bin` and
-`mem.bin` under the VM's instance snapshot directory, seals the sidecar with
-an epoch-bound HMAC envelope, and marks the VM as paused in the local registry.
+`mem.bin` under the VM's instance snapshot directory, encrypts both, seals the
+sidecar with an epoch-bound HMAC envelope over the ciphertext, and marks the VM
+as paused in the local registry.
+
+### Snapshot encryption is required
+
+A sealed instance snapshot holds the guest's memory, so it is always encrypted
+(AES-256-GCM) under a 32-byte snapshot key. There is no setting that writes an
+unencrypted snapshot. Provision the key before the first pause, in one of two
+places:
+
+- `MVM_TENANT_KEY_LOCAL`, set to 64 hex characters. Setting it is an explicit
+  choice: it is then the only source `mvmctl` reads, which suits development,
+  CI, and recovering a snapshot whose key you hold elsewhere.
+- `/var/lib/mvm/keys/local.key`, holding the 32 raw bytes, mode `0600` or
+  `0400`, readable by the user that runs `mvmctl`.
+
+Keep a copy of the key. A snapshot encrypted under it cannot be resumed
+without it, and nothing else holds it.
+
+`pause` resolves and checks the key before it asks the VMM to capture
+anything, and the key it checked is the one that encrypts the capture. It
+refuses, with nothing written and the VM left running, when:
+
+- **no key is configured** in either place;
+- **the key source cannot be read**, for example the key file exists but this
+  user may not open it;
+- **the key is malformed**: not 64 hex characters, not 32 bytes, or a key file
+  whose mode is anything but `0600` or `0400`.
+
+A source that cannot be read or holds a malformed key stops the search; the
+other source is not tried in its place, so a snapshot is never encrypted
+under a key you did not choose. Refusals name the source and what to fix, and
+never quote key material.
+
+Resume reads the key from the same sources:
+
+| Snapshot on disk                    | No key configured                  | Key configured                                                    |
+| ----------------------------------- | ---------------------------------- | ----------------------------------------------------------------- |
+| Encrypted                           | Refused; configure the key it used | Decrypted and resumed; a different key fails authentication       |
+| Unencrypted, from an older `mvmctl` | Resumed as before                  | Refused unless `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` for that resume |
+
+A key source that cannot be read, or holds a malformed key, refuses the
+resume as it refuses a pause. Pausing the VM again replaces an older
+unencrypted snapshot with an encrypted one.
 
 Resume it:
 
@@ -104,7 +147,7 @@ What a refusal does and does not undo:
 but no backend completes a live-memory warm start today, so that path is not
 reachable yet.
 
-When the snapshot is encrypted under a tenant key, a resume decrypts it into a
+When the snapshot is encrypted, a resume decrypts it into a
 private directory beside the sealed snapshot (mode 0700, files 0600) and loads
 from there. The sealed files are never modified, so a refused resume can be
 retried. The decrypted copies are removed when the load returns, whether it

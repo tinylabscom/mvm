@@ -60,6 +60,7 @@ pub mod fanout;
 pub mod input_gate;
 pub mod input_route;
 mod journal;
+pub(crate) use journal::SEED_FILENAME as CAPTURE_SEED_FILENAME;
 pub mod plane;
 pub mod protected;
 mod protected_budget;

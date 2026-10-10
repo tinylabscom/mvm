@@ -241,9 +241,33 @@ deleting or replacing the current VM plan does not change it.
 The current verifier still requires original opening/sealing entries in the
 verified audit segment set. Legitimate pruning of those entries therefore
 refuses recovery and retirement; a standalone signed envelope is not accepted
-as a substitute for chain continuity. Audit pruning pins or chain-linked
-preservation are a remaining lifecycle dependency, so this surface does not
-guarantee unattended cleanup across audit pruning.
+as a substitute for chain continuity. Audit prefix pruning must retain original
+opening, seal and retirement evidence for enrolled captures while verification
+metadata remains, including after ciphertext retirement. Audit segments may
+therefore remain indefinitely. A retirement event is pre-unlink intent, not
+proof that unlink completed; pruning cannot infer release from that event.
+This policy does not authorize metadata disposal or replacement proof sidecars.
+
+Prune admission runs inside the tenant audit-chain transaction and holds
+nonblocking managed-family/capture leases through the signed prune, unlink and
+directory sync. Busy inventory is a retryable operational refusal, not proof of
+an evidence pin. An unavailable family whose tenant cannot yet be authenticated
+can conservatively block pruning for another tenant. No inventory scan is added
+to VM startup or ordinary signing.
+
+Inventory is bounded to managed workload-output families and the managed
+forensic transcript root, without following descendant symlinks. Enrollment
+comes from the signed manifest-root commitment, never unsigned routing or local
+arm records. Known authenticated legacy v6 captures are not enrolled or pinned.
+Missing or corrupt authority refuses admission; a signed seal without retained
+metadata cannot establish legacy status and cannot be pruned as unenrolled.
+After a verified legacy seal is legitimately pruned, its retained manifest
+alone cannot authenticate that legacy status on a later prune attempt. That
+attempt also refuses for missing authority; it does not enroll the capture.
+Original signed openings remain pinned even when metadata is unavailable.
+New opening publication shares the prune lock and can only append to the
+surviving chain. Unsealed forensic candidates without signed opening authority
+conservatively refuse pruning rather than acquiring authority retroactively.
 
 Recovered-seal publication uses the original authenticated opening and a staged,
 terminal incomplete manifest. A dedicated primary-chain emitter holds the tenant

@@ -39,6 +39,29 @@ fn a_member_named_by_the_signed_root_is_delivered_verbatim() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"overlay");
 }
 
+#[test]
+fn the_authenticated_manifest_bytes_retain_the_original_root() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let mut source = with_overlay(b"overlay").serve_from(served.path());
+    let path = served
+        .path()
+        .join(source.train.image_set.manifest_asset.as_str());
+    let mut original = std::fs::read(&path).unwrap();
+    original.extend_from_slice(b"\n  ");
+    std::fs::write(&path, &original).unwrap();
+    source.train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&original);
+
+    let set = PublishedImageSet::acquire_from(source).expect("authenticated original manifest");
+
+    assert_eq!(set.manifest_bytes(), original);
+    assert_eq!(
+        &Sha256Hex::from_bytes(set.manifest_bytes()),
+        set.member_cache().root()
+    );
+    assert_ne!(serde_json::to_vec(set.manifest()).unwrap(), original);
+}
+
 /// A set that also publishes the dev variant of the default tenant must not
 /// confuse the production selectors: the default-workload fetch still takes
 /// exactly the four production artifacts, and the generic artifact lookup

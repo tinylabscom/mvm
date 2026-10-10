@@ -41,7 +41,8 @@ use crate::policy::security::AgentProfile;
 /// classes. The first class embeds one complete image-set manifest and binds
 /// its member artifacts to ordinary bundle artifacts. Older bundles remain
 /// readable because `members` defaults to an empty list.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 3;
+/// Version 4 adds architecture-scoped boot assets; older readers refuse them.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 4;
 
 /// Filename inside the archive for the canonical-JSON manifest.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
@@ -162,6 +163,10 @@ pub enum BundleMember {
     /// manifest must also appear as an ordinary bundle artifact with the same
     /// name, size, and SHA-256.
     EmbeddedImageSet { manifest_artifact: String },
+    /// The unchanged original image-set manifest, with only the runtime overlay
+    /// and initramfs artifacts for `BundleManifest::arch` packaged. Workload
+    /// kernel and rootfs remain ordinary bundle artifacts. Requires schema 4.
+    EmbeddedBootAssets { manifest_artifact: String },
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -415,10 +420,10 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_three() {
+    fn bundle_schema_version_is_four() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 3);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 4);
     }
 
     #[test]
@@ -431,6 +436,19 @@ mod tests {
         assert_eq!(value["manifest_artifact"], "image-set.json");
         assert_eq!(
             serde_json::from_value::<BundleMember>(value).expect("deserialize member"),
+            member
+        );
+    }
+
+    #[test]
+    fn embedded_boot_assets_member_round_trips() {
+        let member = BundleMember::EmbeddedBootAssets {
+            manifest_artifact: "original-image-set.json".into(),
+        };
+        let value = serde_json::to_value(&member).unwrap();
+        assert_eq!(value["class"], "embedded_boot_assets");
+        assert_eq!(
+            serde_json::from_value::<BundleMember>(value).unwrap(),
             member
         );
     }

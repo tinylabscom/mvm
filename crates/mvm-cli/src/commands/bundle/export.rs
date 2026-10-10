@@ -174,6 +174,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             cmdline: cmdline.as_deref(),
             posture: args.posture_inputs(),
             provenance,
+            boot_assets: None,
             out: &args.out,
             debug_out: None,
         },

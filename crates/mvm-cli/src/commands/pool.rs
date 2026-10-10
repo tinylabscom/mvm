@@ -968,6 +968,9 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 ///
 /// - **extra volumes** — the attach threads only the rootfs, so a volume disk
 ///   would be missing from the child;
+/// - **bundle-owned boot assets** — the pool command cannot prepare a parent
+///   from an archive's pinned runtime set, so claiming a host-prepared parent
+///   would substitute boot assets the bundle did not select.
 ///
 /// A virtio-fs root is keyed rather than excluded. The parent boots the same
 /// read-only image tree and a restored child inherits that device model, so the
@@ -982,7 +985,9 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// factory-parent path has no late attachment operation for their image, so
 /// they remain cold-path-only.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty() && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
+    cfg.bundle_boot_assets.is_none()
+        && cfg.volumes.is_empty()
+        && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
 }
 
 /// Excluded shapes keep their cold path even when residency holds no standbys.
@@ -1256,6 +1261,21 @@ mod tests {
         cfg.warm_pool_size = 0;
         assert!(!warm_claim_requested(&cfg, true).unwrap());
         assert!(warm_claim_requested(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn bundle_owned_runtime_never_claims_a_host_prepared_parent() {
+        let mut cfg = eligible_cfg();
+        cfg.bundle_boot_assets = Some(mvm_core::vm_backend::BundleBootAssetsPin {
+            manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"bundle set"),
+            arch: mvm_core::arch::GuestArch::host(),
+            initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"bundle initrd"),
+        });
+        for pool_size in [0, 2] {
+            cfg.warm_pool_size = pool_size;
+            assert!(!warm_eligible_launch(&cfg));
+            assert!(!warm_claim_requested(&cfg, false).unwrap());
+        }
     }
 
     #[test]

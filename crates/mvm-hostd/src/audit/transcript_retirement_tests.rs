@@ -364,7 +364,7 @@ fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
 }
 
 #[test]
-fn legitimate_pruning_does_not_prove_that_a_seal_never_existed() {
+fn historical_pruning_does_not_prove_that_a_seal_never_existed() {
     use crate::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
     use mvm_core::transcript::evidence::authenticated_seal;
     let (f, seed, recovered) = recovery_fixture();
@@ -385,7 +385,51 @@ fn legitimate_pruning_does_not_prove_that_a_seal_never_existed() {
             EvidenceReceipt::Omitted,
         )
         .unwrap();
-    signer.prune_through(&f.plan.tenant, 2).unwrap();
+    let history = mvm_core::audit_verify::set::read_verified_set(
+        f.emitter.audit_dir(),
+        "local",
+        &f.emitter.verifying_key(),
+    )
+    .unwrap();
+    assert!(signer.prune_through(&f.plan.tenant, 2).is_err());
+    for segment in &history {
+        assert_eq!(
+            std::fs::read_to_string(&segment.path).unwrap(),
+            segment.content
+        );
+    }
+    // Historical chains can predate pin admission. Construct that signed
+    // fixture directly, without adding a bypass to the production prune API.
+    let top = history.iter().find(|segment| segment.seq == 2).unwrap();
+    let prune = crate::supervisor::audit_segment::Pruned {
+        through: 2,
+        tip: mvm_contract::verify::hash_line(
+            top.content
+                .lines()
+                .rfind(|line| !line.is_empty())
+                .unwrap()
+                .as_bytes(),
+        ),
+        entries: history
+            .iter()
+            .filter(|segment| segment.seq <= 2)
+            .map(|segment| segment.entries.as_ref().unwrap().len() as u64)
+            .sum(),
+    };
+    emitter
+        .emit_entry_for_evidence(
+            &for_plan(
+                &f.plan,
+                None,
+                crate::supervisor::audit_segment::CHAIN_PRUNED,
+                crate::supervisor::audit_segment::pruned_labels(&prune),
+            ),
+            EvidenceReceipt::Omitted,
+        )
+        .unwrap();
+    for segment in history.iter().filter(|segment| segment.seq <= 2) {
+        std::fs::remove_file(&segment.path).unwrap();
+    }
     let verified = mvm_core::audit_verify::set::read_verified_history(
         f.emitter.audit_dir(),
         "local",

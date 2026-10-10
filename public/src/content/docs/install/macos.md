@@ -64,14 +64,15 @@ install -m 0755 \
   ~/.local/bin/
 ```
 
-### From crates.io
+### From source
 
-The GitHub release tarball is preferred for runtime use because it includes the
-adjacent host helper binaries. `cargo install` installs only the `mvmctl` CLI and
-is useful for CLI-only inspection or development.
+`mvmctl` is not published to crates.io; only the public `mvm-contract` library
+is. The GitHub release tarball is preferred for runtime use because it includes
+the adjacent host helper binaries. Installing from a checkout gives only the
+`mvmctl` CLI and is useful for CLI-only inspection or development.
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 `mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries. A contributor `mvmctl` run from its checkout signs the supervisor it builds; sign copies you install elsewhere yourself.
