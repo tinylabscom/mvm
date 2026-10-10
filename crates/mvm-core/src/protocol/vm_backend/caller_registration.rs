@@ -70,17 +70,9 @@ impl CallerRegistration {
         now: u64,
     ) -> Result<crate::crypto::entrypoint_delegation::VerifiedCallerProof> {
         let binding = &self.expected.binding;
-        let prefix = format!("{vm}/");
-        let instance = binding
-            .instance
-            .strip_prefix(&prefix)
-            .context("caller registration instance mismatch")?;
-        anyhow::ensure!(
-            !Uuid::parse_str(instance)?.is_nil(),
-            "invalid caller instance"
-        );
         anyhow::ensure!(
             self.vm == vm
+                && binding.instance_vm()? == vm
                 && binding.tenant == plan.tenant.0
                 && binding.plan_id == plan.plan_id.0
                 && binding.plan_nonce == plan.nonce
