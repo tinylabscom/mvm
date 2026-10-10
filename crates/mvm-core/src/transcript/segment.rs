@@ -489,7 +489,10 @@ pub(crate) fn verify_segments(chunks: &[ChunkRecord], dir: &Path) -> Result<(), 
 }
 
 /// Stream one chunk's byte range through sha256, without holding it all.
-fn hash_range(handle: &mut File, chunk: &ChunkRecord) -> Result<String, TranscriptError> {
+pub(super) fn hash_range(
+    handle: &mut File,
+    chunk: &ChunkRecord,
+) -> Result<String, TranscriptError> {
     let io = |e: std::io::Error| TranscriptError::Io {
         file: chunk.file.clone(),
         msg: e.to_string(),

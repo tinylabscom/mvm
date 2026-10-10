@@ -282,6 +282,30 @@ pub fn verify_audit_chain_bytes(
     content: &str,
     verifying_key: &VerifyingKey,
 ) -> Result<VerifiedChain, AuditVerifyError> {
+    let verified = verify_audit_entries_bytes(content, verifying_key)?;
+    let entries = verified
+        .into_iter()
+        .map(|(line, entry)| EntrySummary {
+            line,
+            timestamp: entry.timestamp,
+            tenant: entry.tenant,
+            event: entry.event,
+            image_name: entry.image_name,
+            image_sha256: entry.image_sha256,
+        })
+        .collect::<Vec<_>>();
+    Ok(VerifiedChain {
+        count: entries.len(),
+        entries,
+    })
+}
+
+/// Authenticate complete entries from the exact supplied bytes. Readers that
+/// authorize actions from labels must not re-read a file after verification.
+pub fn verify_audit_entries_bytes(
+    content: &str,
+    verifying_key: &VerifyingKey,
+) -> Result<Vec<(usize, PlanAuditEntry)>, AuditVerifyError> {
     let mut prev_hash = [0u8; 32];
     let mut entries = Vec::new();
     let mut seen_a_line = false;
@@ -344,19 +368,9 @@ pub fn verify_audit_chain_bytes(
             .map_err(|_| AuditVerifyError::SignatureInvalid { line: idx })?;
 
         prev_hash = hash_line(line.as_bytes());
-        entries.push(EntrySummary {
-            line: idx,
-            timestamp: envelope.entry.timestamp,
-            tenant: envelope.entry.tenant,
-            event: envelope.entry.event,
-            image_name: envelope.entry.image_name,
-            image_sha256: envelope.entry.image_sha256,
-        });
+        entries.push((idx, envelope.entry));
     }
-    Ok(VerifiedChain {
-        count: entries.len(),
-        entries,
-    })
+    Ok(entries)
 }
 
 /// SHA-256 of `bytes` with no domain-separation prefix. The chain hash

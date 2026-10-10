@@ -376,7 +376,8 @@ mod tests {
             capture_dir.path(),
             mvm_core::crypto::aead::Key::from_bytes([0x5a; 32]),
             config,
-        );
+        )
+        .unwrap();
         let broker = StreamBroker::new(
             vm,
             writer,
