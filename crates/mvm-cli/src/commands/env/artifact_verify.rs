@@ -2,9 +2,9 @@
 //! / builder-VM fetch paths.
 //!
 //! These are the generic "pull a file over curl and check it against the
-//! published checksum manifest" helpers that back hash-verified downloads;
-//! the dev-image and builder-VM download orchestration in
-//! `builder_vm.rs` calls them.
+//! published checksum manifest" helpers that back hash-verified downloads.
+//! `mvmctl update` takes the archive digest it installs against from
+//! [`fetch_expected_hashes`].
 //!
 //! The manifest is itself signature-verified before it is parsed, so the
 //! digests every artifact is held to come from the publisher rather than from
@@ -26,7 +26,6 @@ use crate::ui;
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
 /// so `mvmctl trust audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
-#[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
     let m = mvm_core::observability::metrics::global();
     let counter = match outcome {
@@ -60,7 +59,6 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// URL is not enough — splitting one back apart would have to guess where the
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
-#[cfg(test)]
 pub(crate) struct ChecksumManifest<'a> {
     /// Per-version release base URL, no trailing slash.
     pub base_url: &'a str,
@@ -73,7 +71,6 @@ pub(crate) struct ChecksumManifest<'a> {
     pub train: mvm_build::release_signature::ReleaseTrain,
 }
 
-#[cfg(test)]
 impl ChecksumManifest<'_> {
     fn url(&self) -> String {
         format!("{}/{}", self.base_url, self.asset)
@@ -98,7 +95,6 @@ impl ChecksumManifest<'_> {
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
-#[cfg(test)]
 pub(crate) fn fetch_expected_hashes(
     manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
@@ -148,7 +144,6 @@ pub(crate) fn fetch_expected_hashes(
 ///
 /// A refusal here is attack-shaped, so it feeds the same counter and audit
 /// line as a bad artifact signature rather than looking like a network blip.
-#[cfg(test)]
 pub(super) fn verify_manifest_signature(
     manifest: &ChecksumManifest<'_>,
     staged: &std::path::Path,

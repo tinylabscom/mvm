@@ -436,7 +436,8 @@ statement = "Every published release artifact is authenticated under the release
 # the hash-skip hatch explicitly not waiving the signature.
 #
 # The self-update path now calls the same in-process verifier with the CLI
-# release train. The installer prefers that verifier or host cosign. With
+# release train, first over the checksum manifest it takes the archive digest
+# from and then over the archive. The installer prefers that verifier or host cosign. With
 # neither available, it authenticates the baked archive against its carried
 # target hash, then uses its mvmctl when capable or a separately hash-pinned
 # temporary cosign for legacy releases. A non-default archive with no
@@ -464,6 +465,8 @@ witnesses = [
     "fn:the_hash_skip_hatch_does_not_waive_the_root_signature",
     "fn:an_archive_without_a_bundle_is_refused",
     "fn:a_real_release_bundle_verifies_under_its_tag",
+    "fn:self_update_refuses_an_unsigned_checksum_manifest_before_parsing",
+    "fn:self_update_refuses_a_checksum_manifest_signed_for_another_tag",
     "fn:fresh_install_trust_precedes_verifier_execution",
     "fn:fresh_install_requires_tag_pinned_bundle",
     "fn:fresh_install_has_no_unsigned_fallback",

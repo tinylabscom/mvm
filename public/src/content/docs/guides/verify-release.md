@@ -15,7 +15,7 @@ Each release includes, alongside the `.tar.gz` archives:
 
 | File | Purpose |
 |------|---------|
-| `checksums-sha256.txt` | SHA256 digests for all archives (verified automatically by `mvmctl env update`) |
+| `checksums-sha256.txt` | SHA256 digests for all archives (signature and digests verified automatically by `mvmctl env update`) |
 | `mvmctl-<target>.tar.gz.bundle` | Cosign signature bundle for each platform archive |
 | `sbom.cdx.json` | Software Bill of Materials (CycloneDX JSON) |
 | `sbom.cdx.json.bundle` | Cosign signature bundle for the SBOM |
@@ -115,7 +115,7 @@ cosign verify-blob \
 
 ## Verifying Checksums
 
-`mvmctl env update` automatically downloads `checksums-sha256.txt` and verifies the SHA256 digest of the downloaded archive before installing. No manual step needed.
+`mvmctl env update` automatically downloads `checksums-sha256.txt` and its `.bundle`, verifies the manifest's signature under the release tag before reading it, and then checks the SHA256 digest of the downloaded archive against it before installing. No manual step needed.
 
 To verify manually:
 
