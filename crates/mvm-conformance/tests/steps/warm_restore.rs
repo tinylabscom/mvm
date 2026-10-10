@@ -17,15 +17,26 @@ use mvm_runtime::vm::instance_snapshot::{
     CannedIO, pause_and_seal, verify_and_resume, verify_and_resume_from_dir,
 };
 
-use crate::world::{CliWorld, MvmHomeGuard};
+use crate::world::{CliWorld, ScenarioEnvGuard};
 
-/// Create an isolated temp home, point `MVM_HOME` at it, and return both
-/// the directory and an RAII guard that restores the previous `MVM_HOME`
-/// when the scenario ends. The caller must store both in `world` so the
-/// snapshot files and the override survive the `Given` step.
-fn isolated_mvm_home() -> (tempfile::TempDir, MvmHomeGuard) {
+/// The snapshot key every warm-restore scenario seals under.
+const SCENARIO_SNAPSHOT_KEY_HEX: &str =
+    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+/// Create an isolated temp home, point `MVM_HOME` at it, select a snapshot
+/// key (sealing requires one), and return the directory and an RAII guard
+/// that restores both variables when the scenario ends. The caller must
+/// store both in `world` so the snapshot files and the overrides survive the
+/// `Given` step.
+fn isolated_mvm_home() -> (tempfile::TempDir, ScenarioEnvGuard) {
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
-    let guard = MvmHomeGuard::new(home.path());
+    let guard = ScenarioEnvGuard::new(&[
+        ("MVM_HOME", home.path().as_os_str()),
+        (
+            mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV,
+            std::ffi::OsStr::new(SCENARIO_SNAPSHOT_KEY_HEX),
+        ),
+    ]);
     (home, guard)
 }
 

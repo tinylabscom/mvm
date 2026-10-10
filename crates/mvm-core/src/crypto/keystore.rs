@@ -271,6 +271,58 @@ pub fn has_key(tenant_id: &str) -> bool {
     default_provider().get_data_key(tenant_id).is_ok()
 }
 
+/// Why one provider's lookup produced no usable key.
+///
+/// A caller that must fail closed needs to tell "this source holds no key"
+/// from "this source could not be read" from "this source holds something
+/// that is not a key", and it must do so without echoing the provider's error
+/// text: a decode error can quote characters of the key it failed to decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyLookupFailure {
+    /// The source holds no key for the tenant.
+    NotConfigured,
+    /// The source exists but could not be read: a locked or failing
+    /// keystore, or a key file the process may not open.
+    Unavailable,
+    /// The source holds material that is not a usable key: wrong encoding,
+    /// wrong length, or a key file with an unsafe mode.
+    Invalid,
+}
+
+impl KeyLookupFailure {
+    /// Classify an error returned by a [`KeyProvider`] from the typed causes
+    /// in its chain. Anything without a recognised I/O, environment, or
+    /// keystore cause was rejected by the provider's own validation, so it
+    /// is [`KeyLookupFailure::Invalid`].
+    pub fn classify(err: &anyhow::Error) -> Self {
+        err.chain()
+            .find_map(Self::from_cause)
+            .unwrap_or(Self::Invalid)
+    }
+
+    fn from_cause(cause: &(dyn std::error::Error + 'static)) -> Option<Self> {
+        if let Some(var) = cause.downcast_ref::<std::env::VarError>() {
+            return Some(match var {
+                std::env::VarError::NotPresent => Self::NotConfigured,
+                std::env::VarError::NotUnicode(_) => Self::Invalid,
+            });
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            return Some(match io.kind() {
+                std::io::ErrorKind::NotFound => Self::NotConfigured,
+                _ => Self::Unavailable,
+            });
+        }
+        cause
+            .downcast_ref::<keyring::Error>()
+            .map(|keystore| match keystore {
+                keyring::Error::NoEntry => Self::NotConfigured,
+                keyring::Error::BadEncoding(_) => Self::Invalid,
+                _ => Self::Unavailable,
+            })
+    }
+}
+
 /// Reject any identifier that can't safely be interpolated into a
 /// shell command, filesystem path, or env-var name. Accepts only
 /// `[A-Za-z0-9_-]` and a non-empty string.
@@ -572,5 +624,95 @@ mod tests {
             tenant.to_uppercase().replace('-', "_")
         ));
         assert!(!has_key(tenant));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // KeyLookupFailure
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_unset_env_key_is_not_configured() {
+        let mut env = crate::util::test_env::TestEnv::new();
+        env.remove("MVM_TENANT_KEY_MVM_TEST_LOOKUP_UNSET");
+        let err = EnvKeyProvider
+            .get_data_key("mvm-test-lookup-unset")
+            .unwrap_err();
+        assert_eq!(
+            KeyLookupFailure::classify(&err),
+            KeyLookupFailure::NotConfigured
+        );
+    }
+
+    #[test]
+    fn a_malformed_env_key_is_invalid() {
+        let mut env = crate::util::test_env::TestEnv::new();
+        for bad in [
+            "zz".repeat(KEY_SIZE),
+            "ab".repeat(KEY_SIZE - 1),
+            "abc".into(),
+        ] {
+            env.set("MVM_TENANT_KEY_MVM_TEST_LOOKUP_BAD", &bad);
+            let err = EnvKeyProvider
+                .get_data_key("mvm-test-lookup-bad")
+                .unwrap_err();
+            assert_eq!(
+                KeyLookupFailure::classify(&err),
+                KeyLookupFailure::Invalid,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_key_file_is_not_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = FileKeyProvider::with_dir(tmp.path())
+            .get_data_key("acme")
+            .unwrap_err();
+        assert_eq!(
+            KeyLookupFailure::classify(&err),
+            KeyLookupFailure::NotConfigured
+        );
+    }
+
+    #[test]
+    fn a_key_file_with_an_unsafe_mode_or_length_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_key_file(tmp.path(), "loose", &[0u8; KEY_SIZE], 0o644);
+        write_key_file(tmp.path(), "short", b"short", 0o600);
+        let provider = FileKeyProvider::with_dir(tmp.path());
+        for tenant in ["loose", "short"] {
+            let err = provider.get_data_key(tenant).unwrap_err();
+            assert_eq!(
+                KeyLookupFailure::classify(&err),
+                KeyLookupFailure::Invalid,
+                "{tenant}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_source_is_unavailable() {
+        let denied = anyhow::Error::new(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("read key file");
+        assert_eq!(
+            KeyLookupFailure::classify(&denied),
+            KeyLookupFailure::Unavailable
+        );
+        let locked = anyhow::Error::new(keyring::Error::NoStorageAccess("keychain locked".into()))
+            .context("reading keyring entry");
+        assert_eq!(
+            KeyLookupFailure::classify(&locked),
+            KeyLookupFailure::Unavailable
+        );
+    }
+
+    #[test]
+    fn an_absent_keyring_entry_is_not_configured() {
+        let absent = anyhow::Error::new(keyring::Error::NoEntry).context("reading keyring entry");
+        assert_eq!(
+            KeyLookupFailure::classify(&absent),
+            KeyLookupFailure::NotConfigured
+        );
     }
 }
