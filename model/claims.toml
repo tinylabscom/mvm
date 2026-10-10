@@ -535,3 +535,35 @@ witnesses = [
     "fn:frames_inside_a_credential_entry_window_are_never_recorded",
     "fn:admitted_input_becomes_only_the_fixed_input_methods",
 ]
+
+[[claim]]
+id = "MVM-SEC-25"
+level = "build"
+witness_kinds = ["fn", "ci"]
+suite = "bundle_boot"
+statement = "A signed .mvmpkg named on machine run is verified against the publisher trust store before anything is installed or booted; an unsigned, altered, unenrolled or wrongly keyed archive is refused, an embedded image set the backend cannot boot is refused naming what is missing, and a launch that asks for more than the bundle's sealed posture is refused and audited"
+# The verify-and-boot story for the single-file artifact. Claim 9 covers what
+# happens to a bundle once it is installed: content addressing and admit-time
+# re-verification of the extracted tree. This claim is the step before it, on
+# the run path: the archive a user names is checked on every run, a dry run
+# included, and a refusal installs nothing.
+#
+# The refusals are witnessed hermetically, by unit tests of the run path and by
+# the s13 scenarios against the real binary. The boot itself is witnessed live
+# by the nightly `bundle_boot_live` witness, which seals an OCI image with a fresh home's
+# signer and boots it as the positional source on Firecracker; HVF, libkrun
+# and QEMU boots are recorded on the issue that tracks this claim rather than
+# gated, because no hosted runner can boot those backends. Registered ahead
+# of an ADR-001 ledger row, as claims 22 to 24 are.
+witnesses = [
+    "fn:a_signed_archive_is_installed_and_becomes_its_bundle_address",
+    "fn:a_tampered_archive_is_refused_and_nothing_is_installed",
+    "fn:an_archive_from_an_unknown_publisher_is_refused",
+    "fn:an_archive_whose_key_id_is_enrolled_under_another_key_is_refused",
+    "fn:an_unsigned_archive_is_refused",
+    "fn:backend_capability_refusal_names_the_missing_device",
+    "fn:partial_embedded_image_set_is_refused_before_boot",
+    "fn:a_launch_wider_than_the_bundle_posture_is_refused_and_audited",
+    "fn:a_launch_narrower_than_the_bundle_posture_is_admitted",
+    "ci:bundle_boot_live",
+]

@@ -234,6 +234,11 @@ jobs:
             timeout: 90
           - witness: tool_live
             timeout: 60
+          # Seals an OCI image into a signed .mvmpkg with the home's own
+          # signer and boots it as `machine run ./witness.mvmpkg`: the
+          # Firecracker boot witness for the single-file artifact.
+          - witness: bundle_boot_live
+            timeout: 60
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
@@ -283,7 +288,15 @@ jobs:
           ls -la /dev/kvm
 
       - name: Run the selected live witness
+        if: matrix.witness != 'bundle_boot_live'
         run: just bdd::live-ci ${{ matrix.witness }}
+
+      # Its own step so the claims register can cite it: MVM-SEC-25's boot
+      # witness is this leg, and a matrix entry is not something the ledger
+      # can anchor to.
+      - name: Boot a sealed OCI image as a signed .mvmpkg (bundle_boot_live)
+        if: matrix.witness == 'bundle_boot_live'
+        run: just bdd::live-ci bundle_boot_live
 
       - name: Dump VMM diagnostics on failure
         if: failure()
