@@ -106,7 +106,7 @@ impl CaptureOwner {
             version: 1,
             run: caller.as_ref().map_or_else(
                 || format!("{stamp}-{}", std::process::id()),
-                |caller| caller.challenge().binding.run.to_string(),
+                |caller| caller.capture_run(),
             ),
             persists: retention.persists(),
         };

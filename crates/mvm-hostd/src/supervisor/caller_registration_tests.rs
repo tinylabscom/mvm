@@ -131,7 +131,13 @@ fn actual_admission_installs_once_in_real_owner_without_producer_readiness() {
     .unwrap();
     assert_eq!(
         run.run,
-        registration.proof.challenge.binding.run.to_string()
+        registration
+            .proof
+            .challenge
+            .binding
+            .run
+            .as_u128()
+            .to_string()
     );
     assert!(
         !config::vm_state_dir(&registration.vm)
@@ -291,6 +297,9 @@ fn setup_failure_stays_spent_and_public_teardown_allows_fresh_admission() {
             .consume("failed-cold")
             .is_err()
     );
+    // Repair the injected storage failure. Runtime teardown deliberately does
+    // not delete independently retained diagnostic state.
+    std::fs::remove_file(&root).unwrap();
     mvm_runtime::vm::reconcile::remove_runtime_dirs(&config::vm_state_dir("failed-cold")).unwrap();
     let fresh = admit_fixture("failed-cold", 2);
     let fresh_registration = registration_fixture(&fresh, "failed-cold", 1);
