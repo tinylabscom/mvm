@@ -731,7 +731,7 @@ impl TranscriptWriter {
         plaintext: &[u8],
     ) -> Result<(), TranscriptError> {
         self.admit(plaintext.len() as u64)?;
-        let ciphertext = aead::seal(&self.key, plaintext);
+        let ciphertext = aead::seal(&self.key, plaintext, &[]);
         let placement = self.store.append(&ciphertext, plaintext.len() as u64)?;
         let sha256_hex = crate::plan::bundle::sha256_hex(&ciphertext);
         let seq = self.next_seq;
@@ -902,10 +902,11 @@ pub fn export_chunks(
         })?;
         for chunk in span.chunks {
             let ciphertext = segment::slice_chunk(&bytes, chunk)?;
-            let plaintext = aead::open(key, ciphertext).map_err(|_| TranscriptError::Decrypt {
-                seq: chunk.seq,
-                file: chunk.file.clone(),
-            })?;
+            let plaintext =
+                aead::open(key, ciphertext, &[]).map_err(|_| TranscriptError::Decrypt {
+                    seq: chunk.seq,
+                    file: chunk.file.clone(),
+                })?;
             out.push(ExportedChunk {
                 seq: chunk.seq,
                 direction: chunk.direction,
@@ -966,7 +967,7 @@ pub fn load_kek(keys_dir: &Path) -> std::io::Result<Option<aead::Key>> {
 /// Wrap a per-capture data key under the host KEK, base64 for the manifest's
 /// `wrapped_data_key_b64`.
 pub fn wrap_data_key(kek: &aead::Key, data_key: &aead::Key) -> String {
-    B64.encode(data_key.wrap_under(kek))
+    B64.encode(data_key.wrap_under(kek, &[]))
 }
 
 /// Recover a per-capture data key from the manifest's `wrapped_data_key_b64`.
@@ -975,7 +976,7 @@ pub fn unwrap_data_key(kek: &aead::Key, wrapped_b64: &str) -> Result<aead::Key, 
     let framed = B64
         .decode(wrapped_b64)
         .map_err(|_| TranscriptError::WrappedKeyInvalid)?;
-    aead::Key::unwrap_under(kek, &framed).map_err(|_| TranscriptError::WrappedKeyInvalid)
+    aead::Key::unwrap_under(kek, &framed, &[]).map_err(|_| TranscriptError::WrappedKeyInvalid)
 }
 
 #[cfg(test)]
@@ -1981,8 +1982,8 @@ mod tests {
         let wrapped = wrap_data_key(&kek, &data);
         // Recovered key decrypts what the original sealed.
         let recovered = unwrap_data_key(&kek, &wrapped).unwrap();
-        let blob = aead::seal(&data, b"payload");
-        assert_eq!(aead::open(&recovered, &blob).unwrap(), b"payload");
+        let blob = aead::seal(&data, b"payload", &[]);
+        assert_eq!(aead::open(&recovered, &blob, &[]).unwrap(), b"payload");
         // Wrong KEK + non-base64 both fail closed.
         let wrong = aead::Key::from_bytes([3u8; 32]);
         assert!(matches!(
