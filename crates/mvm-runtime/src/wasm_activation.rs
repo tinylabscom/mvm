@@ -5,9 +5,9 @@
 //! vsock; this tier has no guest agent and no vsock, so the handshake is
 //! adapted to WASI's own capability model:
 //!
-//! - **Preopens instead of mounts.** The runtime overlay's guest binaries
-//!   are preopened read-only at `/mvm/runtime` (the same guest path the
-//!   dm-verity overlay occupies on microVM backends), and each declared
+//! - **Preopens instead of mounts.** The runtime overlay's file tree is
+//!   preopened read-only at `/mvm/runtime` (the same guest path, and the same
+//!   files, the dm-verity overlay carries on microVM backends), and each declared
 //!   materialized directory grant is preopened at its guest mountpoint with
 //!   its read-only flag honored. WASI has no block devices: a direct disk
 //!   volume fails closed before any of this, in
@@ -109,14 +109,14 @@ pub struct WasmPreopenPlan {
 pub fn build_wasm_preopen_plan(
     config: &VmStartConfig,
     run_dir: &Path,
-    overlay_bins_dir: Option<&Path>,
+    overlay_dir: Option<&Path>,
 ) -> WasmPreopenPlan {
     let mut preopens = vec![WasmPreopen {
         host_dir: run_dir.to_path_buf(),
         guest_path: RUN_DIR_GUEST_PATH.to_string(),
         read_only: true,
     }];
-    if let Some(dir) = overlay_bins_dir {
+    if let Some(dir) = overlay_dir {
         preopens.push(WasmPreopen {
             host_dir: dir.to_path_buf(),
             guest_path: RUNTIME_OVERLAY_GUEST_PATH.to_string(),
@@ -152,23 +152,24 @@ pub fn overlay_declared(config: &VmStartConfig) -> bool {
         && config.runtime_overlay_roothash.is_some()
 }
 
-/// Resolve the runtime-overlay guest binaries as a host directory to
-/// preopen read-only at `/mvm/runtime`, reusing the shared
-/// resolve-or-build helper (never a forked copy). `None` when the launch
-/// is overlay-free; a typed `RuntimeOverlayUnavailable` when the launch
+/// Resolve the runtime overlay's file tree as a host directory to preopen
+/// read-only at `/mvm/runtime`: the same files at the same paths the
+/// dm-verity overlay carries on microVM backends, staged from the one verified
+/// guest-runtime archive every other consumer assembles from. `None` when the
+/// launch is overlay-free; a typed `RuntimeOverlayUnavailable` when the launch
 /// declares the overlay but it can't resolve — booting without it would
 /// silently hand the module a lesser environment than the launch contract
 /// promises.
-pub fn resolve_wasm_overlay_bins_dir(
+pub fn resolve_wasm_overlay_dir(
     config: &VmStartConfig,
 ) -> std::result::Result<Option<PathBuf>, WasmBackendError> {
     if !overlay_declared(config) {
         return Ok(None);
     }
     let unavailable = |reason: String| WasmBackendError::RuntimeOverlayUnavailable { reason };
-    let Some(workspace) = mvm_build::guest_agent_build::detect_source_workspace() else {
+    let Some(workspace) = mvm_build::image_source::guest_runtime_source_checkout() else {
         return Err(unavailable(
-            "no source checkout detected to build the guest binaries from".to_string(),
+            "no source checkout detected to assemble the guest runtime from".to_string(),
         ));
     };
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -177,20 +178,16 @@ pub fn resolve_wasm_overlay_bins_dir(
         .runtime_overlay_version
         .as_deref()
         .unwrap_or(env!("CARGO_PKG_VERSION"));
-    let binaries = mvm_build::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
         &cache_root,
         version,
         arch,
         &workspace,
     )
     .map_err(|e| unavailable(e.to_string()))?;
-    // Every binary in the set lives in the layout's own cache dir.
-    let dir = binaries
-        .agent
-        .parent()
-        .map(Path::to_path_buf)
-        .ok_or_else(|| unavailable("resolved agent path has no parent directory".to_string()))?;
-    Ok(Some(dir))
+    mvm_build::runtime_overlay::resolve_runtime_overlay_tree(&cache_root, arch, &runtime)
+        .map(Some)
+        .map_err(|e| unavailable(e.to_string()))
 }
 
 /// Validate a volume's guest mountpoint for preopening: the guest agent's
@@ -230,7 +227,7 @@ pub fn validate_wasm_volume_guest_path(
 pub fn prepare_wasm_activation(
     config: &VmStartConfig,
     state_dir: &Path,
-    overlay_bins_dir: Option<&Path>,
+    overlay_dir: Option<&Path>,
     grant_present: bool,
 ) -> Result<WasmPreopenPlan> {
     // Validate every volume mountpoint before touching the filesystem: a
@@ -249,7 +246,7 @@ pub fn prepare_wasm_activation(
     }
 
     let activation = WasmActivation {
-        runtime_overlay: overlay_bins_dir.map(|_| RUNTIME_OVERLAY_GUEST_PATH.to_string()),
+        runtime_overlay: overlay_dir.map(|_| RUNTIME_OVERLAY_GUEST_PATH.to_string()),
         volumes: config
             .volumes
             .iter()
@@ -267,7 +264,7 @@ pub fn prepare_wasm_activation(
     std::fs::write(run_dir.join("activation.json"), json)
         .map_err(|e| anyhow!("write activation file in {}: {e}", run_dir.display()))?;
 
-    Ok(build_wasm_preopen_plan(config, &run_dir, overlay_bins_dir))
+    Ok(build_wasm_preopen_plan(config, &run_dir, overlay_dir))
 }
 
 #[cfg(test)]
@@ -337,7 +334,7 @@ mod tests {
         let plan = build_wasm_preopen_plan(
             &c,
             Path::new("/state/x/wasm-activation"),
-            Some(Path::new("/cache/runtime-overlay-bins")),
+            Some(Path::new("/cache/runtime-overlay-tree")),
         );
         assert_eq!(
             plan.preopens,
@@ -348,7 +345,7 @@ mod tests {
                     read_only: true,
                 },
                 WasmPreopen {
-                    host_dir: PathBuf::from("/cache/runtime-overlay-bins"),
+                    host_dir: PathBuf::from("/cache/runtime-overlay-tree"),
                     guest_path: "/mvm/runtime".into(),
                     read_only: true,
                 },
@@ -389,7 +386,7 @@ mod tests {
         c.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
             mvm_core::network_policy::NetworkPreset::None,
         );
-        let overlay = dir.path().join("runtime-overlay-bins");
+        let overlay = dir.path().join("runtime-overlay-tree");
         let plan = prepare_wasm_activation(&c, state_dir, Some(&overlay), true).unwrap();
 
         let written: WasmActivation = serde_json::from_slice(

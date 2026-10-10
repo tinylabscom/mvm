@@ -543,7 +543,7 @@ impl VmBackend for WasmBackend {
         // Resolve the environment-activation inputs BEFORE spawning
         // anything: a launch whose declared overlay can't resolve fails
         // closed here, leaving no side effects behind.
-        let overlay_bins_dir = crate::wasm_activation::resolve_wasm_overlay_bins_dir(config)?;
+        let overlay_dir = crate::wasm_activation::resolve_wasm_overlay_dir(config)?;
         let grant_present = crate::microvm::read_verb_grant_envelope(&config.name)?.is_some();
 
         let spawned_endpoint = spawn_wasm_egress_endpoint_if_needed(config, &state_dir)?;
@@ -557,7 +557,7 @@ impl VmBackend for WasmBackend {
         let activation = crate::wasm_activation::prepare_wasm_activation(
             config,
             &state_dir,
-            overlay_bins_dir.as_deref(),
+            overlay_dir.as_deref(),
             grant_present,
         )?;
 
@@ -2226,9 +2226,9 @@ mod tests {
         #[test]
         fn module_sees_the_activation_env_and_the_runtime_preopen() {
             let (_env, home, _guard) = isolated_home();
-            // Seed an overlay-bins dir so the activation carries a runtime
+            // Seed an overlay tree so the activation carries a runtime
             // preopen the module can enumerate.
-            let overlay = home.path().join("runtime-overlay-bins");
+            let overlay = home.path().join("runtime-overlay-tree");
             std::fs::create_dir_all(&overlay).unwrap();
             let config = cfg("activated", "/tmp/does-not-matter.wasm");
             let run_dir = mvm_core::config::vm_state_dir("activated").join("wasm-activation");

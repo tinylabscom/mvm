@@ -747,7 +747,11 @@ fn source_build_pending_for(cache_root: &Path, arch: GuestArch, workspace_root: 
 
 /// Resolve the full runtime-overlay guest-binary set for `(version, arch)`,
 /// building + caching it from `workspace_root` on a cache miss.
-pub fn resolve_or_build_runtime_overlay_guest_binaries(
+///
+/// Crate-private: this is one compile step of the guest-runtime archive
+/// (`guest_bins::build_guest_bins`). Every consumer of these binaries reads
+/// them from that verified archive instead, so none can drift from it.
+pub(crate) fn resolve_or_build_runtime_overlay_guest_binaries(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
