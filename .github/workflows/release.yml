@@ -57,8 +57,8 @@ jobs:
       # images.lock pins, not a pair build of the tree's guest sources. The
       # SDK sidecar and the dev default image are therefore adopted from that
       # signed set whatever sources it was built from, and the lane fails if
-      # the set's signed compatibility excludes this CLI. Guest-source changes
-      # are pair-built and booted in the merge queue's guest-image-boot lane.
+      # the set's signed compatibility excludes this CLI. The
+      # guest-image-boot lane is dispatch-only today.
       boot_pinned_images: true
 
   build:

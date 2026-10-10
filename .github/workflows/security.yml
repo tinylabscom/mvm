@@ -736,9 +736,8 @@ jobs:
           retention-days: 7
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
-  # ADR-001 §W5.1 — the unit tests that exercise the
-  # download-and-verify code path live in mvm-cli. Run them in
-  # isolation so a regression is visible in this workflow even when
+  # The tests exercise PublishedImageSet's production acquisition path.
+  # Run them in isolation so a regression is visible here even when
   # the broader test job in ci.yml is skipped.
   hash-verify-tests:
     name: Hash-verify regression (ADR-001 §W5.1)
@@ -754,7 +753,7 @@ jobs:
       - uses: ./.github/actions/install-zigbuild
 
       - name: Run hash-verify tests
-        run: cargo test -p mvm-cli --lib hash_verify_tests
+        run: "cargo test -p mvm-build --lib published_image_set::tests::"
 
   # ── Lane 6: Verified boot artifact gate ────────────────────────────
   # ADR-001 §W3.4 — the production verity-sealed image must ship its
