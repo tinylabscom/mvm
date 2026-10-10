@@ -1,4 +1,7 @@
 //! Opt-in witness. Every OS operation addresses one fresh test-only namespace.
+//! Use the real user's HOME only for this ignored native-store witness; keep
+//! MVM_HOME and Cargo state isolated. A fake HOME can hide the user keychain.
+//! Never run unrelated HOME-sensitive tests as part of this explicit exception.
 use super::*;
 use std::process::Command;
 use std::sync::mpsc;
@@ -124,12 +127,16 @@ fn native_child() {
         "absent" => {
             let (reply, result) = mpsc::sync_channel(1);
             std::thread::spawn(move || {
-                let _ = reply.send(matches!(
-                    macos::read_at(&service, &account),
-                    Err(IdentityError::Missing)
-                ));
+                let outcome = match macos::read_at(&service, &account) {
+                    Err(IdentityError::Missing) => Ok(()),
+                    Err(error) => Err(error),
+                    Ok(_) => Err(IdentityError::Conflict),
+                };
+                let _ = reply.send(outcome);
             });
-            assert!(result.recv_timeout(Duration::from_secs(5)).unwrap());
+            let outcome = result.recv_timeout(Duration::from_secs(5)).unwrap();
+            println!("native absence category: {outcome:?}");
+            assert_eq!(outcome, Ok(()));
         }
         "create" | "duplicate" => {
             let client = IdentityClient::start(Box::new(TestStore(service))).unwrap();
@@ -137,7 +144,7 @@ fn native_child() {
             if operation == "duplicate" {
                 assert!(matches!(result, Err(IdentityError::Conflict)));
             } else {
-                let credential = result.ok().expect("native enrollment refused");
+                let credential = result.expect("native enrollment refused");
                 println!(
                     "PUBLIC_IDENTITY={}",
                     serde_json::to_string(&credential.identity()).unwrap()
@@ -155,7 +162,7 @@ fn native_child() {
                 assert!(matches!(result, Err(IdentityError::Conflict)));
             } else {
                 assert_eq!(
-                    result.ok().expect("native load refused").identity(),
+                    result.expect("native load refused").identity(),
                     identity
                 );
             }
