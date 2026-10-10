@@ -248,7 +248,8 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
         .members
         .iter()
         .filter_map(|member| match member {
-            BundleMember::EmbeddedImageSet { manifest_artifact } => {
+            BundleMember::EmbeddedImageSet { manifest_artifact }
+            | BundleMember::EmbeddedBootAssets { manifest_artifact } => {
                 manifest.find_by_name(manifest_artifact)
             }
             _ => None,
@@ -266,6 +267,7 @@ pub struct VerifiedBundleFile {
     /// SHA-256 of the whole archive file.
     pub bundle_sha256: String,
     pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
+    pub boot_assets: Option<super::VerifiedBootAssets>,
 }
 
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
@@ -308,11 +310,13 @@ pub fn verify_bundle_file(
         }
     })?;
     let embedded_image_sets = verify_embedded_image_sets(&manifest, &InMemoryArtifacts(&captured))?;
+    let boot_assets = super::verify_boot_assets(&manifest, &InMemoryArtifacts(&captured))?;
     Ok(VerifiedBundleFile {
         bundle_sha256: archive_sha256(path)?,
         manifest,
         key_id,
         embedded_image_sets,
+        boot_assets,
     })
 }
 
@@ -532,6 +536,7 @@ fn stage(
     .map_err(StageError::Verify)?;
     let embedded = verify_embedded_image_sets(manifest, &StagedArtifacts(staging))
         .map_err(StageError::Verify)?;
+    super::verify_boot_assets(manifest, &StagedArtifacts(staging)).map_err(StageError::Verify)?;
     for (name, bytes) in head {
         std::fs::write(staging.join(name), bytes).map_err(|e| {
             StageError::Io(format!("writing {name} into {}: {e}", staging.display()))

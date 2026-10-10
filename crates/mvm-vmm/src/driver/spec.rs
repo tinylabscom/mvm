@@ -142,9 +142,12 @@ pub struct VmmSpec {
 /// the tenant — the audit entry takes it from the plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBinding {
-    /// The admitted `ExecutionPlan` envelope, as the supervisor re-verifies it.
+    /// The trusted launcher's admitted `ExecutionPlan` envelope. Caller
+    /// registration independently verifies it; a legacy decoder alone does not.
     /// Untyped here so the spec does not couple to `mvm_core::plan`.
     pub plan_json: serde_json::Value,
+    /// Only trusted cold entrypoint admission supplies this registration.
+    pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// `~/.mvm/audit/` — where the chain-signed kill entry lands.
     pub audit_dir: PathBuf,
     /// `~/.mvm/keys/host-signer.ed25519` — the key the chain is signed under.

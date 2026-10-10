@@ -783,6 +783,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            caller_registration: None,
             bundle_json,
             config_files: start_config.config_files,
             read_only_materialized_images: c

@@ -1154,7 +1154,7 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
 }
 
 /// A minimal static ELF64-LE fixture accepted by the production validator.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fake_static_elf(arch: GuestArch, tag: &[u8]) -> Vec<u8> {
     let machine: u16 = match arch {
         GuestArch::X86_64 => 0x3E,

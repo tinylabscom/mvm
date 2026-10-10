@@ -8,6 +8,9 @@
 //     (`~/.mvm/instances/<vm>/snapshot/integrity.json`)
 //   * `serde_json` deserialization of `CheckpointMeta`
 //     (`~/.mvm/checkpoints/<id>/meta.json`)
+//   * `mvm_core::crypto::checkpoint_object::ObjectFrame::parse`, the keyless
+//     parser every protected checkpoint object passes through before any key
+//     is used
 //
 // The single property asserted is crash-freedom: every host↔snapshot
 // type is `#[serde(deny_unknown_fields)]`, so a hostile metadata
@@ -20,6 +23,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use mvm_core::checkpoint::CheckpointMeta;
+use mvm_core::crypto::checkpoint_object::{ObjectFrame, PAYLOAD_OVERHEAD, WRAPPED_KEY_LEN};
 use mvm_core::crypto::snapshot_hmac::IntegritySidecar;
 use mvm_core::snapshot_frame::{parse_header, parse_sections};
 
@@ -38,4 +42,13 @@ fuzz_target!(|data: &[u8]| {
     // not panic the deserializer.
     let _ = serde_json::from_slice::<IntegritySidecar>(data);
     let _ = serde_json::from_slice::<CheckpointMeta>(data);
+
+    // Checkpoint object frames: a frame that parses must account for every
+    // input byte, so the declared length can never outrun the buffer.
+    if let Ok(frame) = ObjectFrame::parse(data) {
+        let declared = frame.plaintext_len() as usize + PAYLOAD_OVERHEAD + WRAPPED_KEY_LEN;
+        assert!(declared < data.len());
+        assert!(frame.plaintext_len() <= frame.kind().max_plaintext_len());
+        let _ = frame.fingerprint();
+    }
 });

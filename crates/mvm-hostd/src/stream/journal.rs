@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 /// The mirrored manifest, beside the segments it describes.
 pub(in crate::stream) const JOURNAL_FILENAME: &str = "capture.jsonl";
-pub(in crate::stream) const SEED_FILENAME: &str = "capture-seed.json";
+pub(crate) const SEED_FILENAME: &str = "capture-seed.json";
 
 /// Preserve the canonical opening metadata before any producer is exposed.
 /// Exclusive publication prevents a later owner from resetting its opening time.

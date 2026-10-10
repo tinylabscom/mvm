@@ -19,6 +19,7 @@ pub mod lease;
 pub mod name_registry;
 pub mod overlay;
 pub mod reconcile;
+pub mod snapshot_key;
 pub mod template;
 pub mod volume_registry;
 

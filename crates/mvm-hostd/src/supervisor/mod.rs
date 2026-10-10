@@ -122,6 +122,7 @@ pub mod transcript_sink;
 // (mvm-broker, mvm-host-signer, mvm-audit-signer). Stateless client
 // libraries that open a fresh UDS connection per call.
 pub mod aggregate;
+pub mod caller_registration;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
 pub mod protected_handoff;

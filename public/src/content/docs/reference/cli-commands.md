@@ -132,7 +132,7 @@ startup.
 | `mvmctl env update`                               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
 | `mvmctl env update --check`                       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`                       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
-| `mvmctl env update --skip-verify`                 | Skip release signature verification                                                                                                                                                                                                                           |
+| `mvmctl env update --skip-verify`                 | Skip the archive's own signature check; the signed checksum manifest is still verified and still binds the archive                                                                                                                                            |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
 
 ## Building
@@ -993,14 +993,25 @@ Startup and bounded periodic maintenance use the signed original capture
 authority. Recovery requires exclusive producer leases and a durable signed
 opening; recovered output is explicitly incomplete and retry preserves the
 original staged terminal timestamp. Missing or pruned audit authority refuses
-recovery/retirement; uninterrupted unattended cleanup across audit pruning is
-not guaranteed. Unaccounted interrupted ciphertext tails are preserved for
+recovery/retirement. `mvmctl trust audit prune --through <segment>` is a dry-run;
+`--ack` commits only after repeating verification and protected-evidence admission
+under the audit lock. Original opening, seal and retirement evidence remains
+pinned while enrolled verification metadata is retained, even after ciphertext
+retirement; the containing audit segments may remain indefinitely. Retirement
+records are pre-unlink intent, not proof of completed deletion.
+Busy managed capture inventory refuses pruning with a retryable diagnostic,
+including when its tenant cannot yet be authenticated. Missing/corrupt authority
+and ambiguous legacy enrollment also refuse rather than disposing of metadata
+or manufacturing replacement authority. Known authenticated legacy v6 captures
+remain unenrolled. Unaccounted interrupted ciphertext tails are preserved for
 offline recovery rather than automatically discarded.
+If a verified legacy seal is pruned but its manifest remains, that manifest alone
+cannot authenticate legacy status during a later prune; the later attempt refuses
+for missing authority. Do not treat this refusal as permission to delete metadata.
 Maintenance runs at supervisor startup and while it is alive. There is no
 always-on physical cleanup of stopped, never-restarted captures in this slice:
 read expiry remains enforced, but seven-day physical deletion is not
-guaranteed. Stopped-capture maintenance and audit-pruning continuity remain
-separate follow-ups.
+guaranteed. Always-on stopped-capture maintenance remains a separate follow-up.
 
 Verified history checks signed retirement before decrypting any payload, even
 when deletion was interrupted. Retired/expired history reports an explicit
@@ -1220,6 +1231,56 @@ authentication), and confirms the host architecture before printing a preview.
 The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
+
+#### Packaging an OCI image
+
+`bundle build` resolves an OCI image, materializes its filesystem, and signs a
+single architecture-specific `.mvmpkg` with the host signer:
+
+```sh
+mvmctl bundle build --image docker.io/library/alpine:3.20 \
+  --out alpine.mvmpkg --debug-out alpine.bundle.json
+mvmctl bundle fetch ./alpine.mvmpkg
+mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
+```
+
+The package carries the workload kernel, rootfs, resolved entrypoint and libc
+metadata, universal initramfs, and runtime overlay. Runtime members are acquired
+from the existing authenticated image-set pin; the original image-set manifest
+is carried unchanged. Materialization finishes before the CLI loads its host
+signing key. The builder never receives the publisher key.
+
+`--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
+Packaging currently requires the selected architecture to match the host;
+cross-architecture runtime injection is refused before acquisition. `--label`
+sets the package's display label. The command prints the resolved OCI manifest
+digest, bundle SHA-256, signer key ID, architecture, and output path.
+
+`--production` requires a digest-qualified OCI input and produces an actually
+dm-verity-sealed rootfs with sealed-production posture. Missing entrypoint
+metadata, a platform mismatch, changed materialization bytes, or incomplete
+verity metadata is an error before signing. The default is a signed development
+package, not an unsigned archive. Production admission still applies its normal
+entrypoint, authentication, backend, and security-policy checks.
+
+Both development and production packages construct the rootfs and its verity
+data in-process from the verified OCI content. `MVM_MATERIALIZE_BUILDER_VM`
+and inputs outside the pure writer's supported limits are refused; packaging
+never falls back to an untrusted builder or replaces that seal through one.
+
+`--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
+not currently supported by that shared exporter.
+
+Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
+They retain the original image-set identity while carrying only the selected
+architecture's runtime archives, not the full builder/base-image release set.
+Older readers refuse these packages. Existing schema 3 packages and full
+embedded image sets retain their existing semantics.
+
+Bundles carrying their own boot assets use the cold-boot path. The current
+warm-pool preparation command cannot prepare a parent from an archive's pinned
+runtime set, so a portable bundle never substitutes a host-prepared standby.
+Repeated launches still reuse the content-addressed installed archive.
 
 #### Booting a signed bundle
 
@@ -1943,6 +2004,8 @@ All commands accept these global options:
 | `MVM_BUILDER_AGENT_PORT`                  | Vsock port the builder agent listens on                                                                                                                                                                                                                                                                                                                                                     | `54_321`                         |
 | `MVM_BUILDER_VM_TIMEOUT_SECS`             | Wall-clock cap for one-shot libkrun builder VM runs before the supervisor is killed                                                                                                                                                                                                                                                                                                         | `1800`                           |
 | `MVM_TENANT_KEY_<ID>`                     | Compatibility hook for tenant-scoped key material consumed by shared policy/keystore primitives. Fleet operators should configure tenant keys through `mvmd`.                                                                                                                                                                                                                               | None                             |
+| `MVM_TENANT_KEY_LOCAL`                    | Explicitly selects the 32-byte key (64 hex characters) that encrypts sealed instance snapshots. When set it is the only key source consulted, so a malformed value refuses `machine pause` and `machine resume` rather than falling back to another key. Without it, `/var/lib/mvm/keys/local.key` (32 raw bytes, mode 0600 or 0400) is used. See [Snapshots](/working/snapshots/). | None (pause refuses) |
+| `MVM_ALLOW_UNENCRYPTED_SNAPSHOT`          | Set to `1` to resume, once, an instance snapshot sealed unencrypted by an older `mvmctl` while a snapshot key is configured. Affects resume only; a pause always encrypts. | Unset |
 | `MVM_SKIP_COSIGN_VERIFY`                  | Set to `1` to bypass cosign signature verification on prebuilt-image downloads and on the runtime-overlay / SDK-sidecar release archives. Documented emergency-rotation escape only; never set in CI or production.                                                                                                                                                                         | Unset                            |
 | `MVM_SKIP_HASH_VERIFY`                    | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production.                                                                                                                                                                                                                                                         | Unset                            |
 | `MVM_OVERLAY_BASE_URL`                    | Release base URL the runtime overlay **and** the SDK sidecar are fetched from (both ship in the same release). Point it at a private mirror; `/v<version>` is appended for you.                                                                                                                                                                                                             | GitHub Releases                  |

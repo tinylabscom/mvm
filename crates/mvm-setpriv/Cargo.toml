@@ -1,5 +1,6 @@
 [package]
 name = "mvm-setpriv"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "guest privilege-drop and exec helper, and the descriptor hygiene it applies before exec"

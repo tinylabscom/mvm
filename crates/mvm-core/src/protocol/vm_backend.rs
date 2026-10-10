@@ -18,6 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+pub mod caller_registration;
+
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
 pub use mvm_contract::protocol::resource_controls::{
     CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
@@ -57,6 +59,15 @@ pub use mvm_contract::protocol::vm_backend::{
 /// };
 /// backend.start(&config)?;
 /// ```
+/// Runtime identity admitted from a verified bundle, independent of the CLI lock.
+#[derive(Debug, Clone)]
+pub struct BundleBootAssetsPin {
+    pub manifest_sha256: crate::packs::Sha256Hex,
+    pub arch: crate::arch::GuestArch,
+    /// Digest of the signed, extracted initrd, not a mutable cache marker.
+    pub initrd_sha256: crate::packs::Sha256Hex,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct VmStartConfig {
     /// VM name (user-provided or auto-generated).
@@ -74,6 +85,8 @@ pub struct VmStartConfig {
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
+    /// Verified bundle runtime selection. Never inferred from a cache version.
+    pub bundle_boot_assets: Option<BundleBootAssetsPin>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
     /// Present when the flake was built with `verifiedBoot = true`
     /// (the production default). Must be paired with `roothash`.
@@ -166,13 +179,17 @@ pub struct VmStartConfig {
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
     /// `String` so this wire type stays a serde seam with no typed
-    /// coupling to `mvm_core::plan`. **The supervisor
-    /// re-verifies the signature** before trusting any decoded field;
-    /// the host is in the TCB but the supervisor still runs Ed25519
-    /// verification. **Do not log this value** — the envelope may carry
+    /// coupling to `mvm_core::plan`. Legacy supervisor paths trust the
+    /// authorized launcher; decoding this envelope is not signature verification.
+    /// Opted-in caller registration separately re-verifies it against the
+    /// canonical local host public key before installation.
+    /// **Do not log this value** — the envelope may carry
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
+    /// Optional caller registration from the trusted entrypoint admission path.
+    /// This is not producer readiness and is not accepted by warm launches.
+    pub caller_registration: Option<caller_registration::CallerRegistration>,
     /// JSON-encoded `PlanArtifact` (bundle pin)
     /// when `admitted.plan.bundle.is_some()`. `None` when the plan
     /// has no `.mvmpkg` pin (the common case). Same "do not log"

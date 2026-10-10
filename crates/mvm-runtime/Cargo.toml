@@ -1,5 +1,6 @@
 [package]
 name = "mvm-runtime"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "VM lifecycle orchestration + VmBackend implementations for mvm"

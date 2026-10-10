@@ -172,6 +172,22 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
     world.last_run = Some(output);
 }
 
+#[when(expr = "I trust the isolated home's bundle signer")]
+fn trust_isolated_bundle_signer(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    let pubkey = mvm_core::config::mvm_keys_dir_at(home.path()).join("host-signer.pub");
+    let output = mvmctl_command()
+        .args(["trust", "add"])
+        .arg(pubkey)
+        .isolated_home(home.path())
+        .output()
+        .expect("failed to spawn mvmctl trust add");
+    world.last_run = Some(output);
+}
+
 #[then(expr = "the scratch directory contains file {string}")]
 fn scratch_directory_contains_file(world: &mut CliWorld, rel: String) {
     let scratch = world

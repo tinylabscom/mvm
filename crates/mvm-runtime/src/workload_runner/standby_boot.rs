@@ -109,6 +109,12 @@ pub fn factory_parent_config(
     launch: &VmStartConfig,
     spec: &StandbySpec,
 ) -> std::result::Result<VmStartConfig, StandbyError> {
+    if launch.caller_registration.is_some() {
+        return Err(StandbyError::SpawnFailed(
+            "caller registration requires cold launch; prepared caller standbys are unavailable"
+                .into(),
+        ));
+    }
     let image = spec.image_path.as_deref().ok_or_else(|| {
         StandbyError::SpawnFailed(format!("standby '{}' has no rootfs image to boot", spec.id))
     })?;
@@ -146,6 +152,7 @@ pub fn factory_parent_config(
         runner_dir: _,
         tenant_id: _,
         plan_json: _,
+        caller_registration: _,
         bundle_json: _,
         warm_pool_size: _,
         network_policy: _,
@@ -158,6 +165,7 @@ pub fn factory_parent_config(
         gpu,
         gpu_device,
         initrd_path,
+        bundle_boot_assets,
         verity_path,
         roothash,
         runtime_overlay_path,
@@ -189,6 +197,7 @@ pub fn factory_parent_config(
         cpu_grant: None,
         memory_mib: spec.mem_mib,
         initrd_path: initrd_path.clone(),
+        bundle_boot_assets: bundle_boot_assets.clone(),
         verity_path: verity_path.clone(),
         roothash: roothash.clone(),
         runtime_overlay_path: runtime_overlay_path.clone(),
@@ -211,6 +220,7 @@ pub fn factory_parent_config(
         runner_dir: None,
         tenant_id: None,
         plan_json: None,
+        caller_registration: None,
         bundle_json: None,
         warm_pool_size: 0,
         network_policy: parent_egress_enablement(spec.vsock_egress),

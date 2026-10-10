@@ -754,6 +754,28 @@ impl FileAuditSigner {
             .map(|_| ())
     }
 
+    /// Preview evidence pins under the chain lock. This does not authorize a
+    /// later prune: `prune_through` repeats admission at its commit boundary.
+    pub fn check_prune_pins(
+        &self,
+        tenant: &mvm_core::plan::TenantId,
+        through: u64,
+    ) -> Result<(), AuditError> {
+        crate::audit::prune_pins::validate_tenant(&tenant.0)
+            .map_err(|error| AuditError::Io(error.to_string()))?;
+        let active = self.tenant_path(&tenant.0);
+        let _lock = Self::acquire_lock(&active)?;
+        let dir = active.parent().unwrap_or_else(|| Path::new("."));
+        let _pins = crate::audit::prune_pins::admit(
+            dir,
+            &tenant.0,
+            &self.signing_key.verifying_key(),
+            through,
+        )
+        .map_err(|error| AuditError::Io(error.to_string()))?;
+        Ok(())
+    }
+
     /// Delete segments `1..=through` after recording the removal in the chain.
     ///
     /// The order is the whole design: **verify, then record, then delete.**
@@ -778,6 +800,8 @@ impl FileAuditSigner {
         tenant: &mvm_core::plan::TenantId,
         through: u64,
     ) -> Result<crate::supervisor::audit_segment::Pruned, AuditError> {
+        crate::audit::prune_pins::validate_tenant(&tenant.0)
+            .map_err(|error| AuditError::Io(error.to_string()))?;
         let active = self.tenant_path(&tenant.0);
         let base = Self::segment_base(&active);
         let dir = active
@@ -825,6 +849,11 @@ impl FileAuditSigner {
             }
         }
 
+        let _pins = crate::audit::prune_pins::admit(&dir, &base, &vk, through)
+            .map_err(|error| AuditError::Io(error.to_string()))?;
+        #[cfg(test)]
+        crate::audit::prune_pins::commit_boundary();
+
         // The tip of the highest segment being removed is the one fact the
         // surviving successor independently attests, so it is what the record
         // has to carry.
@@ -860,6 +889,19 @@ impl FileAuditSigner {
             let path = dir.join(mvm_core::config::audit_segment_file_name(&base, seq));
             std::fs::remove_file(&path).map_err(|e| AuditError::Io(e.to_string()))?;
         }
+        #[cfg(test)]
+        crate::audit::prune_pins::sync_boundary().map_err(|error| {
+            AuditError::Io(format!(
+                "prune recorded and segments removed; directory sync failed: {error}"
+            ))
+        })?;
+        std::fs::File::open(&dir)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                AuditError::Io(format!(
+                    "prune recorded and segments removed; directory sync failed: {error}"
+                ))
+            })?;
         Ok(pruned)
     }
 

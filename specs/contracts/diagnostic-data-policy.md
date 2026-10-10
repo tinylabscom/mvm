@@ -60,6 +60,90 @@ load its existing key without creating a replacement. Missing keys, malformed
 envelopes, incorrect keys or failed integrity checks refuse decryption; they
 never authorize plaintext fallback.
 
+### Cold entrypoint caller-registration prerequisite
+
+An explicitly opted-in cold HVF entrypoint launch can install one immutable
+caller registration in its existing supervisor-owned capture owner. The client
+uses `EntrypointAdmissionBuilder::producer_identity` with a previously enrolled
+public identity and a macOS build enabling `native-caller-identity`. Other
+platforms and feature-disabled builds refuse this opt-in before admission or
+VM-state effects; they do not fall back to an unregistered launch. This bounded
+prerequisite does not implement cross-platform native custody. Admission loads
+only that exact native-custody pin; it does not enroll, rotate, or select a
+plaintext, mock, or generic keyring fallback during launch.
+
+The trusted launcher derives a fresh concrete instance, run, producer, session,
+and canonical registration challenge from the actual admitted plan. The cold
+startup record carries this fixed expectation separately from the caller's
+possession proof. Before publishing startup state or entering the guest, the
+supervisor verifies the signed plan against the canonical local host public key,
+checks its content identity and validity, and checks the proof against the
+unchanged launch expectation. The caller-selected audit signing-key path is not
+a trust root. Generic plan signatures and guest verb grants are not producer
+registration authority.
+
+The startup configuration remains part of the trusted authorized-launcher
+boundary. Putting an expectation beside a proof is not an independent trust
+anchor against replacement of both by a compromised launcher. Later producer
+input cannot install or replace the owner's caller identity.
+
+A bounded private consumed-registration ledger lives outside runtime VM state,
+under the configured MVM home's `caller-registration` directory. It stores
+only purpose-domain-separated commitments to the canonical challenge and signed
+expiry times, not keys or raw plans. Exclusive directory locking, bounded reads,
+and a synced atomic replacement complete before startup status, boot-input reads,
+or owner activation. The replay directory's canonical ancestor chain is synced
+as well, so first-use creation does not rely only on syncing files inside an
+unanchored directory. At 4096
+unexpired entries or 1 MiB the ledger refuses new consumption rather than evicting
+an unexpired record. Expiry pruning and a persistent clock high-water advance
+are one transaction; a backward clock refuses instead of reviving pruned records.
+Corrupt storage, or missing storage after recorded initialization, is never
+silently reset.
+
+A non-cloneable consumed-launch capability is passed to the capture owner;
+the owner cannot substitute verification-only state or consume it a second time.
+Missing kernel or initramfs failures after successful consumption remain spent
+even though no capture owner or guest has yet started.
+Owner installation rechecks both the signed plan window and the exact caller
+registration deadline after setup, without rounding that deadline up. A clock
+earlier than the observed consumption time refuses activation; consumption never
+extends validity.
+
+A private, create-only `caller-registration.used` slot in each managed VM
+directory separately guards immutable installation in that instance. Both
+mechanisms are replay bookkeeping, not authorization permits. Failed setup may
+remain spent; recovery requires repairing the underlying failure, normal instance
+teardown, and fresh admission. Ordinary teardown removes the per-instance slot
+but not the durable ledger, so the old still-valid registration remains refused
+while a fresh registration can be admitted. Never erase replay bookkeeping to
+retry the same launch bytes.
+
+Caller registration is currently cold-only. Opted-in standby preparation and
+warm claims are refused before changing pool or guest state, and restoring a
+checkpoint that carries caller registration is refused before rewriting child
+configuration or spawning a supervisor. Snapshot creation alone does not make
+such a checkpoint restorable; it requires a fresh cold launch. No legacy standby
+bootstraps a caller key from a supplied signed plan. Opted-out launch defaults,
+restore behavior, and handoff bytes remain unchanged.
+
+Registration is a prerequisite, not producer ingress, producer readiness,
+guest readiness, or evidence of protected entrypoint stdout/stderr capture.
+It creates no readiness ACK. Any full startup measurement must begin before
+resolution and include admission, native custody, verification, durable replay
+bookkeeping, producer readiness, and guest readiness. Registration-only timing
+cannot establish that full-readiness target.
+
+The real cold-launch witness and startup-performance measurement are blocked by
+[lifetime-safe HVF stop and fail-closed cleanup](https://github.com/tinylabscom/mvm/issues/4276).
+The current driver drops its owned supervisor child after readiness, while the
+public stop path signals a numeric PID. Best-effort transient cleanup may remove
+process evidence after a failed stop. The ignored caller-registration witness
+therefore returns `Unsupported` before launch, and its cleanup companion refuses
+to erase an existing ownership record without proof of quiescence. These refusals
+are not native-boot passes. Scoped admission/owner/replay tests and separate
+native-custody tests do not establish a full native launch or readiness latency.
+
 ## Private creation and replacement
 
 Managed payload files and key material must be created at `0600`; managed
@@ -157,9 +241,33 @@ deleting or replacing the current VM plan does not change it.
 The current verifier still requires original opening/sealing entries in the
 verified audit segment set. Legitimate pruning of those entries therefore
 refuses recovery and retirement; a standalone signed envelope is not accepted
-as a substitute for chain continuity. Audit pruning pins or chain-linked
-preservation are a remaining lifecycle dependency, so this surface does not
-guarantee unattended cleanup across audit pruning.
+as a substitute for chain continuity. Audit prefix pruning must retain original
+opening, seal and retirement evidence for enrolled captures while verification
+metadata remains, including after ciphertext retirement. Audit segments may
+therefore remain indefinitely. A retirement event is pre-unlink intent, not
+proof that unlink completed; pruning cannot infer release from that event.
+This policy does not authorize metadata disposal or replacement proof sidecars.
+
+Prune admission runs inside the tenant audit-chain transaction and holds
+nonblocking managed-family/capture leases through the signed prune, unlink and
+directory sync. Busy inventory is a retryable operational refusal, not proof of
+an evidence pin. An unavailable family whose tenant cannot yet be authenticated
+can conservatively block pruning for another tenant. No inventory scan is added
+to VM startup or ordinary signing.
+
+Inventory is bounded to managed workload-output families and the managed
+forensic transcript root, without following descendant symlinks. Enrollment
+comes from the signed manifest-root commitment, never unsigned routing or local
+arm records. Known authenticated legacy v6 captures are not enrolled or pinned.
+Missing or corrupt authority refuses admission; a signed seal without retained
+metadata cannot establish legacy status and cannot be pruned as unenrolled.
+After a verified legacy seal is legitimately pruned, its retained manifest
+alone cannot authenticate that legacy status on a later prune attempt. That
+attempt also refuses for missing authority; it does not enroll the capture.
+Original signed openings remain pinned even when metadata is unavailable.
+New opening publication shares the prune lock and can only append to the
+surviving chain. Unsealed forensic candidates without signed opening authority
+conservatively refuse pruning rather than acquiring authority retroactively.
 
 Recovered-seal publication uses the original authenticated opening and a staged,
 terminal incomplete manifest. A dedicated primary-chain emitter holds the tenant

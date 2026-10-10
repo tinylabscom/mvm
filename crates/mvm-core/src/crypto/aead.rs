@@ -7,8 +7,12 @@
 //! discipline live in exactly one place.
 //!
 //! Wire: `nonce (12) ‖ ciphertext ‖ tag (16)`.
+//!
+//! Both take associated data: caller context that is authenticated but not
+//! stored in the frame. Callers with no context pass `&[]`; that frame is
+//! byte-for-byte what this module wrote before associated data existed.
 
-use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use rand::Rng;
 use zeroize::Zeroize;
@@ -69,14 +73,24 @@ impl Key {
     /// Wrap this key's bytes under a key-encryption key, returning the AEAD
     /// frame. The raw bytes never leave the type — the inverse is
     /// [`Key::unwrap_under`]. Used to store a data key encrypted at rest.
-    pub fn wrap_under(&self, kek: &Key) -> Vec<u8> {
-        seal(kek, &self.0)
+    /// `aad` binds the wrapped key to a context; it unwraps only in that same
+    /// context.
+    pub fn wrap_under(&self, kek: &Key, aad: &[u8]) -> Vec<u8> {
+        seal(kek, &self.0, aad)
     }
 
     /// Recover a key wrapped by [`Key::wrap_under`]. Fails closed on a wrong
     /// KEK or tampered frame (via [`open`]) or a wrong unwrapped length.
-    pub fn unwrap_under(kek: &Key, framed: &[u8]) -> Result<Key, AeadError> {
-        Key::from_slice(&open(kek, framed)?)
+    pub fn unwrap_under(kek: &Key, framed: &[u8], aad: &[u8]) -> Result<Key, AeadError> {
+        let bytes = zeroize::Zeroizing::new(open(kek, framed, aad)?);
+        Key::from_slice(&bytes)
+    }
+
+    /// Whether this key's bytes equal `other`, compared in constant time.
+    /// Lets a caller refuse to use one secret for two primitives without the
+    /// raw bytes leaving this type.
+    pub(crate) fn same_bytes_as(&self, other: &[u8; KEY_SIZE]) -> bool {
+        super::constant_time::constant_time_eq(&self.0, other)
     }
 
     /// Load the key at `path`, minting and persisting a fresh random one
@@ -120,13 +134,22 @@ impl Drop for Key {
 /// Infallible: AES-GCM encryption of an in-memory buffer cannot fail for
 /// any plaintext small enough to hold in a `Vec` — the lone documented
 /// error is exceeding GCM's ~64 GiB message ceiling, which would OOM first.
-pub fn seal(key: &Key, plaintext: &[u8]) -> Vec<u8> {
+///
+/// `aad` is authenticated but not written into the frame; [`open`] must be
+/// handed the same bytes.
+pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(&key.0.into());
     let mut nonce_arr = [0u8; NONCE_SIZE];
     rand::rng().fill_bytes(&mut nonce_arr);
     let nonce = Nonce::from(nonce_arr);
     let ciphertext = cipher
-        .encrypt(&nonce, plaintext)
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .expect("AES-256-GCM seal of an in-memory buffer cannot fail");
 
     let mut out = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -140,7 +163,9 @@ pub fn seal(key: &Key, plaintext: &[u8]) -> Vec<u8> {
 /// Returns [`AeadError::Auth`] on any tag mismatch (wrong key, tampered
 /// bytes) and [`AeadError::TooShort`] when the frame can't hold a nonce
 /// and tag.
-pub fn open(key: &Key, framed: &[u8]) -> Result<Vec<u8>, AeadError> {
+///
+/// A different `aad` from the one sealed with fails as [`AeadError::Auth`].
+pub fn open(key: &Key, framed: &[u8], aad: &[u8]) -> Result<Vec<u8>, AeadError> {
     if framed.len() < NONCE_SIZE + TAG_SIZE {
         return Err(AeadError::TooShort { got: framed.len() });
     }
@@ -150,7 +175,13 @@ pub fn open(key: &Key, framed: &[u8]) -> Result<Vec<u8>, AeadError> {
     );
     let cipher = Aes256Gcm::new(&key.0.into());
     cipher
-        .decrypt(&nonce, ciphertext)
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|_| AeadError::Auth)
 }
 
@@ -161,25 +192,25 @@ mod tests {
     #[test]
     fn seal_open_roundtrip_and_reject_tamper() {
         let k = Key::random();
-        let mut ct = seal(&k, b"snapshot bytes");
-        assert_eq!(open(&k, &ct).unwrap(), b"snapshot bytes");
+        let mut ct = seal(&k, b"snapshot bytes", &[]);
+        assert_eq!(open(&k, &ct, &[]).unwrap(), b"snapshot bytes");
         ct[20] ^= 1; // flip one ciphertext byte
-        assert!(matches!(open(&k, &ct), Err(AeadError::Auth)));
+        assert!(matches!(open(&k, &ct, &[]), Err(AeadError::Auth)));
     }
 
     #[test]
     fn key_wrap_unwrap_roundtrips_and_rejects_wrong_kek() {
         let kek = Key::from_bytes([7u8; KEY_SIZE]);
         let data = Key::from_bytes([42u8; KEY_SIZE]);
-        let framed = data.wrap_under(&kek);
+        let framed = data.wrap_under(&kek, &[]);
         // Same KEK recovers an identical key (proven by an equal re-wrap is not
         // possible — random nonce — so prove via a seal/open round-trip).
-        let recovered = Key::unwrap_under(&Key::from_bytes([7u8; KEY_SIZE]), &framed).unwrap();
-        let blob = seal(&recovered, b"hi");
-        assert_eq!(open(&data, &blob).unwrap(), b"hi");
+        let recovered = Key::unwrap_under(&Key::from_bytes([7u8; KEY_SIZE]), &framed, &[]).unwrap();
+        let blob = seal(&recovered, b"hi", &[]);
+        assert_eq!(open(&data, &blob, &[]).unwrap(), b"hi");
         // Wrong KEK fails closed.
         assert!(matches!(
-            Key::unwrap_under(&Key::from_bytes([9u8; KEY_SIZE]), &framed),
+            Key::unwrap_under(&Key::from_bytes([9u8; KEY_SIZE]), &framed, &[]),
             Err(AeadError::Auth)
         ));
     }
@@ -187,31 +218,31 @@ mod tests {
     #[test]
     fn roundtrip_empty_plaintext() {
         let k = Key::random();
-        let ct = seal(&k, b"");
+        let ct = seal(&k, b"", &[]);
         assert_eq!(ct.len(), NONCE_SIZE + TAG_SIZE); // nonce + tag, no body
-        assert_eq!(open(&k, &ct).unwrap(), b"");
+        assert_eq!(open(&k, &ct, &[]).unwrap(), b"");
     }
 
     #[test]
     fn wrong_key_fails_auth() {
         let k1 = Key::random();
         let k2 = Key::random();
-        let ct = seal(&k1, b"secret");
-        assert!(matches!(open(&k2, &ct), Err(AeadError::Auth)));
+        let ct = seal(&k1, b"secret", &[]);
+        assert!(matches!(open(&k2, &ct, &[]), Err(AeadError::Auth)));
     }
 
     #[test]
     fn fresh_nonce_per_seal() {
         let k = Key::random();
-        let a = seal(&k, b"same");
-        let b = seal(&k, b"same");
+        let a = seal(&k, b"same", &[]);
+        let b = seal(&k, b"same", &[]);
         assert_ne!(a, b, "each seal must draw a fresh nonce");
     }
 
     #[test]
     fn open_rejects_short_frame() {
         let k = Key::random();
-        let err = open(&k, &[0u8; NONCE_SIZE + TAG_SIZE - 1]).unwrap_err();
+        let err = open(&k, &[0u8; NONCE_SIZE + TAG_SIZE - 1], &[]).unwrap_err();
         assert!(matches!(err, AeadError::TooShort { .. }));
     }
 
@@ -327,9 +358,48 @@ mod tests {
     }
 
     #[test]
+    fn aad_round_trips_and_refuses_a_different_context() {
+        let k = Key::random();
+        let ct = seal(&k, b"body", b"context-a");
+        assert_eq!(open(&k, &ct, b"context-a").unwrap(), b"body");
+        assert!(matches!(open(&k, &ct, b"context-b"), Err(AeadError::Auth)));
+        assert!(matches!(open(&k, &ct, &[]), Err(AeadError::Auth)));
+    }
+
+    #[test]
+    fn an_empty_aad_frame_has_the_original_layout() {
+        // A frame sealed with no associated data is plain AES-256-GCM over
+        // the plaintext, which is what every frame written before associated
+        // data existed is: open it with the cipher directly.
+        let k = Key::from_bytes([3u8; KEY_SIZE]);
+        let framed = seal(&k, b"legacy", &[]);
+        let (nonce, ct) = framed.split_at(NONCE_SIZE);
+        let cipher = Aes256Gcm::new(&k.0.into());
+        let nonce = Nonce::from(<[u8; NONCE_SIZE]>::try_from(nonce).unwrap());
+        assert_eq!(cipher.decrypt(&nonce, ct).unwrap(), b"legacy");
+    }
+
+    #[test]
+    fn context_bound_key_wrap_refuses_another_context() {
+        let kek = Key::from_bytes([1u8; KEY_SIZE]);
+        let data = Key::from_bytes([2u8; KEY_SIZE]);
+        let framed = data.wrap_under(&kek, b"ctx");
+        let recovered = Key::unwrap_under(&kek, &framed, b"ctx").unwrap();
+        assert_eq!(recovered.0, data.0);
+        assert!(matches!(
+            Key::unwrap_under(&kek, &framed, b"other"),
+            Err(AeadError::Auth)
+        ));
+        assert!(matches!(
+            Key::unwrap_under(&kek, &framed, &[]),
+            Err(AeadError::Auth)
+        ));
+    }
+
+    #[test]
     fn output_size_is_nonce_plus_plaintext_plus_tag() {
         let k = Key::random();
-        let ct = seal(&k, b"test");
+        let ct = seal(&k, b"test", &[]);
         assert_eq!(ct.len(), NONCE_SIZE + 4 + TAG_SIZE);
     }
 }
