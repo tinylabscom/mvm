@@ -17,7 +17,7 @@ use mvm_core::protocol::hvf_control::{
 use rand::Rng;
 
 use super::hvf_control_transport as wire;
-use super::process_exit::{ProcessExitObserver, ProcessExitWait};
+use super::process_exit::{ProcessExitObserver, ProcessExitWait, require_owned_child_custody};
 
 /// A fresh challenge has bound this connection to the armed observer.
 pub struct ConnectedInstance {
@@ -59,6 +59,7 @@ impl ConnectedInstance {
 
     /// An owned launch may use its Child's ID, never a PID loaded from disk.
     pub fn connect_owned(vm: &str, child_pid: u32) -> Result<Self> {
+        require_owned_child_custody()?;
         Self::connect_bound(wire::read_instance(vm)?, Some(child_pid))
     }
 
@@ -141,6 +142,7 @@ impl ConnectedInstance {
 
 /// A launch retains real child ownership and the authenticated lifetime binding,
 /// so a normal one-shot exit remains provable after its endpoint closes.
+/// No other thread may reap that Child or change SIGCHLD disposition while owned.
 pub struct OwnedInstance {
     child: Mutex<Child>,
     observer: ProcessExitObserver,
@@ -153,6 +155,7 @@ impl OwnedInstance {
     /// Consume the Child only after its peer and instance are authenticated.
     /// On refusal the caller retains its exact owned handle for error cleanup.
     pub fn adopt(child: &mut Option<Child>, vm: &str) -> Result<Self> {
+        require_owned_child_custody()?;
         let process = child
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("owned child missing"))?;
@@ -180,6 +183,7 @@ impl OwnedInstance {
     }
 
     pub fn try_exited(&self) -> Result<bool> {
+        require_owned_child_custody()?;
         let exited = {
             let mut child = self
                 .child
@@ -221,6 +225,7 @@ impl OwnedInstance {
             self.observer.wait_event(deadline)? == ProcessExitWait::Exited,
             "owned HVF supervisor exit deadline"
         );
+        require_owned_child_custody()?;
         {
             let mut child = self
                 .child
@@ -240,6 +245,7 @@ impl OwnedInstance {
     }
 
     pub fn stop(&self) -> Result<ConfirmedExit> {
+        require_owned_child_custody()?;
         let (pid, exited) = {
             let mut child = self
                 .child
@@ -258,6 +264,7 @@ impl OwnedInstance {
         let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(pid))?;
         let proof = peer.stop()?;
         // wait_event deliberately did not reap this owned child's status.
+        require_owned_child_custody()?;
         {
             let mut child = self
                 .child

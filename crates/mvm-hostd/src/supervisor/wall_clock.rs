@@ -62,6 +62,7 @@ pub trait WorkloadKiller: Send + 'static {
 pub struct SupervisorExitKiller {
     vm_state_dir: std::path::PathBuf,
     pid_file: std::path::PathBuf,
+    retain_evidence: bool,
 }
 
 /// Exit code recorded for a workload its wall-clock bound stopped. Matches
@@ -76,6 +77,22 @@ impl SupervisorExitKiller {
         Self {
             vm_state_dir,
             pid_file,
+            retain_evidence: false,
+        }
+    }
+
+    /// Hard expiry keeps its existing immediate self-exit semantics. A
+    /// controlled supervisor cannot claim graceful finalization at this point,
+    /// so its runtime/helper records remain for authenticated recovery.
+    #[must_use]
+    pub fn retaining_evidence(
+        vm_state_dir: std::path::PathBuf,
+        pid_file: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            vm_state_dir,
+            pid_file,
+            retain_evidence: true,
         }
     }
 
@@ -86,6 +103,9 @@ impl SupervisorExitKiller {
         let path = mvm_core::exit_capture::exit_file_path(&self.vm_state_dir);
         if let Err(err) = std::fs::write(&path, TIMEOUT_EXIT_CODE.to_string()) {
             tracing::warn!(error = %err, path = %path.display(), "recording the wall-clock timeout exit code failed");
+        }
+        if self.retain_evidence {
+            return;
         }
         match self.vm_state_dir.file_name().and_then(|name| name.to_str()) {
             Some(vm_name) => {
@@ -232,6 +252,13 @@ impl SupervisorTimerInputs<'_> {
     pub fn exit_killer(&self) -> SupervisorExitKiller {
         SupervisorExitKiller::new(self.vm_state_dir.to_path_buf(), self.pid_file.to_path_buf())
     }
+
+    pub fn preserving_exit_killer(&self) -> SupervisorExitKiller {
+        SupervisorExitKiller::retaining_evidence(
+            self.vm_state_dir.to_path_buf(),
+            self.pid_file.to_path_buf(),
+        )
+    }
 }
 
 /// Decode what the launch path actually put on `plan_json`.
@@ -300,6 +327,13 @@ pub(crate) fn supervisor_emitter(
 pub fn arm_for_supervisor(
     inputs: SupervisorTimerInputs<'_>,
 ) -> anyhow::Result<Option<WallClockGuard>> {
+    arm_for_supervisor_with_killer(inputs, Box::new(inputs.exit_killer()))
+}
+
+pub fn arm_for_supervisor_with_killer(
+    inputs: SupervisorTimerInputs<'_>,
+    killer: Box<dyn WorkloadKiller>,
+) -> anyhow::Result<Option<WallClockGuard>> {
     use anyhow::Context;
 
     let Some(value) = inputs.plan_json else {
@@ -314,7 +348,6 @@ pub fn arm_for_supervisor(
     let emitter = supervisor_emitter(&inputs)
         .context("a plan with a wall-clock bound needs an audit chain to record its kill")?;
 
-    let killer = Box::new(inputs.exit_killer());
     let timer = WallClockTimer::for_plan(Arc::new(plan), emitter, killer)
         .expect("a nonzero exec_secs always yields a timer");
     tracing::info!(
@@ -327,6 +360,63 @@ pub fn arm_for_supervisor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controlled_hard_expiry_records_timeout_but_retains_runtime_and_helper_evidence() {
+        let state = tempfile::tempdir().unwrap();
+        let pid = state.path().join("hvf.pid");
+        std::fs::write(&pid, "4242").unwrap();
+        std::fs::write(state.path().join("hvf-instance.json"), "instance-evidence").unwrap();
+        std::fs::write(state.path().join("substitution.pid"), "4243").unwrap();
+        let killer =
+            SupervisorExitKiller::retaining_evidence(state.path().to_path_buf(), pid.clone());
+        killer.record_and_release();
+        assert_eq!(std::fs::read_to_string(&pid).unwrap(), "4242");
+        assert_eq!(
+            std::fs::read_to_string(state.path().join("substitution.pid")).unwrap(),
+            "4243"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.path().join("workload.exit")).unwrap(),
+            "124"
+        );
+        assert!(state.path().join("hvf-instance.json").is_file());
+        assert!(!state.path().join("hvf-finalized.json").exists());
+    }
+
+    #[test]
+    #[ignore = "entry point for the explicitly owned hard-expiry fixture"]
+    fn hard_expiry_helper() {
+        let state = std::path::PathBuf::from(std::env::var_os("MVM_HARD_EXPIRY_FIXTURE").unwrap());
+        let pid = state.join("hvf.pid");
+        std::fs::write(&pid, std::process::id().to_string()).unwrap();
+        std::fs::write(state.join("hvf-instance.json"), "retained-instance").unwrap();
+        SupervisorExitKiller::retaining_evidence(state, pid).kill();
+    }
+
+    #[test]
+    fn controlled_hard_expiry_self_exits_124_without_claiming_finalization() {
+        let state = tempfile::tempdir().unwrap();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "supervisor::wall_clock::tests::hard_expiry_helper",
+                "--ignored",
+            ])
+            .env("MVM_HARD_EXPIRY_FIXTURE", state.path())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.code(), Some(TIMEOUT_EXIT_CODE));
+        assert!(state.path().join("hvf.pid").is_file());
+        assert!(state.path().join("hvf-instance.json").is_file());
+        assert!(!state.path().join("hvf-finalized.json").exists());
+        assert_eq!(
+            std::fs::read_to_string(state.path().join("workload.exit")).unwrap(),
+            "124"
+        );
+    }
     use ed25519_dalek::SigningKey;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

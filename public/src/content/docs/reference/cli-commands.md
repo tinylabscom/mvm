@@ -842,9 +842,20 @@ start launches if it is not already running, watches the session and runs
 `machine session reap` once it expires. That sweep stops a Firecracker machine
 through the same `sudo` signal `machine stop` uses, and the host agent has no
 terminal, so it needs `sudo` that does not prompt; where `sudo` prompts, the
-session is stopped by the next `machine session` command instead. A session
-that stops this way leaves the same host state a `machine stop` does: its
-helper processes are stopped and no pid file is left behind.
+session is stopped by the next `machine session` command instead.
+
+HVF stop uses authenticated instance control and confirms the supervisor's actual
+process exit and successful finalization before cleanup. A missing endpoint, key,
+or lifetime proof is an error, not evidence that the machine stopped. Older HVF
+instances without this control protocol require separate operator recovery; there
+is no PID-based stop fallback. Runtime and session evidence is retained on refusal.
+An owned launch can prove its normal exit after its endpoint closes; a later
+detached client cannot reconstruct that proof from a missing PID file.
+
+HVF wall-clock and session expiry preserve the hard timeout exit code 124, without
+adding a guest-execution grace period. A hard expiry does not claim graceful
+capture or helper finalization, so it retains runtime evidence and automatic
+cleanup can still refuse. Other backends retain their existing expiry cleanup.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the

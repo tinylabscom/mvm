@@ -9,6 +9,39 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::time::Instant;
 
+/// Necessary precondition for retaining a Child as exclusive lifetime authority.
+/// This only queries disposition; callers must also prevent competing reapers
+/// and disposition changes for the whole ownership interval.
+#[cfg(unix)]
+pub fn require_owned_child_custody() -> io::Result<()> {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: query only; the writable buffer has the required sigaction size.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful sigaction initialized the entire output.
+    let action = unsafe { action.assume_init() };
+    validate_child_disposition(action.sa_sigaction, action.sa_flags)
+}
+
+#[cfg(unix)]
+fn validate_child_disposition(handler: libc::sighandler_t, flags: libc::c_int) -> io::Result<()> {
+    if handler != libc::SIG_DFL || flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::other(
+            "owned child requires default SIGCHLD and exclusive reaping",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn require_owned_child_custody() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "owned child custody is unsupported",
+    ))
+}
+
 /// Result of waiting for an armed process-exit observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessExitWait {
@@ -330,6 +363,14 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[test]
+    fn child_disposition_validation_never_changes_global_signal_state() {
+        assert!(validate_child_disposition(libc::SIG_DFL, 0).is_ok());
+        assert!(validate_child_disposition(libc::SIG_IGN, 0).is_err());
+        assert!(validate_child_disposition(libc::SIG_DFL, libc::SA_NOCLDWAIT).is_err());
+    }
 
     #[test]
     fn invalid_pid_is_rejected() {
