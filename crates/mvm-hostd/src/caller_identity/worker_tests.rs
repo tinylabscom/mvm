@@ -111,6 +111,14 @@ impl Drop for Panics {
 
 #[test]
 fn a_dead_worker_is_not_respawned_and_post_fork_handles_are_refused() {
+    let inherited_factory = ClientFactory::new();
+    inherited_factory
+        .owner_pid
+        .store(std::process::id().wrapping_add(1), Ordering::Release);
+    assert!(matches!(
+        inherited_factory.get(|| panic!("inherited factory must refuse before initialization")),
+        Err(IdentityError::Unavailable)
+    ));
     let factory = ClientFactory::new();
     let (exited, observed) = mpsc::sync_channel(1);
     let client = factory.get(|| Ok(Box::new(Panics(exited)))).unwrap();
