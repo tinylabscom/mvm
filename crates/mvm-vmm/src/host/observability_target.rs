@@ -234,6 +234,7 @@ mod tests {
             runner_dir: None,
             tenant_id: Some("tenant-1".to_string()),
             plan_json: None,
+            caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,
             network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),

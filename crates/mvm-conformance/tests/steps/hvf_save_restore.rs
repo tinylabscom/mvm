@@ -90,6 +90,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         restore_fds: None,
         timeout_secs: 0,
         plan: None,
+        caller_registration: None,
         audit_dir: None,
         signing_key_path: None,
         agent_socket: Some(PathBuf::from("/parent/state/hvf-agent.sock")),

@@ -20,6 +20,9 @@ substrate_server_category = "per-VM approval endpoint broker (host-local Unix so
 
 [features]
 default = []
+# Explicit macOS-native custody for opted-in caller registration only.
+# Other platforms refuse the opt-in; ordinary launches are unchanged.
+native-caller-identity = ["mvm-hostd/native-caller-identity"]
 # Build as the release channel: the runtime overlay defaults to the published
 # artifact instead of a source-checkout build. Forwarded from mvm-cli's
 # feature of the same name.

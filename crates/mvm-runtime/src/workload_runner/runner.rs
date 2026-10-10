@@ -320,6 +320,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        if inputs.config.caller_registration.is_some() {
+            anyhow::ensure!(
+                self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+                "caller registration requires a cold HVF workload"
+            );
+            let plan = inputs
+                .config
+                .plan_json
+                .as_deref()
+                .context("caller registration requires a signed plan")?;
+            serde_json::from_str::<mvm_core::plan::SignedExecutionPlan>(plan)
+                .context("caller registration requires a signed plan")?;
+        }
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -481,6 +494,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
+        if claim
+            .start_config
+            .as_ref()
+            .is_some_and(|config| config.caller_registration.is_some())
+        {
+            return Err(StandbyError::ClaimFailed(
+                "caller registration requires cold launch; caller-authenticated warm handoff is unavailable".into(),
+            ));
+        }
         use std::io::Write;
 
         let claim_started = Instant::now();
@@ -4147,6 +4169,44 @@ mod tests {
             registry_path: &registry_path,
             grant_issuer: Some(&grant_issuer),
         };
+
+        let mut opted_in = claim.clone();
+        let config = opted_in.start_config.as_mut().unwrap();
+        let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json).unwrap();
+        let installation =
+            serde_json::from_str("\"bdf189ab-9a9a-440b-a266-e95b19e58a5e\"").unwrap();
+        let identity =
+            mvm_core::crypto::entrypoint_delegation::test_support::identity([3; 32], installation);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let expected =
+            mvm_core::vm_backend::caller_registration::CallerRegistration::challenge_for_plan(
+                &config.name,
+                &plan,
+                identity,
+                now,
+            )
+            .unwrap();
+        let proof =
+            mvm_core::crypto::entrypoint_delegation::test_support::proof([3; 32], &expected, now)
+                .unwrap();
+        config.caller_registration = Some(
+            mvm_core::vm_backend::caller_registration::CallerRegistration {
+                vm: config.name.clone(),
+                expected,
+                proof,
+            },
+        );
+        assert!(runner.claim_standby(&ctx, &handle, &opted_in).is_err());
+        assert_eq!(pool.load("warm-parent").unwrap().state, StandbyState::Idle);
+        assert!(
+            !registry_path.exists(),
+            "refusal must precede child identity allocation"
+        );
+        assert!(runner.driver.forked_children().is_empty());
+        assert!(runner.spawner.seen_vm.lock().unwrap().is_none());
 
         let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
 
