@@ -76,22 +76,15 @@
       }
     },
     {
-      "path": "crates/mvm-build/src/release_signature.rs",
-      "package": "mvm-build",
-      "claims": [
-        20
-      ]
-    },
-    {
-      "path": "crates/mvm-build/src/runtime_overlay.rs",
+      "path": "crates/mvm-build/src/published_image_set.rs",
       "package": "mvm-build",
       "claims": [
         6
       ]
     },
     {
-      "path": "crates/mvm-cli/src/commands/env/artifact_verify.rs",
-      "package": "mvm-cli",
+      "path": "crates/mvm-build/src/release_signature.rs",
+      "package": "mvm-build",
       "claims": [
         20
       ]
@@ -149,6 +142,13 @@
       "package": "mvm-client",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-compiler/src/deps_audit.rs",
+      "package": "mvm-compiler",
+      "claims": [
+        11
       ]
     },
     {
@@ -358,13 +358,6 @@
       "package": "mvm-runtime",
       "claims": [
         18
-      ]
-    },
-    {
-      "path": "crates/mvm-compiler/src/deps_audit.rs",
-      "package": "mvm-compiler",
-      "claims": [
-        11
       ]
     },
     {
@@ -821,21 +814,6 @@
       "reason": "valid only while ProcessView lacks a Default derive: with no Default, this mutant cannot compile against the Linux implementation, so the surviving form is the non-Linux probe stub (#[cfg(not(target_os = \"linux\"))], which shells out to the builder VM) — it is not compiled on the Linux mutation host, so no test there can distinguish it. The Linux implementation is `observe_process_at`, witnessed directly against fixture /proc directories; the shared function name means this single entry covers the stub without masking mutations of the Linux path."
     },
     {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "delete ! in extract_release_archive",
-      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace && with || in extract_release_archive",
-      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "replace && with || in local_source_cache_is_fresh",
-      "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
-    },
-    {
       "file": "crates/mvm-contract/src/plan/types.rs",
       "mutant": "replace | with ^ in CallerCommitment::from_hex",
       "reason": "equivalent mutant — no test can kill it. `caller_commitment_nibble` returns a value in 0..=15, so `high << 4` occupies bits 4-7 and `low` occupies bits 0-3. The bit sets are disjoint, which makes `|` and `^` the same function over every input the expression can receive; checked exhaustively over all 256 nibble pairs, and the whole 1007-test mvm-contract suite passes with the mutation applied. Accepted rather than scoped out, because the surrounding decoder is claim surface and is witnessed by caller_commitment_hex_decodes_to_the_bytes_it_names."
@@ -1084,11 +1062,6 @@
       "file": "crates/mvm-fs/src/os_inventory.rs",
       "mutant": "replace || with && in parse_os_release",
       "reason": "Provably equivalent: an empty line fails split_once and is ignored anyway; a comment line starts with #, so its key cannot equal ID, VERSION_ID or PRETTY_NAME. Removing the early skip changes no parsed field or error."
-    },
-    {
-      "file": "crates/mvm-build/src/runtime_overlay.rs",
-      "mutant": "delete field version from struct RuntimeOverlayArtifact expression in install_image_set_runtime_overlay_archive",
-      "reason": "Provably equivalent: stage_runtime_overlay_archive reads the version through read_overlay_artifact_from_dir and read_version_file, which already trims surrounding whitespace. MemberVersion::parse validates that trimmed string without changing it. Omitting the explicit version field therefore inherits exactly the same staged.version; validation and set.record still execute."
     }
   ]
 }

@@ -22,14 +22,6 @@ use mvm_core::vm_backend::{StandbyClaim, StandbyError, StandbySpec, VmStartConfi
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Kernel cmdline token that turns on the authenticated in-guest vsock client.
-/// It is also required for declared ingress under outbound deny-all; secret-
-/// bearing workloads remain on the host-side substitution endpoint.
-pub fn vsock_egress_cmdline_token(config: &VmStartConfig, _state_dir: &Path) -> Option<String> {
-    mvm_vmm::host::egress_shared::effective_vsock_egress(config)
-        .then(|| "mvm.vsock_egress=1".to_string())
-}
-
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
 /// write its PID file before giving up and killing the child. Shared with
 /// the libkrun driver, which spawns the same supervisor binary.
@@ -200,17 +192,6 @@ pub fn libkrun_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &s
     ))
 }
 
-pub fn libkrun_verity_cmdline_args(config: &VmStartConfig) -> Option<String> {
-    let rootfs_hash = config.roothash.as_deref()?;
-    let base = format!("mvm.roothash={rootfs_hash} mvm.data=/dev/vdb mvm.hash=/dev/vdc");
-    match libkrun_runtime_overlay(config) {
-        Some((_, _, overlay_hash)) => Some(format!(
-            "{base} mvm.runtime_roothash={overlay_hash} mvm.runtime_data=/dev/vdd mvm.runtime_hash=/dev/vde"
-        )),
-        None => Some(base),
-    }
-}
-
 pub fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     // A sealed boot (verity metadata present) must be fully verity capable — a
     // missing initrd fails closed rather than downgrading to an unverified root —
@@ -234,66 +215,6 @@ pub fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result
         );
     }
     Ok(())
-}
-
-/// Assemble the guest kernel cmdline: the verity or default base string plus
-/// every optional token layered on top, in the exact order the guest
-/// `/init` expects them.
-pub fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
-    // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
-    // mounts user volumes at their guest paths (no-op when there are
-    // none; harmless for workload guests whose `/init` ignores it).
-    let mut cmdline = if libkrun_verity_enabled(config) {
-        VERITY_CMDLINE.to_string()
-    } else {
-        DEFAULT_CMDLINE.to_string()
-    };
-    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
-        cmdline.push(' ');
-        cmdline.push_str(&uvols);
-    }
-    if let Some(token) = mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(token) = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(token) = mvm_vmm::host::egress_bridge::telemetry_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(verity_args) = libkrun_verity_enabled(config)
-        .then(|| libkrun_verity_cmdline_args(config))
-        .flatten()
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
-    // Non-verity boots carry the runtime overlay as a plain read-only
-    // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
-    // emitted the dm-verity variant above.
-    if !libkrun_verity_enabled(config)
-        && let Some(overlay_args) = mvm_vmm::host::boot_config::build_runtime_overlay_cmdline_args(
-            None,
-            mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_some(),
-        )
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&overlay_args);
-    }
-    // Vsock-only guests have no config drive, so the grant trust anchor rides
-    // the cmdline instead.
-    if let Some(token) = mvm_vmm::host::egress_bridge::host_signer_pub_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(token) = vsock_egress_cmdline_token(config, state_dir) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    cmdline
 }
 
 /// Attach the workload rootfs (plus its dm-verity sidecar and the runtime

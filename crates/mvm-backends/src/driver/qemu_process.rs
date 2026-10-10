@@ -40,13 +40,6 @@ pub(crate) const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
 /// The JSON wiring plan the detached bridge process reads at startup.
 pub(crate) const BRIDGE_SPEC_FILE: &str = "qemu-vsock-bridge.json";
 
-/// Default workload kernel cmdline. `console=ttyS0` is QEMU's serial line
-/// (vs libkrun's `hvc0`); `root=/dev/vda rw init=/init` matches the same
-/// Nix-built workload rootfs the other backends boot. `mvm.backend=qemu`
-/// marks the dev tier (parity with the builder marker).
-pub const DEFAULT_CMDLINE: &str = "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu";
-pub const VERITY_CMDLINE: &str = "console=ttyS0 mvm.backend=qemu";
-
 pub fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
     config.initrd_path.as_ref().map(PathBuf::from)
 }
@@ -88,50 +81,6 @@ pub fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()
         );
     }
     Ok(())
-}
-
-pub fn qemu_cmdline(config: &VmStartConfig) -> String {
-    let mut cmdline = if qemu_verity_enabled(config) {
-        VERITY_CMDLINE.to_string()
-    } else {
-        DEFAULT_CMDLINE.to_string()
-    };
-    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
-        cmdline.push(' ');
-        cmdline.push_str(&uvols);
-    }
-    if let Some(token) = mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(token) = mvm_vmm::host::egress_bridge::require_grant_cmdline_token(&config.name) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    if let Some(verity_args) = mvm_vmm::host::boot_config::build_verity_cmdline_args(
-        config.roothash.as_deref(),
-        if qemu_verity_enabled(config) {
-            qemu_runtime_overlay(config).map(|(_, _, roothash)| roothash)
-        } else {
-            None
-        },
-    ) {
-        cmdline.push(' ');
-        cmdline.push_str(&verity_args);
-    }
-    // Non-verity boots carry the runtime overlay as a plain read-only
-    // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
-    // emitted the dm-verity variant above.
-    if !qemu_verity_enabled(config)
-        && let Some(overlay_args) = mvm_vmm::host::boot_config::build_runtime_overlay_cmdline_args(
-            None,
-            mvm_vmm::host::boot_config::non_verity_overlay_ext4(config).is_some(),
-        )
-    {
-        cmdline.push(' ');
-        cmdline.push_str(&overlay_args);
-    }
-    cmdline
 }
 
 pub fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {

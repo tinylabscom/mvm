@@ -1,4 +1,4 @@
-//! dm-verity/runtime-overlay helpers and Firecracker API body builders.
+//! Runtime-overlay helpers and Firecracker API body builders.
 //!
 //! Backend-agnostic helpers now live in `mvm-vmm::host::boot_config` and are
 //! re-exported here while callers migrate. This module retains only the
@@ -78,17 +78,19 @@ mod tests {
     }
 
     #[test]
-    fn resolved_runtime_overlay_can_feed_non_verity_oci_mount_path() {
+    fn resolved_runtime_overlay_covers_non_verity_oci_mount_path() {
         let mut cfg = baseline_run_config(None);
         cfg.roothash = None;
         cfg.runtime_overlay_path = Some("/k/rootfs.runtime.ext4".into());
         cfg.runtime_overlay_verity_path = Some("/k/rootfs.runtime.verity".into());
         cfg.runtime_overlay_roothash = Some(OVERLAY_HASH.into());
-        assert!(resolved_runtime_overlay(&cfg).is_some());
-        assert_eq!(build_verity_cmdline_args(None, Some(OVERLAY_HASH)), None);
         assert_eq!(
-            build_runtime_overlay_cmdline_args(None, true).as_deref(),
-            Some("mvm.runtime_data=/dev/vdb")
+            resolved_runtime_overlay(&cfg),
+            Some((
+                "/k/rootfs.runtime.ext4",
+                "/k/rootfs.runtime.verity",
+                OVERLAY_HASH,
+            ))
         );
     }
 }

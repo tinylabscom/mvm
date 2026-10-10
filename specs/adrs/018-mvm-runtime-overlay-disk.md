@@ -16,10 +16,9 @@ disagree. The rest of the Decision is kept as written.
   `ActivateEnvironment` over vsock;
   `crates/mvm-runtime/src/microvm/activation.rs` builds that message on the
   host. The agent sets up and checks both verity devices, mounts the overlay
-  at `/mvm/runtime`, and pivots in-process. The `mvm.roothash=` /
-  `mvm.runtime_roothash=` command-line builder left in the libkrun process
-  driver has no caller. `mkGuest`'s `/init` still runs for dev boots and for
-  the chained builder boot, and reads its own command-line tokens.
+  at `/mvm/runtime`, and pivots in-process. The unused legacy roothash
+  command-line builders have been removed. `mkGuest`'s `/init` still runs for
+  dev boots and the chained builder boot, and reads its own command-line tokens.
 - **There is no `mvm-verity-init`.** The initramfs agent took over its job of
   checking verity before anything beyond the initramfs is mounted, and no
   binary of that name is built. The name survives only in source comments
