@@ -16,6 +16,9 @@ use mvm_core::{atomic_io, config};
 use crate::audit::host_keypair;
 use crate::plan_admission::AdmittedPlan;
 
+#[path = "caller_replay.rs"]
+mod replay;
+
 /// Immutable verified registration, owned by exactly one capture owner.
 /// Deliberately not deserializable, cloneable, or constructible by a producer.
 pub struct RegisteredCaller {
@@ -144,6 +147,7 @@ impl VerifiedCallerLaunch {
             std::fs::canonicalize(&state)? == std::fs::canonicalize(parent)?.join(vm),
             "caller launch state is not contained"
         );
+        replay::consume(&self.caller, unix_now()?)?;
         // One fixed private replay slot per managed VM, not attacker-selected
         // filenames or an unbounded nonce directory. Failed setup stays spent:
         // retrying those same launch bytes must never restore authority. Normal

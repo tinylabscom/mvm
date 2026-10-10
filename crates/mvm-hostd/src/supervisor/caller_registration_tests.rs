@@ -301,6 +301,12 @@ fn setup_failure_stays_spent_and_public_teardown_allows_fresh_admission() {
     // not delete independently retained diagnostic state.
     std::fs::remove_file(&root).unwrap();
     mvm_runtime::vm::reconcile::remove_runtime_dirs(&config::vm_state_dir("failed-cold")).unwrap();
+    assert!(
+        launch(&admitted, &registration)
+            .consume("failed-cold")
+            .is_err(),
+        "runtime teardown must not revive the old registration"
+    );
     let fresh = admit_fixture("failed-cold", 2);
     let fresh_registration = registration_fixture(&fresh, "failed-cold", 1);
     assert_ne!(
