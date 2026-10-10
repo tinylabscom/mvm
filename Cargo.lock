@@ -3500,6 +3500,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tracing",
  "virtio-queue",

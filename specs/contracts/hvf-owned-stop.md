@@ -80,8 +80,9 @@ known not to have occurred.
 
 ## Delivery gate
 
-The initial protocol checkpoint supplies typed wire messages, signature/binding
-validators and broker refusal. It does not enable the supervisor endpoint,
+The pre-activation checkpoints supply typed wire messages, signature/binding
+validators, broker refusal, bounded endpoint/client libraries and a serialized
+stop/transfer gate. They do not activate the endpoint in the supervisor boot path,
 authorize native VM execution, or claim complete lifecycle integration.
 Activation requires independent review, bounded transport and replay tests,
 concurrent stop/transfer tests, cleanup failure tests, and an owned native
