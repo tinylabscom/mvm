@@ -134,6 +134,11 @@ in
   # this `true` and runs the probe as its entrypoint; the production guest
   # closure never includes it.
   withAuditProbe ? false,
+  # Whether to bake the static `mvm-setpriv` helper into the rootfs. Every
+  # workload image needs it. A builder image at builder boot ABI 2 sets this
+  # `false`: `mvmctl` hands the builder its own copy in the boot payload, and
+  # the generated scripts then name that copy instead.
+  withSetpriv ? true,
   # Optional kernel package. When set, mkGuest copies its module
   # tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
   # `modprobe vmw_vsock_virtio_transport` before forking the agent.
@@ -295,8 +300,8 @@ let
   rootfsClosureInfo = pkgs.closureInfo {
     rootPaths = [
       busybox
-      setprivPkg
     ]
+    ++ lib.optional withSetpriv setprivPkg
     ++ packages
     ++ extraFileSourceRoots;
   };
@@ -352,7 +357,13 @@ let
     lib = pkgs.lib;
     inherit mvmSrc;
   };
-  setpriv = "${setprivPkg}/bin/mvm-setpriv";
+  # Without a baked copy, the helper is the one the builder boot payload
+  # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-build/src/builder_guest_paths.rs).
+  setpriv =
+    if withSetpriv then
+      "${setprivPkg}/bin/mvm-setpriv"
+    else
+      "/run/mvm/host-bins/mvm-setpriv";
   setprivHelperName = "mvm-setpriv";
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
@@ -1386,8 +1397,10 @@ let
     # PID 1 and by mvm-host-vm-init. Install it alongside busybox so it
     # is on PATH; keep the busybox "setpriv" applet available for any
     # ad-hoc use that does not need the custom flags.
-    cp ${setprivPkg}/bin/mvm-setpriv "$out/bin/mvm-setpriv"
-    chmod 0755 "$out/bin/mvm-setpriv"
+    ${lib.optionalString withSetpriv ''
+      cp ${setprivPkg}/bin/mvm-setpriv "$out/bin/mvm-setpriv"
+      chmod 0755 "$out/bin/mvm-setpriv"
+    ''}
     # /sbin/init is what the kernel actually execs at boot (when
     # there's no init=/init kernel param). We point both at our
     # custom init script so either path works.

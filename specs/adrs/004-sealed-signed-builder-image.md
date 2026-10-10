@@ -27,10 +27,9 @@ model are unchanged.
   binaries stay embedded in `mvmctl`.
 - *The builder image's key folding mvm source* has one remaining term today:
   the ABI 1 image still bakes `mvm-setpriv`, which `mvm-images` compiles from
-  mvm's source and `mvm-host-vm-init` runs from `/sbin`. Builder boot ABI 2
-  ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) carries it in the
-  boot payload instead, after which the builder image contains no mvm binary
-  and its cache key folds no mvm source.
+  mvm's source. The host now includes it in every builder boot payload, and
+  `mvm-host-vm-init` prefers that copy. An ABI 2 image carries no mvm binary,
+  and its cache key folds no mvm binary source.
 
 ## Context
 
@@ -93,8 +92,8 @@ the output.
 **mvm's own builder binaries travel beside the builder image, not inside
 it.** At every builder boot, `mvmctl` assembles a deterministic initramfs —
 the *builder boot payload* — from its embedded builder binaries
-(`mvm-host-vm-init`, `mvm-builderd`), each re-verified against the SHA-256
-compiled into `mvmctl`. The VMM loads it the way it loads the kernel. Its
+(`mvm-host-vm-init`, `mvm-builderd`, `mvm-setpriv`), each re-verified
+against the SHA-256 compiled into `mvmctl`. The VMM loads it the way it loads the kernel. Its
 `/init` mounts the image read-only, copies the binaries to a tmpfs, pivots,
 and continues as the builder's PID 1. The payload digest travels on the
 kernel command line, and the guest refuses a payload that does not match
@@ -113,12 +112,15 @@ meaning is fixed once released:
   payload format, the command line every backend boots with, the ABIs a
   payload supports, and the stage-1 checks the guest runs.
 - *ABI 0* is the legacy image: no marker, and it bakes the builder binaries
-  at `/sbin`. It boots with the payload, whose binaries then win and whose
-  baked copies are never executed, or without one on a host that has none.
+  and `mvm-setpriv` at `/sbin`. It boots with the payload, whose binaries
+  then win and whose baked copies are never executed, or without one on a
+  host that has none.
   A published set published before the field existed omits it and means 0.
   An omitted field currently means ABI 0 for both published and locally built sets.
-- *ABI 1* is an image that carries no binary from `mvmctl`'s payload. It
-  boots only with the payload.
+- *ABI 1* bakes no builder daemon or init binary. It boots only with the
+  payload, but still bakes `mvm-setpriv` from mvm's source.
+- *ABI 2* carries no mvm binary. The payload supplies `mvm-setpriv` as well
+  as the two builder binaries, and the guest prefers its copy on older images.
 - *What every ABI promises the payload:* `/run` is a mount point; busybox,
   `nix`, `iptables` and `/usr/bin/firecracker` sit at their paths; the
   builder uid 902 exists; the persistent store lives on `/dev/vdb`; the root
@@ -187,7 +189,9 @@ signed image set, or from a paired `mvm-images` checkout. While that image
 still bakes the builder binaries (ABI 0), a pair build's cache key folds the
 source identity of the package that builds them, because its target contract
 says the image needs host binaries; that term leaves the key when the image
-moves to ABI 1.
+moves to ABI 1. Below ABI 2 the key also folds the source identity of
+`mvm-setpriv`, which the image compiles; at ABI 2 the payload carries that
+helper and the term leaves the key too.
 
 **Published release artifacts are cosign-signed, and the signed manifest —
 not the artifacts individually — is the trust anchor.** A release's
