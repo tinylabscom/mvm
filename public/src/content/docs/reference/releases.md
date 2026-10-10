@@ -236,6 +236,57 @@ cosign verify-blob \
 `install.sh` and `mvmctl env update` run this automatically when `cosign` is on
 `PATH`.
 
+## Cutting a release (maintainers)
+
+The CLI and the image set are released separately, from two repositories, and
+neither waits on the other.
+
+### CLI (`v*`, this repository)
+
+```bash
+just release::pr          # next version from conventional commits
+just release::pr 0.18.4   # or name it
+```
+
+Either form runs the local release gates, bumps the workspace version,
+prepends the changelog and opens a `release/v<version>` pull request. Once it
+merges, `just release::tag 0.18.4` tags `origin/main` and pushes the tag, which
+starts `release.yml` (see
+[Promotion](#promotion-a-release-reaches-users-only-after-a-fresh-install-boots)).
+
+Source builds also use a separate, unversioned channel:
+`source-host-helpers.yml` publishes Sigstore-signed helper bundles for each
+`main` commit. It replaces neither release train and has nothing for a dirty or
+unpublished revision.
+
+### Image set (`image-set/v*`, mvm-images)
+
+In an `mvm-images` checkout on `main`:
+
+```sh
+git pull --ff-only
+just release 0.2.3
+```
+
+That verifies the tree and tags `image-set/v0.2.3`; the workflow builds both
+architectures, signs the root and publishes it after a protected-environment
+review. Then advance `crates/mvm-core/images.lock` in this repository. The
+`update-image-pin` workflow proposes the change; to do it by hand:
+
+```sh
+gh release download image-set/v0.2.3 --repo tinylabscom/mvm-images \
+  -p image-set.json -p image-set.json.bundle
+cosign verify-blob --bundle image-set.json.bundle \
+  --certificate-identity-regexp 'https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v0.2.3' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  image-set.json
+cargo xtask repin-image-lock image-set.json
+```
+
+`repin-image-lock` rewrites the tag and digest from the verified root. An
+image-only change needs no CLI release, and rolling back means pointing the lock
+at an earlier verified set.
+
 ## Homebrew tap setup (one-time, maintainers)
 
 The `update-homebrew-tap.yml` workflow renders the formula on each release and
