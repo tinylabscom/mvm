@@ -13,7 +13,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::SigningKey;
-use mvm_core::protocol::broker_control::{self, ControlRequest, SignedControl};
+use mvm_core::protocol::broker_control::{self, ControlRequest, ControlResponse, SignedControl};
 use mvm_core::protocol::hvf_control::{HvfInstance, HvfInstanceControl, verify_stop};
 use mvm_vmm::host::hvf_control_transport as wire;
 use rand::Rng;
@@ -22,6 +22,8 @@ use rand::Rng;
 enum Phase {
     Active,
     Stopping,
+    Transferring,
+    Finalizing,
     Failed,
     Finalized,
 }
@@ -97,6 +99,33 @@ impl StopControl {
     /// The owner calls this only after guest quiescence and capture sealing.
     /// Failure leaves all evidence in place and cannot authorize client cleanup.
     pub fn publish_finalized(&self) -> Result<()> {
+        let (instance, message) = {
+            let mut state = self
+                .authority
+                .0
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+            ensure!(
+                matches!(state.phase, Phase::Active | Phase::Stopping),
+                "HVF finalization is failed or already published"
+            );
+            state.phase = Phase::Finalizing;
+            let message = sign(
+                &state,
+                HvfInstanceControl::Finalized {
+                    instance: state.instance.clone(),
+                },
+            )?;
+            (state.instance.clone(), message)
+        };
+        // Persistence is an owner operation, not part of the bounded control
+        // exchange. Never hold the service gate over filesystem I/O.
+        let result = (|| {
+            let path = wire::state_dir(&instance.vm_id)?.join(wire::FINALIZED_FILE);
+            mvm_core::atomic_io::atomic_write_new(&path, &serde_json::to_vec(&message)?)?;
+            mvm_core::atomic_io::sync_dir(path.parent().context("finalization directory missing")?)
+        })();
         let mut state = self
             .authority
             .0
@@ -104,26 +133,22 @@ impl StopControl {
             .lock()
             .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
         ensure!(
-            matches!(state.phase, Phase::Active | Phase::Stopping),
-            "HVF finalization is failed or already published"
+            state.instance == instance && state.phase == Phase::Finalizing,
+            "HVF finalization generation changed"
         );
-        let message = sign(
-            &state,
-            HvfInstanceControl::Finalized {
-                instance: state.instance.clone(),
-            },
-        )?;
-        let path = wire::state_dir(&state.instance.vm_id)?.join(wire::FINALIZED_FILE);
-        mvm_core::atomic_io::atomic_write_new(&path, &serde_json::to_vec(&message)?)?;
-        mvm_core::atomic_io::sync_dir(path.parent().context("finalization directory missing")?)?;
-        state.phase = Phase::Finalized;
-        Ok(())
+        state.phase = if result.is_ok() {
+            Phase::Finalized
+        } else {
+            Phase::Failed
+        };
+        result
     }
 }
 
 impl Drop for StopControl {
     fn drop(&mut self) {
         self.authority.0.closed.store(true, Ordering::Release);
+        self.authority.0.stop.store(true, Ordering::Release);
         wake(&self.authority.0);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -133,34 +158,58 @@ impl Drop for StopControl {
 }
 
 impl StopAuthority {
-    /// Handoff preparation/finalization and generation rotation are atomic
-    /// against stop acceptance. On failure, stop rather than admitting a child
-    /// with ambiguous authority. Only one resident handoff is supported.
+    /// Reserve transfer under the short control gate, perform owner work outside
+    /// it, then commit exactly the reserved generation. Stops are refused while
+    /// the owner prepares; no client or destructor waits on the callback or disk.
     pub fn transfer<T>(
         &self,
         child_vm: &str,
         transfer_capture: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
+        let generation = {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+            ensure!(
+                state.phase == Phase::Active
+                    && !self.0.stop.load(Ordering::Acquire)
+                    && !self.0.closed.load(Ordering::Acquire),
+                "HVF stop already committed"
+            );
+            ensure!(
+                state.listeners.len() == 1,
+                "HVF ownership already transferred"
+            );
+            state.phase = Phase::Transferring;
+            state.instance.clone()
+        };
+        let result = (|| {
+            let (instance, listener) = provision(child_vm)?;
+            let result = transfer_capture()?;
+            Ok((instance, listener, result))
+        })();
         let mut state = self
             .0
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
-        ensure!(
-            state.phase == Phase::Active && !self.0.stop.load(Ordering::Acquire),
-            "HVF stop already committed"
-        );
-        ensure!(
-            state.listeners.len() == 1,
-            "HVF ownership already transferred"
-        );
-        let result = (|| {
-            let (instance, listener) = provision(child_vm)?;
-            let result = transfer_capture()?;
-            state.instance = instance;
-            state.listeners.push(listener);
-            Ok(result)
-        })();
+        let result = match result {
+            Ok((instance, listener, result))
+                if state.instance == generation
+                    && state.phase == Phase::Transferring
+                    && !self.0.closed.load(Ordering::Acquire)
+                    && !self.0.stop.load(Ordering::Acquire) =>
+            {
+                state.instance = instance;
+                state.listeners.push(listener);
+                state.phase = Phase::Active;
+                Ok(result)
+            }
+            Ok(_) => Err(anyhow::anyhow!("HVF transfer reservation canceled")),
+            Err(error) => Err(error),
+        };
         if result.is_err() {
             state.phase = Phase::Failed;
             self.0.stop.store(true, Ordering::Release);
@@ -250,7 +299,16 @@ fn serve(shared: &Shared, mut wake_read: UnixStream) -> Result<()> {
                     // Malformed/expired/refused connections do not end service.
                     // There is no replay table: every connection has one fresh
                     // challenge and consumes at most one stop request.
-                    let _ = exchange(shared, &mut stream);
+                    let deadline = Instant::now() + wire::CONNECTION_BUDGET;
+                    if exchange(shared, &mut stream, deadline).is_err() {
+                        let _ = wire::write_frame(
+                            &mut stream,
+                            &ControlResponse::Err {
+                                message: "control_unavailable".into(),
+                            },
+                            deadline,
+                        );
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.into()),
@@ -260,8 +318,7 @@ fn serve(shared: &Shared, mut wake_read: UnixStream) -> Result<()> {
     Ok(())
 }
 
-fn exchange(shared: &Shared, stream: &mut UnixStream) -> Result<()> {
-    let deadline = Instant::now() + wire::CONNECTION_BUDGET;
+fn exchange(shared: &Shared, stream: &mut UnixStream, deadline: Instant) -> Result<()> {
     let mut client_nonce = [0; 32];
     wire::read_exact(stream, &mut client_nonce, deadline)?;
     let mut connection_nonce = [0; 32];
@@ -271,6 +328,13 @@ fn exchange(shared: &Shared, stream: &mut UnixStream) -> Result<()> {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+        ensure!(
+            matches!(
+                state.phase,
+                Phase::Active | Phase::Stopping | Phase::Finalized
+            ),
+            "HVF owner transition pending or failed"
+        );
         sign(
             &state,
             HvfInstanceControl::Challenge {
@@ -296,8 +360,11 @@ fn exchange(shared: &Shared, stream: &mut UnixStream) -> Result<()> {
             SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
         )?;
         ensure!(
-            state.phase != Phase::Failed,
-            "HVF ownership transfer failed"
+            matches!(
+                state.phase,
+                Phase::Active | Phase::Stopping | Phase::Finalized
+            ),
+            "HVF owner transition pending or failed"
         );
         if state.phase == Phase::Active {
             state.phase = Phase::Stopping;
