@@ -2,6 +2,7 @@
 
 pub mod broker_control;
 pub mod handler;
+pub mod hvf_control;
 #[allow(clippy::module_inception)]
 pub mod protocol;
 pub mod signed_config;
