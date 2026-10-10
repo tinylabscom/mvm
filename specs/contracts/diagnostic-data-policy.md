@@ -65,7 +65,10 @@ never authorize plaintext fallback.
 An explicitly opted-in cold HVF entrypoint launch can install one immutable
 caller registration in its existing supervisor-owned capture owner. The client
 uses `EntrypointAdmissionBuilder::producer_identity` with a previously enrolled
-public identity and a build enabling `native-caller-identity`. Admission loads
+public identity and a macOS build enabling `native-caller-identity`. Other
+platforms and feature-disabled builds refuse this opt-in before admission or
+VM-state effects; they do not fall back to an unregistered launch. This bounded
+prerequisite does not implement cross-platform native custody. Admission loads
 only that exact native-custody pin; it does not enroll, rotate, or select a
 plaintext, mock, or generic keyring fallback during launch.
 
