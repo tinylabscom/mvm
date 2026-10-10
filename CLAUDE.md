@@ -95,15 +95,22 @@ The tag-push release workflow always turns the feature on, so a downloaded
 binary is self-sufficient.
 
 After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
-the source sidecar with `mvmctl bootstrap`. In a source checkout it packs both
-libc variants on the host from the guest runtime's `libmvm_host_services.so`
+the source sidecar by running bootstrap with the source selector:
+
+```sh
+MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
+```
+
+The selector also opts bootstrap into source-built host helpers, which an
+unreleased version needs. Bootstrap packs both libc variants on the host from
+the guest runtime's `libmvm_host_services.so`
 (`build_sdk_sidecar_from_guest_runtime`, the pure-Rust ext4 writer), with no
 mvm-images checkout and no builder VM, and stamps each with the cdylib source
 fingerprint a launch compares against this checkout. The source-built image
 carries no loader and no `libc.so.6`; the workload process that loads the
 library already has its own. A launch only resolves prepared sidecars, so a
-stale or missing one is a warning or a refusal naming `mvmctl bootstrap`, never
-an implicit rebuild.
+stale or missing one is a warning or a refusal naming bootstrap, never an
+implicit rebuild.
 
 `mvmctl build sdk-sidecar build` still exists and still builds both variants
 from a selected mvm-images checkout inside the builder VM; it moves onto the

@@ -335,54 +335,18 @@ pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-/// The mvm source workspace to build the legacy rootfs-injected guest runtime
-/// from, or `None` for an installed binary with no source fallback.
+/// The mvm source workspace every guest artifact is built from, or `None` for a
+/// release binary.
 ///
-/// Resolution: the checkout holding the host binary directory first — the
-/// running executable's, or the one a library embedder declared — then the
-/// invoking process's current checkout, then the compile-time
-/// `CARGO_MANIFEST_DIR` ancestor. An explicitly invoked worktree binary must
-/// keep its host and guest code from the same tree even when the caller's shell
-/// is in another checkout. Installed binaries have no checkout ancestor and
-/// therefore retain the current-directory source fallback.
+/// This is [`crate::image_source::guest_runtime_source_checkout`] — the
+/// override when it names a checkout, otherwise the checkout this binary was
+/// compiled from — and deliberately nothing else. The OCI guest set, the
+/// guest-runtime archive and everything assembled from it must come from one
+/// tree; a second resolver that preferred the shell's current checkout let a
+/// worktree binary run from another checkout build two archives from two trees
+/// in a single bootstrap.
 pub fn detect_source_workspace() -> Option<PathBuf> {
-    let binary_dir = mvm_vmm::host::aux_bin::HostProcess::current().binary_dir();
-    let current_dir = std::env::current_dir().ok();
-    source_workspace_for_channel(
-        crate::artifact_acquisition::compiled_channel(),
-        binary_dir.as_deref(),
-        current_dir.as_deref(),
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    )
-}
-
-#[cfg(test)]
-fn source_workspace_for(
-    host_binary_dir: Option<&Path>,
-    current_dir: Option<&Path>,
-    compiled_manifest_dir: &Path,
-) -> Option<PathBuf> {
-    source_workspace_for_channel(
-        crate::artifact_acquisition::DistributionChannel::Source,
-        host_binary_dir,
-        current_dir,
-        compiled_manifest_dir,
-    )
-}
-
-fn source_workspace_for_channel(
-    channel: crate::artifact_acquisition::DistributionChannel,
-    host_binary_dir: Option<&Path>,
-    current_dir: Option<&Path>,
-    compiled_manifest_dir: &Path,
-) -> Option<PathBuf> {
-    if !channel.permits_automatic_builds() {
-        return None;
-    }
-    host_binary_dir
-        .and_then(source_workspace_from)
-        .or_else(|| current_dir.and_then(source_workspace_from))
-        .or_else(|| source_workspace_from(compiled_manifest_dir))
+    crate::image_source::guest_runtime_source_checkout()
 }
 
 /// Cache-key segment for a source-checkout guest build: a `src-` prefixed
@@ -1818,58 +1782,36 @@ rust = "1.91.1"
     }
 
     #[test]
-    fn executable_checkout_wins_over_an_unrelated_current_checkout() {
-        let executable_checkout = tempfile::tempdir().unwrap();
-        let current_checkout = tempfile::tempdir().unwrap();
-        make_fake_checkout(executable_checkout.path(), "fn main() { /* executable */ }");
-        make_fake_checkout(current_checkout.path(), "fn main() { /* current */ }");
-
-        let host_binary_dir = executable_checkout.path().join("target/debug");
-        let current_dir = current_checkout.path().join("crates/mvm-agentd");
-        let compiled_manifest = executable_checkout.path().join("crates/mvm-build");
-
-        assert_eq!(
-            source_workspace_for(
-                Some(&host_binary_dir),
-                Some(&current_dir),
-                &compiled_manifest
-            ),
-            Some(executable_checkout.path().to_path_buf()),
-            "an explicitly invoked worktree binary must inject guest code from that worktree"
-        );
-    }
-
-    #[test]
-    fn release_channel_ignores_every_checkout_hint() {
-        let executable_checkout = tempfile::tempdir().unwrap();
-        let current_checkout = tempfile::tempdir().unwrap();
-        make_fake_checkout(executable_checkout.path(), "fn main() { /* executable */ }");
-        make_fake_checkout(current_checkout.path(), "fn main() { /* current */ }");
-
-        let executable = executable_checkout.path().join("target/release/mvmctl");
-        let current_dir = current_checkout.path().join("crates/mvm-agentd");
-        let compiled_manifest = executable_checkout.path().join("crates/mvm-build");
-
-        assert_eq!(
-            source_workspace_for_channel(
-                crate::artifact_acquisition::DistributionChannel::Release,
-                Some(&executable),
-                Some(&current_dir),
-                &compiled_manifest,
-            ),
-            None,
-            "an official binary must not compile merely because it runs inside a checkout"
-        );
-    }
-
-    #[test]
     #[cfg(not(feature = "release-channel"))]
     fn detect_source_workspace_resolves_this_repo() {
-        // Running under nextest, cwd is `crates/mvm-build`; the walk up finds the
-        // real workspace root, and it carries the guest crate.
         let ws = detect_source_workspace().expect("this is a source checkout");
         assert!(ws.join("crates/mvm-agentd").is_dir());
         assert!(ws.join("Cargo.toml").is_file());
+    }
+
+    /// The OCI guest set and the guest-runtime archive resolve one checkout:
+    /// the override when set, otherwise the compiled-from tree. Neither reads
+    /// the shell's current directory.
+    #[test]
+    #[cfg(not(feature = "release-channel"))]
+    fn the_oci_guest_set_and_the_archive_resolve_the_same_checkout() {
+        let mut env = TestEnv::new();
+        env.remove(crate::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV);
+        assert_eq!(
+            detect_source_workspace(),
+            crate::image_source::guest_runtime_source_checkout()
+        );
+        let other = tempfile::tempdir().unwrap();
+        make_fake_checkout(other.path(), "fn main() { /* another checkout */ }");
+        env.set(
+            crate::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
+            other.path(),
+        );
+        assert_eq!(detect_source_workspace().as_deref(), Some(other.path()));
+        assert_eq!(
+            detect_source_workspace(),
+            crate::image_source::guest_runtime_source_checkout()
+        );
     }
 
     #[test]
