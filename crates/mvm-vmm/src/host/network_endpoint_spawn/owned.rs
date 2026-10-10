@@ -307,16 +307,8 @@ fn refuse_existing_evidence(params: &SubstitutionSpawnParams<'_>, env: &Path) ->
 }
 
 fn require_child_custody() -> Result<()> {
-    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
-    // SAFETY: query only; the output buffer is valid and no disposition changes.
-    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
-        return Err(io::Error::last_os_error()).context("query endpoint child custody");
-    }
-    // SAFETY: successful sigaction initialized the entire output.
-    let action = unsafe { action.assume_init() };
-    if action.sa_sigaction != libc::SIG_DFL || action.sa_flags & libc::SA_NOCLDWAIT != 0 {
-        bail!("owned endpoint requires default SIGCHLD disposition and exclusive child reaping");
-    }
+    crate::host::process_exit::require_owned_child_custody()
+        .context("query endpoint child custody")?;
     Ok(())
 }
 

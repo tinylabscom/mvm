@@ -41,6 +41,21 @@ pub fn arm_for_claimed_child(
     accepted: &AcceptedHandoff,
     pid_file: &Path,
 ) -> Result<Option<WallClockGuard>> {
+    arm_child_with_policy(accepted, pid_file, false)
+}
+
+pub fn arm_for_claimed_child_preserving_evidence(
+    accepted: &AcceptedHandoff,
+    pid_file: &Path,
+) -> Result<Option<WallClockGuard>> {
+    arm_child_with_policy(accepted, pid_file, true)
+}
+
+fn arm_child_with_policy(
+    accepted: &AcceptedHandoff,
+    pid_file: &Path,
+    retain_evidence: bool,
+) -> Result<Option<WallClockGuard>> {
     let Some(plan_json) = accepted.admitted_plan.as_deref() else {
         return Ok(None);
     };
@@ -54,9 +69,16 @@ pub fn arm_for_claimed_child(
         vm_state_dir: &vm_state_dir,
         pid_file,
     };
-    let guard = super::wall_clock::arm_for_supervisor(inputs)
+    let killer = || -> Box<dyn super::wall_clock::WorkloadKiller> {
+        if retain_evidence {
+            Box::new(inputs.preserving_exit_killer())
+        } else {
+            Box::new(inputs.exit_killer())
+        }
+    };
+    let guard = super::wall_clock::arm_for_supervisor_with_killer(inputs, killer())
         .context("arming the claimed child's wall-clock bound")?;
-    super::session_expiry::arm_for_supervisor(&inputs);
+    super::session_expiry::arm_for_supervisor_with_killer(&inputs, killer());
     Ok(guard)
 }
 

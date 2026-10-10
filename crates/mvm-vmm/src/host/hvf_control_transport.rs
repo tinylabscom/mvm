@@ -60,8 +60,14 @@ pub fn read_instance(vm: &str) -> Result<HvfInstance> {
     Ok(instance)
 }
 
+/// Use the repository's canonical per-VM socket namespace, including its
+/// deterministic private short-path namespace for deep configured homes.
+pub fn socket_path(vm: &str) -> Result<PathBuf> {
+    Ok(mvm_core::config::vm_socket_dir_at(&state_dir(vm)?).join(SOCKET_FILE))
+}
+
 pub fn connect(vm: &str, deadline: Instant) -> Result<UnixStream> {
-    let address = socket2::SockAddr::unix(state_dir(vm)?.join(SOCKET_FILE))?;
+    let address = socket2::SockAddr::unix(socket_path(vm)?)?;
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
     socket.connect_timeout(&address, remaining(deadline)?)?;
     Ok(socket.into())
@@ -69,9 +75,25 @@ pub fn connect(vm: &str, deadline: Instant) -> Result<UnixStream> {
 
 /// Refuses an existing endpoint; never unlinks another generation's evidence.
 pub fn bind(vm: &str) -> Result<UnixListener> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let dir = state_dir(vm)?;
     mvm_core::config::create_private_dir(&dir)?;
-    let path = dir.join(SOCKET_FILE);
+    let path = socket_path(vm)?;
+    let socket_dir = path.parent().context("HVF socket directory missing")?;
+    match std::fs::symlink_metadata(socket_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            mvm_core::config::create_private_dir(socket_dir)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = std::fs::symlink_metadata(socket_dir)?;
+    // SAFETY: geteuid only reads this process's effective user identity.
+    let uid = unsafe { libc::geteuid() };
+    ensure!(
+        metadata.is_dir() && metadata.uid() == uid && metadata.permissions().mode() & 0o077 == 0,
+        "HVF socket namespace is not a private owned directory"
+    );
     let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
     socket.bind(&socket2::SockAddr::unix(&path)?)?;
     mvm_core::private_fs::set_mode(&path, 0o600)?;
@@ -153,6 +175,22 @@ pub fn write_frame<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_home_control_path_reuses_existing_short_socket_namespace() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(&root.path().join("deep".repeat(40)));
+        let state = state_dir("control-path").unwrap();
+        let socket = socket_path("control-path").unwrap();
+        assert_eq!(
+            socket,
+            mvm_core::config::vm_socket_dir_at(&state).join(SOCKET_FILE)
+        );
+        assert!(mvm_core::config::fits_unix_socket_path(&socket));
+        assert!(!socket.starts_with(state));
+        assert!(!socket.exists(), "path derivation must not create anything");
+    }
 
     #[test]
     fn bounded_frame_roundtrip_and_oversize_refusal() {

@@ -46,6 +46,12 @@ The supervisor must not transfer its connected socket to another process.
 A missing peer, failed observer registration, or EOF before the fresh challenge
 proof is an unknown lifetime, not an already-stopped success. A PID from runtime
 files is neither stop authority nor a substitute for the connected peer.
+The endpoint is derived through `config::vm_socket_dir_at`, including the existing
+private short-path namespace for deep homes; no request supplies its path.
+Owned-child paths query SIGCHLD disposition without changing it and refuse
+auto-reaping or non-default handlers. Exclusive reaping and stable disposition
+remain a process-internal cooperation requirement, not a guarantee against
+arbitrary concurrent reapers or host administration.
 
 Stop acceptance and resident ownership transfer share one linearization gate.
 Acceptance rechecks the current generation under that gate. Transfer rotates the
@@ -95,13 +101,29 @@ with the normal authentication, exact-generation and independently observed exit
 checks. It is not a promise that the attestation itself survives a host crash.
 The supervisor reports the durability error and does not delete runtime evidence.
 
+## Hard expiry
+
+Wall-clock and session expiry retain the existing hard self-exit behavior and
+timeout exit code 124. They do not grant additional guest execution time for
+capture or endpoint cleanup. The HVF expiry killer retains PID, control, helper
+and session evidence and does not mint `finalized`. Consequently, expiry can
+leave an already-dead instance whose automatic cleanup still refuses because
+successful capture/compound finalization was not established. This is a deliberate
+compatibility cost, not a reason to fall back to PID signals or state deletion.
+
+The existing backend stop-timing field names remain compatible. For HVF,
+`supervisor_signal` measures authenticated request dispatch, `pid_disappearance`
+measures the kernel lifetime wait, and `force_kill_wait` is zero because the
+supervisor path has no forced-signal fallback. The backend itself does not remove
+state; higher-level cleanup must consume successful quiescence first.
+
 ## Delivery gate
 
 The pre-activation checkpoints supply typed wire messages, signature/binding
 validators, broker refusal, bounded endpoint/client libraries and a serialized
-stop/transfer gate. They do not activate the endpoint in the supervisor boot path,
-authorize native VM execution, or claim complete lifecycle integration.
-Activation requires independent review, bounded transport and replay tests,
+stop/transfer gate. Production boot and cleanup integration require independent
+review; helper-only tests do not authorize native VM execution.
+Activation requires bounded transport and replay tests,
 concurrent stop/transfer tests, cleanup failure tests, and an owned native
 quiescence/finalization witness. Startup timing is measured after those security
 gates, not used to waive them.
