@@ -153,6 +153,7 @@ url = "2"
 rustls = { workspace = true }
 httparse = "1"
 zeroize.workspace = true
+uuid.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -160,8 +161,13 @@ tracing-subscriber.workspace = true
 libc.workspace = true
 rustix = { version = "1.1", features = ["fs", "event"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { version = "0.10", optional = true }
+security-framework = { version = "3.7", optional = true }
+
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "=5.1.0", default-features = false, features = ["rt-async-io-crypto-rust"], optional = true }
 # Aya userspace loader for the vsock egress telemetry probe. The eBPF program
 # itself lives in `ebpf/` and is built separately with nightly + bpf-linker.
 # Optional: enabling `ebpf-telemetry` pulls Aya into the default closure; it
@@ -178,6 +184,7 @@ landlock = { workspace = true }
 hickory-proto = { workspace = true }
 
 [dev-dependencies]
+keyring.workspace = true
 tempfile.workspace = true
 xtask = { path = "../../xtask" }
 # The release-only networking probe drives the guest FlowMux client the
@@ -204,6 +211,7 @@ ctor = "0.2"
 
 [features]
 default = []
+native-caller-identity = ["dep:core-foundation", "dep:security-framework", "dep:secret-service"]
 manifest-verify = ["mvm-core/manifest-verify"]
 # Build the hermetic legacy-L3/FlowMux comparison producer. Never enabled by
 # a production binary; it exposes only a high-level loopback fixture.
