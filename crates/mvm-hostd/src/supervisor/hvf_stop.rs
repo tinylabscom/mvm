@@ -40,6 +40,8 @@ struct State {
         std::sync::mpsc::SyncSender<()>,
         std::sync::mpsc::Receiver<()>,
     )>,
+    #[cfg(test)]
+    stop_notice: Option<std::sync::mpsc::SyncSender<()>>,
 }
 
 struct Shared {
@@ -93,6 +95,8 @@ impl StopControl {
                 key,
                 #[cfg(test)]
                 before_commit: None,
+                #[cfg(test)]
+                stop_notice: None,
             }),
             closed: AtomicBool::new(false),
             stop,
@@ -484,6 +488,10 @@ fn exchange(shared: &Shared, stream: &mut UnixStream, deadline: Instant) -> Resu
         if state.phase == Phase::Active {
             state.phase = Phase::Stopping;
             shared.stop.store(true, Ordering::Release);
+            #[cfg(test)]
+            if let Some(notice) = &state.stop_notice {
+                let _ = notice.try_send(());
+            }
         }
     }
     // Dispatch only, never a process-death or finalization claim.
@@ -494,3 +502,7 @@ fn exchange(shared: &Shared, stream: &mut UnixStream, deadline: Instant) -> Resu
 #[cfg(test)]
 #[path = "hvf_stop_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hvf_stop_native_tests.rs"]
+mod native_tests;
