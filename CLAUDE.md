@@ -177,23 +177,24 @@ The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the
 
 **mvm's builder binaries travel beside the builder image, not inside it.**
 Every builder boot on every backend carries a *builder boot payload*: an
-initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init` and
-`mvm-builderd`, digest-checked by the guest before it pivots into the
-read-only image and runs them from `/run/mvm/host-bins`. The image and the
-payload agree on a versioned builder boot ABI (`/etc/mvm/builder-boot-abi`;
-`builder_boot_abi` in a signed image set): 0 is a legacy image that bakes the
-binaries (the payload's copies still win), 1 is an image that carries none.
+initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init`,
+`mvm-builderd` and `mvm-setpriv`, digest-checked by the guest before it
+pivots into the read-only image and runs them from `/run/mvm/host-bins`. The
+image and the payload agree on a versioned builder boot ABI
+(`/etc/mvm/builder-boot-abi`; `builder_boot_abi` in a signed image set): 0 is
+a legacy image that bakes the builder binaries and `mvm-setpriv`, 1 bakes
+only `mvm-setpriv`, and 2 carries no mvm binary.
 The contract lives in `mvm_build::builder_boot` and is recorded in ADR-004;
 `builder_boot_cmdline` is the one kernel command line every backend boots
 with, and `stage_builder_boot` decides each boot. A persistent builder booted
 with other builder binaries is stopped rather than reused.
 
-One mvm binary is still inside the image: an ABI 1 builder image bakes
-`mvm-setpriv`, compiled from this tree by mvm-images, and `mvm-host-vm-init`
-runs it from `/sbin`. Builder boot ABI 2
-([#4107](https://github.com/tinylabscom/mvm/issues/4107)) is decided but not
-built: it adds `mvm-setpriv` to the payload so the image carries no mvm binary
-at all.
+The currently published ABI 1 builder image still bakes `mvm-setpriv`,
+compiled from this tree by mvm-images. `mvm-host-vm-init` forks the guest
+agent under the payload's copy and falls back to the image's `/sbin` copy only
+when the boot carried none. mkGuest's `withSetpriv = false` builds an image
+without the baked copy; declaring ABI 2 for the published builder image is
+mvm-images' change to make.
 
 Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
@@ -226,7 +227,7 @@ Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, disting
 
 - `mvm-hostd` -- host-side daemon roles, one crate with separate `[[bin]]`s (the process moat): the `supervisor` + `jailer` libs, the `broker`/`host_signer`/`audit_signer` subprocess bins, and the per-VM supervisor bins `mvm-libkrun-supervisor`/`mvm-hvf-supervisor`. Absorbs `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`/`mvm-vm-host`.
 - `mvm-agentd` -- the in-guest daemon: vsock protocol (`vsock/`), console, integrations, entrypoint runtime, the `mvm-guest-agent` `[[bin]]`, and the addon/egress helper bins (`mvm-addon-dns`/`mvm-addon-vsock-bridge`, gated behind the off-by-default `addons` feature so the sealed agent stays tokio-free). Absorbs `mvm-guest` + `mvm-guest-helpers`.
-- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`, and it has to stay one: today the builder image in mvm-images compiles it from this tree's source, so its closure is part of the builder image's cache key, and every crate it reaches is a crate whose edits rebuild that image. ADR-054 moves it into the guest runtime that ships with `mvmctl` — reaching workloads through the runtime overlay ([#4106](https://github.com/tinylabscom/mvm/issues/4106)) and the builder through boot ABI 2 ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) — after which its closure leaves that key. `mvm-agentd` depends on it, never the reverse.
+- `mvm-setpriv` -- the guest's static privilege-drop and exec helper (`mvm-setpriv` `[[bin]]`), plus the descriptor hygiene it applies before exec, which `mvm-agentd` re-exports as `fd_hygiene`. A leaf whose only dependency is `libc`. The published ABI 1 builder image still compiles it from this tree, so its closure is part of that image's cache key. At ABI 2 it arrives in the builder boot payload and leaves the image's key. ADR-054 also moves it into the guest runtime that ships with `mvmctl` for workloads through the runtime overlay ([#4106](https://github.com/tinylabscom/mvm/issues/4106)). `mvm-agentd` depends on it, never the reverse.
 - `mvm-sdk` -- SDK: decorator parser → canonical `Workload` IR → Nix template, and runtime record mode. Language SDK surfaces live under `crates/mvm-sdk/sdks/`. The in-guest host-services C-ABI cdylib is **not** here: `libmvm_host_services.so` is emitted by `mvm-host-services`, a separate crate whose package name is what makes cargo produce that filename directly rather than `libmvm_sdk.so` plus a rename. This matters beyond bookkeeping — the SDK sidecar's staleness fingerprint hashes `mvm-host-services` and its dependencies, so an edit under `crates/mvm-sdk` does not invalidate a cached sidecar.
 - `mvm-hostlib` -- the host library the language SDKs load in-process instead of running `mvmctl`: one versioned C ABI (`mvm_hostlib_abi_version`, `mvm_hostlib_abi_is_compatible`, `mvm_hostlib_call`, `mvm_hostlib_free`) over the `MvmClient` surface, answered by `LocalBackend`, plus the admitted local launch (`machine.run`/`machine.create`, through `LaunchRequest`), the DevOnly `guest.*` process and file methods, answered by `mvm_client::guest` (the implementation `mvmctl machine proc`/`fs`/`cp` use), and handle-and-poll process output streams (`guest.proc.stream.*`). A call before `mvm_hostlib_abi_is_compatible` succeeds is refused. The SDKs never run `mvmctl` and have no subprocess fallback; `xtask check-no-cli-shellout` fails the build if SDK source reaches for a process API. On first use it declares the process a library embedder, so any path that would spawn `mvmctl` refuses, and declares its own directory as the helper-binary directory. Nothing depends on it, so linking `mvm-client` cannot form a cycle.
 - `crates/deps/libkrun-sys` -- the libkrun C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`). Was `mvm-libkrun`; lives low so `mvm-build`/`mvm-runtime` consume the wrapper.

@@ -226,6 +226,7 @@ mod tests {
         let bins = tempfile::tempdir().unwrap();
         std::fs::write(bins.path().join("mvm-host-vm-init"), b"INIT").unwrap();
         std::fs::write(bins.path().join("mvm-builderd"), b"BUILDERD").unwrap();
+        std::fs::write(bins.path().join("mvm-setpriv"), b"SETPRIV").unwrap();
         let state = tempfile::tempdir().unwrap();
 
         let boot =

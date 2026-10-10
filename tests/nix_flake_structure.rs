@@ -1604,6 +1604,20 @@ fn mk_guest_uses_the_static_custom_privilege_helper() {
 }
 
 #[test]
+fn mk_guest_can_omit_setpriv_for_a_builder_boot_payload() {
+    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
+        .expect("mk-guest.nix must be readable");
+    let normalized = normalized_whitespace(&content);
+    assert!(content.contains("withSetpriv ? true,"));
+    assert!(normalized.contains("++ lib.optional withSetpriv setprivPkg ++"));
+    assert!(content.contains("lib.optionalString withSetpriv"));
+    assert!(normalized.contains(&format!(
+        "else \"{}/mvm-setpriv\";",
+        mvm_build::builder_guest_paths::RUNTIME_HOST_BIN_DIR
+    )));
+}
+
+#[test]
 fn builder_hook_uses_util_linux_losetup_before_the_mount_syscall() {
     let hook_path = repo_dir().join("crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs");
     let hook = fs::read_to_string(&hook_path)
@@ -1668,7 +1682,7 @@ fn mk_guest_copies_ca_bundle_without_retaining_cacert_store_path() {
 
     assert!(
         normalized
-            .contains("rootPaths = [ busybox setprivPkg ] ++ packages ++ extraFileSourceRoots")
+            .contains("rootPaths = [ busybox ] ++ lib.optional withSetpriv setprivPkg ++ packages ++ extraFileSourceRoots")
             && !normalized.contains(
                 "rootPaths = [ busybox setprivPkg pkgs.cacert ] ++ packages ++ extraFileSourceRoots"
             ),
