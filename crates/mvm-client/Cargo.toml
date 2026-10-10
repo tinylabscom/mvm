@@ -155,6 +155,8 @@ required-features = ["schema"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Single-owned-PID identity checks in the opt-in native fixture guardian.
+sysinfo = { version = "0.30", default-features = false }
 # The runtime-source tests build a shared-object fixture to check which guest
 # runtime a rootfs needs.
 mvm-fs = { workspace = true, features = ["test-support"] }
