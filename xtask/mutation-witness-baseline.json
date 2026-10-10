@@ -904,76 +904,6 @@
       "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. Both comparisons therefore find an entry, and the result is used only as an existence proof; no input reaching this point distinguishes them."
     },
     {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "delete ! in <impl SnapshotIO for FirecrackerIO>::teardown_paused",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "delete ! in FirecrackerIO::ensure_socket",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl PostRestoreSignal for VsockPostRestoreSignal>::probe_ready -> bool with false",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl PostRestoreSignal for VsockPostRestoreSignal>::probe_ready -> bool with true",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl SnapshotIO for FirecrackerIO>::create_snapshot -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl SnapshotIO for FirecrackerIO>::load_snapshot_for_fork_paused -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl SnapshotIO for FirecrackerIO>::load_snapshot_paused -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl SnapshotIO for FirecrackerIO>::resume -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace <impl SnapshotIO for FirecrackerIO>::teardown_paused -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace FirecrackerIO::ensure_socket -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace FirecrackerIO::load_snapshot_inner -> Result<()> with Ok(())",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace VsockPrimedSignalSource::probe_once -> bool with false",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace VsockPrimedSignalSource::probe_once -> bool with true",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-runtime/src/vm/instance_snapshot.rs",
-      "mutant": "replace instance_dir -> PathBuf with Default::default()",
-      "reason": "Firecracker snapshot driver I/O: create/load/resume/teardown talk to a live Firecracker API socket, and the vsock readiness probes need a booted guest. The claim-3 and claim-10 witnesses in these files (the NIC refusals on restore and the tampered-memory rejection) are caught; these are the driver calls around them, whose only witness is the live-KVM lane. Coverage debt tracked in #2033."
-    },
-    {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
       "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
       "reason": "preload_standby_child's support check is a guard that returns Unsupported early. The error path is exercised through VmmDriver implementations in backend-specific tests; mutating the guard only changes which code path reports the error."
@@ -1002,11 +932,6 @@
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
       "mutant": "replace && with || in WorkloadRunner<D, S, B>::spawn_standby_captured",
       "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace == with != in <impl Drop for WarmClaimLease<'_>>::drop",
-      "reason": "The NotFound branch in WarmClaimLease::drop handles a teardown race where the child directory was already removed. Mutating the comparison changes warning verbosity, not security posture; the race window is exercised by warm-claim integration tests."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",

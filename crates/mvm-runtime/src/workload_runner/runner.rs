@@ -398,7 +398,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // than serializing its process setup after guest readiness.
         let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
-            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: inputs.redaction,
@@ -750,7 +750,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // with nothing else to show why.
         self.console_streamer.start(&ConsoleCapture {
             vm_name: &child.0,
-            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: &redaction,
@@ -1429,6 +1429,15 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
         ))
     })
 }
+/// Whether the backend's own supervisor holds the console capture for the
+/// VM's whole life, so the launcher must not start a competing writer.
+///
+/// Only the HVF supervisor owns capture today. Every other backend leaves it
+/// to the launcher's follower.
+fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -> bool {
+    kind == mvm_core::vm_backend::BackendKind::Hvf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1581,12 +1590,18 @@ mod tests {
     #[derive(Default)]
     struct RecordingConsoleStreamer {
         started: Mutex<Vec<(String, PathBuf)>>,
+        /// `ConsoleCapture::supervisor_owned` of each `start`, in call order.
+        supervisor_owned: Mutex<Vec<bool>>,
         stopped: Mutex<Vec<String>>,
         captured_at_stop: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     impl ConsoleStreamer for RecordingConsoleStreamer {
         fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.supervisor_owned
+                .lock()
+                .unwrap()
+                .push(capture.supervisor_owned);
             self.started.lock().unwrap().push((
                 capture.vm_name.to_string(),
                 capture.console_log.to_path_buf(),
@@ -1609,6 +1624,20 @@ mod tests {
                     .unwrap()
                     .insert(vm_name.to_string(), bytes);
             }
+        }
+    }
+
+    #[test]
+    fn only_the_hvf_supervisor_owns_console_capture() {
+        use mvm_core::vm_backend::BackendKind;
+        assert!(supervisor_owns_console(BackendKind::Hvf));
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+        ] {
+            assert!(!supervisor_owns_console(kind), "{kind:?}");
         }
     }
 
@@ -1932,6 +1961,12 @@ mod tests {
                 [("w-console".to_string(), expected_console_log.clone())]
             );
         }
+        // The mock backend has no supervisor that owns capture, so the
+        // launcher's follower is the writer and must be told so.
+        assert_eq!(
+            streamer.supervisor_owned.lock().unwrap().as_slice(),
+            [false]
+        );
         assert!(
             streamer.stopped.lock().unwrap().is_empty(),
             "must not stop before the workload ends"
@@ -4742,6 +4777,15 @@ mod tests {
             "the console log must live under the child's own state dir, not the parent's"
         );
         drop(started);
+        assert_eq!(
+            out.console_streamer
+                .supervisor_owned
+                .lock()
+                .unwrap()
+                .as_slice(),
+            [false],
+            "a restored child's capture ownership follows its backend, as a cold boot's does"
+        );
         assert!(
             out.console_streamer.stopped.lock().unwrap().is_empty(),
             "a committed claim leaves the console streamer running for the \

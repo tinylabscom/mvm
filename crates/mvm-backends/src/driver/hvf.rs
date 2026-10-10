@@ -752,6 +752,20 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
     Ok(HandoffReply::parse(&response))
 }
 
+/// How much longer than the parent's own capture handoff bound the claimant
+/// waits for a reply.
+const HANDOFF_RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the claimant stops waiting for the parent's handoff reply.
+///
+/// The parent may spend up to [`mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT`]
+/// preparing protected capture before it answers, and then answers with its
+/// reason. Giving up at or before that bound would replace the parent's
+/// account of a refusal with a bare local timeout.
+fn handoff_response_deadline(now: Instant) -> Instant {
+    now + mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+}
+
 /// Read the parent's one-line handoff reply: `OK`, `RETRY <reason>`, or
 /// `ERR <reason>`.
 ///
@@ -760,9 +774,7 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
 /// with no account of what the parent had refused.
 fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
-    let deadline = Instant::now()
-        + mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT
-        + std::time::Duration::from_secs(2);
+    let deadline = handoff_response_deadline(Instant::now());
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while response.len() < HANDOFF_RESPONSE_MAX_BYTES && response.last() != Some(&b'\n') {
@@ -1285,6 +1297,16 @@ mod tests {
         let response = read_handoff_response(&mut stream).expect("read available refusal reason");
         writer.join().expect("join handoff writer");
         assert_eq!(response, b"ERR parent stopped");
+    }
+
+    #[test]
+    fn the_claimant_outwaits_the_parents_capture_handoff_bound() {
+        let now = Instant::now();
+        assert_eq!(
+            handoff_response_deadline(now) - now,
+            mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+        );
+        assert!(!HANDOFF_RESPONSE_GRACE.is_zero());
     }
 
     /// Whatever the parent sends, the host stops at a bound rather than reading
