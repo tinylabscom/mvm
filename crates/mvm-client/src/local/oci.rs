@@ -3,7 +3,7 @@
 use super::{
     TreeMaterializeOptions, UnpackedLayers, backend_err, materialize_tree, unpack_one_layer,
 };
-use mvm_build::oci_runtime_inject::MvmRuntimeBinaries;
+use mvm_build::oci_runtime_inject::{ImageRuntimeConfig, MvmRuntimeBinaries};
 use mvm_core::arch::GuestArch;
 use mvm_core::client::Result;
 use mvm_fs::oci::{
@@ -215,10 +215,19 @@ impl<'a> OciMaterializeRequest<'a> {
         self.sealed = sealed;
         self
     }
+
+    fn tree_options<'b>(&'b self, config: &'b ImageRuntimeConfig) -> TreeMaterializeOptions<'b> {
+        TreeMaterializeOptions {
+            config: Some(config),
+            sealed: self.sealed,
+            runtime_binaries: Some(self.runtime_binaries),
+            policy: mvm_build::run_image::RootfsMaterializationPolicy::InProcessOnly,
+        }
+    }
 }
 
 /// Acquire and materialize for packaging; unlike direct OCI runs a package must
-/// declare an executable argv. `sealed` invokes the real verity materializer.
+/// declare an executable argv. Both variants retain the in-process verity seal.
 pub(crate) async fn materialize_oci_image(
     request: OciMaterializeRequest<'_>,
 ) -> Result<OciMaterialization> {
@@ -226,7 +235,7 @@ pub(crate) async fn materialize_oci_image(
         image_ref,
         arch,
         sealed,
-        runtime_binaries,
+        ..
     } = request;
     require_runtime_arch(arch)?;
     let reference: ImageReference = image_ref.parse().map_err(backend_err)?;
@@ -240,16 +249,7 @@ pub(crate) async fn materialize_oci_image(
         &rootfs,
         &pulled.canonical_reference,
         pulled.layers,
-        TreeMaterializeOptions {
-            config: Some(&pulled.config),
-            sealed,
-            runtime_binaries: Some(runtime_binaries),
-            policy: if sealed {
-                mvm_build::run_image::RootfsMaterializationPolicy::AllowBuilderVm
-            } else {
-                mvm_build::run_image::RootfsMaterializationPolicy::InProcessOnly
-            },
-        },
+        request.tree_options(&pulled.config),
     )?;
     if sealed && !mvm_build::run_image::published_build_matches(&rootfs, true) {
         return Err(backend_err(
@@ -319,6 +319,28 @@ pub(super) fn digest_reference(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn packages_require_in_process_materialization_for_dev_and_prod() {
+        let bins = MvmRuntimeBinaries {
+            agent: "/pinned/agent".into(),
+            netinit: "/pinned/netinit".into(),
+            egress_client: "/pinned/egress".into(),
+            entrypoint_runner: "/pinned/entrypoint".into(),
+        };
+        let config = ImageRuntimeConfig::default();
+        for sealed in [false, true] {
+            let request =
+                OciMaterializeRequest::new("app:1", GuestArch::host(), &bins).sealed(sealed);
+            let options = request.tree_options(&config);
+            assert_eq!(
+                options.policy,
+                mvm_build::run_image::RootfsMaterializationPolicy::InProcessOnly
+            );
+            assert_eq!(options.sealed, sealed);
+            assert_eq!(options.runtime_binaries, Some(&bins));
+        }
+    }
 
     fn config_registry(
         config: &[u8],

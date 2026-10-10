@@ -1121,6 +1121,11 @@ verity metadata is an error before signing. The default is a signed development
 package, not an unsigned archive. Production admission still applies its normal
 entrypoint, authentication, backend, and security-policy checks.
 
+Both development and production packages construct the rootfs and its verity
+data in-process from the verified OCI content. `MVM_MATERIALIZE_BUILDER_VM`
+and inputs outside the pure writer's supported limits are refused; packaging
+never falls back to an untrusted builder or replaces that seal through one.
+
 `--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
 not currently supported by that shared exporter.
 
