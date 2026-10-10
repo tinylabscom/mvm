@@ -3,7 +3,7 @@
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
 //! `run --profile dev -- <argv>` covers its interactive case. The `Args`
-//! struct + internal request machinery stay — `run_secure` reuses them.
+//! struct + internal request machinery stay — `run_secure_started` reuses them.
 
 use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
@@ -553,18 +554,17 @@ pub(in crate::commands) fn run_transient(
     if !args.run.dry_run {
         build_flake_slot(&mut args.run)?;
     }
-    run_secure(cli, args.run, cfg, None)
+    run_secure_started(cli, args.run, cfg, None, Instant::now())
 }
 
-/// Run a transient workload through the normal admitted path, optionally
-/// overriding the user-facing image lookup with an already-verified source.
-/// The override is used only by content-addressed restore, where following a
-/// mutable template pointer would boot the wrong revision.
-pub(in crate::commands) fn run_secure(
+/// Run a transient workload through the admitted path from the instant launch
+/// resolution began, optionally overriding lookup with a content-pinned source.
+pub(in crate::commands) fn run_secure_started(
     cli: &Cli,
     mut args: RunArgs,
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
+    startup_started: std::time::Instant,
 ) -> Result<()> {
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
@@ -826,7 +826,8 @@ pub(in crate::commands) fn run_secure(
             &oci_provenance,
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let result = crate::exec::run_captured(req, Some(&admit), Some(&posture));
+        let result =
+            crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
@@ -889,6 +890,7 @@ pub(in crate::commands) fn run_secure(
             denials: &denials,
             network: network_access,
             review_source: review_source.as_ref(),
+            startup_started,
         },
     )
 }
@@ -923,6 +925,7 @@ fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
 /// (the audit emitter lives inside it) and the resolved backend name for the
 /// audit `backend` label.
 struct RunAudit<'a> {
+    startup_started: std::time::Instant,
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
     backend: &'a str,
@@ -981,7 +984,7 @@ fn run_run_args(
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
-    let result = crate::exec::run(req, audit.admit, Some(&posture));
+    let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
     let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs

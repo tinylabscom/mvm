@@ -276,6 +276,31 @@ The signature option is forwarded to the shared refusal, never ignored.
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
 
+### Protected forensic transcripts
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust audit transcript arm <vm> [--tenant <t>]` | Create a new encrypted capture with seven-day payload retention after terminal sealing. Duration is at most 3600 seconds; byte/chunk limits remain independent. |
+| `mvmctl trust audit transcript disarm <capture-id> [--tenant <t>]` | Acquire the capture lease, finalize an inactive generation, and anchor its immutable root in the host audit chain. Refuses while a protected producer owns the lease. |
+| `mvmctl trust audit transcript reconcile <capture-id> [--tenant <t>]` | Reconcile one known capture: authenticate its original seal and concrete VM identity without requiring the current VM plan, durably sign expiry evidence with the original attribution, then remove only its authorized ciphertext segments. Safe to retry after interruption. |
+| `mvmctl trust audit transcript export <capture-id> [--tenant <t>] [--out <path>]` | Verify and decrypt a readable capture. Expired or authentically retired payload is refused even if physical cleanup is delayed. |
+| `mvmctl trust audit transcript list [--tenant <t>] [--json]` | List captures without enrolling existing data in retention. |
+
+Existing v6 captures remain readable and retention-ineligible; formats v1–v5
+are not supported. Reconciliation retains the original manifest, wrapped key,
+root, and signed audit proof. It never cleans export destinations or recursively
+sweeps arbitrary paths. Symlinks, hard-linked payloads, invalid clocks, missing
+authority, and conflicting evidence refuse cleanup. Unaccounted missing payload
+remains corruption, not successful expiry.
+
+Unattended producer startup/tick maintenance and hourly generation rotation need
+the protected capture lifecycle owner; the explicit command alone does not
+enable them. Workload-output generations may additionally opt into a separately
+authenticated aggregate family budget; unrelated forensic captures are not
+pooled into that budget. Removing names is not secure erasure of backups or open
+descriptors. The directory lease coordinates trusted host processes, not hostile
+same-user processes that ignore locks.
+
 ## Instruction-file provenance
 
 Sign and verify agent instruction files (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`,
@@ -894,7 +919,8 @@ than ambiguous. Nothing selects `ephemeral` today — every production caller
 takes the default — so treat the field as the place a future opt-out will live
 rather than one you can reach now.
 
-Three limits are worth knowing before you rely on this:
+The following limits apply to legacy file-backed console capture, not the
+native HVF protected path described below:
 
 - The recorded transcript is redacted; the **console fallback is not**, so a
   read that falls back to (or splices in) the console shows raw guest bytes.
@@ -904,6 +930,80 @@ Three limits are worth knowing before you rely on this:
 - A spliced read **repeats** the part the recording already showed, because
   console byte offsets and transcript sequence numbers share no coordinate.
   Duplicated, never lost.
+
+**Native HVF protected capture (draft integration).** New native HVF launches
+require a matching host helper and a supervisor-owned encrypted console
+capture before boot is announced. The supervisor continues consuming console
+output after the launcher exits. A bounded, nonblocking handoff drops and
+counts output under overload or consumer failure; it never slows the guest
+behind encryption or disk I/O and never falls back to a plaintext console
+file. `machine logs` refuses plaintext fallback for these runs, including when
+capture setup fails. Signed `ephemeral` policy remains non-persistent.
+
+New protected capture families and their routing metadata live under
+`$MVM_HOME/audit/workload-output/<hex-encoded-concrete-vm-name>/`, outside
+disposable runtime and machine-instance directories. Public stop/removal and
+orphan reaping do not delete these captures. Live sockets and fixed supervisor
+status remain runtime-local. Legacy recordings are not moved or enrolled.
+Restart publishes a fresh run selection without merging earlier sequence
+spaces; a retained family belonging to another tenant refuses name reuse.
+
+Raw supervisor stderr is deliberately discarded on this path, including
+startup failures; it is not retained or exportable. Public errors retain exit
+status and sanitized guidance rather than raw helper output.
+`supervisor-status.json` in the VM state directory records fixed lifecycle
+states such as `capture_setup_failed`, `boot_failed`, and `capture_failed`.
+Encrypted supervisor-stderr collection is a separate follow-up.
+
+Durable generations rotate hourly and become unreadable seven days after sealing. The
+existing 8 MiB / 65,536-chunk budget covers the concrete VM's entire managed
+generation set, including the active generation; encrypted record-envelope
+bytes count against that budget. Pressure seals the active generation before
+authenticated oldest-generation retirement. Unreclaimable capacity sheds
+durable output and reports capture failure, rather than enlarging the limit.
+Startup and bounded periodic maintenance use the signed original capture
+authority. Recovery requires exclusive producer leases and a durable signed
+opening; recovered output is explicitly incomplete and retry preserves the
+original staged terminal timestamp. Missing or pruned audit authority refuses
+recovery/retirement; uninterrupted unattended cleanup across audit pruning is
+not guaranteed. Unaccounted interrupted ciphertext tails are preserved for
+offline recovery rather than automatically discarded.
+Maintenance runs at supervisor startup and while it is alive. There is no
+always-on physical cleanup of stopped, never-restarted captures in this slice:
+read expiry remains enforced, but seven-day physical deletion is not
+guaranteed. Stopped-capture maintenance and audit-pruning continuity remain
+separate follow-ups.
+
+Verified history checks signed retirement before decrypting any payload, even
+when deletion was interrupted. Retired/expired history reports an explicit
+retention gap. Live attachment has a bounded RAM replay window, not a promise
+that every active byte is already terminally verified history.
+An already-open reader has no lifetime exemption: buffered history rechecks its
+generation's authority before each record, and stalled live frames recheck
+revocation and expiry before each nonblocking write. Revocation closes a
+partially sent frame rather than transmitting the remainder under stale
+authorization. Already-delivered bytes cannot be recalled.
+
+The dedicated native cold witness verifies genuine boot UART output through the
+live reader after the launcher exits, then through verified encrypted history
+after public stop, with no matching plaintext managed artifact. This proves
+post-launcher availability of boot output, not that bytes were emitted after
+launcher exit. The stronger synthetic post-detach UART-emission witness remains
+outstanding: ordinary unprivileged guest processes cannot write `/dev/console`,
+and RPC stdout is not a substitute for the UART path.
+
+This integration remains scoped to protected native-HVF console capture; final
+review and CI determine merge readiness, not a claim that all diagnostic
+surfaces or lifecycle witnesses are complete.
+The draft warm-handoff path prepares a fresh child capture, requires every vCPU
+to acknowledge quiescence, replaces the parent's UART capture state, and
+finalizes the old owner before acknowledging transfer. Failure refuses the
+transfer rather than using the parent's capture or plaintext output. This path
+has unit/mock evidence only; native-HVF lifecycle and prepared-launch performance
+have not been validated.
+The seven-day lifetime after sealing and hourly generation schedule do not
+replace byte limits. Legacy captures are not automatically enrolled. This
+native-HVF sequencing does not cover other backends or telemetry.
 
 Full walkthrough: [Workload output
 streaming](/guides/workload-output-streaming/).
@@ -1593,7 +1693,7 @@ running microVM.
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --help` | Show the required `--document` signed-feed path and `--bundle` signature-bundle path. Updating verifies the supplied bytes under the operator's configured release identity before advancing the durable cache checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1617,6 +1717,23 @@ do not redirect image release origins, and private image releases are unsupporte
 Built-image boot remains explicitly unsupported; successful installation does
 not enable it. See [pack authoring](/guides/pack-authoring/#built-image-release-assets)
 for resource limits and the split registry/release inventory.
+
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes or allowed egress,
+enable claims explicitly:
+
+```bash
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
+mvmctl machine run --image alpine -- /bin/true
+```
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
+capacity and fail rather than silently cold-booting. Named launches and shapes
+with extra volumes (including directory mounts) or allowed egress retain their
+cold path, including when the pool size is zero.
 
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release

@@ -45,10 +45,43 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
 use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
+
+/// Test-only, thread-scoped syscall failures; never enabled by environment.
+#[cfg(test)]
+pub(crate) mod write_faults {
+    use std::cell::Cell;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Boundary {
+        PartialAppend,
+        Sync,
+    }
+    thread_local! { static STATE: Cell<Option<(Boundary, bool)>> = const { Cell::new(None) }; }
+    pub struct Guard(Option<(Boundary, bool)>);
+    impl Guard {
+        pub fn arm(boundary: Boundary) -> Self {
+            Self(STATE.replace(Some((boundary, false))))
+        }
+        pub fn consumed(&self) -> bool {
+            STATE.get().is_some_and(|(_, consumed)| consumed)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            STATE.set(self.0);
+        }
+    }
+    pub fn take(boundary: Boundary) -> bool {
+        if STATE.get() == Some((boundary, false)) {
+            STATE.set(Some((boundary, true)));
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Chain-signed file signer. Holds an Ed25519 private key, a base
 /// directory, and an in-memory `tenant -> last_envelope_hash` cursor
@@ -470,6 +503,9 @@ impl FileAuditSigner {
 
     /// Append one signed entry to `path`, assuming the chain lock is held.
     /// Returns the new chain tip.
+    ///
+    /// Recovery publication below deliberately calls this non-reentrant helper
+    /// instead of `sign_and_emit`, which acquires the same chain lock.
     fn append_locked(&self, path: &Path, entry: &PlanAuditEntry) -> Result<[u8; 32], AuditError> {
         // Refresh the cursor under the lock — another process may have appended
         // between our last in-memory snapshot and this call. The in-memory
@@ -477,6 +513,59 @@ impl FileAuditSigner {
         // of truth.
         let prev_hash = self.restore_cursor(path)?;
         self.write_signed(path, entry, prev_hash, sync_policy_for(&entry.event))
+    }
+
+    /// Atomic primary-chain recovery publication. The lifecycle caller must
+    /// retain its exclusive capture lease and establish producer quiescence.
+    pub(crate) fn emit_recovered_transcript_sealed(
+        &self,
+        seed: &mvm_core::transcript::TranscriptManifest,
+        recovered: &mvm_core::transcript::TranscriptManifest,
+    ) -> anyhow::Result<bool> {
+        use anyhow::{Context, ensure};
+        use mvm_core::transcript::evidence::{authenticated_seal, recovered_seal_entry};
+        ensure!(
+            self.fixed_file.is_none(),
+            "recovery requires the primary tenant audit chain"
+        );
+        mvm_core::transcript::check_safe_name(&seed.binding.tenant_id)?;
+        ensure!(
+            seed.binding == recovered.binding,
+            "recovery scope differs from original seed"
+        );
+        let path = self.tenant_path(&seed.binding.tenant_id);
+        let _lock = Self::acquire_lock(&path)?;
+        self.recover_active(
+            &path,
+            &mvm_core::plan::TenantId(seed.binding.tenant_id.clone()),
+        )?;
+        let key = self.verifying_key();
+        let expected = recovered_seal_entry(&self.audit_dir, &key, seed, recovered)?;
+        if let Some(existing) = authenticated_seal(&self.audit_dir, &key, recovered)? {
+            let mut same = expected;
+            same.timestamp = existing.timestamp;
+            ensure!(
+                existing == same,
+                "existing recovered seal conflicts with opening attribution"
+            );
+            return Ok(false);
+        }
+        let len = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if self.rotation.should_rotate(len) {
+            self.rotate(&path, &expected.tenant)?;
+        }
+        self.append_locked(&path, &expected)?;
+        // Verification also syncs the matching segment and directory. This
+        // remains a durability barrier even when ordinary emits are batched.
+        let published = authenticated_seal(&self.audit_dir, &key, recovered)?
+            .context("recovered seal absent after append")?;
+        ensure!(
+            published == expected,
+            "recovered seal changed during publication"
+        );
+        Ok(true)
     }
 
     /// Sign `entry` against `prev_hash` and append it to `path`.
@@ -513,6 +602,14 @@ impl FileAuditSigner {
         // admission decision downstream is assuming.
         let mut record = line.into_bytes();
         record.push(b'\n');
+        #[cfg(test)]
+        if write_faults::take(write_faults::Boundary::PartialAppend) {
+            // Model a real short append followed by a storage failure, rather
+            // than failing before the signer touches the audit file.
+            file.write_all(&record[..record.len() / 2])
+                .map_err(|e| AuditError::Io(e.to_string()))?;
+            return Err(AuditError::Io("injected partial append failure".into()));
+        }
         file.write_all(&record)
             .map_err(|e| AuditError::Io(e.to_string()))?;
 
@@ -533,6 +630,10 @@ impl FileAuditSigner {
         };
         match sync {
             SyncPolicy::Barrier => {
+                #[cfg(test)]
+                if write_faults::take(write_faults::Boundary::Sync) {
+                    return Err(AuditError::Io("injected audit fsync failure".into()));
+                }
                 file.sync_data()
                     .map_err(|e| AuditError::Io(e.to_string()))?;
                 self.pending_sync
@@ -897,27 +998,7 @@ pub(crate) fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
     flock(file.as_fd(), FlockOperation::LockExclusive).map_err(std::io::Error::from)
 }
 
-#[derive(Debug, Error)]
-pub enum VerifyError {
-    #[error("io error: {0}")]
-    Io(String),
-    #[error("malformed envelope at line {line}: {reason}")]
-    Malformed { line: usize, reason: String },
-    #[error("prev_hash mismatch at line {line}: chain broken")]
-    PrevHashMismatch { line: usize },
-    #[error("signature invalid at line {line}")]
-    SignatureInvalid { line: usize },
-    #[error("line {line}: the readable entry disagrees with the bytes that were signed")]
-    EntryCanonicalMismatch { line: usize },
-    /// The file ends mid-record: a writer died between the record and its
-    /// terminating newline. Distinct from [`Self::Malformed`] on purpose — an
-    /// operator triaging a broken chain needs to know whether they are looking
-    /// at a crash or at an edit, and the two are otherwise identical on disk.
-    /// Entries before the truncation point are still verified and returned by
-    /// the count; only the incomplete tail is refused.
-    #[error("audit stream ends mid-record at line {line}: last append did not complete")]
-    TruncatedTail { line: usize },
-}
+pub use mvm_core::audit_verify::file::VerifyError;
 
 /// Walk a chain-signed audit file, verifying each envelope's
 /// `prev_hash` against the running chain hash and each signature

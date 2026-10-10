@@ -21,9 +21,64 @@
 //! [`NoopConsoleStreamer`](super::runner::NoopConsoleStreamer), so an embedder
 //! that never registers one boots workloads exactly as before.
 
+use mvm_core::plan::StreamRetention;
+use mvm_core::policy::RedactionPolicy;
+use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use super::runner::{ConsoleStreamer, NoopConsoleStreamer};
+/// Republishes a legacy backend's write-only console capture into the per-VM
+/// output broker, preserving boot diagnostics before the guest agent starts.
+/// Supervisor-owned protected capture bypasses this launcher hook.
+///
+/// A hook, not a direct call: the broker belongs to the host daemon, which
+/// depends on this runtime rather than the reverse. Like
+/// [`super::runner::NetworkEndpointSpawner`] and [`super::runner::BrokerRegistrar`],
+/// it keeps that dependency direction explicit.
+///
+/// `start` and `stop` are independent calls keyed by VM name: detached launch
+/// and later stop commonly execute in different processes, so the contract
+/// cannot depend on an in-process object surviving the launch.
+///
+/// The hook is unconditional, including unadmitted operational launches with
+/// few other ways to observe boot failure. The backend's capture ownership and
+/// retention policy decide which component actually records the output.
+pub trait ConsoleStreamer: Send + Sync {
+    /// Start legacy console following best-effort. Required protected owner
+    /// provisioning is a separate backend preboot requirement, not this hook.
+    fn start(&self, capture: &ConsoleCapture<'_>);
+
+    /// Stop following this VM if anything started a follower. Idempotent.
+    fn stop(&self, vm_name: &str);
+}
+
+/// The launch's console ownership, source and admitted output policy.
+///
+/// Redaction and retention are passed from the launch rather than resolved
+/// independently by the observer. In particular, persistence comes from the
+/// signed plan, not from an observer's local default.
+pub struct ConsoleCapture<'a> {
+    pub vm_name: &'a str,
+    /// The backend supervisor exclusively owns capture for the VM lifetime.
+    /// A launcher must not start another writer, even if the owner is delayed
+    /// or unavailable. This is independent of Persist versus Ephemeral.
+    pub supervisor_owned: bool,
+    /// The write-only capture file the legacy backend is already writing.
+    pub console_log: &'a Path,
+    /// Signed-grant guest-to-host display socket; the streamer only reads it.
+    pub display_socket: Option<&'a Path>,
+    pub redaction: &'a RedactionPolicy,
+    /// Whether admitted policy asks for durable recording; live fan-out is
+    /// independent of persistence.
+    pub retention: StreamRetention,
+}
+
+/// Default hook for embedders that install no launcher-owned follower.
+/// Backend-owned protected capture remains the backend's responsibility.
+pub struct NoopConsoleStreamer;
+impl ConsoleStreamer for NoopConsoleStreamer {
+    fn start(&self, _capture: &ConsoleCapture<'_>) {}
+    fn stop(&self, _vm_name: &str) {}
+}
 
 static INSTALLED: OnceLock<Arc<dyn ConsoleStreamer>> = OnceLock::new();
 
@@ -76,6 +131,7 @@ mod tests {
     fn capture(vm: &str) -> ConsoleCapture<'_> {
         ConsoleCapture {
             vm_name: vm,
+            supervisor_owned: false,
             console_log: Path::new("/dev/null"),
             display_socket: None,
             redaction: &REDACTION,

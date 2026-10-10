@@ -76,6 +76,10 @@ pub(in crate::commands) struct CachedOciImage {
     pub(super) runtime_tag: Option<String>,
     #[serde(default)]
     pub(super) claims_path: Option<String>,
+    /// Host-authenticated evidence that the resolved digest passed the
+    /// production OCI policy during explicit preparation.
+    #[serde(default)]
+    pub(super) verification_receipt_path: Option<String>,
     #[serde(default)]
     pub(super) layers: Vec<CachedOciLayer>,
 }
@@ -184,6 +188,20 @@ pub(super) struct OciTrustDecision {
 }
 
 impl OciTrustDecision {
+    pub(super) fn local_archive() -> Self {
+        Self {
+            trust_policy: "local-archive-digest-verified".to_string(),
+            verification_status: "content-digest-verified (dev)".to_string(),
+        }
+    }
+
+    pub(super) fn local_rootfs() -> Self {
+        Self {
+            trust_policy: "rootfs-dir-unverified".to_string(),
+            verification_status: "no-provenance (dev)".to_string(),
+        }
+    }
+
     pub(super) fn dev_digest_only(image_ref: &ImageReference) -> Self {
         let trust_policy = if image_ref.is_digest_pinned() {
             "digest-pinned"
@@ -207,7 +225,7 @@ impl OciTrustDecision {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OciRegistryPolicy {
     #[serde(default)]
@@ -218,7 +236,7 @@ pub(super) struct OciRegistryPolicy {
     pub(super) cosign: Vec<CosignIdentity>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CosignIdentity {
     pub(super) certificate_identity: String,
@@ -271,6 +289,7 @@ mod tests {
             rootfs_path: None,
             runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
+            verification_receipt_path: None,
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
                 size_bytes: 4,

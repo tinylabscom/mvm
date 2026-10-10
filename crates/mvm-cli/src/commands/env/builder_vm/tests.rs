@@ -34,8 +34,8 @@ mod default_microvm_tests {
     }
 
     #[test]
-    fn source_checkout_defaults_to_local_build_and_installed_binary_to_download() {
-        assert_eq!(default_workload_kernel_source(true), KernelSource::Compile);
+    fn source_checkout_and_installed_binary_default_to_download() {
+        assert_eq!(default_workload_kernel_source(true), KernelSource::Download);
         assert_eq!(
             default_workload_kernel_source(false),
             KernelSource::Download
