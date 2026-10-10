@@ -161,6 +161,13 @@ pub fn attach_runtime_overlay_if_cached_version(
     expected_version: Option<&str>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<()> {
+    if super::bundle_runtime::attach_if_installed_bundle(start_config, hypervisor)? {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        start_config.bundle_boot_assets.is_none(),
+        "bundle boot-assets pin has no verified installed bundle; refusing runtime fallback"
+    );
     // The wasm backend runs a WASI module directly; it has no guest agent
     // runtime overlay to attach.
     if hypervisor == "wasm" {

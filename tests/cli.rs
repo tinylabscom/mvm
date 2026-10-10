@@ -1027,11 +1027,31 @@ fn bundle_help_lists_push() {
         .expect("run mvmctl bundle --help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for sub in ["export", "fetch", "install", "push", "gc"] {
+    for sub in ["build", "export", "fetch", "install", "push", "gc"] {
         assert!(
             stdout.contains(sub),
             "bundle help must list {sub}:\n{stdout}"
         );
+    }
+}
+
+#[test]
+fn bundle_build_help_names_oci_packaging_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "build", "--help"])
+        .output()
+        .expect("run bundle build help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--image",
+        "--out",
+        "--arch",
+        "--production",
+        "--label",
+        "--debug-out",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag}: {stdout}");
     }
 }
 

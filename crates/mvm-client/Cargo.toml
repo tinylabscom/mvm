@@ -152,6 +152,7 @@ path = "src/bin/emit_instruction_trust_schema.rs"
 required-features = ["schema"]
 
 [dev-dependencies]
+mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
 # The runtime-source tests build a shared-object fixture to check which guest
 # runtime a rootfs needs.

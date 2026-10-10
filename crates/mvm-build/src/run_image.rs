@@ -18,12 +18,23 @@ use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
 
+/// Whether ext4 materialization may leave the host process for the builder VM.
+/// In-process-only requests also retain the pure writer's seal without resealing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RootfsMaterializationPolicy {
+    #[default]
+    AllowBuilderVm,
+    InProcessOnly,
+}
+
 pub struct InjectAndMaterializeRequest<'a> {
     cache_root: &'a Path,
     unpacked_root: &'a Path,
     output: &'a Path,
     label: &'a str,
     entrypoint: Option<&'a ImageRuntimeConfig>,
+    runtime_binaries: Option<&'a MvmRuntimeBinaries>,
+    materialization_policy: RootfsMaterializationPolicy,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
@@ -44,6 +55,8 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             output,
             label,
             entrypoint: None,
+            runtime_binaries: None,
+            materialization_policy: RootfsMaterializationPolicy::default(),
             sealed: false,
             deferred_nodes: Vec::new(),
             owners: mvm_fs::ownership::OwnerTable::new(),
@@ -59,6 +72,8 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     output: &'a Path,
     label: &'a str,
     entrypoint: Option<&'a ImageRuntimeConfig>,
+    runtime_binaries: Option<&'a MvmRuntimeBinaries>,
+    materialization_policy: RootfsMaterializationPolicy,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
@@ -67,6 +82,18 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
+    pub fn materialization_policy(mut self, policy: RootfsMaterializationPolicy) -> Self {
+        self.materialization_policy = policy;
+        self
+    }
+
+    /// Use binaries acquired from an explicitly pinned runtime instead of
+    /// resolving the current source checkout or CLI compatibility cache.
+    pub fn runtime_binaries(mut self, binaries: Option<&'a MvmRuntimeBinaries>) -> Self {
+        self.runtime_binaries = binaries;
+        self
+    }
+
     pub fn entrypoint(mut self, entrypoint: Option<&'a ImageRuntimeConfig>) -> Self {
         self.entrypoint = entrypoint;
         self
@@ -120,6 +147,8 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             output: self.output,
             label: self.label,
             entrypoint: self.entrypoint,
+            runtime_binaries: self.runtime_binaries,
+            materialization_policy: self.materialization_policy,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
             owners: self.owners,
@@ -287,7 +316,7 @@ impl HeldTreeLocks {
 /// the sidecar.
 ///
 /// When `sealed` is set (the `--prod` OCI run), the materialized rootfs is
-/// dm-verity-sealed (see [`seal_rootfs_for_run`]) and the sidecar is written
+/// dm-verity-sealed (see [`finish_sealing`]) and the sidecar is written
 /// `sealed`, so the runtime routes the block+ext4 verity boot and refuses
 /// interactive access.
 ///
@@ -304,6 +333,16 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     inject_and_materialize_holding(request, &held)
 }
 
+fn select_runtime_binaries(
+    supplied: Option<&MvmRuntimeBinaries>,
+    resolve: impl FnOnce() -> Result<MvmRuntimeBinaries>,
+) -> Result<std::borrow::Cow<'_, MvmRuntimeBinaries>> {
+    match supplied {
+        Some(bins) => Ok(std::borrow::Cow::Borrowed(bins)),
+        None => resolve().map(std::borrow::Cow::Owned),
+    }
+}
+
 fn inject_and_materialize_holding(
     request: InjectAndMaterializeRequest<'_>,
     _held: &HeldTreeLocks,
@@ -314,6 +353,8 @@ fn inject_and_materialize_holding(
         output,
         label,
         entrypoint,
+        runtime_binaries,
+        materialization_policy,
         sealed,
         deferred_nodes,
         owners,
@@ -335,7 +376,7 @@ fn inject_and_materialize_holding(
     remove_stale_builds(rootfs_dir)?;
     crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
         .context("admit the image's deferred layer nodes")?;
-    let bins = resolve_guest_binaries(cache_root)?;
+    let bins = select_runtime_binaries(runtime_binaries, || resolve_guest_binaries(cache_root))?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
     ensure_volume_mount_roots(unpacked_root)?;
@@ -364,7 +405,7 @@ fn inject_and_materialize_holding(
     // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_run_rootfs(
+    materialize_run_rootfs_with_policy(
         &MaterializeExt4Input::new(
             unpacked_root.to_path_buf(),
             staged_output.clone(),
@@ -372,13 +413,13 @@ fn inject_and_materialize_holding(
         )
         .with_deferred_nodes(deferred_nodes)
         .with_owners(owners),
+        materialization_policy,
     )?;
 
-    // `--prod`: seal the rootfs before the sidecar is written. If this fails we
-    // surface it and never write a `sealed` sidecar over a rootfs that can't
-    // verity-boot.
+    // `--prod`: retain the pure seal or seal through the legacy path before
+    // writing the sidecar. Failure must never publish a `sealed` sidecar.
     if sealed {
-        seal_rootfs_for_run(&staged_output)?;
+        finish_sealing(&staged_output, materialization_policy, seal_rootfs_for_run)?;
         if let Some(evidence) = &evidence {
             let subject_sha256 = mvm_core::crypto::image_verify::sha256_file(&staged_output)
                 .context("hash sealed rootfs for provenance sidecar")?;
@@ -400,6 +441,46 @@ fn inject_and_materialize_holding(
         .with_context(|| format!("write OCI sidecar in {}", staging.path().display()))?;
     publish_rootfs_build(staging.path(), rootfs_dir)?;
     Ok(())
+}
+
+/// The pure writer derives the image and verity sidecars from the same bytes.
+/// Resealing outside that process would hand those trusted bytes to a builder
+/// that can replace them, breaking their binding to the acquired OCI content.
+fn finish_sealing(
+    rootfs: &Path,
+    policy: RootfsMaterializationPolicy,
+    seal_external: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    match policy {
+        RootfsMaterializationPolicy::AllowBuilderVm => seal_external(rootfs),
+        RootfsMaterializationPolicy::InProcessOnly => {
+            let dir = rootfs
+                .parent()
+                .context("in-process rootfs has no parent directory")?;
+            let image = std::fs::metadata(rootfs)?;
+            let tree = std::fs::metadata(dir.join("rootfs.verity"))?;
+            let hash = std::fs::read_to_string(dir.join("rootfs.roothash"))?;
+            let hash = hash.trim();
+            anyhow::ensure!(
+                image.is_file()
+                    && image.len() > 0
+                    && image.len().is_multiple_of(u64::from(
+                        mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE
+                    ))
+                    && tree.is_file()
+                    && tree.len() > 0
+                    && tree.len().is_multiple_of(u64::from(
+                        mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE
+                    ))
+                    && hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "in-process materialization has incomplete or invalid verity artifacts"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Prefix of the scratch directory an image is built in beside its output.
@@ -791,10 +872,41 @@ pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
 /// debugging. Both paths emit `rootfs.verity` + `rootfs.roothash` beside the
 /// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
+    materialize_run_rootfs_with_policy(input, RootfsMaterializationPolicy::AllowBuilderVm)
+}
+
+fn materialize_run_rootfs_with_policy(
+    input: &MaterializeExt4Input,
+    policy: RootfsMaterializationPolicy,
+) -> Result<()> {
     let input = input.clone().with_verity();
-    match run_in_process_materializer(&input)? {
+    finish_materialization(run_in_process_materializer(&input)?, policy, |route| {
+        materialize_run_rootfs_builder_vm(&input, route)
+    })
+}
+
+fn finish_materialization(
+    outcome: InProcessOutcome,
+    policy: RootfsMaterializationPolicy,
+    builder: impl FnOnce(&crate::rootfs::BuilderVmRoute) -> Result<()>,
+) -> Result<()> {
+    match outcome {
         InProcessOutcome::Materialized => Ok(()),
-        InProcessOutcome::UseBuilderVm(route) => materialize_run_rootfs_builder_vm(&input, &route),
+        InProcessOutcome::UseBuilderVm(route) => match policy {
+            RootfsMaterializationPolicy::AllowBuilderVm => builder(&route),
+            RootfsMaterializationPolicy::InProcessOnly => {
+                let reason = match route {
+                    crate::rootfs::BuilderVmRoute::Selected => {
+                        "MVM_MATERIALIZE_BUILDER_VM is set; unset it to use the in-process writer"
+                            .to_string()
+                    }
+                    crate::rootfs::BuilderVmRoute::PureFallback { because } => {
+                        format!("the image exceeds the in-process writer's capabilities: {because}")
+                    }
+                };
+                anyhow::bail!("in-process-only materialization refuses the builder VM: {reason}")
+            }
+        },
     }
 }
 
@@ -828,7 +940,7 @@ fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcess
         Err(e) if e.pure_should_fall_back() => {
             tracing::warn!(
                 error = %e,
-                "in-process rootfs materialize needs the builder VM; falling back"
+                "in-process rootfs materialize needs the builder VM; checking materialization policy"
             );
             Ok(InProcessOutcome::UseBuilderVm(
                 crate::rootfs::BuilderVmRoute::PureFallback {
@@ -983,6 +1095,204 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pure_sealed_materialization_keeps_its_content_bound_seal() {
+        let source = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let pinned = tempfile::tempdir().unwrap();
+        let bins = MvmRuntimeBinaries {
+            agent: pinned.path().join("agent"),
+            netinit: pinned.path().join("netinit"),
+            egress_client: pinned.path().join("egress"),
+            entrypoint_runner: pinned.path().join("entrypoint"),
+        };
+        for (_, path) in bins.artifacts() {
+            std::fs::write(path, b"\x7fELF-pinned").unwrap();
+        }
+        std::fs::write(source.path().join("payload"), b"acquired OCI payload").unwrap();
+        let rootfs = out.path().join("rootfs.ext4");
+        inject_and_materialize(
+            InjectAndMaterializeRequest::builder(
+                Path::new("/must-not-resolve-runtime"),
+                source.path(),
+                &rootfs,
+                "pinned-oci",
+            )
+            .runtime_binaries(Some(&bins))
+            .materialization_policy(RootfsMaterializationPolicy::InProcessOnly)
+            .sealed(true)
+            .build(),
+        )
+        .unwrap();
+        assert!(published_build_matches(&rootfs, true));
+        assert!(!published_build_matches(&rootfs, false));
+        let image = std::fs::read(&rootfs).unwrap();
+        let expected = mvm_fs::ext4::verity::format(
+            &image,
+            &[0u8; 32],
+            mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+            mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
+        );
+        assert_eq!(
+            std::fs::read(out.path().join("rootfs.verity")).unwrap(),
+            expected.hash_tree
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.path().join("rootfs.roothash"))
+                .unwrap()
+                .trim(),
+            mvm_fs::ext4::verity::to_hex(&expected.root_hash)
+        );
+        finish_sealing(&rootfs, RootfsMaterializationPolicy::InProcessOnly, |_| {
+            panic!("pure materialization must never invoke an external sealer")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&rootfs).unwrap(), image);
+    }
+
+    #[test]
+    fn pure_seal_refuses_incomplete_or_malformed_sidecars_without_resealing() {
+        let source = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let rootfs = out.path().join("rootfs.ext4");
+        crate::rootfs::materialize_ext4_pure(
+            &MaterializeExt4Input::new(source.path().to_owned(), rootfs.clone(), 0).with_verity(),
+        )
+        .unwrap();
+        let tree = out.path().join("rootfs.verity");
+        let hash = out.path().join("rootfs.roothash");
+        let good_tree = std::fs::read(&tree).unwrap();
+        let good_hash = std::fs::read(&hash).unwrap();
+        for (path, original) in [(&tree, &good_tree), (&hash, &good_hash)] {
+            for bad in [None, Some(b"".as_slice()), Some(b"corrupt".as_slice())] {
+                match bad {
+                    None => std::fs::remove_file(path).unwrap(),
+                    Some(bytes) => std::fs::write(path, bytes).unwrap(),
+                }
+                assert!(
+                    finish_sealing(&rootfs, RootfsMaterializationPolicy::InProcessOnly, |_| {
+                        panic!("invalid pure artifacts must fail closed, never be resealed")
+                    })
+                    .is_err()
+                );
+                std::fs::write(path, original).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_seal_dispatch_preserves_external_callback_and_errors() {
+        let rootfs = Path::new("/legacy/rootfs.ext4");
+        let invoked = std::cell::Cell::new(false);
+        finish_sealing(rootfs, RootfsMaterializationPolicy::default(), |path| {
+            assert_eq!(path, rootfs);
+            invoked.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(invoked.get());
+        let error = finish_sealing(rootfs, RootfsMaterializationPolicy::default(), |_| {
+            anyhow::bail!("external seal failed")
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "external seal failed");
+    }
+
+    #[test]
+    fn materialization_policy_refuses_forced_builder_and_structural_fallback() {
+        use crate::rootfs::BuilderVmRoute;
+        for sealed in [false, true] {
+            let path = Path::new("/unused");
+            let request = InjectAndMaterializeRequest::builder(path, path, path, "package")
+                .materialization_policy(RootfsMaterializationPolicy::InProcessOnly)
+                .sealed(sealed)
+                .build();
+            for (route, reason) in [
+                (BuilderVmRoute::Selected, "MVM_MATERIALIZE_BUILDER_VM"),
+                (
+                    BuilderVmRoute::PureFallback {
+                        because: "directory exceeds one block".into(),
+                    },
+                    "directory exceeds one block",
+                ),
+            ] {
+                let error = finish_materialization(
+                    InProcessOutcome::UseBuilderVm(route),
+                    request.materialization_policy,
+                    |_| panic!("in-process-only must not invoke the builder"),
+                )
+                .unwrap_err();
+                assert!(error.to_string().contains(reason), "{error}");
+                assert!(error.to_string().contains("in-process-only"));
+            }
+        }
+    }
+
+    #[test]
+    fn materialization_policy_allows_completed_images_and_legacy_fallback() {
+        finish_materialization(
+            InProcessOutcome::Materialized,
+            RootfsMaterializationPolicy::InProcessOnly,
+            |_| panic!("a completed image must not invoke the builder"),
+        )
+        .unwrap();
+        let invoked = std::cell::Cell::new(false);
+        finish_materialization(
+            InProcessOutcome::UseBuilderVm(crate::rootfs::BuilderVmRoute::Selected),
+            RootfsMaterializationPolicy::AllowBuilderVm,
+            |_| {
+                invoked.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(invoked.get());
+    }
+
+    #[test]
+    fn materialization_policy_request_defaults_to_legacy_and_preserves_override() {
+        let path = Path::new("/unused");
+        let legacy = InjectAndMaterializeRequest::builder(path, path, path, "test").build();
+        assert_eq!(
+            legacy.materialization_policy,
+            RootfsMaterializationPolicy::AllowBuilderVm
+        );
+        let host_only = InjectAndMaterializeRequest::builder(path, path, path, "test")
+            .materialization_policy(RootfsMaterializationPolicy::InProcessOnly)
+            .build();
+        assert_eq!(
+            host_only.materialization_policy,
+            RootfsMaterializationPolicy::InProcessOnly
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_binaries_bypass_resolution() {
+        let bins = MvmRuntimeBinaries {
+            agent: "/pinned/agent".into(),
+            netinit: "/pinned/netinit".into(),
+            egress_client: "/pinned/egress".into(),
+            entrypoint_runner: "/pinned/entrypoint".into(),
+        };
+        let path = Path::new("/unused");
+        let request = InjectAndMaterializeRequest::builder(path, path, path, "test")
+            .runtime_binaries(Some(&bins))
+            .build();
+        let selected = select_runtime_binaries(request.runtime_binaries, || {
+            panic!("an explicit pinned runtime must never resolve the current runtime")
+        })
+        .unwrap();
+        assert!(matches!(selected, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(*selected, bins);
+
+        let legacy = InjectAndMaterializeRequest::builder(path, path, path, "test").build();
+        let selected =
+            select_runtime_binaries(legacy.runtime_binaries, || Ok(bins.clone())).unwrap();
+        assert!(matches!(selected, std::borrow::Cow::Owned(_)));
+        assert_eq!(*selected, bins);
+        assert!(select_runtime_binaries(None, || anyhow::bail!("unavailable")).is_err());
+    }
 
     /// Seed `cache_root` with stand-in guest binaries, so a test that reaches
     /// binary resolution by mistake fails in milliseconds instead of
