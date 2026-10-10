@@ -24,10 +24,10 @@ const RECIPE_DOCS: &[&str] = &[
     "public/src/content/docs/contributing/development.md",
 ];
 
-/// Calls into another repository's justfile, by doc and recipe. The release
-/// table in the README names the command each train is cut with, and the
-/// image train is cut from mvm-images.
-const FOREIGN_RECIPES: &[(&str, &str)] = &[("README.md", "release")];
+/// Calls into another repository's justfile, by doc and recipe. None of the
+/// docs above names one today; the image-train release command lives in the
+/// releases reference page, which this test does not scan.
+const FOREIGN_RECIPES: &[(&str, &str)] = &[];
 
 /// Words that open a shell compound command, and the ones that continue or
 /// close it. Without a shebang `just` hands each body line to its own
