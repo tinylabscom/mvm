@@ -320,6 +320,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        if inputs.config.caller_registration.is_some() {
+            anyhow::ensure!(
+                self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+                "caller registration requires a cold HVF workload"
+            );
+            let plan = inputs
+                .config
+                .plan_json
+                .as_deref()
+                .context("caller registration requires a signed plan")?;
+            serde_json::from_str::<mvm_core::plan::SignedExecutionPlan>(plan)
+                .context("caller registration requires a signed plan")?;
+        }
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.

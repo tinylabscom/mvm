@@ -393,6 +393,32 @@ mod tests {
     }
 
     #[test]
+    fn caller_registration_is_explicit_and_rejects_unsupported_backend_before_custody() {
+        let default = EntrypointAdmission::builder("hvf").build().unwrap();
+        assert!(default.producer_identity.is_none());
+        let identity = serde_json::from_value(serde_json::json!({
+            "installation": "bdf189ab-9a9a-440b-a266-e95b19e58a5e",
+            "public_key": vec![1; 32]
+        }))
+        .unwrap();
+        let admission = EntrypointAdmission::builder("mock")
+            .producer_identity(identity)
+            .build()
+            .unwrap();
+        let error = admission
+            .admit(inputs(std::path::Path::new("/unopened"), "refused"))
+            .err()
+            .expect("unsupported backend must refuse before custody or image access");
+        assert_eq!(
+            error.to_string(),
+            "caller registration currently requires a cold HVF entrypoint launch"
+        );
+        let debug = format!("{admission:?}");
+        assert!(!debug.contains("bdf189ab"));
+        assert!(!debug.contains("public_key"));
+    }
+
+    #[test]
     fn the_input_grant_token_is_the_protocol_constant() {
         assert_eq!(
             input_grant_service().as_str(),

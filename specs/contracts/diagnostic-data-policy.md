@@ -60,6 +60,50 @@ load its existing key without creating a replacement. Missing keys, malformed
 envelopes, incorrect keys or failed integrity checks refuse decryption; they
 never authorize plaintext fallback.
 
+### Cold entrypoint caller-registration prerequisite
+
+An explicitly opted-in cold HVF entrypoint launch can install one immutable
+caller registration in its existing supervisor-owned capture owner. The client
+uses `EntrypointAdmissionBuilder::producer_identity` with a previously enrolled
+public identity and a build enabling `native-caller-identity`. Admission loads
+only that exact native-custody pin; it does not enroll, rotate, or select a
+plaintext, mock, or generic keyring fallback during launch.
+
+The trusted launcher derives a fresh concrete instance, run, producer, session,
+and canonical registration challenge from the actual admitted plan. The cold
+startup record carries this fixed expectation separately from the caller's
+possession proof. Before publishing startup state or entering the guest, the
+supervisor verifies the signed plan against the canonical local host public key,
+checks its content identity and validity, and checks the proof against the
+unchanged launch expectation. The caller-selected audit signing-key path is not
+a trust root. Generic plan signatures and guest verb grants are not producer
+registration authority.
+
+The startup configuration remains part of the trusted authorized-launcher
+boundary. Putting an expectation beside a proof is not an independent trust
+anchor against replacement of both by a compromised launcher. Later producer
+input cannot install or replace the owner's caller identity.
+
+One private, create-only `caller-registration.used` slot in the managed VM
+directory rejects concurrent consumption and replay across supervisor restart.
+It contains only an opaque run identifier and is replay bookkeeping, not an
+authorization permit. Failed setup remains spent; recovery requires normal
+instance teardown and fresh admission, never deleting the slot to retry the
+same launch bytes. The slot is bounded to one per managed instance and is
+removed with that instance's ordinary state lifecycle.
+
+Caller registration is currently cold-only. Opted-in standby preparation and
+warm claims are refused before changing pool or guest state; no legacy standby
+bootstraps a caller key from a supplied signed plan. Opted-out launch defaults
+and handoff bytes remain unchanged.
+
+Registration is a prerequisite, not producer ingress, producer readiness,
+guest readiness, or evidence of protected entrypoint stdout/stderr capture.
+It creates no readiness ACK. Any full startup measurement must begin before
+resolution and include admission, native custody, verification, durable replay
+bookkeeping, producer readiness, and guest readiness. Registration-only timing
+cannot establish that full-readiness target.
+
 ## Private creation and replacement
 
 Managed payload files and key material must be created at `0600`; managed
