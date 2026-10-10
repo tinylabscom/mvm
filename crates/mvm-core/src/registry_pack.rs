@@ -1026,7 +1026,7 @@ fn validate_registry_pack_manifest(
 
 mod built_image;
 use built_image::verify_built_image_authenticity;
-pub use built_image::verify_built_image_provenance;
+pub use built_image::{ensure_built_image_verifier_available, verify_built_image_provenance};
 
 /// Verify the unpacked payload against an already authenticated manifest.
 ///

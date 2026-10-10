@@ -1754,9 +1754,11 @@ exact public GitHub release assets, verifies their sizes, hashes, rootfs
 signature and provenance, then publishes the complete payload atomically.
 Installed-pack verification and admission repeat these checks. Registry mirrors
 do not redirect image release origins, and private image releases are unsupported.
-Built-image boot remains explicitly unsupported; successful installation does
-not enable it. See [pack authoring](/guides/pack-authoring/#built-image-release-assets)
-for resource limits and the split registry/release inventory.
+Currently, `pull` refuses built-image packs before downloading payload assets
+because no compatible released image verifier is trusted. Built-image boot
+remains explicitly unsupported. See
+[pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
+limits and the split registry/release inventory.
 
 On Linux and other non-HVF hosts, the default residency remains `parked`
 (`warm_pool_size=0`). `pool warm` prepares capacity but does not change that

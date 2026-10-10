@@ -525,6 +525,12 @@ fn pull_one(
         })?
     };
     check_registry_pack_revocations_if_configured(&verified)?;
+    if matches!(
+        verified.manifest().image.as_ref(),
+        Some(RegistryPackImage::Built(_))
+    ) {
+        mvm_core::registry_pack::ensure_built_image_verifier_available()?;
+    }
     download_payload(config, &verified, fetched.staged_path())?;
 
     let installed = if pinned {

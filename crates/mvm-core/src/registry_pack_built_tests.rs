@@ -55,6 +55,10 @@ fn built_image_verification_stays_fail_closed_without_a_compatible_release() {
         TRUSTED_IMAGE_VERIFIER_SHA256.is_none(),
         "pin only a published verifier compatible with the current image-set lock"
     );
+    assert!(
+        ensure_built_image_verifier_available().is_err(),
+        "clients without a compatible release must refuse built-image installation"
+    );
     let claimed = Sha256Hex::from_bytes(b"any claimed verifier");
     let error = verify_trusted_image_verifier(&claimed).unwrap_err();
     assert!(

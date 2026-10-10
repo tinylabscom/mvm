@@ -359,6 +359,12 @@ image lock and build inputs. These checks run before atomic cache publication
 and again when installed contents are reopened, including host admission.
 No key bundled beside an artifact becomes a trust anchor.
 
+Built-image installation is currently unavailable: this client has no trusted
+released verifier compatible with its compiled image-set lock, so `mvmctl pull`
+refuses built-image packs before downloading payload assets. Do not publish or
+rely on a successful built-image pull until a compatible verifier release is
+verified and pinned.
+
 Downloads and verification are bounded: manifests and signature metadata are
 limited to 1 MiB, a built rootfs to 16 GiB, its verity tree to 1 GiB, and each
 remaining built-image asset to 1 MiB. The combined payload permits at most

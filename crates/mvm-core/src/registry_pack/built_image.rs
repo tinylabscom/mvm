@@ -95,18 +95,28 @@ pub(super) fn verify_built_image_authenticity(
 fn verify_trusted_image_verifier(
     verifier_sha256: &Sha256Hex,
 ) -> Result<(), RegistryPackVerificationError> {
-    let Some(expected) = TRUSTED_IMAGE_VERIFIER_SHA256 else {
-        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
-            reason:
-                "no released image verifier compatible with the current image-set lock is trusted"
-                    .to_string(),
-        });
-    };
+    let expected = trusted_image_verifier_sha256()?;
     if verifier_sha256.as_str() == expected {
         return Ok(());
     }
     Err(RegistryPackVerificationError::InvalidImageDeclaration {
         reason: "built image provenance names an untrusted verifier binary".to_string(),
+    })
+}
+
+/// Refuse built-image installation early when this client has no trusted,
+/// released verifier compatible with its compiled image-set lock.
+pub fn ensure_built_image_verifier_available() -> Result<(), RegistryPackVerificationError> {
+    trusted_image_verifier_sha256().map(|_| ())
+}
+
+fn trusted_image_verifier_sha256() -> Result<&'static str, RegistryPackVerificationError> {
+    TRUSTED_IMAGE_VERIFIER_SHA256.ok_or_else(|| {
+        RegistryPackVerificationError::InvalidImageDeclaration {
+            reason:
+                "no released image verifier compatible with the current image-set lock is trusted"
+                    .to_string(),
+        }
     })
 }
 
