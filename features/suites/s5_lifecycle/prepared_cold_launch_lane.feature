@@ -12,6 +12,12 @@ Feature: Prepared cold-launch measurement lanes
   process-table walk costs whatever the host is busy with. Neither is a pull, a
   build, a materialization, or a claim, so neither had a name here before.
 
+  A launch from a signed `.mvmpkg` verifies the archive against the publisher
+  trust store first. That is real work and the prepared lanes refuse it; the
+  `prepared_cold_artifact` lane is where it is measured, held to the same
+  dispatch budgets and per-boot ceiling, with the verification time published
+  beside the boot rather than folded into it.
+
   Scenario: A launch that only booted is a prepared cold sample
     Given a release launch sample whose launch performed no hidden work
     When the sample is offered to the prepared-cold lane
@@ -30,6 +36,22 @@ Feature: Prepared cold-launch measurement lanes
       | warm_claim        |
       | artifact_hash     |
       | process_table_scan|
+      | bundle_verify     |
+
+  Scenario: A launch from a verified signed archive is an artifact-lane sample
+    Given a release launch sample whose launch performed bundle_verify
+    When the sample is offered to the prepared-cold-artifact lane
+    Then the prepared-cold-artifact lane accepts the sample
+
+  Scenario: The artifact lane refuses a launch that verified no archive
+    Given a release launch sample whose launch performed no hidden work
+    When the sample is offered to the prepared-cold-artifact lane
+    Then the prepared-cold-artifact lane refuses the sample naming bundle_verify
+
+  Scenario: The artifact lane still refuses an image pull
+    Given a release launch sample whose launch performed image_pull
+    When the sample is offered to the prepared-cold-artifact lane
+    Then the prepared-cold-artifact lane refuses the sample naming image_pull
 
   Scenario: A warm claim is refused even when only the launch mode reveals it
     Given a release launch sample whose launch performed no hidden work

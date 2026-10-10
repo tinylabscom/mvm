@@ -20,7 +20,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -277,6 +277,14 @@ pub struct AcquisitionWork {
     /// and so needs no snapshot; a nonzero count means maintenance ran on the
     /// launch path.
     pub process_table_scans: u64,
+    /// Time spent verifying a signed `.mvmpkg` archive against the publisher
+    /// trust store before the launch resolved its boot source, in
+    /// microseconds. `None` when the launch named no archive.
+    ///
+    /// It is recorded here rather than in the launch's own phase marks because
+    /// it runs before those marks exist: the archive has to verify before the
+    /// run knows which installed bundle it is booting.
+    pub bundle_verify_us: Option<u64>,
 }
 
 struct AcquisitionRecorder {
@@ -284,6 +292,8 @@ struct AcquisitionRecorder {
     image_build: AtomicBool,
     artifact_bytes_hashed: AtomicU64,
     process_table_scans: AtomicU64,
+    bundle_verified: AtomicBool,
+    bundle_verify_us: AtomicU64,
 }
 
 static ACQUISITION: AcquisitionRecorder = AcquisitionRecorder {
@@ -291,6 +301,8 @@ static ACQUISITION: AcquisitionRecorder = AcquisitionRecorder {
     image_build: AtomicBool::new(false),
     artifact_bytes_hashed: AtomicU64::new(0),
     process_table_scans: AtomicU64::new(0),
+    bundle_verified: AtomicBool::new(false),
+    bundle_verify_us: AtomicU64::new(0),
 };
 
 /// Record that this process fetched image bytes from a registry.
@@ -320,6 +332,19 @@ pub fn record_process_table_scan() {
         .fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record that this process verified a signed bundle archive, taking
+/// `elapsed`.
+///
+/// Accumulates, like the byte counter: a launch that verified two archives did
+/// twice the work, and reporting the second alone would hide the first.
+pub fn record_bundle_verify(elapsed: Duration) {
+    let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
+    ACQUISITION
+        .bundle_verify_us
+        .fetch_add(micros, Ordering::Relaxed);
+    ACQUISITION.bundle_verified.store(true, Ordering::Relaxed);
+}
+
 /// What acquisition work this process has performed so far.
 #[must_use]
 pub fn recorded_acquisition() -> AcquisitionWork {
@@ -328,6 +353,10 @@ pub fn recorded_acquisition() -> AcquisitionWork {
         image_build: ACQUISITION.image_build.load(Ordering::Relaxed),
         artifact_bytes_hashed: ACQUISITION.artifact_bytes_hashed.load(Ordering::Relaxed),
         process_table_scans: ACQUISITION.process_table_scans.load(Ordering::Relaxed),
+        bundle_verify_us: ACQUISITION
+            .bundle_verified
+            .load(Ordering::Relaxed)
+            .then(|| ACQUISITION.bundle_verify_us.load(Ordering::Relaxed)),
     }
 }
 
@@ -520,6 +549,22 @@ mod tests {
         assert!(
             recorded_acquisition().artifact_bytes_hashed >= before + 201_000,
             "each reported read must add to the total, not replace it"
+        );
+    }
+
+    /// Bundle verification is reported as a duration only once one ran, so an
+    /// archive launch can never be mistaken for one that named no archive.
+    #[test]
+    fn bundle_verify_accumulates_and_is_present_once_recorded() {
+        let before = recorded_acquisition().bundle_verify_us.unwrap_or(0);
+        record_bundle_verify(Duration::from_micros(1_500));
+        record_bundle_verify(Duration::from_micros(500));
+        let after = recorded_acquisition()
+            .bundle_verify_us
+            .expect("a recorded verification must be reported");
+        assert!(
+            after >= before + 2_000,
+            "each verification must add to the total, not replace it"
         );
     }
 
