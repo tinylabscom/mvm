@@ -1475,6 +1475,11 @@ mod tests {
             "transfer the fingerprint-indexed runtime cache with its executable modes intact"
         );
         assert!(
+            bootstrap.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build"),
+            "artifact acquisition defaults to published downloads even from a source checkout; \
+             without the explicit build arm the bootstrap packs no guest-runtime cache"
+        );
+        assert!(
             smoke.contains("name: no-kvm-guest-runtime") && smoke.contains("path: /tmp"),
             "download the runtime cache produced by this run, not a different source generation"
         );

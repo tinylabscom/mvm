@@ -865,6 +865,11 @@ jobs:
       - name: Bootstrap source-matched launch artifacts
         env:
           MVM_KERNEL_SOURCE: auto
+          # This lane's artifacts are the source-matched ones the smoke job
+          # boots against, and the guest-runtime cache it restores is the
+          # source build's. Downloads are the default even from a checkout, so
+          # the build arm is selected explicitly.
+          MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
       # The published workload asset is the uncompressed ELF required by
