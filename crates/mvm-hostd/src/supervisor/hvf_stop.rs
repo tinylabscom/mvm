@@ -35,6 +35,11 @@ struct State {
     // the old listener open avoids descriptor reuse while the worker polls it.
     listeners: Vec<UnixListener>,
     key: SigningKey,
+    #[cfg(test)]
+    before_commit: Option<(
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    )>,
 }
 
 struct Shared {
@@ -42,6 +47,8 @@ struct Shared {
     closed: AtomicBool,
     stop: &'static AtomicBool,
     wake: UnixStream,
+    #[cfg(test)]
+    close_attempt: Mutex<Option<std::sync::mpsc::SyncSender<()>>>,
 }
 
 /// The capture controller borrows this gate; it cannot publish finalization.
@@ -52,6 +59,17 @@ pub struct StopAuthority(Arc<Shared>);
 pub struct StopControl {
     authority: StopAuthority,
     worker: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Publication cannot be rolled back after its signed bytes become visible.
+#[derive(Debug)]
+#[must_use]
+pub enum FinalizationPublication {
+    Durable,
+    /// Capture/status/outcome were already durable before this attestation.
+    /// Its visible signature still proves quiescence with independent exit
+    /// evidence, but its own directory durability is not confirmed.
+    PublishedDurabilityUnconfirmed(anyhow::Error),
 }
 
 impl StopControl {
@@ -73,10 +91,14 @@ impl StopControl {
                 phase: Phase::Active,
                 listeners: vec![listener],
                 key,
+                #[cfg(test)]
+                before_commit: None,
             }),
             closed: AtomicBool::new(false),
             stop,
             wake,
+            #[cfg(test)]
+            close_attempt: Mutex::new(None),
         });
         let service = shared.clone();
         let worker = std::thread::Builder::new()
@@ -96,9 +118,65 @@ impl StopControl {
         self.authority.clone()
     }
 
-    /// The owner calls this only after guest quiescence and capture sealing.
-    /// Failure leaves all evidence in place and cannot authorize client cleanup.
-    pub fn publish_finalized(&self) -> Result<()> {
+    pub fn current_state_dir(&self) -> Result<std::path::PathBuf> {
+        let vm = self
+            .authority
+            .0
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?
+            .instance
+            .vm_id
+            .clone();
+        wire::state_dir(&vm)
+    }
+
+    pub fn publish_terminal_status(
+        &self,
+        status: mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus,
+    ) -> Result<()> {
+        self.publish_terminal_status_with(status, mvm_core::atomic_io::sync_dir)
+    }
+
+    fn publish_terminal_status_with(
+        &self,
+        status: mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus,
+        sync_directory: impl FnOnce(&std::path::Path) -> Result<()>,
+    ) -> Result<()> {
+        let result = (|| {
+            let directory = self.current_state_dir()?;
+            status.publish(&directory)?;
+            sync_directory(&directory)
+        })();
+        if result.is_err()
+            || !matches!(
+                status,
+                mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus::Stopped
+            )
+        {
+            let mut state = self
+                .authority
+                .0
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
+            state.phase = Phase::Failed;
+            self.authority.0.stop.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    /// The owner calls only after guest quiescence and durable capture, status
+    /// and outcome publication. Err means no attestation was published by this
+    /// attempt; an error syncing its directory *after* publication is distinct.
+    pub fn publish_finalized(&self) -> Result<FinalizationPublication> {
+        self.publish_finalized_with(mvm_core::atomic_io::sync_dir)
+    }
+
+    fn publish_finalized_with(
+        &self,
+        sync_directory: impl FnOnce(&std::path::Path) -> Result<()>,
+    ) -> Result<FinalizationPublication> {
         let (instance, message) = {
             let mut state = self
                 .authority
@@ -123,8 +201,12 @@ impl StopControl {
         // exchange. Never hold the service gate over filesystem I/O.
         let result = (|| {
             let path = wire::state_dir(&instance.vm_id)?.join(wire::FINALIZED_FILE);
+            let parent = path.parent().context("finalization directory missing")?;
             mvm_core::atomic_io::atomic_write_new(&path, &serde_json::to_vec(&message)?)?;
-            mvm_core::atomic_io::sync_dir(path.parent().context("finalization directory missing")?)
+            Ok(match sync_directory(parent) {
+                Ok(()) => FinalizationPublication::Durable,
+                Err(error) => FinalizationPublication::PublishedDurabilityUnconfirmed(error),
+            })
         })();
         let mut state = self
             .authority
@@ -132,10 +214,11 @@ impl StopControl {
             .state
             .lock()
             .map_err(|_| anyhow::anyhow!("stop gate poisoned"))?;
-        ensure!(
-            state.instance == instance && state.phase == Phase::Finalizing,
-            "HVF finalization generation changed"
-        );
+        if state.instance != instance || state.phase != Phase::Finalizing {
+            state.phase = Phase::Failed;
+            self.authority.0.stop.store(true, Ordering::Release);
+            anyhow::bail!("HVF finalization generation changed");
+        }
         state.phase = if result.is_ok() {
             Phase::Finalized
         } else {
@@ -147,8 +230,32 @@ impl StopControl {
 
 impl Drop for StopControl {
     fn drop(&mut self) {
-        self.authority.0.closed.store(true, Ordering::Release);
-        self.authority.0.stop.store(true, Ordering::Release);
+        #[cfg(test)]
+        if let Some(notice) = self
+            .authority
+            .0
+            .close_attempt
+            .lock()
+            .expect("test close notice")
+            .as_ref()
+        {
+            let _ = notice.try_send(());
+        }
+        {
+            // Cancellation and ownership commit linearize under the same gate.
+            // Recovering a poisoned gate still cancels; it cannot authorize work.
+            let mut state = self
+                .authority
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.authority.0.closed.store(true, Ordering::Release);
+            self.authority.0.stop.store(true, Ordering::Release);
+            if state.phase != Phase::Finalized {
+                state.phase = Phase::Failed;
+            }
+        }
         wake(&self.authority.0);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -202,6 +309,11 @@ impl StopAuthority {
                     && !self.0.closed.load(Ordering::Acquire)
                     && !self.0.stop.load(Ordering::Acquire) =>
             {
+                #[cfg(test)]
+                if let Some((entered, release)) = state.before_commit.take() {
+                    entered.send(()).expect("test commit notice");
+                    release.recv().expect("test commit release");
+                }
                 state.instance = instance;
                 state.listeners.push(listener);
                 state.phase = Phase::Active;
@@ -233,7 +345,10 @@ fn provision(vm: &str) -> Result<(HvfInstance, UnixListener)> {
         &dir.join(wire::INSTANCE_FILE),
         &serde_json::to_vec(&instance)?,
     )?;
-    mvm_core::atomic_io::sync_dir(&dir)?;
+    mvm_core::private_fs::sync_managed_directory_chain(
+        &mvm_core::config::mvm_home_strict()?,
+        &dir,
+    )?;
     Ok((instance, listener))
 }
 
