@@ -144,7 +144,10 @@ mod tests {
         let crate::commands::Commands::Run(parsed) = parsed.command else {
             panic!("expected Commands::Run");
         };
-        assert_eq!(parsed.run.secret, vec!["anthropic", "gh:api.github.com"]);
+        assert_eq!(
+            parsed.machine.run.secret,
+            vec!["anthropic", "gh:api.github.com"]
+        );
 
         let parsed = crate::commands::Cli::try_parse_from([
             "mvmctl",

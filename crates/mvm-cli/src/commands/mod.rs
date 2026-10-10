@@ -181,12 +181,12 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// Run one command in a fresh transient microVM, then tear it down
+    /// Run an image or a signed `.mvmpkg` (alias of `machine run`)
     ///
-    /// The argument surface still differs from `machine run` in both
-    /// directions; consolidating the two into one struct is the next step.
+    /// `mvmctl run <IMAGE|ARTIFACT> -- <cmd>` is `mvmctl machine run`, plus
+    /// the SDK transport flags (`--mode`, `--dev`) that only `run` carries.
     #[command(display_order = 2)]
-    Run(vm::exec::TransientRunArgs),
+    Run(vm::exec::RunVerbArgs),
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]
     SdkNoVm(vm::sdk_no_vm::Args),
@@ -357,6 +357,10 @@ fn run_command() -> Result<()> {
         Err(error) => {
             let exit_code = error.exit_code();
             eprint!("{}", constrain_help_output(&error.to_string()));
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if let Some(tip) = separator_tip(error.kind(), &args) {
+                eprintln!("{tip}");
+            }
             mvm_observability::exit(exit_code);
         }
     };
@@ -452,6 +456,34 @@ fn wrap_usage(usage: &str) -> String {
         line_width += word_width;
     }
     wrapped
+}
+
+/// The hint a `run` or `machine run` parse error gets when the likeliest cause
+/// is a guest command written without `--`. clap's own message for that names
+/// only the stray word, or reports a conflict between the first word and the
+/// source flag.
+///
+/// It fires only when the subcommand is plainly `run` or `machine run`, so it
+/// cannot attach itself to an unrelated error.
+fn separator_tip(kind: ErrorKind, args: &[String]) -> Option<&'static str> {
+    if !matches!(
+        kind,
+        ErrorKind::UnknownArgument | ErrorKind::ArgumentConflict
+    ) {
+        return None;
+    }
+    let mut words = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'));
+    let is_run = match words.next()? {
+        "run" => true,
+        "machine" => words.next() == Some("run"),
+        _ => false,
+    };
+    is_run.then_some(
+        "tip: the guest command goes after `--`: `mvmctl run [IMAGE | ./app.mvmpkg] -- <cmd>`",
+    )
 }
 
 fn constrain_help_output(help: &str) -> String {

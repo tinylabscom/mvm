@@ -584,7 +584,11 @@ fn resolve_entrypoint_stdin_with(
     }
 }
 
-pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run_dispatch(
+    cli: &Cli,
+    mut args: MachineRunArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
     let startup_started = std::time::Instant::now();
     // Settle the cold-build policy before any launch phase runs: `machine
     // run` builds what a cold cache lacks and announces the first such build,
@@ -595,6 +599,10 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // flag that only exists on this verb (`--name`, `-d`/`--detach`, …) is
     // still caught when placed right after `--`.
     crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
+    // Before the `--prod` check below, which asks whether an image was named:
+    // a positional image reference is one. An artifact is verified and
+    // installed here, and refused under `--prod` before it is.
+    crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
     // Syntax, policy, terminal, dry-run, and host-capability refusals must be
@@ -603,19 +611,22 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // `startup_started`, so a real launch miss remains inside the same budget
     // without masking an earlier, more specific refusal.
     // Settle the boot source before `resolve_mode` decides whether one is
-    // missing — the same resolver `mvmctl run` uses, so the two verbs infer
-    // identically or not at all.
+    // missing. A transient run may infer one from the command or the working
+    // directory; a persistent machine never does, because guessing the base
+    // image of a machine that outlives the command from whatever directory it
+    // was started in builds machines nobody chose.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     crate::commands::vm::run_policy::select_pack_image(&mut args.run)?;
-    crate::commands::vm::exec::resolve_run_source(
-        &mut args.run,
-        &cwd,
-        crate::commands::vm::exec::Inference::ExplicitOnly,
-    )?
-    .announce();
-    // Before policy is read: a `--manifest` naming a `.mvmpkg` becomes the
-    // installed bundle's sha256 here, so nothing downstream parses the archive
-    // as an `mvm.toml` and the boot is a plain `--manifest <bundle-sha256>`.
+    let inference = if args.persistent() {
+        crate::commands::vm::exec::Inference::ExplicitOnly
+    } else {
+        crate::commands::vm::exec::Inference::Enabled
+    };
+    crate::commands::vm::exec::resolve_run_source(&mut args.run, &cwd, inference)?.announce();
+    // Before policy is read: a `--manifest` naming a `.mvmpkg` (written as a
+    // flag or as the positional source) becomes the installed bundle's sha256
+    // here, so nothing downstream parses the archive as an `mvm.toml` and the
+    // boot is a plain `--manifest <bundle-sha256>`.
     crate::commands::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
@@ -626,7 +637,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     let review_source = ReviewSource::for_launch(&args.run)?;
     args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
-    let resolved_flake_slot = crate::commands::vm::exec::build_flake_slot(&mut args.run)?;
+    // A dry run validates the plan without booting, so it builds nothing either.
+    let resolved_flake_slot = if args.run.dry_run {
+        None
+    } else {
+        crate::commands::vm::exec::build_flake_slot(&mut args.run)?
+    };
     let local_deployment = args
         .run
         .deployment

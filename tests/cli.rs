@@ -924,7 +924,7 @@ fn an_sdk_mode_run_refuses_a_flag_right_after_double_dash() {
 }
 
 /// Project detection must not outrun the misplaced-image-reference refusal:
-/// next to a `package.json`, `mvmctl run node:22 -- index.js` refuses instead
+/// next to a `package.json`, `mvmctl run -- node:22 index.js` refuses instead
 /// of booting the detected node runtime with `node:22` as its command.
 #[test]
 fn run_refuses_a_misplaced_image_reference_inside_a_detected_project() {
@@ -934,8 +934,8 @@ fn run_refuses_a_misplaced_image_reference_inside_a_detected_project() {
     let (ok, stderr) = mvmctl_in(cwd.path(), &["run", "--", "node:22", "index.js"]);
     assert!(!ok, "a misplaced image reference must not run");
     assert!(
-        stderr.contains("--image node:22"),
-        "the refusal must point at --image, stderr: {stderr}"
+        stderr.contains("mvmctl run node:22 --"),
+        "the refusal must show the image named before `--`, stderr: {stderr}"
     );
     assert!(
         !stderr.contains("detected node"),
@@ -1765,6 +1765,20 @@ fn run_and_machine_run_help_list_the_allow_endpoint_flag() {
         assert!(help.contains("--allow-endpoint"), "{verb:?}: {help}");
         assert!(help.contains("[METHOD ]URL"), "{verb:?}: {help}");
     }
+}
+
+/// `run` is `machine run`'s alias: both usage lines name the boot source before
+/// `--` and the guest command after it, and only `run` carries the SDK modes.
+#[test]
+fn run_and_machine_run_help_show_the_source_and_the_separator() {
+    for verb in [&["run", "--help"][..], &["machine", "run", "--help"][..]] {
+        let help = mvmctl_help(verb);
+        assert!(help.contains("[SOURCE]"), "{verb:?}: {help}");
+        assert!(help.contains("[-- <ARGV>...]"), "{verb:?}: {help}");
+        assert!(help.contains("--detach"), "{verb:?}: {help}");
+    }
+    assert!(mvmctl_help(&["run", "--help"]).contains("--mode"));
+    assert!(!mvmctl_help(&["machine", "run", "--help"]).contains("--mode <"));
 }
 
 #[test]
