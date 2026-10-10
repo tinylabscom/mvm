@@ -144,7 +144,7 @@ fn native_child() {
             if operation == "duplicate" {
                 assert!(matches!(result, Err(IdentityError::Conflict)));
             } else {
-                let credential = result.ok().expect("native enrollment refused");
+                let credential = result.expect("native enrollment refused");
                 println!(
                     "PUBLIC_IDENTITY={}",
                     serde_json::to_string(&credential.identity()).unwrap()
@@ -162,7 +162,7 @@ fn native_child() {
                 assert!(matches!(result, Err(IdentityError::Conflict)));
             } else {
                 assert_eq!(
-                    result.ok().expect("native load refused").identity(),
+                    result.expect("native load refused").identity(),
                     identity
                 );
             }
