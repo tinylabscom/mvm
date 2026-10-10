@@ -81,7 +81,21 @@ Feature: machine run request contract
       | --runtime-pack                  |
       | --deployment missing-deployment |
       | --flake missing-flake           |
-      | --manifest missing-manifest     |
+
+  # Spelled out rather than as an outline row: the documented
+  # `machine run --manifest <dir> --prod` example is witnessed by this command.
+  Scenario: machine run refuses production on a manifest source
+    When I run mvmctl with "machine run --manifest missing-manifest --prod -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "only with `--image` or `--runtime`"
+
+  # A positional source is an image or a signed `.mvmpkg`. A project directory
+  # there is refused with the flags that take one, before anything is resolved.
+  Scenario: machine run refuses a positional path that is not an artifact
+    When I run mvmctl with "machine run ./project -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "--manifest ./project"
+    And the error output contains "--deployment ./project"
 
   # --entrypoint dispatches a baked /etc/mvm/entrypoint, which an OCI image does
   # not have; silently ignoring the flag would run something other than what was
