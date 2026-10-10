@@ -498,6 +498,36 @@ mod tests {
         assert!(host.installed().is_empty());
     }
 
+    /// The trust store is keyed by `key_id`, so the file it hands back is the
+    /// only link from the id an archive declares to the key that must have
+    /// signed it. A store entry for the archive's id holding some other key is
+    /// a misfiled or substituted key, and the run refuses rather than trusting
+    /// whichever key happens to sit under that name.
+    #[test]
+    fn an_archive_whose_key_id_is_enrolled_under_another_key_is_refused() {
+        let host = Host::new(false);
+        let declared = key_id_from_pubkey(&host.key.verifying_key());
+        let substituted = SigningKey::from_bytes(&[9; 32]).verifying_key();
+        let trust = host.home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trust).expect("trust store");
+        std::fs::write(
+            trust.join(format!("{}.pub", declared.0)),
+            substituted.to_bytes(),
+        )
+        .expect("misfile a key");
+        let (_dir, path, _) = host.archive();
+
+        let (manifest, result) = settle(&path, false);
+
+        let err = result.expect_err("an archive must verify under its own key");
+        assert!(
+            format!("{err:#}").contains("but trust store entry is for"),
+            "the refusal names the key mismatch: {err:#}"
+        );
+        assert_eq!(manifest, Some(path.display().to_string()));
+        assert!(host.installed().is_empty());
+    }
+
     #[test]
     fn an_unsigned_archive_is_refused() {
         let host = Host::new(true);

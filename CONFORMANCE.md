@@ -54,6 +54,7 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-09` | `build` | Every published bundle is content-addressed and re-verified | `fn:read_and_verify_bundle`, `fn:verify_plan_bundle`, `fn:an_installed_rootfs_changed_after_install_is_refused_at_admission`, `fn:every_installed_artifact_is_checked_not_only_the_ones_the_plan_pins` |
+| `MVM-SEC-25` | `build` | A signed .mvmpkg named on machine run is verified against the publisher trust store before anything is installed or booted; an unsigned, altered, unenrolled or wrongly keyed archive is refused, an embedded image set the backend cannot boot is refused naming what is missing, and a launch that asks for more than the bundle's sealed posture is refused and audited | `fn:a_signed_archive_is_installed_and_becomes_its_bundle_address`, `fn:a_tampered_archive_is_refused_and_nothing_is_installed`, `fn:an_archive_from_an_unknown_publisher_is_refused`, `fn:an_archive_whose_key_id_is_enrolled_under_another_key_is_refused`, `fn:an_unsigned_archive_is_refused`, `fn:backend_capability_refusal_names_the_missing_device`, `fn:partial_embedded_image_set_is_refused_before_boot`, `fn:a_launch_wider_than_the_bundle_posture_is_refused_and_audited`, `fn:a_launch_narrower_than_the_bundle_posture_is_admitted`, `ci:bundle_boot_live` |
 
 ## cumulative_ledger
 
