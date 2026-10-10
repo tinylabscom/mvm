@@ -113,7 +113,7 @@ mod tests {
         env.set("HOME", home.path().to_string_lossy().into_owned());
         env.set(
             "MVM_HOME",
-            home.path().join(".mvm").to_string_lossy().into_owned(),
+            home.path().join("state").to_string_lossy().into_owned(),
         );
 
         let err = stage_for_update("v9.9.9").expect_err("no published runtime means no update");
