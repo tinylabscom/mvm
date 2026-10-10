@@ -13,11 +13,12 @@ use mvm_core::arch::GuestArch;
 use sha2::{Digest, Sha256};
 use tar::EntryType;
 
-use crate::guest_agent_build::{self, GuestAgentBuildError};
+use crate::guest_agent_build::{self, Freshness, GuestAgentBuildError};
 use crate::guest_bins::{
     self, GPU_SHIM_CDYLIBS, GUEST_BINS_MANIFEST_FILE, GuestBinsBuild, GuestBinsError,
     GuestBinsManifest, GuestBinsMember, HOST_SERVICES_CDYLIB,
 };
+use crate::process_memo::ProcessMemo;
 
 /// A complete guest runtime extracted under a single archive digest.
 #[derive(Debug, Clone)]
@@ -142,7 +143,7 @@ pub fn resolve_or_build_source_guest_runtime(
         arches: vec![arch],
         out_dir: build_dir.path().to_path_buf(),
     })?;
-    if source_fingerprint(version, arch, workspace_root)? != fingerprint {
+    if source_fingerprint_with(version, arch, workspace_root, Freshness::Rewalk)? != fingerprint {
         return Err(GuestRuntimeError::Cache(
             "source changed while guest runtime was building".to_string(),
         ));
@@ -197,7 +198,7 @@ pub fn seed_source_guest_runtime(
         ));
     }
     validate_source_sdk_members(&runtime.manifest, workspace_root)?;
-    if source_fingerprint(version, arch, workspace_root)? != fingerprint {
+    if source_fingerprint_with(version, arch, workspace_root, Freshness::Rewalk)? != fingerprint {
         return Err(GuestRuntimeError::Cache(
             "source changed while guest runtime was copying".to_string(),
         ));
@@ -277,19 +278,53 @@ fn validate_source_sdk_members(
     Ok(())
 }
 
+/// [`source_fingerprint`] answers, by workspace root, version and architecture.
+static SOURCE_FINGERPRINTS: ProcessMemo<(PathBuf, String, GuestArch), String> = ProcessMemo::new();
+
+/// The key a source checkout's runtime is cached under. Memoized for the
+/// process: a source-checkout launch asks this from its preparation check, its
+/// runtime identity and its initramfs eviction, and each answer used to walk
+/// the guest sources again.
 fn source_fingerprint(
     version: &str,
     arch: GuestArch,
     workspace_root: &Path,
+) -> Result<String, GuestRuntimeError> {
+    source_fingerprint_with(version, arch, workspace_root, Freshness::Memoized)
+}
+
+/// [`source_fingerprint`], or a new walk of every input when `freshness` asks
+/// for one — what a build uses to notice the tree changing under it.
+fn source_fingerprint_with(
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+    freshness: Freshness,
+) -> Result<String, GuestRuntimeError> {
+    let compute = || compute_source_fingerprint(version, arch, workspace_root, freshness);
+    match freshness {
+        Freshness::Memoized => SOURCE_FINGERPRINTS.get_or_try_insert(
+            (workspace_root.to_path_buf(), version.to_string(), arch),
+            compute,
+        ),
+        Freshness::Rewalk => compute(),
+    }
+}
+
+fn compute_source_fingerprint(
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+    freshness: Freshness,
 ) -> Result<String, GuestRuntimeError> {
     let mut hash = Sha256::new();
     hash.update(b"mvm-guest-runtime-source-v1\0");
     for value in [
         version.to_string(),
         arch.to_string(),
-        guest_agent_build::guest_source_fingerprint(workspace_root)?,
-        guest_agent_build::sdk_cdylib_source_fingerprint(workspace_root)?,
-        guest_bins::extras::extras_source_fingerprint(workspace_root)?,
+        guest_agent_build::guest_source_fingerprint_with(workspace_root, freshness)?,
+        guest_agent_build::sdk_cdylib_source_fingerprint_with(workspace_root, freshness)?,
+        guest_bins::extras::extras_source_fingerprint_with(workspace_root, freshness)?,
     ] {
         hash.update(value.as_bytes());
         hash.update(b"\0");
@@ -348,11 +383,38 @@ fn install_archive(
     })
 }
 
+/// Objects this process has fully verified, by object directory, with the
+/// filesystem state they were verified in.
+static VERIFIED_OBJECTS: ProcessMemo<PathBuf, (ObjectStamp, GuestRuntime)> = ProcessMemo::new();
+
 fn load_cached(
     base: &Path,
     digest: &str,
     version: &str,
     arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    load_cached_at(base, digest, version, arch, std::time::SystemTime::now())
+}
+
+/// Load a cached object, verifying it in full at most once per process.
+///
+/// Full verification hashes the 30-odd MB archive, decompresses it, and hashes
+/// every extracted member. A source-checkout launch reaches this from three
+/// call sites, and paying it three times was most of a warm claim's startup.
+///
+/// A repeat is answered from the memo only when the object's filesystem state
+/// is exactly what it was verified in — every entry's inode, size, mode, mtime
+/// and ctime — and only when every one of those timestamps was already settled
+/// at least [`OBJECT_SETTLE`] before verification began. File timestamps
+/// advance on a coarse clock, so an edit made in the same tick as the stamp
+/// could otherwise leave it unchanged; an object written that recently is
+/// verified in full every time instead.
+fn load_cached_at(
+    base: &Path,
+    digest: &str,
+    version: &str,
+    arch: GuestArch,
+    now: std::time::SystemTime,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GuestRuntimeError::Cache(
@@ -360,6 +422,119 @@ fn load_cached(
         ));
     }
     let object = base.join("objects").join(digest);
+    let stamp = settled_stamp(&object, now);
+    if let Some(stamp) = &stamp
+        && let Some((verified_in, runtime)) = VERIFIED_OBJECTS.get(&object)
+        && verified_in == *stamp
+        && runtime.digest == digest
+    {
+        validate_guest_runtime_manifest(&runtime.manifest, version, arch)?;
+        return Ok(runtime);
+    }
+    let runtime = verify_cached_object(&object, digest, version, arch)?;
+    if let Some(stamp) = stamp {
+        VERIFIED_OBJECTS.insert(object, (stamp, runtime.clone()));
+    }
+    Ok(runtime)
+}
+
+#[cfg(test)]
+thread_local! {
+    static FULL_OBJECT_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How long an object's timestamps must have been still before its
+/// verification may be reused. Comfortably above any filesystem's timestamp
+/// granularity.
+#[cfg(unix)]
+const OBJECT_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The filesystem state of one cached object: every entry under it, keyed by
+/// relative path.
+#[cfg(unix)]
+type ObjectStamp = std::collections::BTreeMap<PathBuf, EntryStamp>;
+/// No platform without an inode change time can vouch for a reuse, so there
+/// is never a stamp there and every load verifies in full.
+#[cfg(not(unix))]
+type ObjectStamp = std::convert::Infallible;
+
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EntryStamp {
+    dev: u64,
+    ino: u64,
+    mode: u32,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+/// The object's stamp, or `None` when it cannot vouch for a later reuse: an
+/// entry changed within [`OBJECT_SETTLE`] of `now`, or the object could not be
+/// walked.
+#[cfg(unix)]
+fn settled_stamp(object: &Path, now: std::time::SystemTime) -> Option<ObjectStamp> {
+    let mut entries = ObjectStamp::new();
+    collect_entry_stamps(object, object, &mut entries).ok()?;
+    let horizon = now
+        .checked_sub(OBJECT_SETTLE)?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let horizon = (
+        i64::try_from(horizon.as_secs()).ok()?,
+        i64::from(horizon.subsec_nanos()),
+    );
+    entries
+        .values()
+        .all(|entry| entry.mtime < horizon && entry.ctime < horizon)
+        .then_some(entries)
+}
+
+#[cfg(not(unix))]
+fn settled_stamp(_object: &Path, _now: std::time::SystemTime) -> Option<ObjectStamp> {
+    None
+}
+
+#[cfg(unix)]
+fn collect_entry_stamps(
+    root: &Path,
+    path: &Path,
+    entries: &mut ObjectStamp,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)?;
+    let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
+    entries.insert(
+        relative.to_path_buf(),
+        EntryStamp {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+            mode: metadata.mode(),
+            len: metadata.len(),
+            mtime: (metadata.mtime(), metadata.mtime_nsec()),
+            ctime: (metadata.ctime(), metadata.ctime_nsec()),
+        },
+    );
+    if metadata.file_type().is_dir() {
+        for entry in fs::read_dir(path)? {
+            collect_entry_stamps(root, &entry?.path(), entries)?;
+        }
+    }
+    Ok(())
+}
+
+/// Verify a cached object in full: its layout, the archive against the
+/// digest that names it, the archive's own manifest, and every extracted
+/// member against that manifest.
+fn verify_cached_object(
+    object: &Path,
+    digest: &str,
+    version: &str,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    #[cfg(test)]
+    FULL_OBJECT_VERIFICATIONS.with(|count| count.set(count.get() + 1));
+    let object = object.to_path_buf();
     for dir in [&object, &object.join("tree")] {
         if !fs::symlink_metadata(dir)?.file_type().is_dir() {
             return Err(GuestRuntimeError::Cache(format!(
@@ -819,6 +994,102 @@ mod tests {
             cached_source_guest_runtime(&cache_root, "1.2.4", arch, &workspace)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    fn full_object_verifications() -> usize {
+        FULL_OBJECT_VERIFICATIONS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_settled_object_is_verified_in_full_once_until_it_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = fixture_manifest(GuestArch::X86_64);
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
+        // As a launch long after the object was written sees it.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+
+        let before = full_object_verifications();
+        for _ in 0..3 {
+            let loaded =
+                load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later).unwrap();
+            assert_eq!(loaded.digest, runtime.digest);
+            assert_eq!(loaded.manifest, runtime.manifest);
+        }
+        let expected = if cfg!(unix) { 1 } else { 3 };
+        assert_eq!(full_object_verifications() - before, expected);
+
+        assert!(
+            matches!(
+                load_cached_at(&base, &runtime.digest, "4.5.6", GuestArch::X86_64, later),
+                Err(GuestRuntimeError::Version { .. })
+            ),
+            "a reused verification still answers to the requested version"
+        );
+        fs::write(runtime.root.join("x86_64/bin/mvm-ping"), b"tampered!").unwrap();
+        assert!(
+            matches!(
+                load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later),
+                Err(GuestRuntimeError::TreeDigest { .. })
+            ),
+            "a member changed after verification is verified again, and refused"
+        );
+    }
+
+    #[test]
+    fn a_freshly_written_object_is_verified_in_full_every_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = fixture_manifest(GuestArch::X86_64);
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
+
+        let before = full_object_verifications();
+        for _ in 0..2 {
+            load_cached(&base, &runtime.digest, "1.2.3", GuestArch::X86_64).unwrap();
+        }
+        assert_eq!(
+            full_object_verifications() - before,
+            2,
+            "an object whose timestamps may not have advanced past an edit is never reused"
+        );
+    }
+
+    #[test]
+    fn repeated_source_lookups_walk_the_guest_sources_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let cache_root = temp.path().join("cache");
+        source_cache_fixture(&cache_root, &workspace);
+
+        let walks = guest_agent_build::source_input_walks_on_this_thread();
+        // Preparation check, runtime identity and initramfs eviction: the
+        // three lookups one source-checkout launch makes.
+        for _ in 0..3 {
+            assert!(
+                cached_source_guest_runtime(&cache_root, "1.2.3", GuestArch::X86_64, &workspace)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        assert_eq!(
+            guest_agent_build::source_input_walks_on_this_thread(),
+            walks,
+            "a lookup after the first answers from the memo"
+        );
+
+        let memoized = source_fingerprint("1.2.3", GuestArch::X86_64, &workspace).unwrap();
+        let rewalked =
+            source_fingerprint_with("1.2.3", GuestArch::X86_64, &workspace, Freshness::Rewalk)
+                .unwrap();
+        assert_eq!(memoized, rewalked);
+        assert!(
+            guest_agent_build::source_input_walks_on_this_thread() >= walks + 3,
+            "a rewalk reads the guest, cdylib and extras inputs again"
         );
     }
 

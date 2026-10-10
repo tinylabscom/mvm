@@ -198,6 +198,8 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
+/// Process-lifetime memo for answers every call site of one command shares.
+mod process_memo;
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.
