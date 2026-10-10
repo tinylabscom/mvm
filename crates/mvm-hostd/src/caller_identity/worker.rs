@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
@@ -18,16 +18,32 @@ pub struct IdentityClient {
     owner_pid: u32,
 }
 
-struct ClientFactory(OnceLock<Result<IdentityClient>>);
+struct ClientFactory {
+    owner_pid: AtomicU32,
+    client: OnceLock<Result<IdentityClient>>,
+}
 
 impl ClientFactory {
     const fn new() -> Self {
-        Self(OnceLock::new())
+        Self {
+            owner_pid: AtomicU32::new(0),
+            client: OnceLock::new(),
+        }
     }
 
     fn get(&self, store: impl FnOnce() -> Result<Box<dyn Store>>) -> Result<IdentityClient> {
+        let pid = std::process::id();
+        if let Err(owner) =
+            self.owner_pid
+                .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire)
+            && owner != pid
+        {
+            // Check before touching OnceLock: a fork can inherit it while a
+            // vanished parent thread is still initializing the worker.
+            return Err(IdentityError::Unavailable);
+        }
         let client = self
-            .0
+            .client
             .get_or_init(|| IdentityClient::start(store()?))
             .clone()?;
         client.check_process()?;
