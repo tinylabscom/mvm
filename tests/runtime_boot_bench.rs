@@ -699,8 +699,8 @@ fn evidence_write_failure_does_not_mask_measurement_failure() -> Result<()> {
     let failed = Err(anyhow::anyhow!("original measurement failure"));
     writer.record(false, &failed)?;
     assert_eq!(
-        failed.expect_err("original measurement error").to_string(),
-        "original measurement failure"
+        failed.as_ref().err().map(ToString::to_string),
+        Some("original measurement failure".into())
     );
     assert_eq!(
         std::fs::read(&path)?,
