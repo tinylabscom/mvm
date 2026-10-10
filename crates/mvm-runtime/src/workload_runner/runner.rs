@@ -481,6 +481,15 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
+        if claim
+            .start_config
+            .as_ref()
+            .is_some_and(|config| config.caller_registration.is_some())
+        {
+            return Err(StandbyError::ClaimFailed(
+                "caller registration requires cold launch; caller-authenticated warm handoff is unavailable".into(),
+            ));
+        }
         use std::io::Write;
 
         let claim_started = Instant::now();

@@ -37,6 +37,8 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// Trusted admission's optional caller registration, never a producer ACK.
+    pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// The tenant policy bundle the plan resolved, serialized, when it has one.
     pub bundle_json: Option<String>,
     /// Config-drive files the plan's guest boot config needs.
@@ -282,6 +284,7 @@ pub fn boot_session_vm(
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
     start_config.tenant_id = Some(substrate.tenant_id);
     start_config.plan_json = Some(substrate.plan_json);
+    start_config.caller_registration = substrate.caller_registration;
     start_config.bundle_json = substrate.bundle_json;
     start_config.config_files.extend(substrate.config_files);
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {

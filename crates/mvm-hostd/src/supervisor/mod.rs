@@ -124,6 +124,7 @@ pub mod transcript_sink;
 pub mod aggregate;
 /// Arming a warm-claimed child's bounds in the standby supervisor it inherits.
 pub mod claimed_child;
+pub mod caller_registration;
 pub mod protected_handoff;
 pub mod services;
 /// Session idle-timeout enforcement: the shared reap decision and the
