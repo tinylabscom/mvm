@@ -368,6 +368,8 @@ fn only_the_runner_picker_routes_ci_to_the_kvm_pool_and_never_for_a_fork() {
     for expected in [
         "HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
         "PICKER_TOKEN: ${{ secrets.RUNNER_PICKER_TOKEN }}",
+        "WORKSPACE_ROUTING: ${{ vars.RUNNER_PICKER_WORKSPACE }}",
+        r#"[ "$WORKSPACE_ROUTING" != true ]"#,
         "workspace=github",
         r#"select(.status == "online" and .busy == false)"#,
         "exit 0",

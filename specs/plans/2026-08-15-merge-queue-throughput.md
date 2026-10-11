@@ -106,7 +106,14 @@ order without failing every queue run.
 A runner picker (`Pick runners`) sends the x86_64 workspace suite to the idle
 self-hosted KVM box when `RUNNER_PICKER_TOKEN` can see one, and to hosted
 runners otherwise. It never fails a run and never selects the box for a
-pull request from a fork.
+pull request from a fork. Routing is opt-in through the repository variable
+`RUNNER_PICKER_WORKSPACE=true`: the box's first run took 34 minutes (12.6 of
+them in the nextest filter listing) and failed three tests that pass hosted
+(`registry_pack::tests::verified_payload_refuses_a_symlink_even_when_its_target_matches`,
+`checkpoint::gc::tests::captures_racing_a_prune_always_link_a_verified_object`,
+`bundle_push_emits_bundle_push_and_the_printed_reference_fetches`).
+- [ ] Fix the self-hosted box's three failing tests and drop the filter listing
+      from its shard, then set `RUNNER_PICKER_WORKSPACE=true`.
 
 ## Work
 

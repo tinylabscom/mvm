@@ -241,6 +241,12 @@ jobs:
   # time a hosted runner spends compiling the archive. It is one machine: when
   # it is busy, or the picker cannot see it, the suite stays hosted.
   #
+  # Routing is opt-in through the repository variable
+  # `RUNNER_PICKER_WORKSPACE=true`. The box's first run of the suite was
+  # slower than the hosted shards (34 minutes, a third of it listing the suite
+  # for the nextest filters) and failed three tests that pass on hosted
+  # runners, so the suite stays hosted until the box is fixed.
+  #
   # This job never fails a run. A missing, expired or rejected token, an API
   # error, or unparseable output all resolve to `github`. A pull request from a
   # fork always resolves to `github` before the token is read: this repository
@@ -259,12 +265,15 @@ jobs:
           REPO: ${{ github.repository }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           PICKER_TOKEN: ${{ secrets.RUNNER_PICKER_TOKEN }}
+          WORKSPACE_ROUTING: ${{ vars.RUNNER_PICKER_WORKSPACE }}
         run: |
           set -uo pipefail
           workspace=github
           labels='["self-hosted","Linux","X64","mvm","hetzner","kvm"]'
           if [ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$REPO" ]; then
             reason="pull request from a fork ($HEAD_REPO) never runs on a self-hosted runner"
+          elif [ "$WORKSPACE_ROUTING" != true ]; then
+            reason="self-hosted routing is off (repository variable RUNNER_PICKER_WORKSPACE is not true)"
           elif [ -z "$PICKER_TOKEN" ]; then
             reason="RUNNER_PICKER_TOKEN is not available"
           elif ! listing=$(GH_TOKEN="$PICKER_TOKEN" gh api "repos/${REPO}/actions/runners?per_page=100" 2>&1); then
