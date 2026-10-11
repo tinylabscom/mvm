@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Invalid archive run ID" >&2; exit 1; }
-          # The cleanup CLI test clears /tmp on Linux while this shard runs.
+          # Kept under RUNNER_TEMP, outside the /tmp tree the tests share.
           archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           rm -rf -- "$archive_root"
           mkdir -p -- "$archive_root"
