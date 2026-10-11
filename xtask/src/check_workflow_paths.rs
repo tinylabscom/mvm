@@ -1429,15 +1429,19 @@ mod tests {
         );
         // `/etc/mvm/entrypoint` is a marker, not a command line. The agent
         // takes the marker file itself as the program only when it starts
-        // with `#!` and is mode 0755 root:root, and `debugfs write` creates
+        // with `#!` and is mode 0555 root:root, and `debugfs write` creates
         // 0644. The fixture originally wrote a command line at 0644, which
         // satisfies neither, so the guest refused the entrypoint at boot and
         // the lane exited 1 where it asserts 7 — every night, undetected,
         // because the only thing checking was a guest three jobs downstream.
         // This lane runs nightly; this assertion runs on every pull request.
+        // The mode itself is held to the agent's policy by
+        // `no_kvm_fixture_stamps_the_entrypoint_mode_the_guest_agent_requires`,
+        // which reads it from `EntrypointPolicy` rather than restating it: this
+        // assertion once pinned 0755 after the agent moved to 0555.
         assert!(
-            build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100755"),
-            "the exit-code fixture must bake a shebang marker at mode 0755 — \
+            build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100555"),
+            "the exit-code fixture must bake a shebang marker at mode 0555 — \
              the only shape the guest agent's sealed-marker policy accepts"
         );
         // The guest agent builds the dm-verity table at the data device's ext4
