@@ -72,6 +72,7 @@ Feature: README persistent machine lifecycle works end to end
   @live @firecracker @tool_live
   Scenario: a workload-origin tool receives only its scoped route and secret
     Given an isolated mvm home on encrypted backing storage
+    And the image "python:3.12" is prepared in the live home
     When I run mvmctl in the isolated mvm home with "secret set tool-live --host httpbin.org --type bearer --value tool-live-credential"
     Then the command exits with code 0
     # /bin/sh is not declared. The python process it starts is workload-origin,
