@@ -433,6 +433,14 @@ impl VmmDriver for QemuDriver {
             KernelImage::Path(p) => p.clone(),
             KernelImage::Bundled => qemu_process::resolve_workload_kernel_path(&spec.name, None)?,
         };
+        // `qemu-system-<host-arch>` is the emulator `locate_qemu` picks, so the
+        // guest is the host's architecture. Refusing here names the kernel and
+        // the fix instead of leaving the caller a QEMU log tail.
+        mvm_core::kernel_format::check_direct_boot_loadable(
+            BackendKind::Qemu,
+            mvm_core::arch::GuestArch::host(),
+            &kernel,
+        )?;
         let qemu_bin = qemu_process::locate_qemu()?;
 
         let state_dir = vm_state_dir(&spec.name);
@@ -737,6 +745,32 @@ mod tests {
             msg.contains("does not support virtio-fs shares"),
             "unexpected refusal: {msg}"
         );
+    }
+
+    /// The vmlinux Firecracker boots has no PVH entry note, and QEMU's x86_64
+    /// loader exits on it. The driver refuses before spawning QEMU and says
+    /// which kernel and why, rather than surfacing QEMU's log tail.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn boot_refuses_an_x86_64_elf_kernel_without_a_pvh_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("vmlinux");
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        std::fs::write(&kernel, &elf).unwrap();
+        let spec = spec_with(KernelImage::Path(kernel.clone()), vec![], vec![]);
+
+        let msg = match QemuDriver::new().boot(&spec) {
+            Ok(_) => panic!("a kernel QEMU cannot load must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("no PVH entry note"),
+            "unexpected refusal: {msg}"
+        );
+        assert!(msg.contains(&kernel.display().to_string()), "{msg}");
     }
 
     #[test]

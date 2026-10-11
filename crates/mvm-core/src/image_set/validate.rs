@@ -426,6 +426,11 @@ impl BackendImageSupport {
     /// Image contract declared by each Linux-direct workload backend. Backends
     /// that do not boot the shared Linux image return `None` and are refused
     /// before artifact extraction or boot.
+    ///
+    /// A declared format is necessary, not sufficient: QEMU on x86_64 boots
+    /// an ELF kernel only through its PVH entry note, a property of the bytes
+    /// that `mvm_core::kernel_format::check_direct_boot_loadable` checks once
+    /// the kernel is on disk.
     #[must_use]
     pub fn for_backend(kind: BackendKind) -> Option<Self> {
         let (guest_arches, kernels) = match kind {
