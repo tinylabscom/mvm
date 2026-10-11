@@ -18,6 +18,8 @@ fn fixture() -> (tempfile::TempDir, GuestRuntime) {
         .chain(RUNTIME_OVERLAY_ADDON_BINS)
         .map(|name| format!("{arch}/bin/{name}"))
         .collect();
+    // Built outside the overlay invocations, staged into the overlay all the same.
+    members.push(format!("{arch}/bin/mvm-setpriv"));
     members.push(format!("{arch}/initramfs/mvm-guest-agent"));
     members.push("sdk-py/mvm/__init__.py".into());
     for libc in ["glibc", "musl"] {
