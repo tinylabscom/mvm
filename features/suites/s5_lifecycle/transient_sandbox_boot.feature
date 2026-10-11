@@ -91,13 +91,15 @@ Feature: Transient sandbox boot
   # The cached default development image is shared by every launch that names
   # it and is hashed at admission, so a launch must leave its bytes exactly as
   # it found them. The first run populates the cache when it is empty; the
-  # second is the witness.
+  # second is the witness. Both runs are named so they take the cold path: an
+  # unnamed launch has to claim a prepared warm standby, and this scenario is
+  # about the cached image, not about standbys.
   @live @firecracker
   Scenario: a transient run leaves the cached default development rootfs byte-identical
-    When I run mvmctl in an isolated live home with "run --no-detect -- /bin/true"
+    When I run mvmctl in an isolated live home with "run --name bdd-dev-image-identical --no-detect -- /bin/true"
     Then the command exits with code 0
     And the cached default development rootfs digest is recorded
-    When I run mvmctl in an isolated live home with "run --no-detect -- /bin/true"
+    When I run mvmctl in an isolated live home with "run --name bdd-dev-image-identical --no-detect -- /bin/true"
     Then the command exits with code 0
     And the cached default development rootfs digest is unchanged
     And the last admitted plan names the cached default development rootfs digest
@@ -109,7 +111,8 @@ Feature: Transient sandbox boot
   # one.
   @live @warm_claim
   Scenario: machine run cleans the request state after claiming a warm standby
-    Given the live mvm home request state is recorded
+    Given the image "alpine" is prepared in the live home
+    And the live mvm home request state is recorded
     And warm residency is enabled
     When I run mvmctl in an isolated live home with "pool warm 1 --image alpine"
     Then the command exits with code 0

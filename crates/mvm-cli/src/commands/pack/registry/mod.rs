@@ -41,8 +41,8 @@ pub(in crate::commands) struct LsArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RmArgs {
-    /// The pack to remove: `namespace/name` (the pin decides the version)
-    #[arg(value_name = "ns/name")]
+    /// The pack to remove; a version must match the lock pin
+    #[arg(value_name = "ns/name[@version]")]
     pub reference: String,
 }
 

@@ -84,7 +84,10 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 306 (was 231): the image-set signature verifier in the default build, the
 /// same +75 and the same reason as the Linux budget below.
-const MACOS_CLOSURE_BUDGET: usize = 306;
+///
+/// 307 (was 306): the first-party `mvm-compiler` extraction, with no new
+/// third-party dependencies; same reason as the Linux budget below.
+const MACOS_CLOSURE_BUDGET: usize = 307;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -245,7 +248,11 @@ const MACOS_CLOSURE_BUDGET: usize = 306;
 /// shipped closure does not change; this budget had been measuring a build
 /// nobody ships. Lower it when the sigstore crates make that client optional
 /// upstream, and again when sigstore-crypto moves to digest 0.11.
-pub(crate) const CLOSURE_BUDGET: usize = 312;
+///
+/// 313 (was 312): `mvm-compiler` extracts the workload compiler from `mvm-sdk`
+/// for direct host-tool reuse. All its dependencies were already in the
+/// closure; the sole additional node is this first-party workspace crate.
+pub(crate) const CLOSURE_BUDGET: usize = 313;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

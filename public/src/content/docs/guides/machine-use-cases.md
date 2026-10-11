@@ -17,7 +17,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | --- | --- | --- |
 | Sandbox untrusted code | `mvmctl machine run --image alpine -- <cmd>` | Fresh transient microVM, command output, teardown on exit. |
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
-| Run an offline, pre-sealed workload | `mvmctl bundle install ./app.mvmpkg` then `mvmctl machine run --manifest <bundle-sha256>` | Offline-friendly input through the signed-bundle verify/admission path. |
+| Run an offline, pre-sealed workload | `mvmctl run ./app.mvmpkg -- <cmd>` | Offline-friendly input through the signed-bundle verify/admission path. |
 | Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
 | Start a machine, creating it if missing | `mvmctl machine start dev --image alpine` | Combines `create` + `start`; useful for scripts and idempotent workflows. |
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |

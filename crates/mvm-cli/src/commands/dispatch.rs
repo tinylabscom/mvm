@@ -22,7 +22,7 @@ impl TopLevelCommand for Commands {
             Commands::BuilderShellJob(a) => builder_shell_job::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
             Commands::Why(a) => why::run(a),
-            Commands::Run(a) => vm::exec::run_transient(cli, a, cfg),
+            Commands::Run(a) => vm::exec::run_verb(cli, a, cfg),
             Commands::Bench(a) => bench::run(a),
             Commands::Plugin(a) => plugin::run(a),
             Commands::Completions(a) => completions::run(a),

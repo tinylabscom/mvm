@@ -94,7 +94,7 @@ That direct Nix command is only for users who intentionally manage their own Nix
 | `hypervisor` | `string` (optional) | Override the default (`firecracker`). |
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
 | `dev` | `bool` (optional) | Explicit accessible-vs-sealed image default. Inferred from entrypoint by default; the launch profile and run shape still decide agent-verb grants. |
-| `uids` | `attrs` (optional) | `{ agent = 990; entrypoint = 0|1000; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
+| `uids` | `attrs` (optional) | `{ agent = 901; entrypoint = 0|901; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
 | `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` writes text, `{ source; mode?; }` copies a file, and `{ link; }` makes a symlink to a Nix store path. All are baked into the rootfs at build time. |
 
 SSH is not a template capability. `mkGuest` fails Nix evaluation if `packages`
@@ -240,15 +240,15 @@ PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in 
 | Process | Default uid | Role |
 |---|---|---|
 | `/init` (PID 1) | 0 | Mounts pseudofs, forks the agent in the background, drops privs, exec's the entrypoint |
-| `mvm-guest-agent` | 990 | Vsock RPC handler (never needs root); supervised by `/init` |
-| Entrypoint (workload) | **0 in dev**, **1000 in prod** | Your service or shell |
+| `mvm-guest-agent` | 901 | Vsock RPC handler (never needs root); supervised by `/init` |
+| Entrypoint (workload) | **0 in dev**, **901 in prod** | Your service or shell |
 
 > **Agent binary status:** the agent is the cross-compiled Rust binary; `mkGuest` emits `passthru.mvm.agentBinary = "real"` unconditionally. The `"stub"` value is retained only as something a consumer may refuse — nothing produces it any more.
 
 The dev/prod default split is intentional:
 
 - **Dev** keeps entrypoint as root because debug shells expect root: `apt install`, `mount`, `tcpdump`. Forcing rootless dev would break those flows on first try.
-- **Prod** drops to uid 1000 by default per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
+- **Prod** drops to uid 901 by default — the same uid the initramfs agent runs every workload as — per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
 
 `/init` uses `setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
 
@@ -258,7 +258,7 @@ The dev/prod default split is intentional:
 # Rootless dev shell — forces non-root even in dev mode.
 mkGuest {
   entrypoint.shell = "/bin/bash";
-  uids = { entrypoint = 1000; };
+  uids = { entrypoint = 901; };
 }
 
 # Rootful prod workload — explicit override, rarely the right call.

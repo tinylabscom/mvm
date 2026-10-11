@@ -102,7 +102,16 @@ impl Smoke {
     }
 
     fn run_archive(&self, archive: &Path, version: Option<&str>) -> Output {
-        let mut command = self.command(version, &[]);
+        self.run_archive_with(archive, version, &[])
+    }
+
+    fn run_archive_with(
+        &self,
+        archive: &Path,
+        version: Option<&str>,
+        envs: &[(&str, &str)],
+    ) -> Output {
+        let mut command = self.command(version, envs);
         command
             .env("MVM_SMOKE_ARCHIVE", archive)
             .env_remove("MVM_SMOKE_INSTALLER");
@@ -115,6 +124,7 @@ impl Smoke {
             .arg(script())
             .env("MVM_SMOKE_OUT", self.out())
             .env_remove("MVM_SMOKE_ARCHIVE")
+            .env_remove("MVM_SMOKE_GUEST_RUNTIME")
             .env_remove("GITHUB_ACTIONS")
             .env_remove("GITHUB_STEP_SUMMARY");
         if let Some(version) = version {
@@ -278,6 +288,87 @@ fn release_archive(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
         .unwrap();
     assert!(status.success());
     archive
+}
+
+/// A fake `mvmctl` whose bootstrap reports the guest runtime it finds in
+/// `guest-runtime/` beside its real path, the way a release binary does.
+fn runtime_adopting_mvmctl() -> String {
+    format!(
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl 1.2.3' ;;\n  \
+         bootstrap) for f in \"$(dirname \"$(readlink -f \"$0\")\")\"/guest-runtime/*; do \
+         [ -f \"$f\" ] && echo \"[mvm] Guest runtime $(basename \"$f\") ready (installed beside mvmctl).\" >&2; done ;;\n  \
+         machine) shift 2\n{CACHE_OVERLAY_ONCE}\n{ECHO_TOKEN}\n    ;;\nesac"
+    )
+}
+
+/// The release workflow stages the guest runtime it is about to publish beside
+/// the unpublished mvmctl, and the smoke passes only when bootstrap adopts it
+/// from there.
+#[test]
+fn an_unpublished_guest_runtime_is_adopted_from_beside_mvmctl() {
+    let smoke = Smoke::new();
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", &runtime_adopting_mvmctl())]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    std::fs::write(&runtime, b"runtime").unwrap();
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("guest runtime: mvm-guest-bins-v1.2.3.tar.gz adopted from beside mvmctl"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// A bootstrap that never reports the staged runtime fails the smoke: the
+/// pairing it exists to witness did not happen.
+#[test]
+fn a_guest_runtime_bootstrap_did_not_adopt_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[("mvmctl", &fake_mvmctl("1.2.3", ECHO_TOKEN))],
+    );
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    std::fs::write(&runtime, b"runtime").unwrap();
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("bootstrap did not adopt the unpublished guest runtime"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// The guest runtime is staged beside an unpacked archive; on its own it names
+/// nothing to install.
+#[test]
+fn a_guest_runtime_without_an_archive_is_exit_two() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", "/nonexistent.tar.gz")],
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{}", combined(&output));
 }
 
 /// The release workflow runs the smoke on the archive it is about to publish.

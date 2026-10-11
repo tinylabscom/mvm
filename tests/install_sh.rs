@@ -202,6 +202,16 @@ struct Release {
     /// Raw bytes for a named hostbin, overriding the auto-generated shell
     /// script stub — so a test can ship a real, already-signed Mach-O.
     hostbin_bytes: Vec<(String, Vec<u8>)>,
+    /// The guest runtime archive the release publishes, if any.
+    guest_runtime: Option<GuestRuntimeAsset>,
+}
+
+/// A published guest runtime: its bytes, the digest the checksum manifest
+/// records for it, and whether its signature bundle is published.
+struct GuestRuntimeAsset {
+    bytes: Vec<u8>,
+    recorded_sha256: String,
+    publish_bundle: bool,
 }
 
 impl Release {
@@ -216,12 +226,46 @@ impl Release {
             entitlements: EntitlementsLayout::Assets,
             publish_bundle: true,
             hostbin_bytes: Vec::new(),
+            guest_runtime: None,
         }
     }
 
     fn without_bundle(mut self) -> Self {
         self.publish_bundle = false;
         self
+    }
+
+    /// Publish a guest runtime beside the archive, signed and listed.
+    fn with_guest_runtime(mut self) -> Self {
+        let bytes = format!("guest runtime {}\n", self.version).into_bytes();
+        self.guest_runtime = Some(GuestRuntimeAsset {
+            recorded_sha256: sha256_hex(&bytes),
+            bytes,
+            publish_bundle: true,
+        });
+        self
+    }
+
+    /// Publish a guest runtime whose manifest digest does not match it.
+    fn with_tampered_guest_runtime(mut self) -> Self {
+        self = self.with_guest_runtime();
+        if let Some(runtime) = self.guest_runtime.as_mut() {
+            runtime.recorded_sha256 = "0".repeat(64);
+        }
+        self
+    }
+
+    /// Publish a guest runtime with no signature bundle.
+    fn with_unsigned_guest_runtime(mut self) -> Self {
+        self = self.with_guest_runtime();
+        if let Some(runtime) = self.guest_runtime.as_mut() {
+            runtime.publish_bundle = false;
+        }
+        self
+    }
+
+    fn guest_runtime_name(&self) -> String {
+        format!("mvm-guest-bins-{}.tar.gz", self.version)
     }
 
     /// Only signing reads the profiles, and only macOS signs.
@@ -382,32 +426,24 @@ impl Release {
     fn routes(&self) -> Vec<(String, Vec<u8>)> {
         let tarball = self.tarball();
         let archive = Self::archive_name();
-        let checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
+        let mut checks = format!("{}  {}\n", sha256_hex(&tarball), archive);
         let base = format!("/tinylabscom/mvm/releases/download/{}", self.version);
-        let mut routes = vec![
-            (format!("{base}/{archive}"), tarball),
-            (format!("{base}/checksums-sha256.txt"), checks.into_bytes()),
-        ];
+        let mut routes = vec![(format!("{base}/{archive}"), tarball)];
         if self.publish_bundle {
             routes.push((format!("{base}/{archive}.bundle"), b"bundle".to_vec()));
         }
-        // Deliberately synthetic bytes and verifier stubs: these tests exercise
-        // installer transaction behavior, not live Sigstore verification.
-        let runtime = format!("mvm-guest-bins-{}.tar.gz", self.version);
-        let runtime_bytes = format!("both-architecture runtime {}", self.version).into_bytes();
-        routes.push((
-            format!("{base}/{runtime}.sha256"),
-            format!("{}  {runtime}\n", sha256_hex(&runtime_bytes)).into_bytes(),
-        ));
-        routes.push((format!("{base}/{runtime}"), runtime_bytes));
-        routes.push((
-            format!("{base}/{runtime}.bundle"),
-            b"runtime bundle".to_vec(),
-        ));
-        routes.push((
-            format!("{base}/{runtime}.sha256.bundle"),
-            b"runtime checksum bundle".to_vec(),
-        ));
+        if let Some(runtime) = &self.guest_runtime {
+            let name = self.guest_runtime_name();
+            checks.push_str(&format!("{}  {name}\n", runtime.recorded_sha256));
+            routes.push((format!("{base}/{name}"), runtime.bytes.clone()));
+            if runtime.publish_bundle {
+                routes.push((format!("{base}/{name}.bundle"), b"bundle".to_vec()));
+            }
+        }
+        routes.insert(
+            1,
+            (format!("{base}/checksums-sha256.txt"), checks.into_bytes()),
+        );
         routes.push((
             format!(
                 "/sigstore/cosign/releases/download/v3.1.3/{}",
@@ -1122,121 +1158,93 @@ fn install_sh_rejects_tampered_checksum() {
     assert!(!host.lib().exists(), "no release directory on failure");
 }
 
+/// The release's guest runtime is verified like the archive and staged in the
+/// release directory beside mvmctl, where a release mvmctl looks for it, and
+/// is not linked onto PATH.
 #[test]
-fn install_sh_preserves_legacy_releases_without_a_guest_runtime_archive() {
-    for version in ["v0.18.0-rc.2", "v0.18.3", "v0.22.0", "v0.23.0"] {
-        let release = Release::new(version);
-        let mut routes = release.routes();
-        routes.retain(|(path, _)| !path.contains("mvm-guest-bins"));
-        let (base, _stop) = serve(routes);
-        let host = Host::new();
-        host.install_ok(&base, version);
-        assert!(host.bin().join("mvmctl").exists());
-        assert!(!host.lib().join("current/guest-runtime").exists());
-    }
-}
-
-#[test]
-fn install_sh_requires_runtime_from_the_cutover_including_prereleases() {
-    for version in ["v0.23.1-rc.1", "v0.23.1", "v0.24.0", "v1.0.0"] {
-        let previous = Release::new("v0.22.0");
-        let next = Release::new(version);
-        let mut routes = previous.routes();
-        routes.extend(next.routes());
-        routes.retain(|(path, _)| !path.contains("mvm-guest-bins"));
-        let (base, _stop) = serve(routes);
-        let host = Host::new();
-        host.install_ok(&base, "v0.22.0");
-        let before = host.snapshot();
-        let output = host.install(&base, version);
-        assert!(
-            !output.status.success(),
-            "{version} must not fall back to the legacy runtime contract"
-        );
-        assert_eq!(
-            host.snapshot(),
-            before,
-            "{version} changed the active release"
-        );
-    }
-}
-
-#[test]
-fn install_sh_pairs_runtime_bytes_with_the_cli_and_refuses_bad_runtime_inputs() {
-    let v1 = Release::new("v1.0.0");
-    let v2 = Release::new("v2.0.0");
-    for failure in ["digest", "version", "bundle", "checksum-bundle"] {
-        let mut routes = v1.routes();
-        let mut next = v2.routes();
-        let runtime = "mvm-guest-bins-v2.0.0.tar.gz";
-        match failure {
-            "digest" => {
-                next.iter_mut()
-                    .find(|(path, _)| path.ends_with(runtime))
-                    .unwrap()
-                    .1 = b"tampered runtime".to_vec();
-            }
-            "version" => {
-                let sum = next
-                    .iter_mut()
-                    .find(|(path, _)| path.ends_with(&format!("{runtime}.sha256")))
-                    .unwrap();
-                sum.1 = String::from_utf8(sum.1.clone())
-                    .unwrap()
-                    .replace("v2.0.0", "v1.0.0")
-                    .into_bytes();
-            }
-            _ => {
-                let suffix = if failure == "bundle" {
-                    ".bundle"
-                } else {
-                    ".sha256.bundle"
-                };
-                next.retain(|(path, _)| !path.ends_with(&format!("{runtime}{suffix}")));
-            }
-        }
-        routes.extend(next);
-        let (base, _stop) = serve(routes);
-        let host = Host::new();
-        host.install_ok(&base, "v1.0.0");
-        let runtime_dir = host.lib().join("current/guest-runtime");
-        assert_eq!(
-            std::fs::read(runtime_dir.join("mvm-guest-bins-v1.0.0.tar.gz")).unwrap(),
-            b"both-architecture runtime v1.0.0",
-        );
-        let before = host.snapshot();
-        let output = host.install(&base, "v2.0.0");
-        assert!(
-            !output.status.success(),
-            "{failure} must refuse installation"
-        );
-        assert_eq!(
-            host.snapshot(),
-            before,
-            "{failure} changed the active release"
-        );
-    }
-}
-
-#[test]
-fn install_sh_refuses_a_runtime_rejected_by_the_signature_verifier() {
-    let v1 = Release::new("v1.0.0").with_mvmctl(format!(
-        "#!/bin/sh\ncase \"$*\" in\n*guest-runtime*) exit \"${{MVM_TEST_RUNTIME_VERIFY_STATUS:-0}}\";;\nesac\n{}",
-        stub_mvmctl("v1.0.0")
-    ));
-    let v2 = Release::new("v2.0.0");
-    let (base, _stop) = serve_releases(&[&v1, &v2]);
+fn install_sh_stages_the_verified_guest_runtime_beside_mvmctl() {
+    let release = Release::new("v9.9.9").with_guest_runtime();
+    let name = release.guest_runtime_name();
+    let (base, _stop) = serve_releases(&[&release]);
     let host = Host::new();
-    host.install_ok(&base, "v1.0.0");
-    let before = host.snapshot();
-    let output = host
-        .installer(&base, "v2.0.0")
-        .env("MVM_TEST_RUNTIME_VERIFY_STATUS", "1")
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(stderr(&output).contains("signature verification failed for mvm-guest-bins"));
-    assert_eq!(host.snapshot(), before);
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(output.status.success(), "{}", stderr(&output));
+    let staged = host.current_target().join("guest-runtime").join(&name);
+    assert_eq!(
+        std::fs::read(&staged).unwrap(),
+        release.guest_runtime.as_ref().unwrap().bytes,
+        "the runtime must sit in the release directory's guest-runtime/"
+    );
+    assert!(
+        !host.bin().join("guest-runtime").exists() && !host.bin().join(&name).exists(),
+        "the runtime is not a command and must not be linked onto PATH"
+    );
+}
+
+/// A release published before the guest runtime asset installs without it.
+#[test]
+fn install_sh_installs_a_release_that_predates_the_guest_runtime() {
+    let release = Release::new("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("publishes no guest runtime"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.current_target().join("guest-runtime").exists());
+}
+
+/// A guest runtime whose bytes the signed manifest does not vouch for stops
+/// the install, and nothing is left behind.
+#[test]
+fn install_sh_refuses_a_guest_runtime_the_manifest_does_not_match() {
+    let release = Release::new("v9.9.9").with_tampered_guest_runtime();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "a tampered runtime must not install"
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "checksum mismatch for {}",
+            release.guest_runtime_name()
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists(), "no binary on failure");
+    assert!(!host.lib().exists(), "no release directory on failure");
+}
+
+/// A guest runtime without its signature bundle stops the install.
+#[test]
+fn install_sh_refuses_an_unsigned_guest_runtime() {
+    let release = Release::new("v9.9.9").with_unsigned_guest_runtime();
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+
+    let output = host.install(&base, "v9.9.9");
+    assert!(
+        !output.status.success(),
+        "an unsigned runtime must not install"
+    );
+    assert!(
+        stderr(&output).contains(&format!(
+            "no signature bundle published for {}",
+            release.guest_runtime_name()
+        )),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!host.bin().join("mvmctl").exists(), "no binary on failure");
 }
 
 #[test]
@@ -1472,7 +1480,6 @@ fn explicit_archive_pin_is_enforced_with_an_installed_verifier() {
     }
 }
 
-#[cfg(unix)]
 #[test]
 fn explicit_archive_pin_is_enforced_with_cosign_on_path() {
     use std::os::unix::fs::PermissionsExt;
@@ -1800,7 +1807,7 @@ fn fake_codesign(host: &Host) -> (String, PathBuf) {
     std::fs::write(
         &codesign,
         format!(
-            "#!/bin/sh\n[ \"$1\" = --sign ] || exit 1\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+            "#!/bin/sh\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
             log.display()
         ),
     )

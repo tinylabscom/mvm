@@ -301,11 +301,20 @@ mod tests {
     }
 
     #[test]
-    fn an_image_above_the_supported_range_is_refused() {
+    fn an_image_without_mvm_binaries_is_abi_2() {
         let root = image_root(Some("2\n"), true);
+        assert_eq!(
+            check_image(root.path()).unwrap(),
+            BuilderBootAbi::NO_MVM_BINARY
+        );
+    }
+
+    #[test]
+    fn an_image_above_the_supported_range_is_refused() {
+        let root = image_root(Some("3\n"), true);
         let refusal = check_image(root.path()).unwrap_err().to_string();
         assert!(
-            refusal.contains("ABI 2") && refusal.contains("0..=1"),
+            refusal.contains("ABI 3") && refusal.contains("0..=2"),
             "{refusal}"
         );
     }

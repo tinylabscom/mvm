@@ -100,7 +100,12 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
             .map(|policy| policy.path.clone())
             .collect(),
         policy_documents,
-        image_manifest: manifest.image.as_ref().map(|image| image.manifest.clone()),
+        image_manifest: manifest.image.as_ref().and_then(|image| match image {
+            mvm_core::registry_pack::RegistryPackImage::Source(source) => {
+                Some(source.manifest.clone())
+            }
+            mvm_core::registry_pack::RegistryPackImage::Built(_) => None,
+        }),
         files: manifest
             .files
             .iter()

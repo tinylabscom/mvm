@@ -49,34 +49,31 @@ env:
 
 jobs:
   e2e-docs-linux:
-    name: Documented surface e2e (Linux, Firecracker)
+    name: Documented surface e2e (Linux, Firecracker, shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # 120, not 60. At 60 this job never once finished: it died at exactly
-    # 60m00s on three consecutive runs, which GitHub reports as `cancelled`
-    # rather than as a timeout — so it read as an infrastructure hiccup instead
-    # of a budget that was too small, and the Linux half of the release gate
-    # went unproven for as long as that was true.
+    # Both required matrix jobs partition the complete scenario inventory;
+    # neither shard is a substitute for the other. Separate hosted runners
+    # retain the full live witness without one serial suite exhausting its
+    # deadline before the scenario summary can be produced.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["0/2", "1/2"]
+    # The job must have time for checkout, toolchain setup, mvmctl compilation,
+    # builder-image acquisition and cleanup in addition to the suite deadline.
+    # Keep the suite's own deadline below the job's so a genuine hang prints
+    # the scenario where it stopped rather than an opaque job cancellation.
     #
-    # The arithmetic was never going to work: `e2e-documented-surface.sh` gives
-    # the cucumber suite alone a 3600s deadline, and the job must also check
-    # out, install the toolchain, build `mvmctl`, install Firecracker and warm
-    # the artifact home before the suite starts. The job budget has to exceed
-    # the suite budget by the whole of setup, and it did not exceed it at all.
-    #
-    # Keeping the suite's own deadline below the job's also means a genuine
-    # hang produces the script's "TIMEOUT after Ns — killing the suite" message,
-    # naming the scenario it stopped on, rather than an opaque cancellation.
-    #
-    # The 120-minute suite deadline reached only 287 of 367 scenarios on
-    # 2026-10-08 and produced no final summary. Give the remaining surface an
-    # additional hour while retaining a separate hour for setup and cleanup.
-    # Keep the suite deadline below the job budget so a genuine hang still
-    # names the scenario where it stopped.
+    # The unsharded 120-minute suite reached 287 of 367 scenarios and the
+    # 180-minute retry reached about 290, both without a final summary. Both
+    # shards are required below. Keep a generous per-shard deadline below the
+    # job budget so a genuine hang still names the scenario where it stopped.
     timeout-minutes: 240
     env:
       # Raised with `timeout-minutes` above; the two are one budget and drifted
       # apart once already.
       MVM_E2E_TIMEOUT_SECS: "10800"
+      MVM_BDD_SHARD: ${{ matrix.shard }}
       # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
       # passes flags older Firecracker releases reject before opening the API
       # socket, which otherwise surfaces as an unhelpful socket timeout.

@@ -541,6 +541,16 @@ pub fn admit_plan_for_boot_configured_ingress(
                 .with_context(|| format!("hashing kernel at {} for the plan pin", kernel.display()))
         })
         .transpose()?;
+    // A kernel the selected backend cannot load is refused here, before a plan
+    // is signed for a boot that would only end in the VMM's own loader error.
+    if let (Some(kind), Some(kernel)) = (p.backend_kind, p.kernel_path) {
+        mvm_core::kernel_format::check_direct_boot_loadable(
+            kind,
+            mvm_core::arch::GuestArch::host(),
+            kernel,
+        )
+        .with_context(|| format!("backend {} cannot boot this kernel", kind.as_str()))?;
+    }
 
     let generated_network_policy_bundle =
         generated_policy_bundle_for_network_policy(p.tenant, p.vm_name, &p.network_policy)?;
@@ -1763,6 +1773,49 @@ pub(crate) mod admit_plan_tests {
             ctx.admitted.plan(),
         )
         .expect("the pinned kernel must pass its own gate");
+    }
+
+    /// QEMU's x86_64 loader refuses an uncompressed ELF with no PVH entry note,
+    /// which is the vmlinux Firecracker boots. Admission has to refuse it by
+    /// name rather than sign a plan for a boot QEMU will reject.
+    #[test]
+    fn qemu_admission_refuses_an_elf_kernel_qemu_cannot_load() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"hello rootfs");
+        // A little-endian ELF64 header with no program headers, so no notes.
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        let kernel = rootfs_dir.path().join("vmlinux");
+        std::fs::write(&kernel, &elf).unwrap();
+
+        let admit = |kind| {
+            let ledger = InMemoryNonceLedger::new();
+            admit_plan_for_boot(AdmitPlanForBootParams {
+                instructions: Default::default(),
+                outputs: Vec::new(),
+                kernel_path: Some(kernel.as_path()),
+                keys_dir: Some(keys_dir.path()),
+                audit_dir: Some(audit_dir.path()),
+                backend_kind: Some(kind),
+                ..pinning_params(&rootfs, &ledger)
+            })
+            .map(|_| ())
+        };
+
+        let on_qemu = admit(mvm_core::vm_backend::BackendKind::Qemu);
+        if mvm_core::arch::GuestArch::host() == mvm_core::arch::GuestArch::X86_64 {
+            let err = format!("{:#}", on_qemu.expect_err("qemu x86_64 must refuse"));
+            assert!(err.contains("no PVH entry note"), "{err}");
+            assert!(err.contains("CONFIG_PVH=y"), "{err}");
+        } else {
+            on_qemu.expect("the PVH rule binds only an x86_64 guest");
+        }
+        admit(mvm_core::vm_backend::BackendKind::Firecracker)
+            .expect("Firecracker boots the same ELF without a PVH note");
     }
 
     /// A kernel swapped between admission and boot is refused. Same plan, same

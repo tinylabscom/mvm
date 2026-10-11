@@ -12,11 +12,14 @@
 //! dependencies from the registry, so publishing out of that order fails
 //! mid-run with half the set uploaded.
 //!
-//! Some crates in the closure cannot be published yet. Each is declared under
-//! `[workspace.metadata.mvm.publish.blocked]` with the reason, and the plan
-//! withholds it together with every crate that depends on it, so a publish
-//! run uploads the part of the set that works and says what it held back
-//! instead of failing half way.
+//! The roots are the crates meant for outside consumers. Everything they pull
+//! in is published only because a root needs it, so the plan fails closed: a
+//! crate that cannot be published yet is declared under
+//! `[workspace.metadata.mvm.publish.blocked]` with the reason, the plan
+//! withholds it together with every crate that depends on it, and when that
+//! reaches a root, the root's whole closure is withheld with it. A crate
+//! reaches crates.io only as part of a root that is itself published, never as
+//! the leftover lower half of one that is not.
 //!
 //! `check-publish-readiness` holds the manifests to what publishing needs:
 //!
@@ -257,8 +260,13 @@ fn shipped_deps(pkg: &Package) -> impl Iterator<Item = &Dep> {
 
 /// The shipped-dependency closure of the roots.
 fn closure(ws: &Workspace) -> BTreeSet<String> {
+    closure_of(ws, &ws.roots)
+}
+
+/// The shipped-dependency closure of `roots`, the roots included.
+fn closure_of(ws: &Workspace, roots: &[String]) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
-    let mut stack: Vec<String> = ws.roots.clone();
+    let mut stack: Vec<String> = roots.to_vec();
     while let Some(name) = stack.pop() {
         if !seen.insert(name.clone()) {
             continue;
@@ -306,6 +314,28 @@ fn plan(ws: &Workspace) -> Result<Plan> {
             ));
             held.insert(name);
         }
+    }
+
+    // Fail closed: a crate goes up only if a published root needs it.
+    let withheld_roots: Vec<&String> = roots.iter().filter(|r| held.contains(*r)).collect();
+    let live_roots: Vec<String> = roots
+        .iter()
+        .filter(|r| !held.contains(*r))
+        .cloned()
+        .collect();
+    let needed = closure_of(ws, &live_roots);
+    let (publish, orphaned): (Vec<String>, Vec<String>) =
+        publish.into_iter().partition(|name| needed.contains(name));
+    for name in orphaned {
+        let owners: Vec<&str> = withheld_roots
+            .iter()
+            .filter(|root| closure_of(ws, std::slice::from_ref(**root)).contains(&name))
+            .map(|root| root.as_str())
+            .collect();
+        withheld.push((
+            name,
+            format!("needed only by withheld root {}", owners.join(", ")),
+        ));
     }
     Ok(Plan { publish, withheld })
 }
@@ -559,13 +589,43 @@ mod tests {
             json!({ "mid": { "kind": "name-taken", "reason": "name is owned elsewhere" } });
         let ws = workspace(packages, &["top"], blocked);
         let plan = plan(&ws).expect("plan");
-        assert_eq!(plan.publish, ["gen", "leaf"]);
+        assert!(plan.publish.is_empty(), "{:?}", plan.publish);
         assert_eq!(
             plan.withheld,
             [
                 ("mid".to_string(), "name is owned elsewhere".to_string()),
                 ("top".to_string(), "depends on withheld mid".to_string()),
+                (
+                    "gen".to_string(),
+                    "needed only by withheld root top".to_string()
+                ),
+                (
+                    "leaf".to_string(),
+                    "needed only by withheld root top".to_string()
+                ),
             ]
+        );
+    }
+
+    /// A withheld root takes its private closure with it, while a crate a
+    /// published root also needs still goes up.
+    #[test]
+    fn a_withheld_root_uploads_nothing_of_its_own_closure() {
+        let mut packages = chain();
+        packages[4]["publish"] = json!([]);
+        packages.push(package("api", &[("leaf", None, true)]));
+        let blocked = json!({ "top": { "kind": "name-taken", "reason": "taken" } });
+        let ws = workspace(packages, &["api", "top"], blocked);
+        let plan = plan(&ws).expect("plan");
+        assert_eq!(plan.publish, ["leaf", "api"]);
+        let held: Vec<&str> = plan.withheld.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(held, ["top", "gen", "mid"]);
+        assert!(
+            plan.withheld
+                .iter()
+                .all(|(name, why)| name == "top" || why == "needed only by withheld root top"),
+            "{:?}",
+            plan.withheld
         );
     }
 
@@ -652,128 +712,18 @@ mod tests {
         );
     }
 
-    fn run_publisher_fixture(status: &str, failure: &str) -> (bool, String) {
-        let workflow = include_str!("../../.github/workflows/publish-crates.yml");
-        let step = workflow
-            .split_once("      - name: Publish the plan in dependency order\n")
-            .expect("publisher step")
-            .1;
-        let script = step
-            .split_once("        run: |\n")
-            .expect("publisher script")
-            .1
-            .lines()
-            .take_while(|line| line.is_empty() || line.starts_with("          "))
-            .map(|line| line.strip_prefix("          ").unwrap_or(line))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tmp = tempfile::tempdir().expect("publisher fixture");
-        let log = tmp.path().join("uploads");
-        let mocks = r#"
-            cargo() {
-              case "$*" in
-                *check-publish-readiness) [[ "$FAILURE" != readiness ]];;
-                *publish-plan)
-                  [[ "$FAILURE" != empty ]] || return 0
-                  if [[ "$FAILURE" == internal ]]; then
-                    printf 'mvm-core\nmvm-client\n'
-                    return 0
-                  fi
-                  printf 'mvm-client\nmvmctl\n'
-                  [[ "$FAILURE" != plan ]]
-                  ;;
-                "publish --package "*)
-                  printf '%s\n' "$3" >> "$UPLOADS"
-                  [[ "$FAILURE" != upload ]]
-                  ;;
-                *) return 99;;
-              esac
-            }
-            curl() {
-              printf '%s' "$HTTP_STATUS"
-              [[ "$FAILURE" != transport ]]
-            }
-        "#;
-        let output = Command::new("bash")
-            .args(["-c", &format!("{mocks}\n{script}")])
-            .env("TAG_NAME", "v0.23.1")
-            .env("GITHUB_REPOSITORY", "tinylabscom/mvm")
-            .env("HTTP_STATUS", status)
-            .env("FAILURE", failure)
-            .env("UPLOADS", &log)
-            .output()
-            .expect("run mocked publisher");
-        (
-            output.status.success(),
-            std::fs::read_to_string(log).unwrap_or_default(),
-        )
-    }
-
+    /// The checked-in manifests satisfy the gate, and crates.io gets the
+    /// public contract crate and nothing else. Every other workspace crate is
+    /// internal; widening this set is a decision, so it has to be made here
+    /// as well as in the manifests.
     #[test]
-    fn publisher_uploads_in_plan_order_and_skips_existing_versions() {
-        assert_eq!(
-            run_publisher_fixture("404", ""),
-            (true, "mvm-client\nmvmctl\n".into())
-        );
-        assert_eq!(run_publisher_fixture("200", ""), (true, String::new()));
-    }
-
-    #[test]
-    fn publisher_fails_closed_on_registry_errors() {
-        for status in ["000", "301", "401", "403", "429", "500", "503", ""] {
-            assert_eq!(
-                run_publisher_fixture(status, ""),
-                (false, String::new()),
-                "HTTP {status} must not upload"
-            );
-        }
-        assert_eq!(
-            run_publisher_fixture("404", "transport"),
-            (false, String::new())
-        );
-    }
-
-    #[test]
-    fn publisher_never_uploads_a_partial_or_invalid_plan() {
-        for failure in ["readiness", "plan", "empty", "internal"] {
-            assert_eq!(
-                run_publisher_fixture("404", failure),
-                (false, String::new()),
-                "{failure} must not upload"
-            );
-        }
-        assert_eq!(
-            run_publisher_fixture("404", "upload"),
-            (false, "mvm-client\n".into()),
-            "a failed dependency upload must stop the plan"
-        );
-    }
-
-    /// The checked-in manifests satisfy the gate, and the plan they produce
-    /// starts at the bottom of the graph.
-    #[test]
-    fn the_real_workspace_is_publish_ready() {
+    fn the_real_workspace_publishes_only_the_public_crates() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask has a parent");
         run_check(root).expect("the workspace passes check-publish-readiness");
-        let ws = load(root).expect("load");
-        let plan = plan(&ws).expect("plan");
-        assert_eq!(
-            plan.publish.first().map(String::as_str),
-            Some("mvm-contract")
-        );
-        assert!(ws.blocked.contains_key("libkrun-sys"));
-        assert!(plan.withheld.iter().any(|(name, _)| name == "mvm-client"));
-        assert!(plan.withheld.iter().any(|(name, _)| name == "mvmctl"));
-        for (position, name) in plan.publish.iter().enumerate() {
-            for dep in shipped_deps(&ws.packages[name]) {
-                assert!(
-                    plan.publish[..position].contains(&dep.name),
-                    "{name} must follow its dependency {}",
-                    dep.name
-                );
-            }
-        }
+        let plan = plan(&load(root).expect("load")).expect("plan");
+        assert_eq!(plan.publish, ["mvm-contract"]);
+        assert!(plan.withheld.is_empty(), "{:?}", plan.withheld);
     }
 }

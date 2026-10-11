@@ -47,12 +47,10 @@ esac
 mvmctl --help >/dev/null
 sha256sum -c --quiet "${sums}" || fail "installed files differ from the release tarball"
 runtime="/usr/lib/mvmctl/guest-runtime/mvm-guest-bins-v${version}.tar.gz"
-for suffix in "" .sha256 .bundle .sha256.bundle; do
-  [ -s "${runtime}${suffix}" ] || fail "missing paired runtime ${runtime}${suffix}"
-done
+[ -s "${runtime}" ] || fail "missing paired runtime ${runtime}"
 # Load the installed library, not a build-tree copy. Python is a disposable
 # test dependency, not a dependency added to the shipped CLI package.
-python3 "$(dirname "$0")/smoke-installed-release.py" /usr "${version}"
+python3 "$(dirname "$0")/smoke-installed-release.py" /usr "${version}" --archive-only
 # The marker `mvmctl env update` reads to refuse replacing package-owned files.
 marker=/usr/share/mvmctl/package-managed
 [ "$(cat "${marker}" 2>/dev/null)" = "${format}" ] \

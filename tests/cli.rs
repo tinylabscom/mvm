@@ -569,7 +569,9 @@ fn pack_help_lists_all_subcommands() {
         String::from_utf8_lossy(&out.stderr)
     );
     let help = String::from_utf8_lossy(&out.stdout);
-    for verb in ["list", "rollback", "prune", "download", "update"] {
+    for verb in [
+        "ls", "rm", "system", "list", "rollback", "prune", "download", "update",
+    ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
 }
@@ -922,7 +924,7 @@ fn an_sdk_mode_run_refuses_a_flag_right_after_double_dash() {
 }
 
 /// Project detection must not outrun the misplaced-image-reference refusal:
-/// next to a `package.json`, `mvmctl run node:22 -- index.js` refuses instead
+/// next to a `package.json`, `mvmctl run -- node:22 index.js` refuses instead
 /// of booting the detected node runtime with `node:22` as its command.
 #[test]
 fn run_refuses_a_misplaced_image_reference_inside_a_detected_project() {
@@ -932,8 +934,8 @@ fn run_refuses_a_misplaced_image_reference_inside_a_detected_project() {
     let (ok, stderr) = mvmctl_in(cwd.path(), &["run", "--", "node:22", "index.js"]);
     assert!(!ok, "a misplaced image reference must not run");
     assert!(
-        stderr.contains("--image node:22"),
-        "the refusal must point at --image, stderr: {stderr}"
+        stderr.contains("mvmctl run node:22 --"),
+        "the refusal must show the image named before `--`, stderr: {stderr}"
     );
     assert!(
         !stderr.contains("detected node"),
@@ -1025,11 +1027,31 @@ fn bundle_help_lists_push() {
         .expect("run mvmctl bundle --help");
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    for sub in ["export", "fetch", "install", "push", "gc"] {
+    for sub in ["build", "export", "fetch", "install", "push", "gc"] {
         assert!(
             stdout.contains(sub),
             "bundle help must list {sub}:\n{stdout}"
         );
+    }
+}
+
+#[test]
+fn bundle_build_help_names_oci_packaging_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["bundle", "build", "--help"])
+        .output()
+        .expect("run bundle build help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--image",
+        "--out",
+        "--arch",
+        "--production",
+        "--label",
+        "--debug-out",
+    ] {
+        assert!(stdout.contains(flag), "missing {flag}: {stdout}");
     }
 }
 
@@ -1765,6 +1787,20 @@ fn run_and_machine_run_help_list_the_allow_endpoint_flag() {
     }
 }
 
+/// `run` is `machine run`'s alias: both usage lines name the boot source before
+/// `--` and the guest command after it, and only `run` carries the SDK modes.
+#[test]
+fn run_and_machine_run_help_show_the_source_and_the_separator() {
+    for verb in [&["run", "--help"][..], &["machine", "run", "--help"][..]] {
+        let help = mvmctl_help(verb);
+        assert!(help.contains("[SOURCE]"), "{verb:?}: {help}");
+        assert!(help.contains("[-- <ARGV>...]"), "{verb:?}: {help}");
+        assert!(help.contains("--detach"), "{verb:?}: {help}");
+    }
+    assert!(mvmctl_help(&["run", "--help"]).contains("--mode"));
+    assert!(!mvmctl_help(&["machine", "run", "--help"]).contains("--mode <"));
+}
+
 #[test]
 fn secret_set_help_and_parser_cover_every_injection_mode() {
     let help = mvmctl_help(&["secret", "set", "--help"]);
@@ -2384,34 +2420,92 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-packs/.github/workflo
 #[test]
 fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
     let home = tempfile::tempdir().unwrap();
-    let out = mvmctl_isolated(home.path())
-        .args(["pack", "registry", "ls", "--json"])
-        .output()
-        .expect("run mvmctl pack registry ls --json");
-    assert!(
-        out.status.success(),
-        "ls must succeed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let rows: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
-    assert!(rows.as_array().expect("rows").is_empty());
+    for argv in [
+        ["pack", "ls", "--json"].as_slice(),
+        ["pack", "registry", "ls", "--json"].as_slice(),
+    ] {
+        let out = mvmctl_isolated(home.path())
+            .args(argv)
+            .output()
+            .expect("run pack ls --json");
+        assert!(
+            out.status.success(),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rows: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
+        assert!(rows.as_array().expect("rows").is_empty());
+    }
 
-    let out = mvmctl_isolated(home.path())
-        .args(["pack", "registry", "rm", "runtime/python"])
-        .output()
-        .expect("run mvmctl pack registry rm");
+    for argv in [
+        ["pack", "rm", "runtime/python"].as_slice(),
+        ["pack", "registry", "rm", "runtime/python"].as_slice(),
+    ] {
+        let out = mvmctl_isolated(home.path())
+            .args(argv)
+            .output()
+            .expect("run pack rm");
+        assert!(
+            out.status.success(),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(shown.contains("not pinned"), "{shown}");
+    }
+}
+
+#[test]
+fn system_pack_list_preserves_legacy_json_output() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |command: &[&str]| {
+        let output = mvmctl_isolated(home.path())
+            .args(command)
+            .output()
+            .expect("run system pack list");
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("system list JSON")
+    };
+    assert_eq!(
+        run(&["pack", "system", "list", "--json"]),
+        run(&["pack", "list", "--json"])
+    );
+}
+
+#[test]
+fn pack_update_dispatches_by_exact_target_shape() {
+    let home = tempfile::tempdir().unwrap();
+    let missing_registry = format!("file://{}", home.path().join("missing-registry").display());
+    let run = |command: &[&str]| {
+        mvmctl_isolated(home.path())
+            .env("MVM_PACK_REGISTRY", &missing_registry)
+            .args(command)
+            .output()
+            .expect("run pack update")
+    };
+    let workload = run(&["pack", "update", "runtime/python"]);
+    let legacy = run(&["pack", "registry", "update", "runtime/python"]);
+    assert!(!workload.status.success());
+    assert!(!legacy.status.success());
+    assert_eq!(workload.stderr, legacy.stderr);
+
+    let system = run(&["pack", "update", "runtime"]);
+    assert!(!system.status.success());
     assert!(
-        out.status.success(),
-        "rm of an unpinned pack exits zero: {}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&system.stderr).contains("not yet fetchable"),
+        "{}",
+        String::from_utf8_lossy(&system.stderr)
     );
-    let shown = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(shown.contains("not pinned"), "{shown}");
+    assert_ne!(system.stderr, workload.stderr);
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
@@ -2447,4 +2541,43 @@ fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(installed, 0, "a refused archive installs nothing");
+}
+
+#[test]
+fn image_revocations_fail_closed_without_an_applied_signed_list() {
+    let home = tempfile::tempdir().expect("tempdir");
+    let missing = mvmctl_isolated(home.path())
+        .args(["image", "revocations", "status"])
+        .output()
+        .expect("run status");
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(
+        stderr.contains("mvmctl image revocations update"),
+        "{stderr}"
+    );
+
+    let document = home.path().join("revocations.json");
+    let bundle = home.path().join("revocations.json.bundle");
+    std::fs::write(
+        &document,
+        br#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00Z","not_after":"2026-02-01T00:00:00Z"}"#,
+    )
+    .expect("document");
+    std::fs::write(&bundle, b"not a sigstore bundle").expect("bundle");
+    let refused = mvmctl_isolated(home.path())
+        .args(["image", "revocations", "update", "--document"])
+        .arg(&document)
+        .arg("--bundle")
+        .arg(&bundle)
+        .output()
+        .expect("run update");
+    assert!(!refused.status.success());
+    assert!(
+        !home
+            .path()
+            .join("image-set-revocations/checkpoint.json")
+            .exists(),
+        "a refused list must not advance the checkpoint"
+    );
 }

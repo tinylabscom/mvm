@@ -325,7 +325,8 @@ impl VerifyEnv {
             workspace_root,
             exe_profile: host.build_profile(),
             binary_dir: host.binary_dir(),
-            source_builds: host.builds_helpers_from_source(),
+            source_builds: host.builds_helpers_from_source()
+                && explicit_helper_source_build_requested(),
             // The cargo that launched `cargo run`, when that is how this
             // process started, so the helper is built by the same toolchain.
             cargo: std::env::var_os("CARGO")
@@ -341,6 +342,11 @@ impl VerifyEnv {
             }),
         }
     }
+}
+
+fn explicit_helper_source_build_requested() -> bool {
+    std::env::var("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE").as_deref() == Ok("build")
+        || std::env::var_os("MVM_IMAGES_DIR").is_some_and(|value| !value.is_empty())
 }
 
 /// Applies a helper's macOS entitlement once this process has built it. A

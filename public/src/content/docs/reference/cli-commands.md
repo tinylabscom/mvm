@@ -51,6 +51,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl capture`                                                                                                        | Inspect a Linux project and selected commands, resolve the evidence into canonical MVM IR, and render or verify the resulting environment (`project`, `resolve`, and `verify` subcommands)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine run --flake <ref>`                                                                                      | Build a Nix flake and boot a transient VM                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `mvmctl machine run --manifest <path>`                                                                                  | Boot a pre-built manifest (`mvm.toml`, its directory, or a slot name; short form `-m`). Mutually exclusive with `--flake`/`--image`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `mvmctl machine run <app.mvmpkg> [-- <cmd>...]`                                                                         | The same run with the signed bundle named as the positional source. A path ending in `.mvmpkg` before `--` is always a bundle, never a program: the archive is verified against the trust store on every run, a dry run included, and an unsigned, altered, or unenrolled archive is refused before anything is installed. `mvmctl run <app.mvmpkg>` is the same command. See [Booting a signed bundle](#booting-a-signed-bundle) |
 | `mvmctl machine run --manifest <app.mvmpkg> [-- <cmd>...]`                                                              | Verify a signed `.mvmpkg` bundle against the publisher trust store (`~/.mvm/trusted-publishers/`), install it into `~/.mvm/bundles/<sha>/` (an identical installed bundle is reused), then boot it exactly as `--manifest <bundle-sha256>` does: the same signed plan and the same admit-time bundle re-verification. An unsigned, tampered, or unknown-publisher archive is refused before any backend is touched. `--dry-run` verifies without installing. See [Booting a signed bundle](#booting-a-signed-bundle) |
 | `mvmctl machine run --image <ref>`                                                                                      | Boot an OCI image (pulled/cached). Mutually exclusive with `--flake`/`--manifest`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine run --prod --image <ref@sha256:...>`                                                                    | Verify and boot a sealed production OCI image, then run its declared Entrypoint/Cmd through the production-safe `RunEntrypoint` path. Do not pass a command after `--`: ad-hoc commands are DevOnly and remain refused. Accepted only for transient `--image` and catalog `--runtime` launches. Persistent runs and `--runtime-pack`, `--deployment`, `--flake`, or `--manifest` are refused before source resolution because those paths cannot preserve or build the sealed production variant                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
@@ -129,39 +130,11 @@ startup.
 | `mvmctl env bootstrap`                            | Same as `mvmctl bootstrap` (the `env`-grouped form)                                                                                                                                                                                                           |
 | `mvmctl doctor`                                   | Run diagnostics + dependency checks + security posture, including per-tenant host-agent daemon state (folded in from the dropped `mvmctl security` verb)                                                                                                      |
 | `mvmctl doctor --json`                            | Output diagnostics as JSON                                                                                                                                                                                                                                    |
-| `mvmctl env update`                               | Check for and atomically install the CLI, host helpers, and signed version-matched guest runtime using the installer inside the authenticated release archive. Package-managed installations must use their package manager |
+| `mvmctl env update`                               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
 | `mvmctl env update --check`                       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`                       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
-| `mvmctl env update --skip-verify`                 | Legacy flag: refused when installing. Self-update must authenticate the installer and cannot skip release signatures |
+| `mvmctl env update --skip-verify`                 | Skip the archive's own signature check; the signed checksum manifest is still verified and still binds the archive                                                                                                                                            |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
-
-Standalone self-update verifies the host archive checksum and release signature
-before extracting or running its bundled `install.sh`. It never fetches an
-unsigned installer script. That authenticated installer receives the exact release
-tag in `MVM_VERSION`, verifies the matching guest-runtime assets, stages the whole
-release, and switches `current` atomically. The installer owns migration,
-privilege escalation, smoke tests, and rollback; the updater never replaces the
-running binary or runtime files individually. Its host-archive redownload is
-pinned to the already authenticated archive's SHA-256. Self-update clears
-inherited checksum/signing bypasses and verifier-bootstrap overrides, and skips
-automatic builder bootstrap so updating does not start a VM.
-
-The installer requires the signed guest-runtime archive starting with CLI
-`v0.23.1`, including its prereleases. A missing archive on that release train or
-any newer version is a hard failure before activation, not permission to use an
-older runtime. Installing a historical CLI through `v0.23.0` retains that CLI's
-image-set runtime contract; those releases did not publish the new archive.
-
-For a loose standalone binary, `MVM_INSTALL_DIR` is its parent directory. For an
-existing versioned install, the updater preserves the library directory and reads
-the original binary directory from `install_dir` in `.mvm-lib`. Older markers
-without that field must first be migrated by re-running the installer with the
-original installation paths. Releases without a bundled installer are refused
-without changing the old installation.
-
-`--check` remains read-only, including on package-owned installs. `--force`
-still permits reinstalling or downgrading, but never bypasses authentication.
-`--skip-verify` and `MVM_SKIP_COSIGN_VERIFY` cannot authorize a self-update.
 
 ## Building
 
@@ -184,8 +157,8 @@ refused before any output is written.
 | `mvmctl build runtime-overlay build`                                | Prebuild the version-matched read-only runtime overlay into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` without booting a VM. This is the explicit “pay the guest-binary build debt once” command for required-overlay workflows                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `mvmctl build runtime-overlay build --force`                        | Refresh the cached overlay even when the matching cache entry already exists                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl build runtime-overlay build --source build\|download\|auto` | Choose whether the overlay is assembled from the source checkout, downloaded from the published release, or resolved the same way ordinary required-overlay boots do                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `mvmctl build sdk-sidecar build`                                    | Build the guest-facing host-services SDK sidecar from this checkout inside Stage 0, verify its ext4/checksum contract, and cache it with the checkout source fingerprint                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `mvmctl build sdk-sidecar build --force`                            | Rebuild the source sidecar even when the cached artifact already matches this checkout                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `mvmctl build sdk-sidecar build`                                    | Pack the guest-facing host-services SDK sidecar, one per guest libc, on the host from this checkout's guest-runtime archive (built first if it is not cached) and cache each with its source fingerprint and archive digest. No `mvm-images` checkout or builder VM. Outside a source checkout it installs the pinned image set's members instead |
+| `mvmctl build sdk-sidecar build --force`                            | Repack (or re-download) even when the cached sidecar already matches |
 | `mvmctl build image-set <role> [--attr <attr>]`                     | Contributor builds only. Build one role (`builder-vm`, `default-tenant`, `rootless-tenant`, `runtime-overlay`; `--attr sdk-sidecar-image` or `sdk-sidecar-image-musl` for the SDK sidecars) of the `mvm-images` checkout named by `MVM_IMAGES_DIR` against the mvm checkout this binary was compiled from, inside the HVF or Firecracker builder VM, and publish it to the local image cache at `~/.mvm/cache/local-images/` as `local-dev`. A second run with unchanged checkouts reuses the cached set. Run it through `MVM_IMAGES_DIR=../mvm-images bin/dev build image-set <role>`, which scopes `MVM_HOME` and `CARGO_TARGET_DIR` to the checkout pair |
 | `mvmctl build guest-bins [--out <dir>] [--arch aarch64\|x86_64]...` | Contributor builds only. Assemble the guest-runtime archive `mvm-guest-bins-v<version>.tar.gz` plus a `sha256sum`-format `.sha256` beside it: every guest artifact mvm owns — the static guest executables, the initramfs agent, the host-services and GPU shim shared objects for glibc and musl, for both guest architectures (or the repeated `--arch` subset), and the Python SDK — compiled through cached host-side `cargo zigbuild` builds, with a `manifest.json` recording each member's sha256, the workspace version, the checkout's commit and whether its tree was dirty, and its guest-source and host-services cdylib source fingerprints. The archive is byte-reproducible from the same inputs. See the Guest Binaries section |
 | Runtime overlay update model                                        | Stopped VMs pick up the newer version-matched overlay on the next boot. Running VMs keep the overlay they booted with; mvm does not hot-remount a different runtime overlay into a live guest                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -230,9 +203,33 @@ removes the installed `mvmctl` and its host binaries too.
 
 ### Running (top-level — already manifest-aware)
 
-`mvmctl machine run [PATH]` and `mvmctl run [PATH] -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. If no current revision exists, they error with a hint to run `mvmctl machine build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
+`mvmctl machine run --manifest PATH -- <cmd>` and `mvmctl run --manifest PATH -- <cmd>` accept a manifest path or its directory and look up the manifest-keyed slot. A positional source before `--` is an OCI image or a signed `.mvmpkg`, never a manifest; a manifest path there is refused with a pointer to `--manifest`. If no current revision exists, they error with a hint to run `mvmctl machine build`. See the [VM Lifecycle](#vm-lifecycle) and [One-shot Exec](#one-shot-run-transient-runner) sections for full flag lists. (Plan 40 dropped the `start` and `run` aliases on `up`.)
 
 ### Inspection / registry (`mvmctl manifest *`)
+
+`ls`, `info`, and `verify` share their operations with the
+`mvm_client::manifest` library facade. The host library exposes the same
+operations as `manifest.list`, `manifest.info`, and `manifest.verify` (ABI
+1.7), with generated request/reply types and method constants for the Python
+and TypeScript SDK bindings. These inspect the local registry without booting
+a machine. Listing supports repeated `--tag` filters: a slot must have every
+requested tag. `info` keeps snapshot lookup best-effort; a missing snapshot
+does not make the persisted manifest unavailable. `verify` checks artifact
+checksums, not publisher trust: `--check-signature` remains explicitly refused.
+Persisted names and revision metadata are validated before resolving paths:
+invalid template names contribute no tags, and invalid snapshot references
+produce no snapshot. Verification refuses artifact paths that escape the
+selected revision rather than checking unrelated host files.
+
+The SDK adapters call these host-library operations in-process:
+`mvm.manifest.list()`, `mvm.manifest.info(path)`, and
+`mvm.manifest.verify(path)` in Python; `manifest.list()`,
+`manifest.info(path)`, and `manifest.verify(path)` from `@runmvm/mvm` in
+TypeScript. Listing takes `orphans` and `tags` options in both languages.
+An omitted inspection or verification path uses the same cwd discovery as
+the CLI. Verification takes `revision` and `check_signature` keyword arguments
+in Python, or `revision` and `checkSignature` in the TypeScript options object.
+The signature option is forwarded to the shared refusal, never ignored.
 
 | Command                                             | Description                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -279,6 +276,31 @@ removes the installed `mvmctl` and its host binaries too.
 | `mvmctl trust audit receipts export [--tenant <t>] [--plan-id <id>] [--json]`                            | Derive signed `ExecutionReceipt`s from the chain-signed audit log. Entries with no receipt mapping (egress decisions, stream attach/input grants, sealed-transcript anchors) are reported as citations rather than dropped                                                                                                                                              |
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
+
+### Protected forensic transcripts
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust audit transcript arm <vm> [--tenant <t>]` | Create a new encrypted capture with seven-day payload retention after terminal sealing. Duration is at most 3600 seconds; byte/chunk limits remain independent. |
+| `mvmctl trust audit transcript disarm <capture-id> [--tenant <t>]` | Acquire the capture lease, finalize an inactive generation, and anchor its immutable root in the host audit chain. Refuses while a protected producer owns the lease. |
+| `mvmctl trust audit transcript reconcile <capture-id> [--tenant <t>]` | Reconcile one known capture: authenticate its original seal and concrete VM identity without requiring the current VM plan, durably sign expiry evidence with the original attribution, then remove only its authorized ciphertext segments. Safe to retry after interruption. |
+| `mvmctl trust audit transcript export <capture-id> [--tenant <t>] [--out <path>]` | Verify and decrypt a readable capture. Expired or authentically retired payload is refused even if physical cleanup is delayed. |
+| `mvmctl trust audit transcript list [--tenant <t>] [--json]` | List captures without enrolling existing data in retention. |
+
+Existing v6 captures remain readable and retention-ineligible; formats v1–v5
+are not supported. Reconciliation retains the original manifest, wrapped key,
+root, and signed audit proof. It never cleans export destinations or recursively
+sweeps arbitrary paths. Symlinks, hard-linked payloads, invalid clocks, missing
+authority, and conflicting evidence refuse cleanup. Unaccounted missing payload
+remains corruption, not successful expiry.
+
+Unattended producer startup/tick maintenance and hourly generation rotation need
+the protected capture lifecycle owner; the explicit command alone does not
+enable them. Workload-output generations may additionally opt into a separately
+authenticated aggregate family budget; unrelated forensic captures are not
+pooled into that budget. Removing names is not secure erasure of backups or open
+descriptors. The directory lease coordinates trusted host processes, not hostile
+same-user processes that ignore locks.
 
 ## Instruction-file provenance
 
@@ -466,7 +488,7 @@ admission until their transports are wired.
 | Command                                                                        | Description                                                                                                                                                                |
 | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl build runtime-overlay build`                                           | Populate the local runtime-overlay cache at `~/.mvm/cache/runtime-overlay/<version>/<arch>/` for this `mvmctl` version and host architecture without booting a workload VM |
-| `mvmctl build runtime-overlay build --source build`                            | Build the overlay from the source checkout. Requires `nix/images/runtime-overlay/flake.nix` in the current checkout                                                        |
+| `mvmctl build runtime-overlay build --source build`                            | Assemble the overlay on the host from this checkout's guest-runtime archive. A selected `MVM_IMAGES_DIR` checkout does not change this                                                        |
 | `mvmctl build runtime-overlay build --source download`                         | Download the published runtime-overlay artifact for this version into the cache                                                                                            |
 | `mvmctl build runtime-overlay build --arch aarch64\|x86_64 --version <semver>` | Override the target architecture or the expected overlay version                                                                                                           |
 | Runtime overlay update model                                                   | Running VMs keep the overlay they booted with; a changed overlay takes effect on the next boot of a stopped VM                                                             |
@@ -476,12 +498,12 @@ admission until their transports are wired.
 
 | Command                                  | Description                                                                                                                                                                               |
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl build sdk-sidecar build`         | Build the current checkout's host-services sidecars — one per guest libc — inside the Stage 0 builder VM and install each into the version/architecture/libc cache with source provenance |
-| `mvmctl build sdk-sidecar build --force` | Rebuild even when the installed sidecar fingerprint already matches the checkout                                                                                                          |
+| `mvmctl build sdk-sidecar build`         | Pack the current checkout's host-services sidecars — one per guest libc — on the host from its guest-runtime archive and install each into the version/architecture/libc cache with source provenance and the archive digest. `--source download` installs the pinned image set's members; `--source auto` (the default) packs in a source checkout and downloads otherwise |
+| `mvmctl build sdk-sidecar build --force` | Repack or re-download even when the installed sidecar already matches |
 
 ## Guest Binaries
 
-The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. Starting with the `v0.23.1` release train, installed CLIs require the complete both-architecture archive signed by their exact CLI release tag. They verify a packaged archive or fetch it from that release before assembling the overlay, initramfs, and sidecar; missing or invalid archives never fall back to image-set runtime artifacts. This is the release contract, not a claim that the release has already been published. The archive is not an `mvm-images` input; that repository still builds its own guest artifacts until the remaining image-boundary changes land.
+The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. Each CLI release publishes the archive as a signed asset, version-locked to the CLI and listed in the release's signed checksum manifest. `install.sh` and the deb and rpm packages install it beside `mvmctl` (in the release directory's `guest-runtime/`, or `/usr/lib/mvmctl/guest-runtime/`), and `mvmctl bootstrap` on a downloaded binary otherwise fetches it, held to its digest and then its signature; `mvmctl env update` fetches the new version's archive before it replaces the binary. Installed CLIs do not yet assemble from it: they still use the published overlay, initramfs, and sidecar artifacts. The archive is not an `mvm-images` input; that repository still builds its own guest artifacts until the remaining image-boundary changes land.
 
 | Command | Description |
 | ------- | ----------- |
@@ -517,7 +539,9 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl image boot check [--json]`                                                                                | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code                                                                                                                                           |
 | `mvmctl image boot update [--tag <t>] [--force]`                                                                  | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative                                                                                          |
 | `mvmctl image dev ensure`                                                                                          | Ensure the writable dev default-tenant image is installed in the local cache: adopt the pinned image set's `dev` members when `MVM_FETCH_UNCHANGED_IMAGES` asks for them (`1`: built from this tree's sources; `pinned`: whatever they were built from), otherwise pair-build from the selected mvm-images checkout, or answer an already-complete cache                         |
-| `mvmctl image boot verify --manifest <f> --bundle <f> [--lock <f>] --artifacts <dir> [--artifact <name> ...] [--require-complete] [--json]` | Verify a published image set offline. Without `--artifact`, verify every member artifact. With repeatable `--artifact`, verify only the named declared artifact bytes while still checking the signed manifest against the lock, its producer, structure, and signature; output explicitly marks unselected artifacts as unverified. The omitted lock uses the pin compiled into `mvmctl`. This command does not check revocation status. No network or cache writes; a refusal names its stage and exits nonzero. |
+| `mvmctl image boot verify --manifest <f> --bundle <f> [--lock <f>] --artifacts <dir> [--artifact <name> ...] [--require-complete] [--check-revocations] [--json]` | Verify a published image set offline. Without `--artifact`, verify every member artifact. With repeatable `--artifact`, verify only the named declared artifact bytes while still checking the signed manifest against the lock, its producer, structure, and signature; output explicitly marks unselected artifacts as unverified. The omitted lock uses the pin compiled into `mvmctl`. With `--check-revocations`, also refuse a revoked set or member under the signed image-set revocation list applied with `mvmctl image revocations update`; a missing, expired, or modified list fails the command rather than being treated as empty. Without it, revocation status is not checked. No network or cache writes; a refusal names its stage and exits nonzero. |
+| `mvmctl image revocations update --document <revocations.json> --bundle <revocations.json.bundle>` | Apply the signed image-set revocation list published at `https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json`. The bundle must name the mvm-images `revocations.yml` workflow at a `revocation-list/v<N>` tag under the GitHub Actions issuer; any other signer, including the registry-pack revocation authority, is refused. The list must be inside its own validity window (at most 62 days), and neither the publication number `N` nor `issued_at` may go back from the last applied list. Two different lists at the same `N` or `issued_at` are refused. A refused list leaves the local copy unchanged. No network. |
+| `mvmctl image revocations status [--json]` | Re-verify the applied image-set revocation list and report its publication, validity window, digest, signer, and entry count. A missing, expired, incomplete, or modified local copy exits nonzero and names the command that fixes it. |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
@@ -562,9 +586,30 @@ sealed VMs refuse all of these verbs.
 
 ## One-shot Run (transient runner)
 
-`mvmctl run` is the one-shot sandbox UX: it boots a fresh transient microVM,
-runs one command, and tears the VM down on exit — like `docker run --rm` but
-with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
+`mvmctl run` is an alias of `mvmctl machine run`. It takes the same flags and
+follows the same path, plus the SDK `--mode`/`--dev` transport, which only
+`run` carries. Both name what to boot before `--` and the guest command after
+it:
+
+```sh
+mvmctl run alpine:3.20 -- echo hi          # an OCI image
+mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
+mvmctl run -- npm test                     # infer the runtime from the command
+```
+
+The positional source is classified by its shape, never by what exists on
+disk. A path ending in `.mvmpkg` is a signed bundle, and anything else is an
+image reference, as `--image` takes it. A bundle is verified against the trust
+store every time it runs and installed into the content-addressed bundle
+registry on first use, then booted the way `--manifest <bundle-sha256>` boots an
+installed bundle; it is the same run as `--manifest ./app.mvmpkg`. Any other path is refused with a pointer to `--manifest` or
+`--deployment`, and `app.mvmpkg` without a leading `./` is refused rather than
+pulled from a registry. The guest command must follow `--`: a command written
+without it is a parse error.
+
+Without `-d` or another persistent flag, it is the one-shot sandbox UX: it
+boots a fresh transient microVM, runs one command, and tears the VM down on
+exit — like `docker run --rm` but with a Firecracker microVM as the sandbox. Plan 178 merged the former bare
 `mvmctl machine exec` into `run` (it was already a strict superset); `run` adds a
 security `--profile`, OCI `--image`, signed `--receipt`, `--json`/`--dry-run`,
 and the SDK `--mode`/`--dev`/`--prod` transport. Arbitrary command dispatch
@@ -578,9 +623,11 @@ into the image; Nix-built production guests may also use
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
+| `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
+| `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
-| `mvmctl run npm test`                                               | Infer the runtime when no source flag is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                      |
+| `mvmctl run -- npm test`                                            | Infer the runtime when no source is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                           |
 | `mvmctl run --runtime <name> -- <cmd>...`                           | Boot a named runtime from the built-in catalog; an unknown name is refused, never defaulted                                                                                                                                                                                                                                                                                           |
 | `mvmctl run --no-detect -- <cmd>...`                                | Skip inference and use the bundled default image                                                                                                                                                                                                                                                                                                                                      |
 | `mvmctl run --image <ref> -- <cmd>...`                              | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit                                                                                                                                                    |
@@ -619,19 +666,21 @@ paths.
 
 ### Runtime detection
 
-With no `--image` / `--manifest` / `--flake` / `--deployment` / `--runtime-pack`,
-`mvmctl run` settles the boot source in this order. The order is the contract:
+With no positional source and no `--image` / `--manifest` / `--flake` /
+`--deployment` / `--runtime-pack`, a transient run settles the boot source in
+this order. The order is the contract:
 
-1. **An explicit source flag.** Nothing is inferred.
+1. **An explicit source**, positional or flag. Nothing is inferred.
 2. **`--runtime <name>`** against the built-in catalog. An unknown name is
    refused and lists the known ones — a typo never falls through to a default.
 3. **A first command word that reads as an OCI image reference** — a tag
    colon, a digest, or an explicit registry host before a `/`, and not a
    path — refuses right here, before any inference runs. This is not part
    of inference and is not gated on steps 5–6 below finding nothing: it
-   applies equally to `--no-detect` and to `machine run`, which never reach
-   steps 5 or 6 at all. `mvmctl machine run app:1.0 -- sh` refuses with a
-   hint to pass `--image app:1.0` for exactly this reason. A source flag
+   applies equally to `--no-detect` and to persistent runs, which never reach
+   steps 5 or 6 at all. `mvmctl run -- app:1.0 sh` refuses with a hint to
+   name the image before `--` (`mvmctl run app:1.0 -- sh`) for exactly this
+   reason. A source flag
    from step 1, or `--runtime` from step 2, skips this check entirely, so a
    legitimate command whose first word happens to contain a colon still
    runs. A word that names an existing path relative to the working
@@ -682,13 +731,14 @@ Detection picks a **source**, never a posture. An inferred run admits through
 the same signed `ExecutionPlan`, with the same `--profile standard` default and
 the same deny-all egress, as one that named its image.
 
-**`machine run` does not infer.** Steps 5 and 6 are skipped there: it creates a
-named, possibly persistent machine, and picking its base image from whatever
-directory you were standing in is a footgun — `machine run` inside any Rust
-checkout would quietly build a machine on `rust:1-alpine`. It keeps its error
-naming every way to supply a source. `--runtime <name>` works on both verbs,
-because that is you naming one. The misplaced-image-reference refusal (step 3)
-still runs for `machine run`, exactly as it does for `run`.
+**A persistent run does not infer.** Steps 5 and 6 are skipped for `-d`,
+`--ttl`, `--port`, `--healthcheck` and `--up-json`, on either verb: a machine
+that outlives the command should not take its base image from whatever
+directory you were standing in — inside any Rust checkout it would quietly
+become a machine on `rust:1-alpine`. Such a run keeps its error naming every
+way to supply a source. `--runtime <name>` works either way, because that is
+you naming one. The misplaced-image-reference refusal (step 3) runs for every
+run.
 
 The catalog is curated, in-tree, and versioned with the code; it is never
 fetched at runtime. Its refs are **tags, not digests**, which is deliberate:
@@ -823,7 +873,7 @@ guest, on any tier.
 | `mvmctl machine run --image <ref> --json -- <cmd>`                                             | Print a redacted JSON execution summary with `egress_denials` and optional `egress_review`; no review prompt opens                                                                                                                                                                                                                  |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>`                                   | Write a signed execution receipt                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine run -d --image <ref>`                                                          | Boot a **persistent** machine, auto-name it (printed), return                                                                                                                                                                                                                                                                        |
-| `mvmctl machine run -d --name <name> --image <ref>`                                            | Boot a **persistent** named machine, return; reconnect via `machine shell <name>`                                                                                                                                                                                                                                                    |
+| `mvmctl machine run -d --name <name> --image <ref>`                                            | Boot a **persistent** named machine and return. Add `--profile dev` at launch if later `machine shell` or ad-hoc `machine exec` is needed; the standard profile's signed verb grant does not authorize those operations.                                                                                                                    |
 | `mvmctl machine run --healthcheck 'curl -fsS localhost/health' --image <ref>`                  | Boot a **persistent** machine in the foreground (registered, shows in `machine ps`); its presence alone promotes the lifecycle even without `-d`                                                                                                                                                                                     |
 | `mvmctl machine run -d --healthcheck 'curl -fsS localhost/health' --name <name> --image <ref>` | Same, detached — the usual way to run a long-lived service                                                                                                                                                                                                                                                                           |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>`                                      | Boot a named foreground transient machine, run `<cmd>`, tear down                                                                                                                                                                                                                                                                    |
@@ -898,7 +948,8 @@ than ambiguous. Nothing selects `ephemeral` today — every production caller
 takes the default — so treat the field as the place a future opt-out will live
 rather than one you can reach now.
 
-Three limits are worth knowing before you rely on this:
+The following limits apply to legacy file-backed console capture, not the
+native HVF protected path described below:
 
 - The recorded transcript is redacted; the **console fallback is not**, so a
   read that falls back to (or splices in) the console shows raw guest bytes.
@@ -908,6 +959,91 @@ Three limits are worth knowing before you rely on this:
 - A spliced read **repeats** the part the recording already showed, because
   console byte offsets and transcript sequence numbers share no coordinate.
   Duplicated, never lost.
+
+**Native HVF protected capture (draft integration).** New native HVF launches
+require a matching host helper and a supervisor-owned encrypted console
+capture before boot is announced. The supervisor continues consuming console
+output after the launcher exits. A bounded, nonblocking handoff drops and
+counts output under overload or consumer failure; it never slows the guest
+behind encryption or disk I/O and never falls back to a plaintext console
+file. `machine logs` refuses plaintext fallback for these runs, including when
+capture setup fails. Signed `ephemeral` policy remains non-persistent.
+
+New protected capture families and their routing metadata live under
+`$MVM_HOME/audit/workload-output/<hex-encoded-concrete-vm-name>/`, outside
+disposable runtime and machine-instance directories. Public stop/removal and
+orphan reaping do not delete these captures. Live sockets and fixed supervisor
+status remain runtime-local. Legacy recordings are not moved or enrolled.
+Restart publishes a fresh run selection without merging earlier sequence
+spaces; a retained family belonging to another tenant refuses name reuse.
+
+Raw supervisor stderr is deliberately discarded on this path, including
+startup failures; it is not retained or exportable. Public errors retain exit
+status and sanitized guidance rather than raw helper output.
+`supervisor-status.json` in the VM state directory records fixed lifecycle
+states such as `capture_setup_failed`, `boot_failed`, and `capture_failed`.
+Encrypted supervisor-stderr collection is a separate follow-up.
+
+Durable generations rotate hourly and become unreadable seven days after sealing. The
+existing 8 MiB / 65,536-chunk budget covers the concrete VM's entire managed
+generation set, including the active generation; encrypted record-envelope
+bytes count against that budget. Pressure seals the active generation before
+authenticated oldest-generation retirement. Unreclaimable capacity sheds
+durable output and reports capture failure, rather than enlarging the limit.
+Startup and bounded periodic maintenance use the signed original capture
+authority. Recovery requires exclusive producer leases and a durable signed
+opening; recovered output is explicitly incomplete and retry preserves the
+original staged terminal timestamp. Missing or pruned audit authority refuses
+recovery/retirement. `mvmctl trust audit prune --through <segment>` is a dry-run;
+`--ack` commits only after repeating verification and protected-evidence admission
+under the audit lock. Original opening, seal and retirement evidence remains
+pinned while enrolled verification metadata is retained, even after ciphertext
+retirement; the containing audit segments may remain indefinitely. Retirement
+records are pre-unlink intent, not proof of completed deletion.
+Busy managed capture inventory refuses pruning with a retryable diagnostic,
+including when its tenant cannot yet be authenticated. Missing/corrupt authority
+and ambiguous legacy enrollment also refuse rather than disposing of metadata
+or manufacturing replacement authority. Known authenticated legacy v6 captures
+remain unenrolled. Unaccounted interrupted ciphertext tails are preserved for
+offline recovery rather than automatically discarded.
+If a verified legacy seal is pruned but its manifest remains, that manifest alone
+cannot authenticate legacy status during a later prune; the later attempt refuses
+for missing authority. Do not treat this refusal as permission to delete metadata.
+Maintenance runs at supervisor startup and while it is alive. There is no
+always-on physical cleanup of stopped, never-restarted captures in this slice:
+read expiry remains enforced, but seven-day physical deletion is not
+guaranteed. Always-on stopped-capture maintenance remains a separate follow-up.
+
+Verified history checks signed retirement before decrypting any payload, even
+when deletion was interrupted. Retired/expired history reports an explicit
+retention gap. Live attachment has a bounded RAM replay window, not a promise
+that every active byte is already terminally verified history.
+An already-open reader has no lifetime exemption: buffered history rechecks its
+generation's authority before each record, and stalled live frames recheck
+revocation and expiry before each nonblocking write. Revocation closes a
+partially sent frame rather than transmitting the remainder under stale
+authorization. Already-delivered bytes cannot be recalled.
+
+The dedicated native cold witness verifies genuine boot UART output through the
+live reader after the launcher exits, then through verified encrypted history
+after public stop, with no matching plaintext managed artifact. This proves
+post-launcher availability of boot output, not that bytes were emitted after
+launcher exit. The stronger synthetic post-detach UART-emission witness remains
+outstanding: ordinary unprivileged guest processes cannot write `/dev/console`,
+and RPC stdout is not a substitute for the UART path.
+
+This integration remains scoped to protected native-HVF console capture; final
+review and CI determine merge readiness, not a claim that all diagnostic
+surfaces or lifecycle witnesses are complete.
+The draft warm-handoff path prepares a fresh child capture, requires every vCPU
+to acknowledge quiescence, replaces the parent's UART capture state, and
+finalizes the old owner before acknowledging transfer. Failure refuses the
+transfer rather than using the parent's capture or plaintext output. This path
+has unit/mock evidence only; native-HVF lifecycle and prepared-launch performance
+have not been validated.
+The seven-day lifetime after sealing and hourly generation schedule do not
+replace byte limits. Legacy captures are not automatically enrolled. This
+native-HVF sequencing does not cover other backends or telemetry.
 
 Full walkthrough: [Workload output
 streaming](/guides/workload-output-streaming/).
@@ -963,7 +1099,7 @@ mvmctl machine run -it --name debug --image <dev-image> -- /bin/sh
 Use the explicit persistent lifecycle when you want the VM to survive:
 
 ```bash
-mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2a", returns
+mvmctl machine run -d --profile dev --image alpine  # boots, prints e.g. "blue-fox-3f2a", returns
 mvmctl machine shell blue-fox-3f2a            # reconnect (dev PTY)
 mvmctl machine exec  blue-fox-3f2a -- ps          # one-shot command in the running machine
 mvmctl machine exec  blue-fox-3f2a -it -- /bin/sh   # PTY command in the running machine
@@ -971,6 +1107,9 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 ```
 
 `-d --name <N>` does the same with a name you choose.
+The explicit dev profile permits later shell and ad-hoc exec requests under
+the admitted plan's guest profile. A detached standard-profile service does
+not receive those verbs; attaching a dev command to it is refused.
 
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
 PTY and requires DevOnly verbs; it is refused for a sealed/production image
@@ -1094,11 +1233,63 @@ The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
-#### Booting a signed bundle
+#### Packaging an OCI image
 
-A signed `.mvmpkg` boots through `--manifest`:
+`bundle build` resolves an OCI image, materializes its filesystem, and signs a
+single architecture-specific `.mvmpkg` with the host signer:
 
 ```sh
+mvmctl bundle build --image docker.io/library/alpine:3.20 \
+  --out alpine.mvmpkg --debug-out alpine.bundle.json
+mvmctl bundle fetch ./alpine.mvmpkg
+mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
+```
+
+The package carries the workload kernel, rootfs, resolved entrypoint and libc
+metadata, universal initramfs, and runtime overlay. Runtime members are acquired
+from the existing authenticated image-set pin; the original image-set manifest
+is carried unchanged. Materialization finishes before the CLI loads its host
+signing key. The builder never receives the publisher key.
+
+`--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
+Packaging currently requires the selected architecture to match the host;
+cross-architecture runtime injection is refused before acquisition. `--label`
+sets the package's display label. The command prints the resolved OCI manifest
+digest, bundle SHA-256, signer key ID, architecture, and output path.
+
+`--production` requires a digest-qualified OCI input and produces an actually
+dm-verity-sealed rootfs with sealed-production posture. Missing entrypoint
+metadata, a platform mismatch, changed materialization bytes, or incomplete
+verity metadata is an error before signing. The default is a signed development
+package, not an unsigned archive. Production admission still applies its normal
+entrypoint, authentication, backend, and security-policy checks.
+
+Both development and production packages construct the rootfs and its verity
+data in-process from the verified OCI content. `MVM_MATERIALIZE_BUILDER_VM`
+and inputs outside the pure writer's supported limits are refused; packaging
+never falls back to an untrusted builder or replaces that seal through one.
+
+`--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
+not currently supported by that shared exporter.
+
+Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
+They retain the original image-set identity while carrying only the selected
+architecture's runtime archives, not the full builder/base-image release set.
+Older readers refuse these packages. Existing schema 3 packages and full
+embedded image sets retain their existing semantics.
+
+Bundles carrying their own boot assets use the cold-boot path. The current
+warm-pool preparation command cannot prepare a parent from an archive's pinned
+runtime set, so a portable bundle never substitutes a host-prepared standby.
+Repeated launches still reuse the content-addressed installed archive.
+
+#### Booting a signed bundle
+
+A signed `.mvmpkg` boots as the positional source, or through `--manifest`;
+the two are the same run:
+
+```sh
+mvmctl machine run ./app.mvmpkg -- python -m app
 mvmctl machine run --manifest ./app.mvmpkg -- python -m app
 ```
 
@@ -1127,15 +1318,17 @@ The posture never grants anything: a bundle that allows egress still boots
 deny-all unless the launch asks for egress. A manifest edited on disk after
 install fails the signature check and refuses the boot.
 
-The archive is taken through `--manifest` rather than as a positional argument.
-`machine run` already reads its trailing positionals as the guest command, so
-`mvmctl machine run ./app.mvmpkg` would mean "run the program `./app.mvmpkg`",
-and making the first positional sometimes an artifact would change what an
-existing command line means depending on a file extension. `--manifest` already
-names the pre-built workload a run boots, including an installed bundle by its
-sha256, so a bundle archive is one more form of the same thing. A path ending in
-`.mvmpkg` that is not a directory is read as an archive; every other argument
-keeps its existing meaning.
+`.mvmpkg` is the one extension for a runnable artifact. Being runnable is a
+property of the command, not of the file: the same archive `bundle export`,
+`bundle build`, and `artifact pack` write is the one `bundle install`,
+`machine check-artifact`, and `machine run` read, and there is no second
+container format.
+
+A positional source is unambiguous because the guest command only ever follows
+`--`: `mvmctl machine run ./app.mvmpkg` names a bundle, and running a program
+called `./app.mvmpkg` is `mvmctl machine run -- ./app.mvmpkg`. As a positional
+or after `--manifest`, a path ending in `.mvmpkg` that is not a directory is read
+as an archive; every other `--manifest` argument keeps its existing meaning.
 
 ### Lineage / time-travel
 
@@ -1580,21 +1773,24 @@ running microVM.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl pack list`                                        | List every recorded pack version, marking each key's active one                                                                                                   |
-| `mvmctl pack rollback`                                    | Point a pack class's active version at an already-cached one                                                                                                      |
-| `mvmctl pack prune`                                       | Reclaim non-active pack versions beyond the newest N per key                                                                                                      |
-| `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
-| `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
+| `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
+| `mvmctl pack rm ns/name[@version]`                        | Remove a workload pack's cache entry and lock pin; a supplied version must match the pin                                                                           |
+| `mvmctl pack update ns/name[@version]`                    | Re-pull a signed workload pack and its signed profile dependencies, adopting a newer published version when available                                             |
+| `mvmctl pack system list [--kind KIND] [--json]`          | List every recorded builder, runtime, image-project, or extension pack version, marking each active one                                                            |
+| `mvmctl pack system rollback KIND [--to VERSION]`        | Point a system pack class's active version at an already-cached one                                                                                                |
+| `mvmctl pack system prune [--keep-recent N] [--dry-run]`   | Reclaim non-active system pack versions beyond the newest N per key                                                                                                |
+| `mvmctl pack system download KIND`                        | Fetch a system pack version into the cache without changing the active one; no system pack class is published yet                                                  |
+| `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
 | `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
-| `mvmctl pack registry ls`                                 | List pinned signed registry packs and whether each is installed (`--json` for machine-readable rows)                                                              |
-| `mvmctl pack registry rm ns/name`                         | Remove a signed registry pack's cache entry and lock pin                                                                                                          |
-| `mvmctl pack registry update ns/name[@version]`           | Re-pull a signed registry pack and its signed profile dependencies, adopting newer published versions when there are any                                                                              |
+| `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
+| `mvmctl pack registry rm ns/name[@version]`               | Compatibility spelling of `pack rm`                                                                                                                               |
+| `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --help` | Show the required `--document` signed-feed path and `--bundle` signature-bundle path. Updating verifies the supplied bytes under the operator's configured release identity before advancing the durable cache checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1610,6 +1806,34 @@ running microVM.
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+For a built-image pack, `pull` authenticates its descriptor before fetching the
+exact public GitHub release assets, verifies their sizes, hashes, rootfs
+signature and provenance, then publishes the complete payload atomically.
+Installed-pack verification and admission repeat these checks. Registry mirrors
+do not redirect image release origins, and private image releases are unsupported.
+Currently, `pull` refuses built-image packs before downloading payload assets
+because no compatible released image verifier is trusted. Built-image boot
+remains explicitly unsupported. See
+[pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
+limits and the split registry/release inventory.
+
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes or allowed egress,
+enable claims explicitly:
+
+```bash
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
+mvmctl machine run --image alpine -- /bin/true
+```
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
+capacity and fail rather than silently cold-booting. Named launches and shapes
+with extra volumes (including directory mounts) or allowed egress retain their
+cold path, including when the pool size is zero.
+
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release
 status. Revocation checks cover an operator-configured signed feed when one is
@@ -1617,6 +1841,16 @@ configured; a feed is not required by the current registry-pack model. The
 `revocation_scope: "operator_configured_only"` JSON field makes that limit
 explicit. A valid signature proves publisher identity and content integrity,
 not safety.
+
+The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
+use the signed registry-pack cache and lockfile. Existing `pack registry`
+commands remain available. The former system-cache commands are now grouped
+under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
+`pack download KIND`, and `pack update KIND` spellings remain compatible.
+`pack update` selects the system cache only for the exact class names
+`builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
+selects a workload pack. Other targets are rejected. This command migration
+does not change pack trust or establish any pack as official.
 
 ### Bundles in image registries
 
@@ -1755,7 +1989,7 @@ All commands accept these global options:
 | `MVM_BUILDER_BACKEND`                     | Builder VMM selection: `hvf`, `firecracker`, `qemu`, or the optional development-only `libkrun` integration. Platform defaults are Apple Silicon macOS → `hvf` and Linux-with-KVM → `firecracker`; every other host → `qemu`. libkrun is never auto-detected and never fallen back to, so an unsupported host fails an availability check rather than gaining a hidden Homebrew dependency. | Platform default                 |
 | `MVM_BUILDER_LOCK_WAIT_SECS`              | Seconds to wait for the shared Nix store image lock when another build holds it; set to `0` to fail fast instead of queueing                                                                                                                                                                                                                                                                | `3600` (1 hour)                  |
 | `MVM_IMAGES_DIR`                          | Contributor builds only: path to a local `mvm-images` checkout, reported by `mvmctl doctor` as the `local-dev` image source. Never discovered automatically; a path that is not a checkout is an error, not a fallback. A release build refuses it before any command runs, and a production admission refuses to boot while it is set. Image builds do not read it yet                     | Unset                            |
-| `MVM_FETCH_UNCHANGED_IMAGES`              | Contributor and CI builds only: how `build sdk-sidecar build` and `image dev ensure` prepare their images. `1` adopts the pinned set's members only when built from this tree's sources; `pinned` adopts them whatever they were built from, refusing (never pair-building) if the set is refused or lacks them. Both verify every member and report the arm                                | Unset (pair-build)               |
+| `MVM_FETCH_UNCHANGED_IMAGES`              | Contributor and CI builds only: how `build sdk-sidecar build` and `image dev ensure` prepare their images. `1` adopts the pinned set's members only when built from this tree's sources; `pinned` adopts them whatever they were built from, refusing (never building) if the set is refused or lacks them. Both verify every member and report the arm                                | Unset (sidecar: packed from the guest runtime; dev image: pair-build) |
 | `MVM_NO_PERSISTENT_BUILDER`               | Set to `1` to disable automatic routing through a persistent-builder session                                                                                                                                                                                                                                                                                                                | Unset                            |
 | `MVM_WORKLOAD_KERNEL_VARIANT`             | Dev tier only: `workload-k8s` makes `machine run` boot the verified `workload-k8s` kernel from the local kernel cache (`mvmctl kernel build --which workload-k8s`) instead of the sealed workload kernel, with or without a local image checkout; a cache miss warns and boots the sealed kernel. Any other value selects the sealed kernel                                                 |
 | `MVM_TEMPLATE_REGISTRY_ENDPOINT`          | S3-compatible endpoint URL for template push/pull                                                                                                                                                                                                                                                                                                                                           | None                             |
@@ -1764,7 +1998,7 @@ All commands accept these global options:
 | `MVM_TEMPLATE_REGISTRY_SECRET_ACCESS_KEY` | S3 secret access key                                                                                                                                                                                                                                                                                                                                                                        | None                             |
 | `MVM_TEMPLATE_REGISTRY_PREFIX`            | Key prefix inside the bucket                                                                                                                                                                                                                                                                                                                                                                | `mvm`                            |
 | `MVM_TEMPLATE_REGISTRY`                   | Base URL of the remote template index and files used by `mvmctl template search` and remote scaffolds (`https://` or `file://`)                                                                                                                                                                                                                                                              | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
-| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl search`, `pull` and `pack registry update` read (`https://` or `file://`). Packs from another registry still have to verify under the publisher trust policy                                                                                                                                                                                     | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
+| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl pack search`, `pack pull`, and `pack update ns/name` read (`https://` or `file://`). The original top-level and `pack registry` spellings share this setting. Packs from another registry still have to verify under the publisher trust policy | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
 | `MVM_TEMPLATE_REGISTRY_REGION`            | S3 region                                                                                                                                                                                                                                                                                                                                                                                   | `us-east-1`                      |
 | `OPENAI_API_KEY`                          | Enables LLM-backed template planning for `template init --prompt`                                                                                                                                                                                                                                                                                                                           | None                             |
 | `MVM_TEMPLATE_PROVIDER`                   | Prompt planning provider: `auto`, `openai`, `local`, or `heuristic`                                                                                                                                                                                                                                                                                                                         | `auto`                           |
@@ -1788,6 +2022,8 @@ All commands accept these global options:
 | `MVM_BUILDER_AGENT_PORT`                  | Vsock port the builder agent listens on                                                                                                                                                                                                                                                                                                                                                     | `54_321`                         |
 | `MVM_BUILDER_VM_TIMEOUT_SECS`             | Wall-clock cap for one-shot libkrun builder VM runs before the supervisor is killed                                                                                                                                                                                                                                                                                                         | `1800`                           |
 | `MVM_TENANT_KEY_<ID>`                     | Compatibility hook for tenant-scoped key material consumed by shared policy/keystore primitives. Fleet operators should configure tenant keys through `mvmd`.                                                                                                                                                                                                                               | None                             |
+| `MVM_TENANT_KEY_LOCAL`                    | Explicitly selects the 32-byte key (64 hex characters) that encrypts sealed instance snapshots and host-domain checkpoints. When set it is the only key source consulted, so a malformed value refuses `machine pause` and `machine resume` rather than falling back to another key. Without it, `/var/lib/mvm/keys/local.key` (32 raw bytes, mode 0600 or 0400) is used. See [Snapshots](/working/snapshots/). | None (pause refuses) |
+| `MVM_ALLOW_UNENCRYPTED_SNAPSHOT`          | Set to `1` to resume, once, an instance snapshot sealed unencrypted by an older `mvmctl` while a snapshot key is configured. Affects resume only; a pause always encrypts. | Unset |
 | `MVM_SKIP_COSIGN_VERIFY`                  | Set to `1` to bypass cosign signature verification on prebuilt-image downloads and on the runtime-overlay / SDK-sidecar release archives. Documented emergency-rotation escape only; never set in CI or production.                                                                                                                                                                         | Unset                            |
 | `MVM_SKIP_HASH_VERIFY`                    | Set to `1` to bypass SHA-256 verification on prebuilt-image downloads. Documented escape hatch only; never set in CI or production.                                                                                                                                                                                                                                                         | Unset                            |
 | `MVM_OVERLAY_BASE_URL`                    | Release base URL the runtime overlay **and** the SDK sidecar are fetched from (both ship in the same release). Point it at a private mirror; `/v<version>` is appended for you.                                                                                                                                                                                                             | GitHub Releases                  |

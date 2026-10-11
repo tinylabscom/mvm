@@ -131,6 +131,16 @@ class InstalledReleaseTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError):
             MODULE.smoke(self.prefix, "1.2.3")
 
+    def test_archive_only_package_layout_needs_no_sidecars(self):
+        Path(str(self.archive) + ".sha256").unlink()
+        Path(str(self.archive) + ".bundle").unlink()
+        with self.assertRaises(FileNotFoundError):
+            MODULE.smoke(self.prefix, "1.2.3")
+        MODULE.smoke(self.prefix, "1.2.3", archive_only=True)
+        self.archive.unlink()
+        with self.assertRaises(FileNotFoundError):
+            MODULE.smoke(self.prefix, "1.2.3", archive_only=True)
+
     def test_incompatible_library_is_rejected(self):
         self.library.mvm_hostlib_abi_version.return_value = 2 << 16
         with self.assertRaisesRegex(RuntimeError, "incompatible installed hostlib"):

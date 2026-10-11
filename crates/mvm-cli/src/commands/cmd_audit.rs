@@ -154,7 +154,11 @@ impl Commands {
     /// reserve that channel before reconcile-on-entry or other startup chrome.
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
-            Commands::Run(a) => a.run.json,
+            // `run` is `machine run`, and reserves stdout on the same terms.
+            Commands::Run(a) => {
+                let r = &a.machine;
+                r.run.json || r.up_json || !r.run.argv.is_empty()
+            }
             Commands::Why(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
@@ -216,11 +220,12 @@ impl Commands {
             }
             return true;
         }
-        matches!(
-            self,
-            // Lifecycle mutate/read on the local single-host path.
-            Commands::Run(_)
-        )
+        // `run` is `machine run`, so it converges on the same terms: an unnamed
+        // foreground run is throwaway and does not.
+        if let Commands::Run(a) = self {
+            return machine_run_touches_vm_state(&a.machine);
+        }
+        false
     }
 
     /// Canonical clap-subcommand name for this variant. Used as the

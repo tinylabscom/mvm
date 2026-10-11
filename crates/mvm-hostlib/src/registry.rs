@@ -38,6 +38,7 @@ use crate::guest::{
     StdinRequest, WaitReply, WaitRequest, WriteRequest, WrittenReply,
 };
 use crate::launch::{CreateRequest, MACHINE_CREATE, MACHINE_RUN, RunReply, RunRequest};
+use crate::manifest::{INFO as MANIFEST_INFO, LIST as MANIFEST_LIST, VERIFY as MANIFEST_VERIFY};
 use crate::stream::{
     CloseRequest, Empty as StreamEmpty, LOGS_CLOSE, LOGS_NEXT, LOGS_OPEN, LogsOpenRequest,
     NextReply, NextRequest, OpenReply, OpenRequest, STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
@@ -175,8 +176,55 @@ fn telemetry_page() -> SchemaAndDefs {
     }
 }
 
+/// The persisted manifest and snapshot retain their client-owned report shape.
+fn manifest_info() -> SchemaAndDefs {
+    SchemaAndDefs {
+        root: serde_json::json!({
+            "type": "object",
+            "required": ["slot_hash", "persisted", "snapshot"],
+            "properties": {
+                "slot_hash": {"type": "string"},
+                "persisted": {
+                    "type": "object",
+                    "description": "PersistedManifest report owned by mvm-core."
+                },
+                "snapshot": {
+                    "type": ["object", "null"],
+                    "description": "Optional SnapshotInfo report owned by mvm-core."
+                }
+            },
+            "additionalProperties": false
+        }),
+        defs: Vec::new(),
+    }
+}
+
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
+    MethodDef {
+        name: MANIFEST_INFO,
+        key: "manifest_info",
+        summary: "Inspect a built manifest slot and its optional snapshot.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::InfoRequest>,
+        reply: manifest_info,
+    },
+    MethodDef {
+        name: MANIFEST_LIST,
+        key: "manifest_list",
+        summary: "List built manifest slots with orphan and tag-intersection filters.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::ListRequest>,
+        reply: array_of::<mvm_client::manifest::SlotRow>,
+    },
+    MethodDef {
+        name: MANIFEST_VERIFY,
+        key: "manifest_verify",
+        summary: "Verify built manifest artifact checksums; signature verification is refused.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::VerifyRequest>,
+        reply: schema_of::<mvm_client::manifest::VerifiedSlot>,
+    },
     MethodDef {
         name: BACKEND_CAPABILITIES,
         key: "backend_capabilities",
@@ -639,6 +687,7 @@ mod tests {
             .iter()
             .chain(crate::guest::METHODS.iter())
             .chain(crate::launch::METHODS.iter())
+            .chain(crate::manifest::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
             .chain(crate::stream::LOG_METHODS.iter())

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
+use mvm_core::plan::{ExecutionPlan, SecretBinding};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
@@ -139,74 +139,7 @@ impl BrokerGuard {
     }
 }
 
-/// Republishes a workload's console capture (`<state_dir>/console.log`,
-/// write-only, written by every backend before the guest agent can say
-/// anything) into the per-VM output-stream broker — so a guest that panics
-/// on boot, fails dm-verity, or OOMs its agent still leaves a stream instead
-/// of an empty one.
-///
-/// A hook, not a direct call: the broker this republishes into is owned by
-/// the resident per-tenant daemon, which sits *above* this crate in the
-/// dependency graph (the daemon depends on the runtime, never the other way
-/// around), so this crate cannot name that broker's type. Same shape as
-/// [`NetworkEndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
-/// solve exactly this "the runtime needs the resident daemon to do
-/// something" problem — and, like the ordinary `VmBackend` methods this
-/// trait's two calls sit beside, `start`/`stop` are independent entry points
-/// keyed by `vm_name` rather than a value threaded between them: a `start`
-/// during `machine run -d` and the matching `machine stop` commonly run in different process
-/// invocations against the same disk-backed VM state, so nothing here can
-/// rely on an in-process object outliving the call that created it.
-///
-/// **Unconditional.** Unlike [`BrokerRegistrar`] (an unrelated, same-named
-/// host-services broker for admitted typed services), this is never
-/// gated on tenant admission. An unadmitted local run is exactly the case
-/// with the fewest other ways to see a boot failure, so it must not lose
-/// console capture either.
-pub trait ConsoleStreamer: Send + Sync {
-    /// Start capturing one workload's output. Best-effort: a real
-    /// implementation logs and continues on failure rather than failing a
-    /// workload boot over an observability feature.
-    fn start(&self, capture: &ConsoleCapture<'_>);
-
-    /// Stop following `vm_name`'s console, if anything started one.
-    /// Idempotent — a no-op for a VM whose console was never followed,
-    /// matching every other per-VM reaper `WorkloadRunner::stop` already
-    /// calls unconditionally.
-    fn stop(&self, vm_name: &str);
-}
-
-/// One workload's console capture: which VM, which file, the redaction policy
-/// its recorded output is cleared under, and whether that output is kept.
-///
-/// The policy rides along rather than being resolved on the far side because
-/// it is the *launch's* policy — the same value this call's caller already
-/// handed the substitution endpoint. A capture that picked its own would give
-/// one answer on egress and a different one in the transcript.
-///
-/// The retention mode rides along for the same reason and one more: it comes
-/// off the *signed plan*, so a streamer that read it from anywhere else would
-/// be honouring something nobody admitted.
-pub struct ConsoleCapture<'a> {
-    pub vm_name: &'a str,
-    /// The write-only capture file the backend is already writing.
-    pub console_log: &'a Path,
-    /// Signed-grant guest-to-host display socket; the streamer only reads it.
-    pub display_socket: Option<&'a Path>,
-    pub redaction: &'a RedactionPolicy,
-    /// Whether the admitted plan asked for a durable transcript. Capture and
-    /// live fan-out happen either way; this decides only what outlives the run.
-    pub retention: StreamRetention,
-}
-/// The hook a process that registered no real streamer gets: console bytes
-/// keep going to the write-only capture file on disk and nothing republishes
-/// them. An embedder driving this crate as a library, and every unit test
-/// that does not care about output capture, land here.
-pub struct NoopConsoleStreamer;
-impl ConsoleStreamer for NoopConsoleStreamer {
-    fn start(&self, _capture: &ConsoleCapture<'_>) {}
-    fn stop(&self, _vm_name: &str) {}
-}
+pub use super::console_stream::{ConsoleCapture, ConsoleStreamer, NoopConsoleStreamer};
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.
@@ -428,9 +361,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         {
             append_cmdline_token(&mut boot_cmdline, &token);
         }
-        if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
-            append_cmdline_token(&mut boot_cmdline, &token);
-        }
         if let Some(problem) = cmdline::cmdline_overflow(&boot_cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
         }
@@ -465,6 +395,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // than serializing its process setup after guest readiness.
         let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: inputs.redaction,
@@ -481,8 +412,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Universal initramfs path: the guest PID-1 agent waits for a signed
         // ActivateEnvironment before exposing operational RPCs. Send it now,
         // while the broker registration below still has a guard that rolls back
-        // on failure. A legacy per-rootfs verity initramfs (cold universal
-        // cache) keeps its own PID 1 and is never sent this verb.
+        // on failure. A rootfs boot whose universal initramfs could not be
+        // resolved was refused at launch resolution, before the VMM started.
         if crate::microvm::booted_with_universal_initramfs(inputs.config) {
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
@@ -816,6 +747,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // with nothing else to show why.
         self.console_streamer.start(&ConsoleCapture {
             vm_name: &child.0,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: &redaction,
@@ -1494,6 +1426,15 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
         ))
     })
 }
+/// Whether the backend's own supervisor holds the console capture for the
+/// VM's whole life, so the launcher must not start a competing writer.
+///
+/// Only the HVF supervisor owns capture today. Every other backend leaves it
+/// to the launcher's follower.
+fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -> bool {
+    kind == mvm_core::vm_backend::BackendKind::Hvf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1646,12 +1587,18 @@ mod tests {
     #[derive(Default)]
     struct RecordingConsoleStreamer {
         started: Mutex<Vec<(String, PathBuf)>>,
+        /// `ConsoleCapture::supervisor_owned` of each `start`, in call order.
+        supervisor_owned: Mutex<Vec<bool>>,
         stopped: Mutex<Vec<String>>,
         captured_at_stop: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     impl ConsoleStreamer for RecordingConsoleStreamer {
         fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.supervisor_owned
+                .lock()
+                .unwrap()
+                .push(capture.supervisor_owned);
             self.started.lock().unwrap().push((
                 capture.vm_name.to_string(),
                 capture.console_log.to_path_buf(),
@@ -1674,6 +1621,20 @@ mod tests {
                     .unwrap()
                     .insert(vm_name.to_string(), bytes);
             }
+        }
+    }
+
+    #[test]
+    fn only_the_hvf_supervisor_owns_console_capture() {
+        use mvm_core::vm_backend::BackendKind;
+        assert!(supervisor_owns_console(BackendKind::Hvf));
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+        ] {
+            assert!(!supervisor_owns_console(kind), "{kind:?}");
         }
     }
 
@@ -1782,87 +1743,17 @@ mod tests {
     #[test]
     fn append_cmdline_token_separates_only_a_non_empty_cmdline() {
         let mut empty = String::new();
-        append_cmdline_token(&mut empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut empty, "mvm.telemetry=1");
         assert_eq!(
-            empty, "mvm.secret_env=ab",
+            empty, "mvm.telemetry=1",
             "no leading space on an empty cmdline"
         );
 
         let mut non_empty = "root=/dev/vda".to_string();
-        append_cmdline_token(&mut non_empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut non_empty, "mvm.telemetry=1");
         assert_eq!(
-            non_empty, "root=/dev/vda mvm.secret_env=ab",
+            non_empty, "root=/dev/vda mvm.telemetry=1",
             "a non-empty cmdline gets exactly one space separator"
-        );
-    }
-
-    #[test]
-    fn a_secret_env_token_rides_the_boot_cmdline() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        let verity = rootfs_dir.path().join("rootfs.verity");
-        let initrd = rootfs_dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run(
-            "runner-secret-env-cmdline-spacing",
-            false,
-            true,
-        )
-        .write_to_dir(rootfs_dir.path())
-        .unwrap();
-
-        let vm_name = "runner-secret-env-cmdline-spacing";
-        seed_grant_sidecar_and_key(vm_name);
-        // A substitution env with one secret-shaped pair: the
-        // `mvm.secret_env` token must reach the booted spec's cmdline.
-        // (The separator rule itself is witnessed directly on
-        // `append_cmdline_token` — the runner path always pre-seeds the
-        // hostepoch token, so the base cmdline is never empty here.)
-        let state_dir = mvm_core::config::vm_state_dir(vm_name);
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("substitution-env.json"),
-            br#"[["API_KEY","mvm-secret-test"]]"#,
-        )
-        .unwrap();
-
-        let cfg = VmStartConfig {
-            name: vm_name.into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
-                home.path(),
-            )),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
-            ..Default::default()
-        };
-
-        let driver = MockDriver::default();
-        let guest = spawn_activation_guest(driver.clone(), vm_name);
-        let runner = WorkloadRunner::new(
-            driver,
-            RecordingSpawner::new("/run/ep.sock"),
-            RecordingBrokerRegistrar::new(),
-        );
-        runner.start(&cfg).expect("start succeeds");
-        guest.join().expect("guest thread");
-
-        let specs = runner.driver.booted_specs();
-        assert_eq!(specs.len(), 1);
-        let cmdline = &specs[0].cmdline;
-        assert!(
-            cmdline.contains("mvm.secret_env="),
-            "booted cmdline missing the secret-env token: {cmdline}"
         );
     }
 
@@ -1910,7 +1801,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workload_threads_minted_placeholders_to_pid1_without_raw_secrets() {
+    fn start_workload_puts_no_secret_environment_on_the_kernel_cmdline() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1949,10 +1840,14 @@ mod tests {
             })
             .expect("secret-bearing workload boots");
 
+        // The placeholders reach the workload with each `RunEntrypoint`, from
+        // the host's environment synthesis. The kernel cmdline used to carry
+        // them hex-encoded for a shell `/init` that no booted guest runs; any
+        // guest process can read `/proc/cmdline`, so nothing of them rides it.
         let specs = runner.driver.booted_specs();
         let cmdline = &specs[0].cmdline;
-        assert!(cmdline.contains("mvm.secret_env="), "{cmdline}");
-        assert!(cmdline.contains("4150495f4b45593d"), "{cmdline}");
+        assert!(!cmdline.contains("mvm.secret_env"), "{cmdline}");
+        assert!(!cmdline.contains("4150495f4b45593d"), "{cmdline}");
         assert!(!cmdline.contains("opaque-placeholder"), "{cmdline}");
     }
 
@@ -1997,6 +1892,12 @@ mod tests {
                 [("w-console".to_string(), expected_console_log.clone())]
             );
         }
+        // The mock backend has no supervisor that owns capture, so the
+        // launcher's follower is the writer and must be told so.
+        assert_eq!(
+            streamer.supervisor_owned.lock().unwrap().as_slice(),
+            [false]
+        );
         assert!(
             streamer.stopped.lock().unwrap().is_empty(),
             "must not stop before the workload ends"
@@ -4807,6 +4708,15 @@ mod tests {
             "the console log must live under the child's own state dir, not the parent's"
         );
         drop(started);
+        assert_eq!(
+            out.console_streamer
+                .supervisor_owned
+                .lock()
+                .unwrap()
+                .as_slice(),
+            [false],
+            "a restored child's capture ownership follows its backend, as a cold boot's does"
+        );
         assert!(
             out.console_streamer.stopped.lock().unwrap().is_empty(),
             "a committed claim leaves the console streamer running for the \

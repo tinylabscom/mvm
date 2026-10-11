@@ -247,7 +247,11 @@ echo "==> warming artifacts in $E2E_HOME"
 # Stage 0 store ("persistent Stage 0 ext4 store reported N filesystem errors")
 # failed the whole suite before a single scenario ran, for a reason unrelated to
 # any launch mode.
-MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --image alpine -- true
+#
+# A launch is cache-only, so the image is pulled first. The launch is named so
+# it boots cold: an unnamed one has to claim a prepared warm standby.
+MVM_HOME="$E2E_HOME" "$MVMCTL" image pull alpine
+MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --name e2e-launch-warmup --image alpine -- true
 
 echo "==> host posture"
 MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true

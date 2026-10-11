@@ -197,9 +197,9 @@ use xattr::{XattrWarningReason, collect_entry_xattrs};
 ///
 /// Bump it when the same layers start producing a different rootfs image, so a
 /// cache that keys an image on it rebuilds instead of serving an image built
-/// under the old semantics. `2` is the version that records file owners; an
-/// image cached before it has every file owned by root.
-pub const UNPACK_SEMANTICS_VERSION: &str = "2";
+/// under the old semantics. `3` normalizes newly created directories to 0755
+/// independently of host umask; `2` added recorded file owners.
+pub const UNPACK_SEMANTICS_VERSION: &str = "3";
 
 /// How [`unpack_layer`] handles xattrs carried in pax headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

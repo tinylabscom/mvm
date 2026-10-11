@@ -7,8 +7,8 @@ This page describes the current boot and execution path for workload microVMs.
 It replaces the older per-rootfs init schemes (`mvm-verity-init`, `mvm-oci-init`,
 busybox `/init`) with a single **universal initramfs** and a fail-closed
 activation step over vsock. Every runner backend boots this contract —
-Firecracker, libkrun, HVF, and QEMU (dev/test tier) all attach the universal
-initramfs and deliver `ActivateEnvironment` over vsock. QEMU's `vhost-vsock`
+Firecracker, libkrun, HVF, Apple Container, and QEMU (dev/test tier) all attach
+the universal initramfs and deliver `ActivateEnvironment` over vsock. QEMU's `vhost-vsock`
 speaks real `AF_VSOCK`, so its channels ride a per-VM `AF_VSOCK`↔UNIX bridge
 into the same per-port UNIX-socket convention the other backends expose
 natively.
@@ -32,8 +32,8 @@ The artifact is content-addressed and cached alongside `initramfs.hash`,
 image set at `<MVM_HOME>/cache/initramfs/image-set/<root-sha256>/<member-version>/<arch>/`,
 keyed by the signed root rather than the CLI version. On a cache miss a source
 checkout builds it with cargo, and an installed binary fetches the pinned
-image set's member. Attaching the initramfs is non-fatal: a cold cache falls back to the
-legacy boot path rather than failing the run.
+image set's member. If the required initramfs cannot be resolved, the boot
+fails closed.
 
 ## Boot inputs and device layout
 
@@ -66,14 +66,10 @@ vsock in `ActivateEnvironment` after boot, so the cmdline carries only the
 VMM console base plus, when applicable, egress, verb-grant, and user-volume
 tokens.
 
-That scoping matters, because the legacy tokens are not gone from the tree. The
-per-backend verity cmdline builders still emit `mvm.roothash=`, `mvm.data=`,
-`mvm.hash=`, and the `mvm.runtime_roothash=` / `mvm.runtime_data=` /
-`mvm.runtime_hash=` trio — the shared `build_verity_cmdline_args` for the QEMU
-driver, and an inline equivalent in the libkrun driver. A non-verity boot that
-carries a runtime overlay as a plain read-only block device still emits
-`mvm.runtime_data=`, naming the device the overlay actually landed on. The
-2048-byte cmdline overflow guard still applies.
+The old roothash cmdline builders are gone. A non-verity boot with a plain
+read-only runtime overlay still carries `mvm.runtime_data=` to name its attached
+device. The 2048-byte cmdline overflow guard still applies to the cmdline that
+is actually booted.
 
 ## Guest PID 1: early setup, then a fail-closed gate
 
@@ -98,8 +94,7 @@ The guest exposes no operational RPC surface until the host activates it.
 
 After the VMM boots, the workload runner builds an `ActivateEnvironment`
 message from the admitted launch config and sends it over the guest-agent
-vsock port — for every boot that attached the universal initramfs, verified
-or not. The message carries:
+vsock port. The message carries:
 
 - **Rootfs config** — one of two shapes: a dm-verity block root (`/dev/vda`
   - `/dev/vdb` + roothash, from the launch config or the `rootfs.roothash`
@@ -115,9 +110,7 @@ or not. The message carries:
   `<MVM_HOME>/vms/<name>/verb-grant.json` when present.
 
 The host requires an `ActivateEnvironmentAck`. Any error or unexpected response
-fails the boot closed. A legacy per-rootfs verity initramfs (used when the
-universal artifact is not cached yet) keeps its own PID 1 and is never sent
-this verb.
+fails the boot closed.
 
 ## Guest applies activation and pivots into the workload
 
@@ -151,9 +144,8 @@ Once activated, the guest is a normal workload VM:
 
 Factory standby parents boot the same device model and cmdline shape as
 workloads, minus workload authority (no plan, no volumes, no broker, deny-all
-egress). They are captured before activation, so the warm-claim path with the
-universal initramfs is not armed yet; it is part of the HVF / warm-claim
-convergence work.
+egress). They are sent `ActivateEnvironment`, still without workload authority,
+before capture, so a restored child does not resume in the pre-activation state.
 
 ## Future tiers and backends
 
@@ -220,10 +212,8 @@ form — or honestly not at all:
 
 - **Fail-closed guest** — no operational RPCs before a successful
   `ActivateEnvironment`, on every boot that attaches the universal initramfs.
-- **No roothash on the kernel cmdline, on the universal-initramfs verity path**
-  — there, verity parameters travel over the authenticated vsock channel instead
-  of being visible in `/proc/cmdline`. The per-backend verity cmdline builders
-  still emit them on the paths described above.
+- **No roothash on the kernel cmdline** — verity parameters travel over the
+  authenticated vsock channel instead of being visible in `/proc/cmdline`.
 - **Verified root where sealed** — a verity boot only pivots into a rootfs
   that passed dm-verity; unverified dev-tier boots are mounted plainly and
   are exactly as trustworthy as the legacy path they replace.

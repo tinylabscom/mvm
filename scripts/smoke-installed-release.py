@@ -15,13 +15,17 @@ import tempfile
 import urllib.request
 
 
-def runtime_digest(archive: Path) -> str:
-    checksum = Path(str(archive) + ".sha256").read_text().split()
+def file_digest(path: Path) -> str:
     sha256 = hashlib.sha256()
-    with archive.open("rb") as stream:
+    with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             sha256.update(chunk)
-    digest = sha256.hexdigest()
+    return sha256.hexdigest()
+
+
+def runtime_digest(archive: Path) -> str:
+    checksum = Path(str(archive) + ".sha256").read_text().split()
+    digest = file_digest(archive)
     if checksum != [digest, archive.name]:
         raise RuntimeError("installed guest archive differs from its release checksum")
     if not Path(str(archive) + ".bundle").read_bytes():
@@ -60,7 +64,8 @@ def fetch_verified_runtime(cli: Path, version: str) -> str:
         return digest
 
 
-def smoke(prefix: Path, version: str, *, runtime_fetch: bool = False) -> None:
+def smoke(prefix: Path, version: str, *, runtime_fetch: bool = False,
+          archive_only: bool = False) -> None:
     cli = (prefix / "bin" / "mvmctl").resolve(strict=True)
     reported = subprocess.check_output([cli, "--version"], text=True).strip()
     if reported != f"mvmctl {version}":
@@ -81,11 +86,19 @@ def smoke(prefix: Path, version: str, *, runtime_fetch: bool = False) -> None:
     archive = directories[0] / name
     for directory in directories:
         candidate = directory / name
-        components = [Path(str(candidate) + suffix) for suffix in ("", ".sha256", ".bundle")]
+        suffixes = ("",) if archive_only else ("", ".sha256", ".bundle")
+        components = [Path(str(candidate) + suffix) for suffix in suffixes]
         if any(path.exists() or path.is_symlink() for path in components):
             archive = candidate
             break
-    digest = fetch_verified_runtime(cli, version) if runtime_fetch else runtime_digest(archive)
+    if runtime_fetch:
+        digest = fetch_verified_runtime(cli, version)
+    elif archive_only:
+        # The .deb and .rpm carry the archive alone; the payload manifest the
+        # package was built with already pins its bytes.
+        digest = file_digest(archive)
+    else:
+        digest = runtime_digest(archive)
     # Cryptographic verification runs at recipe acquisition and guest-runtime
     # admission; this witness exercises the package manager's installed bytes.
     print(json.dumps({"cli": str(cli), "version": version, "library": str(library_path),
@@ -100,5 +113,8 @@ if __name__ == "__main__":
     parser.add_argument("version")
     parser.add_argument("--runtime-fetch", action="store_true",
                         help="fetch the exact runtime and authenticate it using the installed CLI")
+    parser.add_argument("--archive-only", action="store_true",
+                        help="the package installs the runtime archive without its sidecars")
     args = parser.parse_args()
-    smoke(args.prefix, args.version, runtime_fetch=args.runtime_fetch)
+    smoke(args.prefix, args.version, runtime_fetch=args.runtime_fetch,
+          archive_only=args.archive_only)

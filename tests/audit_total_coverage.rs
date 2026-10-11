@@ -205,6 +205,13 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 // does not emit a local audit-chain entry of its own.
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
+// `mvmctl image revocations` — `update` advances the image-set revocation
+// checkpoint and records it; `status` only re-verifies the applied list.
+const IMAGE_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("update", AuditPosture::Emits("ImageSetRevocationUpdate")),
+    ("status", AuditPosture::ReadOnly),
+];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("build-layer", AuditPosture::InteractiveOrControl),
     ("pull", AuditPosture::Emits("ImageFetch")),
@@ -213,13 +220,17 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("CachePrune")),
     ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
     ("dev", AuditPosture::DelegatesToSub(IMAGE_DEV_SUB)),
+    (
+        "revocations",
+        AuditPosture::DelegatesToSub(IMAGE_REVOCATIONS_SUB),
+    ),
 ];
 
 // `mvmctl pack` manages the versioned attested-pack cache and signed workload
-// packs. `rollback` swaps the active pointer
-// and emits `PackCacheChange`; `prune` removes bytes so it reuses
-// `CachePrune`. `download`/`update` refuse for every class — no pack is
-// published — so they change nothing and have nothing to record.
+// packs. `rollback` swaps the active pointer and emits `PackCacheChange`;
+// `prune` removes bytes and reuses `CachePrune`. System `download` and
+// `update` refuse while no system pack class is published. Workload `update`
+// follows the verified pull path and records its pin.
 const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
     "update",
     AuditPosture::Emits("RegistryPackRevocationUpdate"),
@@ -228,14 +239,24 @@ const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
-    ("update", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("RegistryPackPin")),
     (
         "revocations",
         AuditPosture::DelegatesToSub(PACK_REGISTRY_REVOCATIONS_SUB),
     ),
 ];
 
+const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("rollback", AuditPosture::Emits("PackCacheChange")),
+    ("prune", AuditPosture::Emits("CachePrune")),
+    ("download", AuditPosture::ReadOnly),
+    ("update", AuditPosture::ReadOnly),
+];
+
 const PACK_SUB: &[(&str, AuditPosture)] = &[
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -244,8 +265,9 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),
-    ("update", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("RegistryPackPin")),
     ("registry", AuditPosture::DelegatesToSub(PACK_REGISTRY_SUB)),
+    ("system", AuditPosture::DelegatesToSub(PACK_SYSTEM_SUB)),
 ];
 
 /// `deployments` is a read-only inventory of the local deploy store.
@@ -479,6 +501,8 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
 // audit entries (publisher trust is host-trust-boundary state);
 // list is `ReadOnly`.
 const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
+    // Like export, build produces a caller-owned archive, not a registry install.
+    ("build", AuditPosture::InteractiveOrControl),
     ("export", AuditPosture::InteractiveOrControl),
     ("fetch", AuditPosture::ReadOnly),
     // `bundle install` mutates the local bundle registry under
@@ -506,6 +530,9 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
     ("disarm", AuditPosture::Emits("TranscriptSealed")),
     ("list", AuditPosture::ReadOnly),
     ("export", AuditPosture::Emits("TranscriptExported")),
+    // Authenticated cleanup appends transcript.retired before unlink; exact
+    // already-retired/no-op reconciliation does not append duplicate evidence.
+    ("reconcile", AuditPosture::Emits("transcript.retired")),
 ];
 
 // `trust audit <sub>` — the chain inspection/verification verbs are read-only;
@@ -917,6 +944,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "TranscriptArmed",
         "TranscriptExported",
         "TranscriptSealed",
+        // Managed payload retirement is a signed original-capture event,
+        // rather than a LocalAuditKind operator-log variant.
+        "transcript.retired",
         "TrustAdd",
         "TrustRemove",
         "TrustInstructionsInit",
@@ -949,6 +979,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "RegistryPackPin",
         "RegistryPackRemove",
         "RegistryPackRevocationUpdate",
+        "ImageSetRevocationUpdate",
         // Secret-service entries: the recorder emits `secret.<action>`
         // for the action the service names, and a consent run names
         // `oauth_login` whatever its outcome.

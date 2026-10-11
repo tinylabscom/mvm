@@ -1881,6 +1881,7 @@ mod tests {
             "initramfs",
             "runtime-overlay",
             "runtime-overlay-bins",
+            mvm_build::runtime_overlay::RUNTIME_OVERLAY_TREE_CACHE_DIR,
             "guest-agent-build",
             "verity-initrd",
             "sdk-sidecar",

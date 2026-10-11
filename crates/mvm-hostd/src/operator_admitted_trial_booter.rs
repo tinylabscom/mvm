@@ -461,28 +461,13 @@ impl OperatorConfiguredTrialBooter {
             stream_retention: StreamRetention::Ephemeral,
             attestation_mode: self.config.attestation.mode.clone(),
         };
-        let config = VmStartConfig {
-            name: vm_name.clone(),
-            rootfs_path: self.config.workload.rootfs_path.display().to_string(),
-            kernel_path: self
-                .config
-                .workload
-                .kernel_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            verity_path: self
-                .config
-                .workload
-                .verity_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            roothash: self.config.workload.roothash.clone(),
-            cpus: self.config.workload.cpus,
-            memory_mib: self.config.workload.memory_mib,
-            tenant_id: Some(self.config.tenant.as_str().to_string()),
-            network_policy: network_policy.clone(),
-            ..Default::default()
-        };
+        let config = workload_start_config(
+            &self.config.workload,
+            &self.config.tenant,
+            &network_policy,
+            &vm_name,
+            backend_name,
+        )?;
         let campaign_now_unix_ms = now_unix_ms()?;
         let extension_context = ExtensionAdmissionContext::at(&cache_root, &verify);
         let keys_root = self.state_root.join("host-signing-keys");
@@ -643,6 +628,36 @@ impl OperatorConfiguredTrialBooter {
             NetworkPolicy::allow_list(allowed)
         }
     }
+}
+
+fn workload_start_config(
+    workload: &ProviderWorkloadConfig,
+    tenant: &AssuranceId,
+    network_policy: &NetworkPolicy,
+    vm_name: &str,
+    backend_name: &str,
+) -> Result<VmStartConfig> {
+    let mut config = VmStartConfig {
+        name: vm_name.to_string(),
+        rootfs_path: workload.rootfs_path.display().to_string(),
+        kernel_path: workload
+            .kernel_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        verity_path: workload
+            .verity_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        roothash: workload.roothash.clone(),
+        cpus: workload.cpus,
+        memory_mib: workload.memory_mib,
+        tenant_id: Some(tenant.as_str().to_string()),
+        network_policy: network_policy.clone(),
+        ..Default::default()
+    };
+    crate::run::attach_guest_runtime(&mut config, backend_name)
+        .context("resolving guest runtime for admitted assurance boot")?;
+    Ok(config)
 }
 
 fn verify_assurance_guest_protocol(rootfs: &Path) -> Result<()> {
@@ -908,6 +923,45 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
         let error = verify_assurance_guest_protocol(&rootfs).expect_err("missing sidecar");
         assert!(error.to_string().contains("missing mvm-meta.json"));
+    }
+
+    #[test]
+    fn assurance_start_config_attaches_the_guest_runtime() {
+        let (_environment, home) = crate::test_fixtures::isolated_mvm_home();
+        crate::test_fixtures::install_runtime_overlay(home.path());
+        mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(home.path());
+        let rootfs = home.path().join("workload.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("rootfs");
+        let workload = ProviderWorkloadConfig {
+            image_name: AssuranceId::parse("assurance-workload").expect("image name"),
+            rootfs_path: rootfs,
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "11".repeat(32)))
+                .expect("artifact digest"),
+            kernel_path: Some(home.path().join("vmlinux")),
+            kernel_digest: Some(
+                Sha256Digest::parse(format!("sha256:{}", "22".repeat(32))).expect("kernel digest"),
+            ),
+            verity_path: None,
+            roothash: None,
+            backend: ProviderBackend::Firecracker,
+            cpus: 1,
+            memory_mib: 256,
+            boot_timeout_seconds: 60,
+        };
+        let config = workload_start_config(
+            &workload,
+            &AssuranceId::parse("assurance-tenant").expect("tenant"),
+            &NetworkPolicy::deny_all(),
+            "assurance-runtime-test",
+            "firecracker",
+        )
+        .expect("cached guest runtime is attached");
+
+        assert!(config.runtime_overlay_path.is_some());
+        assert!(config.runtime_overlay_verity_path.is_some());
+        assert!(config.runtime_overlay_roothash.is_some());
+        assert!(config.runtime_overlay_version.is_some());
+        assert!(config.initrd_path.is_some());
     }
 
     fn signed_extension_pack(

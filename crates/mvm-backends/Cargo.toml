@@ -1,5 +1,6 @@
 [package]
 name = "mvm-backends"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Concrete VMM backend implementations for mvm"

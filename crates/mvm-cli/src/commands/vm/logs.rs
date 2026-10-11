@@ -419,6 +419,10 @@ fn announce(args: &Args, stream: &VmOutputStream, sinks: &mut Sinks<'_>) {
 /// is right there.
 fn describe_empty(empty: EmptyHistory, args: &Args) -> Option<String> {
     match empty {
+        EmptyHistory::Retired => Some(format!(
+            "note: microVM {:?} output payload is unavailable under authenticated retention policy",
+            args.name
+        )),
         EmptyHistory::CaptureEmpty => Some(format!(
             "note: microVM {:?} has an output capture and it is empty",
             args.name
@@ -1091,6 +1095,7 @@ mod tests {
                 display_socket: None,
                 redaction: &redaction,
                 retention: mvm_core::plan::StreamRetention::Persist,
+                supervisor_owned: false,
             })
             .expect("attach a plane");
 
@@ -1186,11 +1191,15 @@ mod tests {
                         max_chunks: 4096,
                     },
                     retention: RetentionPolicy::Ring,
+                    at_rest: None,
+                    generation_budget: None,
+                    payload_encoding: Default::default(),
                     created_unix_secs: 0,
                     recipient: "transcript-kek".to_string(),
                     wrapped_data_key_b64: wrapped,
                 },
-            );
+            )
+            .unwrap();
             for line in lines {
                 writer
                     .push(Direction::Stdout, line.as_bytes())
@@ -1207,6 +1216,7 @@ mod tests {
                 vm: "vm".to_string(),
                 socket: root.join("absent.sock"),
                 transcript_dir: dir,
+                protected_transcript_dir: None,
                 console_log: root.join("absent-console.log"),
                 keys_dir,
             }

@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 6;
+export const ABI_MINOR = 7;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -17,6 +17,21 @@ export interface HostAbiMethod {
   classification: Classification;
   summary: string;
 }
+
+/** Inspect a built manifest slot and its optional snapshot. */
+export const MANIFEST_INFO = "manifest.info";
+
+/**
+ * List built manifest slots with orphan and tag-intersection
+ * filters.
+ */
+export const MANIFEST_LIST = "manifest.list";
+
+/**
+ * Verify built manifest artifact checksums; signature verification
+ * is refused.
+ */
+export const MANIFEST_VERIFY = "manifest.verify";
 
 /** Reports what the backend can do. */
 export const BACKEND_CAPABILITIES = "backend.capabilities";
@@ -166,6 +181,9 @@ export const TELEMETRY_RECORDS = "telemetry.records";
 export const TELEMETRY_STATUS = "telemetry.status";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
+  "manifest.info": { key: "manifest_info", classification: "prod_safe", summary: "Inspect a built manifest slot and its optional snapshot." },
+  "manifest.list": { key: "manifest_list", classification: "prod_safe", summary: "List built manifest slots with orphan and tag-intersection filters." },
+  "manifest.verify": { key: "manifest_verify", classification: "prod_safe", summary: "Verify built manifest artifact checksums; signature verification is refused." },
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
   "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },
   "machine.create": { key: "machine_create", classification: "prod_safe", summary: "Persists a machine definition without booting it." },

@@ -5,7 +5,7 @@ description: Get a microVM running in under 5 minutes.
 
 :::tip[Looking for the shortest path to "it's running"?]
 [First-Use Happy Paths](/getting-started/happy-paths/) lists a
-three-command sequence for each mvm audience: OCI-image CLI users,
+short preparation-and-run sequence for each mvm audience: OCI-image CLI users,
 flake CLI users, Python SDK users, TypeScript SDK users, prebuilt bundle
 operators, and interactive-shell users. Each path is paired with
 `mvmctl doctor --workflow <name>` so the preflight only flags blockers
@@ -14,15 +14,25 @@ your audience actually has.
 
 ## 1. Run an OCI Image
 
-The shortest current path is a one-shot microVM from an OCI image:
+Prepare the runtime, image, and matching standby explicitly, then launch:
 
 ```bash
+mvmctl bootstrap
+mvmctl image pull alpine
+export MVM_RESIDENCY=warm
+mvmctl pool warm 1 --image alpine
 mvmctl machine run --image alpine -- uname -a
 ```
 
-This pulls or reuses the cached image, records OCI provenance, boots a transient
-microVM, runs the command, and tears the VM down. You do not need host Nix for
-this path.
+`MVM_RESIDENCY=warm` enables prepared claims in this shell. Linux otherwise
+defaults to `parked` with a zero warm target; `pool warm` alone does not change
+that policy.
+
+Preparation owns downloads and materialization. `machine run` is cache-only and
+claims the prepared standby, keeping every successful warm-eligible startup
+strictly below 300ms. A missing artifact or standby fails quickly and names the
+preparation command; launch never hides a pull, build, or cold fallback. You do
+not need host Nix for this path.
 
 Use this when you want "run this command in a fresh microVM." Use the flake
 and manifest flows below when you are building a custom image or a

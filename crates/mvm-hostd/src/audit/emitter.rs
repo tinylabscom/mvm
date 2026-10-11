@@ -1238,6 +1238,25 @@ impl AuditEmitter {
         self.emit_entry_for_evidence_blocking(entry, receipt)
     }
 
+    /// Publish a staged recovered terminal seal at most once on the primary
+    /// chain, preserving original authenticated opening attribution. Returns
+    /// true only when this call appended it. The caller must hold the capture
+    /// lease and establish producer quiescence/death; the timestamp is not proof.
+    ///
+    /// Use a dedicated `with_dir` emitter. Replicated stream destinations are
+    /// refused rather than silently bypassed or given a non-atomic guarantee.
+    pub fn emit_recovered_transcript_sealed(
+        &self,
+        seed: &mvm_core::transcript::TranscriptManifest,
+        recovered: &mvm_core::transcript::TranscriptManifest,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            self.signers.len() == 1,
+            "atomic recovery requires a primary-only emitter"
+        );
+        self.signers[0].emit_recovered_transcript_sealed(seed, recovered)
+    }
+
     fn emit_entry_for_evidence_blocking(
         &self,
         entry: &PlanAuditEntry,

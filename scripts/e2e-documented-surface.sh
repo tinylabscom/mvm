@@ -451,8 +451,8 @@ E2E_IMAGE_ENV=(MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES="$E2E_FETCH_MODE"
 if [[ "$E2E_FETCH_MODE" != pinned ]]; then
   E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
   if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
-    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
-    echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
+    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the dev default image is built" >&2
+    echo "!!! from its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
     echo "!!! or MVM_FETCH_UNCHANGED_IMAGES=pinned to boot the pinned set's members." >&2
     exit 1
   fi
@@ -478,7 +478,9 @@ if [[ "$(uname -s)" == Linux ]]; then
   echo "==> preparing the dev default image"
   env "${E2E_IMAGE_ENV[@]}" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
-  MVM_HOME="$E2E_HOME" "$MVMCTL" run --no-detect -- /bin/true
+  # Named, so it takes the cold path. An unnamed launch has to claim a
+  # prepared warm standby, and nothing has warmed one for the dev image.
+  MVM_HOME="$E2E_HOME" "$MVMCTL" run --name e2e-dev-image-warm --no-detect -- /bin/true
 fi
 
 # ---------------------------------------------------------------------------
@@ -544,6 +546,25 @@ warm_launch_artifacts() {
   fi
   rm -f "$warm_log"
 }
+# ---------------------------------------------------------------------------
+# Pull the OCI images the live scenarios boot.
+#
+# A launch is cache-only: it boots an image `image pull` already prepared and
+# refuses one that was not ("cached OCI image ... is not launch-ready"). The
+# live scenarios boot these in this home, through `machine run --image`, a
+# detected runtime (`rust` from Cargo.toml, `python` from the command), or the
+# warm-up below, so the home is prepared here, the way an operator prepares
+# one. Best-effort like the warm-up: a pull that fails surfaces as the
+# scenarios that needed it failing, naming the image.
+# ---------------------------------------------------------------------------
+E2E_LIVE_IMAGES=(alpine rust:1-alpine python:3.12 python:3.12-alpine curlimages/curl:8.21.0)
+e2e_phase images
+for image in "${E2E_LIVE_IMAGES[@]}"; do
+  echo "==> pulling $image"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" image pull "$image" \
+    || echo "    pull of $image FAILED; scenarios that boot it will say so"
+done
+
 e2e_phase launch-artifacts
 warm_launch_artifacts
 
@@ -641,7 +662,9 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 #
 # `MVM_BDD_LIVE=1` opts into the scenarios that boot a real microVM. No
 # `MVM_BDD_ONLY_TAG` here: that selector narrows to one tag's subset,
-# and narrowing is what let the macOS default backend go uncovered.
+# and narrowing is what let the macOS default backend go uncovered. The
+# release Linux matrix instead uses `MVM_BDD_SHARD`: both required jobs cover
+# disjoint partitions of this entire scenario inventory.
 # ---------------------------------------------------------------------------
 # Bounded, because a live scenario can hang rather than fail: a guest that
 # never completes its request leaves the runner waiting forever, and a release
@@ -685,7 +708,8 @@ SUITE_STARTED=""
 # deliberately absent: if one of those fires, the lane did not boot what it
 # claims to boot, and that has to be a failure rather than a footnote.
 #
-# This lane drives the whole suite, so it tolerates more than the launch lane:
+# Across the required Linux shards this lane drives the whole suite, so it
+# tolerates more than the launch lane:
 # a backend with no memory-snapshot tier (Firecracker reports `unsupported`;
 # the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
 # fixtures that need material this lane does not publish.
@@ -782,13 +806,16 @@ e2e_phase_end
 if (( SUITE_STATUS == 124 )); then
   echo
   echo "!!! TIMEOUT after ${E2E_TIMEOUT_SECS}s — terminated the suite process tree."
-  echo "!!! A live scenario hung instead of failing. The last scenario printed"
-  echo "!!! above is where it stopped; raise MVM_E2E_TIMEOUT_SECS if it needs longer."
+  echo "!!! The live suite exceeded its deadline. The last scenario printed"
+  echo "!!! above is where it stopped; diagnose that step before changing the budget."
 fi
 
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+if [[ -n "${MVM_BDD_SHARD:-}" ]]; then
+  echo "    shard ${MVM_BDD_SHARD} is not full coverage alone; all shards must pass."
+fi
 # A run that produced no scenario summary proved nothing, whatever its failure
 # count says. This is the shape that fooled a reader once already: the suite was
 # invoked, refused to start against a stale binary, and the log showed zero

@@ -16,6 +16,20 @@ pub use hvf::HvfDriver;
 pub use libkrun::LibkrunDriver;
 pub use qemu::QemuDriver;
 
+/// Keep socket fixtures independent of a potentially deep platform `TMPDIR`.
+/// The private directory is removed with its owner; the process environment
+/// and production socket namespace are never changed.
+#[cfg(test)]
+fn socket_tempdir() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+
+    tempfile::Builder::new()
+        .prefix("mvm-sock-")
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir_in("/tmp")
+        .expect("create short private socket fixture directory")
+}
+
 /// Host-dialable workload services. Guest-dialed and builder-only services
 /// must never be exposed through a workload's host connection API.
 fn host_dialable_port(port: u32) -> bool {
@@ -29,6 +43,37 @@ fn host_dialable_port(port: u32) -> bool {
 mod tests {
     use super::host_dialable_port;
     use mvm_net::channel::GuestService;
+
+    #[test]
+    fn socket_fixture_binds_nested_endpoints_and_cleans_up() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = super::socket_tempdir();
+        let root = dir.path().to_path_buf();
+        assert_eq!(root.parent(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(
+            std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for relative in [
+            "child/runtime/v.sock_5254",
+            "vsock/vsock-20001.sock",
+            "hvf-agent.sock",
+        ] {
+            let socket = root.join(relative);
+            std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+            let listener = UnixListener::bind(&socket).unwrap();
+            let client = UnixStream::connect(&socket).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            drop((client, server, listener));
+        }
+        drop(dir);
+        assert!(
+            !root.exists(),
+            "the socket fixture must remove its owned state"
+        );
+    }
 
     #[test]
     fn host_dial_ports_exclude_guest_dialed_and_builder_services() {

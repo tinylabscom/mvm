@@ -23,7 +23,6 @@
 //! transcript that lost records rather than handing back an artifact that
 //! verifies clean while being quietly incomplete.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -33,6 +32,7 @@ use std::time::Duration;
 use mvm_contract::stream::{StreamKind, StreamRecord};
 use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
 
+use super::protected_budget::SharedReservations;
 use crate::stream::journal::{CaptureJournal, JournalShortfall};
 
 /// Records the writer thread may fall behind before the hand-off starts
@@ -50,7 +50,7 @@ pub(in crate::stream) const DURABLE_QUEUE_DEPTH: usize = 256;
 enum PersistJob {
     /// Append this record's payload to the transcript. The record is shared
     /// rather than copied — the fan-out already holds it behind an `Arc`.
-    Chunk(Arc<StreamRecord>),
+    Chunk(PersistChunk),
     /// Answer once every earlier job has been taken. A test asserting on what
     /// landed needs a point at which "queued" and "written" are the same
     /// thing; nothing in production waits on the store.
@@ -58,11 +58,22 @@ enum PersistJob {
     Drained(SyncSender<()>),
 }
 
+struct PersistChunk {
+    record: Arc<StreamRecord>,
+    encoded: Option<Vec<u8>>,
+}
+
+impl PersistChunk {
+    fn payload(&self) -> &[u8] {
+        self.encoded.as_deref().unwrap_or(&self.record.payload)
+    }
+}
+
 impl PersistJob {
     /// The record this job wants appended, if it carries one. Answering a
     /// drain request is the other thing a job can be, and it is done here so
     /// the writer loop has one shape whatever the queue is carrying.
-    fn record(self) -> Option<Arc<StreamRecord>> {
+    fn record(self) -> Option<PersistChunk> {
         match self {
             Self::Chunk(record) => Some(record),
             #[cfg(test)]
@@ -140,11 +151,7 @@ pub(in crate::stream) struct DurableSink {
     jobs: Option<SyncSender<PersistJob>>,
     worker: Option<WriterHandle>,
     counters: Arc<PersistCounters>,
-    /// The journal the writer thread mirrors landed chunks into, so a process
-    /// that did not open this capture can still seal it. Held here only to
-    /// unlink it once a manifest supersedes it — the file itself belongs to
-    /// the writer thread.
-    journal_path: PathBuf,
+    reservations: Option<SharedReservations>,
 }
 
 impl DurableSink {
@@ -154,7 +161,6 @@ impl DurableSink {
         // that lock is never released. The journal mirrors the same seed.
         let seed = writer.sealed_manifest();
         let journal = CaptureJournal::new(writer.dir(), seed.clone());
-        let journal_path = journal.path().to_path_buf();
         let writer = Arc::new(Mutex::new(writer));
         let counters = Arc::new(PersistCounters::default());
         let (jobs, inbox) = sync_channel(DURABLE_QUEUE_DEPTH);
@@ -171,13 +177,13 @@ impl DurableSink {
             vm: vm.to_string(),
             writer,
             seed,
-            journal_path,
             // A thread that would not start must not cost the capture its
             // transcript by pulling the disk onto the producer's own thread:
             // without one, `push` sheds every record, same as a full queue.
             jobs: worker.as_ref().map(|_| jobs),
             worker,
             counters,
+            reservations: None,
         }
     }
 
@@ -187,15 +193,14 @@ impl DurableSink {
     #[cfg(test)]
     fn new_without_writer_thread(vm: &str, writer: TranscriptWriter) -> Self {
         let seed = writer.sealed_manifest();
-        let journal_path = writer.dir().join(crate::stream::journal::JOURNAL_FILENAME);
         Self {
             vm: vm.to_string(),
             writer: Arc::new(Mutex::new(writer)),
             seed,
-            journal_path,
             jobs: None,
             worker: None,
             counters: Arc::new(PersistCounters::default()),
+            reservations: None,
         }
     }
 
@@ -208,19 +213,56 @@ impl DurableSink {
     /// whole module exists to remove, reached through the one door that
     /// used to bypass it.
     pub fn push(&self, record: &Arc<StreamRecord>) {
-        self.counters.total.fetch_add(1, Ordering::Relaxed);
-        self.counters
-            .total_bytes
-            .fetch_add(record.payload.len() as u64, Ordering::Relaxed);
-        let Some(jobs) = self.jobs.as_ref() else {
-            return note_shed(&self.vm, &self.counters, record);
+        let encoded = match self.seed.payload_encoding {
+            mvm_core::transcript::PayloadEncoding::Raw => None,
+            mvm_core::transcript::PayloadEncoding::StreamRecordV1 => {
+                match serde_json::to_vec(record.as_ref()) {
+                    Ok(encoded) => Some(encoded),
+                    Err(_) => {
+                        self.note_unwritten(1, record.payload.len() as u64);
+                        return;
+                    }
+                }
+            }
         };
-        match jobs.try_send(PersistJob::Chunk(Arc::clone(record))) {
-            Ok(()) => note_handed_over(&self.vm, &self.counters),
-            Err(TrySendError::Full(_)) => note_shed(&self.vm, &self.counters, record),
-            // The writer thread is gone; the shed path applies here too.
-            Err(TrySendError::Disconnected(_)) => note_shed(&self.vm, &self.counters, record),
+        let chunk = PersistChunk {
+            record: Arc::clone(record),
+            encoded,
+        };
+        let bytes = chunk.payload().len() as u64;
+        saturating_add(&self.counters.total, 1);
+        saturating_add(&self.counters.total_bytes, bytes);
+        let Some(jobs) = self.jobs.as_ref() else {
+            return note_shed(&self.vm, &self.counters, record, bytes);
+        };
+        if let Some(reservations) = &self.reservations {
+            if !reservations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reserve(bytes)
+            {
+                return note_shed(&self.vm, &self.counters, record, bytes);
+            }
+        } else if self.seed.generation_budget.is_some() {
+            return note_shed(&self.vm, &self.counters, record, bytes);
         }
+        match jobs.try_send(PersistJob::Chunk(chunk)) {
+            Ok(()) => note_handed_over(&self.vm, &self.counters),
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                if let Some(reservations) = &self.reservations {
+                    reservations
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .release_rejected(bytes);
+                }
+                note_shed(&self.vm, &self.counters, record, bytes);
+            }
+        }
+    }
+
+    pub fn with_reservations(mut self, reservations: Option<SharedReservations>) -> Self {
+        self.reservations = reservations;
+        self
     }
 
     /// Block until every record pushed so far has reached the writer.
@@ -252,6 +294,19 @@ impl DurableSink {
         }
     }
 
+    /// Account for loss before broker ingestion (for example, a UART handoff).
+    pub fn note_unwritten(&self, chunks: u64, bytes: u64) {
+        saturating_add(&self.counters.shed_chunks, chunks);
+        saturating_add(&self.counters.shed_bytes, bytes);
+        saturating_add(&self.counters.total, chunks);
+        saturating_add(&self.counters.total_bytes, bytes);
+    }
+
+    pub fn ready(&self) -> bool {
+        self.jobs.is_some()
+            && (self.seed.generation_budget.is_none() || self.reservations.is_some())
+    }
+
     /// Stop taking work, wait — up to a bound — for what is queued to land,
     /// and seal.
     ///
@@ -270,13 +325,8 @@ impl DurableSink {
             Some(worker) => wait_for_writer(worker, SEAL_JOIN_TIMEOUT),
             None => true,
         };
-        // The journal exists so a *different* process can seal this capture.
-        // This one just did, and leaving the mirror behind would invite a
-        // later stop to adopt a capture that already has a manifest. Only on
-        // the joined path: a writer still running owns that file.
-        if joined {
-            CaptureJournal::discard(&self.journal_path);
-        }
+        // Keep the journal until the owner has published the manifest. Losing
+        // it here would make a failed manifest write unrecoverable on restart.
         if !joined {
             tracing::warn!(
                 vm = %self.vm,
@@ -295,7 +345,15 @@ impl DurableSink {
             self.counters.shed_chunks.load(Ordering::Relaxed),
             self.counters.shed_bytes.load(Ordering::Relaxed),
         );
-        writer.sealed_manifest()
+        match mvm_core::transcript::retention_now()
+            .and_then(|now| finalize_joined_writer(&mut writer, now))
+        {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                tracing::warn!("capture finalization failed; no terminal lifetime is claimed");
+                self.degraded_manifest()
+            }
+        }
     }
 
     /// The manifest for a writer this sink gave up waiting on: no chunks,
@@ -307,12 +365,45 @@ impl DurableSink {
     /// direction that never overclaims completeness.
     fn degraded_manifest(&self) -> TranscriptManifest {
         let mut manifest = self.seed.clone();
+        manifest.adopted = true;
         manifest.refused_chunks = self.counters.total.load(Ordering::Relaxed);
         manifest.refused_bytes = self.counters.total_bytes.load(Ordering::Relaxed);
         manifest.sealed_root_hex =
             sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
         manifest
     }
+}
+
+/// Called only after closing admission and joining the sole writer thread.
+/// A late maintenance tick may conservatively recover that quiescent generation,
+/// but backward/overflowing clocks are not permission to reset its lifetime.
+fn finalize_joined_writer(
+    writer: &mut TranscriptWriter,
+    now: u64,
+) -> Result<TranscriptManifest, mvm_core::transcript::TranscriptError> {
+    match writer.finalize_at(now) {
+        Ok(manifest) => Ok(manifest),
+        Err(error @ mvm_core::transcript::TranscriptError::RetentionClock) => {
+            let mut manifest = writer.sealed_manifest();
+            let overdue = manifest
+                .at_rest
+                .map(|policy| policy.generation_deadline(manifest.created_unix_secs))
+                .transpose()?
+                .is_some_and(|deadline| now > deadline);
+            if !overdue {
+                return Err(error);
+            }
+            mvm_core::transcript::recover_abandoned_at(&mut manifest, now)?;
+            Ok(manifest)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
 }
 
 /// A sink dropped without sealing still lets its writer finish, under the same
@@ -387,11 +478,9 @@ fn wait_for_writer(worker: WriterHandle, timeout: Duration) -> bool {
 /// fan-out already refuses to have. The count is what keeps the drop from
 /// being a lie: [`DurableSink::seal`] folds it into the manifest's refusal
 /// totals, so the artifact declares its own hole.
-fn note_shed(vm: &str, counters: &PersistCounters, record: &StreamRecord) {
-    counters.shed_chunks.fetch_add(1, Ordering::Relaxed);
-    counters
-        .shed_bytes
-        .fetch_add(record.payload.len() as u64, Ordering::Relaxed);
+fn note_shed(vm: &str, counters: &PersistCounters, record: &StreamRecord, bytes: u64) {
+    saturating_add(&counters.shed_chunks, 1);
+    saturating_add(&counters.shed_bytes, bytes);
     if !counters.shedding.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             vm = %vm,
@@ -458,8 +547,8 @@ fn spawn_writer(
 fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) {
     let mut degraded = false;
     while let Ok(job) = inbox.recv() {
-        if let Some(record) = job.record() {
-            degraded = append(vm, state, &record, degraded);
+        if let Some(chunk) = job.record() {
+            degraded = append(vm, state, &chunk.record, chunk.payload(), degraded);
         }
     }
 }
@@ -477,9 +566,15 @@ fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) 
 /// writer's own totals rather than recomputing them: a journal line that
 /// disagreed with the writer about what had landed would rebuild into a
 /// manifest that does not describe the segments beside it.
-fn append(vm: &str, state: &mut WriterThread, record: &StreamRecord, degraded: bool) -> bool {
+fn append(
+    vm: &str,
+    state: &mut WriterThread,
+    record: &StreamRecord,
+    payload: &[u8],
+    degraded: bool,
+) -> bool {
     let mut writer = lock_writer(&state.writer);
-    let outcome = writer.push(direction_for(record.kind), &record.payload);
+    let outcome = writer.push(direction_for(record.kind), payload);
     if outcome.is_ok() {
         let shortfall = JournalShortfall {
             // The hand-off's own drops belong in the same total the writer's
@@ -572,14 +667,60 @@ mod tests {
                     max_chunks: 1_000_000,
                 },
                 retention: RetentionPolicy::Ring,
+                at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 0,
                 recipient: "host:test".to_string(),
                 wrapped_data_key_b64: String::new(),
             },
         )
+        .unwrap()
     }
 
     const PAYLOAD: &[u8] = b"payload";
+
+    #[test]
+    fn late_joined_generation_keeps_its_original_age_and_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
+        let mut config = crate::stream::broker::stream_capture_config(
+            crate::stream::broker::StreamCaptureIdentity {
+                capture_id: "late-generation".into(),
+                binding: CaptureBinding {
+                    tenant_id: "tenant".into(),
+                    vm_name: "instance".into(),
+                    session_id: None,
+                },
+                created_unix_secs: 100,
+                recipient: "test".into(),
+                wrapped_data_key_b64: String::new(),
+            },
+        );
+        config.at_rest = Some(mvm_core::transcript::AtRestRetention::default());
+        let mut writer = TranscriptWriter::new(root.path(), aead::Key::random(), config).unwrap();
+        assert!(finalize_joined_writer(&mut writer, 99).is_err());
+        let manifest = finalize_joined_writer(&mut writer, 3701).unwrap();
+        assert_eq!(manifest.created_unix_secs, 100);
+        assert_eq!(manifest.sealed_unix_secs, Some(3700));
+        assert!(manifest.adopted);
+        assert_eq!(manifest.retention_deadline().unwrap(), Some(3700 + 604800));
+        let again = finalize_joined_writer(&mut writer, 4000).unwrap();
+        assert_eq!(again.sealed_unix_secs, manifest.sealed_unix_secs);
+    }
+
+    #[test]
+    fn upstream_loss_saturation_survives_later_durable_shedding() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = DurableSink::new_without_writer_thread("saturated", writer_at(root.path()));
+        sink.note_unwritten(u64::MAX, u64::MAX);
+        sink.push(&record(0));
+        assert_eq!(sink.counts().shed_chunks, u64::MAX);
+        let manifest = sink.seal();
+        assert_eq!(manifest.refused_chunks, u64::MAX);
+        assert_eq!(manifest.refused_bytes, u64::MAX);
+        assert!(manifest.is_truncated());
+    }
 
     fn record(seq: u64) -> Arc<StreamRecord> {
         Arc::new(StreamRecord {
@@ -732,6 +873,66 @@ mod tests {
             manifest.is_truncated(),
             "a transcript that dropped every record must say so"
         );
+    }
+
+    #[test]
+    fn timed_out_protected_writer_keeps_its_real_generation_lease_until_drain() {
+        use crate::audit::transcript_retirement::GenerationReservation;
+        use crate::stream::protected_budget::Reservations;
+        use mvm_core::transcript::secure_cleanup::CaptureDirectory;
+        use mvm_core::transcript::{AtRestRetention, GenerationBudget};
+        let root = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
+        let dir = root.path().join("generation");
+        let writer = crate::stream::plane::build_writer_with_policy(
+            "vm-durable",
+            &dir,
+            Some(AtRestRetention::default()),
+            "tenant",
+            &root.path().join("keys"),
+        )
+        .unwrap();
+        assert!(CaptureDirectory::open(root.path(), Path::new("generation")).is_err());
+        let reservations = Arc::new(Mutex::new(Reservations::new(
+            GenerationBudget::default(),
+            GenerationReservation {
+                plaintext_bytes: 0,
+                chunks: 0,
+            },
+        )));
+        let mut sink = DurableSink::new("vm-durable", writer).with_reservations(Some(reservations));
+        // Observe actual worker exit independently, without polling after its
+        // timed-out join detaches. The wrapper does not own the writer/lease.
+        let worker = sink.worker.take().unwrap();
+        let (actual_exit, exited) = std::sync::mpsc::channel();
+        let (proxy_exit, proxy_exited) = std::sync::mpsc::channel();
+        sink.worker = Some(WriterHandle {
+            join: std::thread::spawn(move || {
+                worker.join.join().unwrap();
+                drop(proxy_exit);
+                actual_exit.send(()).unwrap();
+            }),
+            exited: proxy_exited,
+        });
+        let held = sink.writer_lock();
+        let wedged = held.lock().unwrap();
+        sink.push(&record(0));
+        let (finished, sealing) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            finished.send(sink.seal()).unwrap();
+        });
+        let snapshot = sealing
+            .recv_timeout(SEAL_JOIN_TIMEOUT + Duration::from_secs(5))
+            .unwrap();
+        assert!(snapshot.sealed_unix_secs.is_none());
+        assert!(
+            CaptureDirectory::open(root.path(), Path::new("generation")).is_err(),
+            "finish timeout is not producer-death evidence"
+        );
+        drop(wedged);
+        drop(held);
+        exited.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(CaptureDirectory::open(root.path(), Path::new("generation")).is_ok());
     }
 
     #[test]

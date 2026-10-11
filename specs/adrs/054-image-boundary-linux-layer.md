@@ -113,29 +113,45 @@ and cite #4100 for the direction, never the reverse.
   mounts the SDK sidecar and volumes, and pivots in-process.
   `mkGuest`'s `/init` still runs for dev boots, for the chained builder boot,
   and for `mvm-images`' own e2e boots.
-- In a source checkout with no `mvm-images` checkout selected, `mvmctl`
-  already builds the runtime overlay on the host
-  (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_binaries`:
-  cargo-zigbuild binaries, the pure-Rust ext4 writer, in-process verity) and
-  the initramfs (`mvm_build::initramfs::initramfs_cpio`). The host-built
-  overlay lacks the GPU shims and the Python SDK tree the published one
-  carries.
-- The SDK sidecar has no host build path. `mvmctl build sdk-sidecar build`
-  builds it from a selected `mvm-images` checkout in the builder VM. The
-  loader and `libc.so.6` the published sidecar bundles are never loaded: the
-  workload process that loads the library already has its own.
-- With an `mvm-images` checkout selected, a source build pair-builds the
-  overlay and sidecars from that checkout. A release build acquires all three
-  pieces from the pinned image set.
+- A source checkout builds one guest-runtime archive from this tree
+  (`mvm_build::guest_runtime::resolve_or_build_source_guest_runtime`), keyed
+  by its digest, and assembles all three pieces from it on the host, whether
+  or not an `mvm-images` checkout is selected: the runtime overlay with the
+  GPU shims and the Python SDK tree
+  (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime`:
+  the pure-Rust ext4 writer and in-process verity), the initramfs from the
+  archive's sealed initramfs agent (`mvm_build::initramfs::initramfs_cpio`),
+  and the SDK sidecar without a bundled loader or libc
+  (`mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime`). The Wasm
+  tier preopens the same overlay files as a directory. A selected checkout
+  pair-builds only workload images and kernels.
+- In a source checkout every route goes through that one archive and those
+  assemblers. Bootstrap resolves the archive once and assembles all four
+  pieces from it (`mvm_build::runtime_pieces::assemble_runtime_pieces`); the
+  explicit `mvmctl build runtime-overlay build` and
+  `mvmctl build sdk-sidecar build` assemble the piece they name from it, with
+  no `mvm-images` checkout and no builder VM, and `--source download` installs
+  the pinned image set's member instead. Each assembled piece records the
+  digest of the archive it came from beside its version-keyed files, and
+  `mvmctl doctor`'s `guest runtime` line reports, per piece, that archive (and
+  whether it is the one this tree builds today) or the image-set member a
+  launch would attach. The archive object is the one digest-keyed cache; the
+  pieces keep their version-keyed slots because that is what the launch
+  resolvers read, and the sidecar keys reuse on its host-services sources
+  rather than the archive digest.
 - The builder boot payload (builder boot ABI 1) already hands the builder
   `mvm-host-vm-init` and `mvm-builderd` per boot. `mvm-setpriv` is the one mvm
   binary the builder image still bakes, and `mvm-host-vm-init` runs it from
   `/sbin`.
-- No CLI release carries the guest runtime, and `tests/release_assets.rs`
-  refuses the overlay, sidecar and initramfs as assets in `release.yml`.
-  `mvm_build::runtime_overlay::fetch_cli_release_archive` and
-  `install_runtime_overlay_archive` already implement a CLI-train archive
-  fetch, with no production caller.
+- Each CLI release builds the guest-bins archive and publishes it as a signed
+  asset (#4103): in the cosign sign loop, the signed checksum manifest and
+  the build provenance, and `tests/release_assets.rs` still refuses the
+  overlay, sidecar and initramfs as image assets of `release.yml`.
+  `install.sh` and the deb and rpm packages install it beside `mvmctl`;
+  `mvmctl bootstrap` on a release binary and `mvmctl env update` acquire it
+  through `mvm_build::runtime_overlay::fetch_cli_release_archive` (digest,
+  then signature). Nothing assembles the overlay, initramfs or sidecar from
+  it yet (#4104), so a release binary still boots the image set's copies.
 
 ## Consequences
 

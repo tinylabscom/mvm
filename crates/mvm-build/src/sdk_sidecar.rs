@@ -302,7 +302,7 @@ pub fn install_sidecar_into_cache(
     arch: &str,
     libc: GuestLibc,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
-    install_sidecar_with_fingerprint(source, cache_root, version, arch, libc, None)
+    install_sidecar_with_markers(source, cache_root, version, arch, libc, &[])
 }
 
 /// Install a sidecar produced from the current checkout and publish its source
@@ -318,6 +318,20 @@ pub fn install_source_built_sidecar(
     arch: GuestArch,
     libc: GuestLibc,
     fingerprint: &str,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    install_source_built_sidecar_from(source, cache_root, version, arch, libc, fingerprint, None)
+}
+
+/// [`install_source_built_sidecar`], also recording the guest-runtime archive
+/// the sidecar was packed from inside the same staging rename.
+fn install_source_built_sidecar_from(
+    source: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    fingerprint: &str,
+    archive_digest: Option<&str>,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     if fingerprint.trim().is_empty() {
         return Err(SdkSidecarBuildError::InstallInvalid {
@@ -338,14 +352,16 @@ pub fn install_source_built_sidecar(
         });
     }
     let arch_dir = arch.to_string();
-    install_sidecar_with_fingerprint(
-        source,
-        cache_root,
-        version,
-        &arch_dir,
-        libc,
-        Some(fingerprint.trim()),
-    )?;
+    let mut markers = vec![(LOCAL_SOURCE_FINGERPRINT_FILE, fingerprint.trim())];
+    if let Some(digest) = archive_digest {
+        if !crate::guest_runtime::is_archive_digest(digest) {
+            return Err(SdkSidecarBuildError::InstallInvalid {
+                reason: format!("{digest:?} is not a guest-runtime archive digest"),
+            });
+        }
+        markers.push((crate::runtime_pieces::ARCHIVE_ORIGIN_FILE, digest));
+    }
+    install_sidecar_with_markers(source, cache_root, version, &arch_dir, libc, &markers)?;
     Ok(
         SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
             .resolve(&arch_dir, libc)?,
@@ -355,6 +371,14 @@ pub fn install_source_built_sidecar(
 /// Build the libc-specific SDK sidecar from a verified guest-runtime member.
 /// The image contains only the host-services cdylib: the guest workload's own
 /// dynamic loader and libc satisfy its dependencies.
+///
+/// The installed sidecar is stamped with the archive's recorded cdylib source
+/// fingerprint — the inputs its one file was compiled from — so a later archive
+/// that rebuilt only other guest binaries reuses it, and
+/// [`cached_sidecar_provenance`] can tell whether it carries this checkout's
+/// host-services sources. It also records the archive digest it was packed
+/// from ([`crate::runtime_pieces::ARCHIVE_ORIGIN_FILE`]); a reused sidecar
+/// keeps naming the archive whose member it carries.
 pub fn build_sdk_sidecar_from_guest_runtime(
     cache_root: &Path,
     version: &str,
@@ -392,10 +416,11 @@ pub fn build_sdk_sidecar_from_guest_runtime(
             reason: format!("guest runtime member changed while packing: {member}"),
         });
     }
+    let source_fingerprint = runtime.manifest.sdk_cdylib_source_fingerprint.as_str();
     let resolver = SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string());
     let layout = resolver.layout(&arch.to_string(), libc);
     if std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
-        .is_ok_and(|fingerprint| fingerprint.trim() == runtime.digest)
+        .is_ok_and(|fingerprint| fingerprint.trim() == source_fingerprint)
         && let Ok(cached) = resolver.resolve(&arch.to_string(), libc)
     {
         return Ok(cached);
@@ -434,13 +459,14 @@ pub fn build_sdk_sidecar_from_guest_runtime(
         hex::encode(sha2::Sha256::digest(format!("{version}\n").as_bytes())),
     );
     std::fs::write(&manifest_path, body).map_err(io_at("writing", &manifest_path))?;
-    install_source_built_sidecar(
+    install_source_built_sidecar_from(
         staging.path(),
         cache_root,
         version,
         arch,
         libc,
-        &runtime.digest,
+        source_fingerprint,
+        Some(&runtime.digest),
     )
 }
 
@@ -466,13 +492,15 @@ fn require_canonical_sidecar_files(source: &Path) -> Result<(), SdkSidecarBuildE
     Ok(())
 }
 
-fn install_sidecar_with_fingerprint(
+/// Install `source`'s canonical files, plus each `(file name, value)` marker,
+/// as one staged directory published by a single rename.
+fn install_sidecar_with_markers(
     source: &Path,
     cache_root: &Path,
     version: &str,
     arch: &str,
     libc: GuestLibc,
-    fingerprint: Option<&str>,
+    markers: &[(&str, &str)],
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
     let layout = SdkSidecarLayout::under(cache_root, version, arch, libc);
     let parent =
@@ -487,9 +515,9 @@ fn install_sidecar_with_fingerprint(
             })?;
     std::fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
     let staging = stage_sidecar_artifact(parent, arch, source)?;
-    if let Some(fingerprint) = fingerprint {
-        let marker = staging.join(LOCAL_SOURCE_FINGERPRINT_FILE);
-        std::fs::write(&marker, format!("{fingerprint}\n")).map_err(io_at("writing", &marker))?;
+    for (name, value) in markers {
+        let marker = staging.join(name);
+        std::fs::write(&marker, format!("{value}\n")).map_err(io_at("writing", &marker))?;
         crate::runtime_overlay::set_cache_perms(&marker)?;
     }
     promote_staging(&staging, &layout.artifact_dir)?;
@@ -675,12 +703,14 @@ pub(crate) mod tests {
 
     const FIXTURE_VERSION: &str = "9.9.9";
 
-    #[test]
-    fn guest_runtime_sidecar_packs_one_cdylib_for_each_libc_and_rejects_bad_members() {
+    /// A verified guest runtime under `source` holding one host-services
+    /// object per libc, recording `cdylib_fingerprint` as its cdylib sources.
+    fn sidecar_runtime(
+        source: &Path,
+        arch: GuestArch,
+        cdylib_fingerprint: &str,
+    ) -> crate::guest_runtime::GuestRuntime {
         use mvm_core::image_set::{GitCommit, WorktreeState};
-        let source = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::X86_64;
         let mut files = std::collections::BTreeMap::new();
         for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
             let member = format!("{arch}/lib/{libc}/libmvm_host_services.so");
@@ -688,26 +718,86 @@ pub(crate) mod tests {
                 "libgcc_s.so.1",
                 libc.libc_soname().unwrap(),
             ]);
-            let path = source.path().join(&member);
+            let path = source.join(&member);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, &bytes).unwrap();
             files.insert(member, sha256_hex(&bytes));
         }
-        let mut runtime = crate::guest_runtime::GuestRuntime {
-            root: source.path().to_path_buf(),
+        crate::guest_runtime::GuestRuntime {
+            root: source.to_path_buf(),
             digest: "d".repeat(64),
             manifest: crate::guest_bins::GuestBinsManifest {
                 schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
                 version: FIXTURE_VERSION.into(),
                 guest_source_fingerprint: "g".repeat(64),
-                sdk_cdylib_source_fingerprint: "s".repeat(64),
+                sdk_cdylib_source_fingerprint: cdylib_fingerprint.to_string(),
                 source: crate::image_source::RepoIdentity {
                     commit: GitCommit::new("a".repeat(40)).unwrap(),
                     worktree: WorktreeState::Clean,
                 },
                 files,
             },
+        }
+    }
+
+    /// The explicit verb and bootstrap pack both variants through
+    /// `pack_sdk_sidecars`. Each records the archive it was packed from, and a
+    /// later archive with the same host-services sources reuses the sidecar
+    /// without relabelling it.
+    #[test]
+    fn packed_sidecars_record_the_archive_they_came_from() {
+        use crate::runtime_pieces::{
+            PieceOrigin, RuntimePiece, SDK_SIDECAR_LIBCS, pack_sdk_sidecars, piece_origin,
         };
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
+        let mut runtime = sidecar_runtime(source.path(), arch, &"s".repeat(64));
+
+        let packed = pack_sdk_sidecars(cache.path(), FIXTURE_VERSION, arch, &runtime).unwrap();
+        assert_eq!(
+            packed.iter().map(|a| a.libc).collect::<Vec<_>>(),
+            SDK_SIDECAR_LIBCS
+        );
+        let origin = |libc| {
+            piece_origin(
+                cache.path(),
+                FIXTURE_VERSION,
+                arch,
+                RuntimePiece::SdkSidecar(libc),
+                &set,
+            )
+            .unwrap()
+        };
+        for libc in SDK_SIDECAR_LIBCS {
+            assert_eq!(
+                origin(libc),
+                PieceOrigin::Archive {
+                    digest: "d".repeat(64)
+                }
+            );
+        }
+
+        runtime.digest = "e".repeat(64);
+        pack_sdk_sidecars(cache.path(), FIXTURE_VERSION, arch, &runtime).unwrap();
+        for libc in SDK_SIDECAR_LIBCS {
+            assert_eq!(
+                origin(libc),
+                PieceOrigin::Archive {
+                    digest: "d".repeat(64)
+                },
+                "a reused sidecar still names the archive its bytes came from"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_runtime_sidecar_packs_one_cdylib_for_each_libc_and_rejects_bad_members() {
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let mut runtime = sidecar_runtime(source.path(), arch, &"s".repeat(64));
         for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
             let artifact = build_sdk_sidecar_from_guest_runtime(
                 cache.path(),
@@ -841,6 +931,65 @@ pub(crate) mod tests {
         std::fs::write(root.join("crates/mvm-host-services/src/lib.rs"), sdk_src).unwrap();
     }
 
+    /// The sidecar the bootstrap packs from this checkout's guest runtime is
+    /// recognised as this checkout's: the provenance check and the producer
+    /// agree on what the marker records. A sidecar stamped with anything else
+    /// would warn on every launch that it predates the tree.
+    #[test]
+    fn a_sidecar_packed_from_the_guest_runtime_matches_its_checkout() {
+        let _env = TestEnv::new();
+        let cache = tempfile::tempdir().unwrap();
+        let checkout = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fake_checkout(checkout.path(), "// v1\n");
+        let fingerprint =
+            crate::guest_agent_build::sdk_cdylib_source_fingerprint(checkout.path()).unwrap();
+        let arch = GuestArch::host();
+        let mut runtime = sidecar_runtime(source.path(), arch, &fingerprint);
+        let provenance = |tree: &Path| {
+            cached_sidecar_provenance(cache.path(), FIXTURE_VERSION, arch, GuestLibc::Musl, tree)
+                .unwrap()
+        };
+
+        let first = build_sdk_sidecar_from_guest_runtime(
+            cache.path(),
+            FIXTURE_VERSION,
+            arch,
+            GuestLibc::Musl,
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            provenance(checkout.path()),
+            SidecarProvenance::MatchesSource
+        );
+
+        // An archive that rebuilt only other guest binaries carries the same
+        // cdylib sources, so the packed sidecar is reused rather than rewritten.
+        // Its cdylib bytes differ too, so a repack would change the image.
+        runtime.digest = "e".repeat(64);
+        let member = format!("{arch}/lib/musl/libmvm_host_services.so");
+        let rebuilt =
+            mvm_fs::elf::test_fixture::shared_object(&["libgcc_s.so.1", "libm.so", "libc.so"]);
+        std::fs::write(source.path().join(&member), &rebuilt).unwrap();
+        runtime.manifest.files.insert(member, sha256_hex(&rebuilt));
+        let reused = build_sdk_sidecar_from_guest_runtime(
+            cache.path(),
+            FIXTURE_VERSION,
+            arch,
+            GuestLibc::Musl,
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(reused.image_sha256, first.image_sha256);
+
+        // A checkout whose host-services sources moved on, as the next process
+        // sees it (one process answers a tree's fingerprint once).
+        let edited = tempfile::tempdir().unwrap();
+        fake_checkout(edited.path(), "// v2\n");
+        assert_eq!(provenance(edited.path()), SidecarProvenance::StaleSource);
+    }
+
     /// A downloaded sidecar carries no source marker, and that absence is the
     /// signal — it is how "the published artifact" is told apart from "built
     /// here". This is the case a contributor actually hits: the cache holds a
@@ -906,8 +1055,12 @@ pub(crate) mod tests {
         );
 
         // The edit that motivated all of this: a new verb in the FFI dispatch.
+        // Made in a second checkout, as the next `mvmctl` invocation would
+        // see it: one process answers a tree's fingerprint once and keeps it.
+        let edited = tempfile::tempdir().unwrap();
+        fake_checkout(edited.path(), "// v1\n");
         std::fs::write(
-            checkout.path().join("crates/mvm-host-services/src/lib.rs"),
+            edited.path().join("crates/mvm-host-services/src/lib.rs"),
             "// v2 — adds host.kv.get\n",
         )
         .unwrap();
@@ -918,7 +1071,7 @@ pub(crate) mod tests {
                 FIXTURE_VERSION,
                 GuestArch::host(),
                 GuestLibc::Musl,
-                checkout.path(),
+                edited.path(),
             )
             .unwrap(),
             SidecarProvenance::StaleSource,

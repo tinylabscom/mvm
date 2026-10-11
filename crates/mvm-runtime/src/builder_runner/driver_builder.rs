@@ -225,16 +225,36 @@ fn validate_shell_job(job: &mvm_build::builder_vm::BuilderShellJob) -> Result<()
 /// The HVF builder extracts artifacts to its own VM output dir; downstream code
 /// (the dev-build pipeline and slot registration) reads from the caller's
 /// `artifact_out`, so the artifacts must be copied across.
+///
+/// `src` is what the guest wrote, so nothing in it is followed or opened
+/// unless it is a plain file: a link is recreated as the same link, which
+/// keeps a guest-chosen target from being read into `dst` as file content,
+/// and a FIFO, socket or device is refused rather than opened.
 pub(super) fn copy_tree(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
             copy_tree(&from, &to)?;
-        } else {
+            continue;
+        }
+        // Whatever an earlier build left at `to` goes first: a copy onto a
+        // link left there would write through it.
+        if std::fs::symlink_metadata(&to).is_ok_and(|m| !m.is_dir()) {
+            std::fs::remove_file(&to)?;
+        }
+        if kind.is_symlink() {
+            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
+        } else if kind.is_file() {
             std::fs::copy(&from, &to)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("builder output {} is not a regular file", from.display()),
+            ));
         }
     }
     Ok(())
@@ -474,6 +494,67 @@ mod tests {
             std::fs::read(dst.path().join("sub").join("meta.json")).unwrap(),
             b"{}"
         );
+    }
+
+    #[test]
+    fn copy_tree_recreates_a_link_instead_of_reading_through_it() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dst = tempfile::TempDir::new().unwrap();
+        let host = tempfile::TempDir::new().unwrap();
+        let secret = host.path().join("host-signer.ed25519");
+        std::fs::write(&secret, [9u8; 32]).unwrap();
+        std::os::unix::fs::symlink(&secret, src.path().join("rootfs.ext4")).unwrap();
+
+        copy_tree(src.path(), dst.path()).unwrap();
+
+        let copied = dst.path().join("rootfs.ext4");
+        assert!(
+            std::fs::symlink_metadata(&copied)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link is mirrored as a link"
+        );
+        assert_eq!(std::fs::read_link(&copied).unwrap(), secret);
+        mvm_build::builder_output::require_regular_member(&copied)
+            .expect_err("and the output check downstream refuses it");
+    }
+
+    #[test]
+    fn copy_tree_never_writes_through_a_link_an_earlier_build_left() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dst = tempfile::TempDir::new().unwrap();
+        let host = tempfile::TempDir::new().unwrap();
+        let victim = host.path().join("victim");
+        std::fs::write(&victim, b"host bytes").unwrap();
+        std::os::unix::fs::symlink(&victim, dst.path().join("rootfs.ext4")).unwrap();
+        std::fs::write(src.path().join("rootfs.ext4"), b"root").unwrap();
+
+        copy_tree(src.path(), dst.path()).unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"host bytes");
+        assert_eq!(
+            std::fs::read(dst.path().join("rootfs.ext4")).unwrap(),
+            b"root"
+        );
+    }
+
+    #[test]
+    fn copy_tree_refuses_a_fifo_rather_than_opening_it() {
+        let src = tempfile::TempDir::new().unwrap();
+        let dst = tempfile::TempDir::new().unwrap();
+        let fifo = src.path().join("rootfs.ext4");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let err = copy_tree(src.path(), dst.path()).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

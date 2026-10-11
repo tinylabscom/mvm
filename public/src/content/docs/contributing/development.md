@@ -129,25 +129,27 @@ Or run the bootstrap script on a fresh machine:
 # Build
 just build
 
-# Prebuild the guest runtime overlay once so later required-overlay boots
-# can reuse the cached artifact instead of rebuilding guest binaries.
-just check::overlay
+# Prepare published runtime/image artifacts and the signed host helpers built
+# for this exact clean source commit.
+just check::run -- bootstrap
+just check::run -- image pull alpine
+just check::run -- pool warm 1 --image alpine
 
 # Run CLI
 just check::run -- --help
 
-# Boot a throwaway workload — the (headless) builder VM auto-bootstraps
-# on first use, then the workload boots on the platform's default backend.
+# Boot a prepared throwaway workload without compiling or downloading.
 just check::run -- machine run --image alpine -- uname -a
 
 # Release build (stripped, LTO)
 just release-build
 ```
 
-The runtime-overlay command only builds the **guest-executed** runtime payload
-and stores the sealed shared artifact under
-`~/.mvm/cache/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
-bootstrap or supervision stay outside that overlay.
+CI publishes signed host-helper bundles for each `main` commit. A clean checkout
+of one of those commits downloads the exact bundle during bootstrap. Dirty
+checkouts and commits not yet published from `main` have no remote artifact by
+construction; explicitly opt into local compilation with
+`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`.
 
 Source guest-runtime caches are keyed by the source fingerprint, version and
 guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy
@@ -500,24 +502,8 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 |----------|---------|--------------|
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
-| `publish-crates.yml` | Manual dispatch; packaging checks on relevant PRs and Extended CI | Checks the dependency plan; refuses live plans containing internal crates |
+| `publish-crates.yml` | Dispatched by `release.yml` on a tag | Publishes the public crates (`mvm-contract`) to crates.io; every other crate is `publish = false` |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
-
-### crates.io readiness
-
-`cargo run -p xtask -- check-publish-readiness` checks package metadata and
-source boundaries. `cargo run -p xtask -- publish-plan` prints the normal- and
-build-dependency closure of `mvm-client` and `mvmctl`, dependencies first.
-This is a dependency diagnostic, not authorization to publish the internal
-workspace. `mvm-client` and `mvmctl` are not yet standalone registry packages;
-their current manifests require internal dependencies, and the planner withholds
-roots above declared blockers.
-
-CLI releases do not dispatch crates.io publication. A manual live run rejects
-the entire plan before uploading anything if it contains names other than
-`mvm-client` or `mvmctl`. Publishing those names requires a deliberately
-standalone public package design; removing a blocker from the planner is not
-sufficient. Readiness and dry-run commands upload nothing.
 
 ### Website deployment
 

@@ -634,6 +634,7 @@ dependencies = [
  "mvm-contract",
  "rand",
  "regex",
+ "rustix",
  "secrecy",
  "serde",
  "serde_jcs",

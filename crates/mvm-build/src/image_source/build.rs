@@ -35,7 +35,7 @@ use super::cache::{
 };
 use crate::builder_vm_runtime::copy_dir_filtered;
 use crate::guest_libc::GuestLibc;
-use crate::host_payload_manifest::host_binary_names;
+use crate::host_payload_manifest::legacy_installed_host_binary_names;
 
 /// The image checkout's host-binary build script, relative to its root.
 pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
@@ -370,7 +370,7 @@ pub fn stage_work_tree(
             path: to.clone(),
             source,
         })?;
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             let from = bins.join(name);
             std::fs::copy(&from, to.join(name)).map_err(|source| LocalImageBuildError::Io {
                 op: "copying host binary",
@@ -454,7 +454,7 @@ pub fn build_host_binaries(
         what: "building the builder's host binaries".to_string(),
         detail: "the script printed no MVM_HOST_BIN_DIR= line".to_string(),
     })?;
-    for name in host_binary_names() {
+    for name in legacy_installed_host_binary_names() {
         if !dir.join(name).is_file() {
             return Err(LocalImageBuildError::Tool {
                 what: "building the builder's host binaries".to_string(),
@@ -1153,7 +1153,7 @@ mod tests {
         write(&mvm.join("crates/a/src/lib.rs"), b"// src");
         write(&mvm.join("target/debug/junk"), b"x");
         let bins = tmp.path().join("bins");
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             write(&bins.join(name), name.as_bytes());
         }
         let dest = tmp.path().join("work");
@@ -1164,7 +1164,7 @@ mod tests {
         assert!(!dest.join("images/.git").exists());
         assert!(dest.join("mvm/crates/a/src/lib.rs").is_file());
         assert!(!dest.join("mvm/target").exists());
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             assert_eq!(
                 std::fs::read(dest.join("host-bins").join(name)).unwrap(),
                 name.as_bytes()

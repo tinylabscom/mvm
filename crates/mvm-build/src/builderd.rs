@@ -459,6 +459,18 @@ pub fn dispatch_nix_build(
 /// inside it. The hook is baked into workload rootfses by
 /// `mkFunctionService.nix`; if the script is absent (e.g., a host-tool image) it
 /// is treated as a no-op by the runner.
+/// The members the export copies verbatim when the image has them: the ones
+/// every builder script returns (`builder_output::NIX_OUTPUT_MEMBERS`, which a
+/// library test holds this list to), plus a guest sidecar the image published.
+/// Spelled out here because the daemon binary compiles this file without the
+/// rest of the library.
+pub(crate) const EXPORTED_MEMBERS: &[&str] = &[
+    "initrd",
+    "rootfs-closure-paths",
+    "manifest.json",
+    "mvm-meta.json",
+];
+
 fn export_image_artifacts(nix_out: &Path, output_dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(output_dir)
         .map_err(|e| format!("create {}: {e}", output_dir.display()))?;
@@ -480,6 +492,14 @@ fn export_image_artifacts(nix_out: &Path, output_dir: &Path) -> Result<(), Strin
         copy_rootfs_with_hook(&rootfs, &output_dir.join("rootfs.ext4"))?;
     } else {
         return Err(format!("no rootfs.ext4 in {}", nix_out.display()));
+    }
+    // Never the image's dm-verity pair: the hook above rewrote the rootfs it
+    // covers, so the host computes one.
+    for member in EXPORTED_MEMBERS {
+        let src = nix_out.join(member);
+        if src.is_file() {
+            copy_artifact(&src, &output_dir.join(member))?;
+        }
     }
     Ok(())
 }
@@ -1148,6 +1168,27 @@ mod tests {
             b"rootfs-bytes"
         );
         assert!(!out.join("vmlinux").exists());
+    }
+
+    #[test]
+    fn export_returns_the_shared_members_and_never_the_image_verity_pair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nix_out = tmp.path().join("store-img");
+        let out = tmp.path().join("out");
+        std::fs::create_dir_all(&nix_out).unwrap();
+        std::fs::write(nix_out.join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(nix_out.join("rootfs.ext4"), b"rootfs").unwrap();
+        std::fs::write(nix_out.join("initrd"), b"initrd").unwrap();
+        std::fs::write(nix_out.join("mvm-meta.json"), b"{}").unwrap();
+        std::fs::write(nix_out.join("rootfs.verity"), b"nix tree").unwrap();
+        std::fs::write(nix_out.join("rootfs.roothash"), b"nix hash").unwrap();
+
+        export_image_artifacts(&nix_out, &out).unwrap();
+
+        assert_eq!(std::fs::read(out.join("initrd")).unwrap(), b"initrd");
+        assert_eq!(std::fs::read(out.join("mvm-meta.json")).unwrap(), b"{}");
+        assert!(!out.join("rootfs.verity").exists());
+        assert!(!out.join("rootfs.roothash").exists());
     }
 
     #[test]

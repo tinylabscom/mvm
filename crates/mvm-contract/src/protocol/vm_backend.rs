@@ -149,37 +149,9 @@ pub fn decode_host_epoch_cmdline(cmdline: &str) -> Option<u64> {
     value.parse::<u64>().ok().filter(|seconds| *seconds > 0)
 }
 
-/// Encode the per-run secret **placeholder** env as a single
-/// `mvm.secret_env=<hex>` kernel-cmdline token: a newline-joined
-/// `VAR=placeholder` blob, hex-encoded so it survives `/proc/cmdline` as one
-/// space-free token. `/init` decodes it and `export`s each `VAR=placeholder`
-/// into the sealed entrypoint's environment, so an SDK-free workload reads its
-/// opaque placeholder from `$VAR` and the host substitutes the real credential
-/// at egress. **Never a value** — only the `mvm-secret-…` placeholder (claim 13).
-/// `None` for no secrets. The cmdline is the only per-VM channel a *fresh* FC
-/// boot has to a sealed guest (no secrets drive attached), and the placeholder
-/// must be minted **before** boot so it can ride here.
-///
-/// The shared workload runner appends this token after the substitution
-/// endpoint has minted the per-boot placeholders. Guest PID 1 decodes it into
-/// tmpfs and exports only identifier-shaped environment entries before
-/// launching the workload; raw secret bytes never cross this boundary.
-pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
-    if pairs.is_empty() {
-        return None;
-    }
-    let blob = pairs
-        .iter()
-        .map(|(var, ph)| format!("{var}={ph}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let hex: String = blob.bytes().map(|b| format!("{b:02x}")).collect();
-    Some(format!("mvm.secret_env={hex}"))
-}
-
-/// Whether `name` can cross the PID 1 environment handoff as one assignment.
-/// Kept beside the encoder so persistent-reference validation and boot-time
-/// filtering cannot drift on what counts as an environment target.
+/// Whether `name` can be delivered to the workload as one environment
+/// assignment. Shared so persistent-reference validation, admission, and the
+/// service catalog cannot drift on what counts as an environment target.
 pub fn is_secret_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('A'..='Z' | 'a'..='z' | '_'))
@@ -1933,11 +1905,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_secret_env_cmdline_empty_is_none() {
-        assert!(encode_secret_env_cmdline(&[]).is_none());
-    }
-
-    #[test]
     fn secret_environment_names_are_shell_identifiers() {
         for valid in ["API_KEY", "_TOKEN", "lowercase9"] {
             assert!(is_secret_env_name(valid), "{valid}");
@@ -1945,28 +1912,6 @@ mod tests {
         for invalid in ["", "9TOKEN", "API-KEY", "/run/secrets/key", "A=B"] {
             assert!(!is_secret_env_name(invalid), "{invalid}");
         }
-    }
-
-    #[test]
-    fn encode_secret_env_cmdline_round_trips_pairs_as_single_token() {
-        let pairs = vec![
-            ("API_KEY".to_string(), "mvm-secret-abc123".to_string()),
-            ("DB_TOKEN".to_string(), "mvm-secret-def456".to_string()),
-        ];
-        let got = encode_secret_env_cmdline(&pairs).unwrap();
-        assert!(got.starts_with("mvm.secret_env="));
-        // Single cmdline token — no spaces/newlines survive.
-        assert!(!got.contains(' ') && !got.contains('\n'));
-        // The hex decodes back to the newline-joined `VAR=placeholder` blob.
-        let hex = got.strip_prefix("mvm.secret_env=").unwrap();
-        let decoded: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect();
-        assert_eq!(
-            String::from_utf8(decoded).unwrap(),
-            "API_KEY=mvm-secret-abc123\nDB_TOKEN=mvm-secret-def456"
-        );
     }
 
     #[test]

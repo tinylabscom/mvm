@@ -144,6 +144,7 @@ pub(crate) fn apply_activation(
     } else {
         guest_mount::pivot_to_root(&new_root)?;
     }
+    guest_mount::mount_extensions(&env.extensions, std::path::Path::new("/"))?;
     // The same post-mount setup the legacy per-rootfs init performs: mediated
     // tools, egress CA, verb grant, netinit, loopback + resolver, egress client.
     // It has to land after the pivot (it writes into the workload's root) and
@@ -165,6 +166,9 @@ pub(crate) fn apply_activation(
     // first. Without it the guest still boots, and its restores are refused.
     #[cfg(target_os = "linux")]
     mvm_agentd::crng_reseed::start_helper();
+    // The telemetry signing key is the egress client's, mode 0400; read it now
+    // or the listener can never answer a session.
+    crate::telemetry::capture_session_keys_before_privilege_drop();
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

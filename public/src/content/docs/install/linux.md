@@ -55,14 +55,15 @@ install -m 0755 \
   ~/.local/bin/
 ```
 
-### From crates.io
+### From source
 
-The GitHub release tarball is preferred for runtime use because it includes the
-adjacent host helper binaries. `cargo install` installs only the `mvmctl` CLI and
-is useful for CLI-only inspection or development.
+`mvmctl` is not published to crates.io; only the public `mvm-contract` library
+is. The GitHub release tarball is preferred for runtime use because it includes
+the adjacent host helper binaries. Installing from a checkout gives only the
+`mvmctl` CLI and is useful for CLI-only inspection or development.
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 ## Verify

@@ -6,12 +6,20 @@
 //! section. The meaning of each value is fixed once released:
 //!
 //! - **0** — the legacy image. It carries no marker, and it bakes `mvmctl`'s
-//!   builder binaries at `/sbin`. It boots either with those baked binaries or
-//!   with the boot payload, whose binaries then win.
-//! - **1** — the image carries no `mvmctl` binary at all. It boots only with
-//!   the boot payload, which supplies `mvm-host-vm-init` and `mvm-builderd`.
+//!   builder binaries and `mvm-setpriv` at `/sbin`. It boots either with those
+//!   baked binaries or with the boot payload, whose binaries then win.
+//! - **1** — the image carries none of the builder binaries the boot payload
+//!   supplies (`mvm-host-vm-init`, `mvm-builderd`) and boots only with the
+//!   payload. It still bakes `mvm-setpriv` at `/sbin`.
+//! - **2** — the image carries no mvm binary at all. `mvm-setpriv` also
+//!   arrives in the boot payload, so the image depends on nothing compiled
+//!   from mvm's source.
 //!
-//! Both promise the rest of the builder's surface: `/run` is a mount point,
+//! Every boot payload carries all three binaries whatever the image's ABI, and
+//! the guest prefers the payload's copy to a baked one, so a host that boots 2
+//! boots 0 and 1 the same way.
+//!
+//! All of them promise the rest of the builder's surface: `/run` is a mount point,
 //! busybox, `nix`, `iptables` and `/usr/bin/firecracker` sit at their paths,
 //! the builder uid 902 exists, and the persistent store lives on `/dev/vdb`.
 //! A change to any of those is a new ABI number, never a reinterpretation.
@@ -28,8 +36,12 @@ pub struct BuilderBootAbi(u32);
 impl BuilderBootAbi {
     /// Host binaries baked into the image, no marker.
     pub const LEGACY: Self = Self(0);
-    /// No host binaries in the image; they arrive in the boot payload.
+    /// No builder binaries in the image; they arrive in the boot payload. The
+    /// image still bakes `mvm-setpriv`.
     pub const PAYLOAD: Self = Self(1);
+    /// No mvm binary in the image: `mvm-setpriv` arrives in the boot payload
+    /// beside the builder binaries.
+    pub const NO_MVM_BINARY: Self = Self(2);
 
     pub const fn new(version: u32) -> Self {
         Self(version)
@@ -65,7 +77,7 @@ impl BuilderBootAbiRange {
     /// them all.
     pub const WITH_PAYLOAD: Self = Self {
         min: BuilderBootAbi::LEGACY,
-        max: BuilderBootAbi::PAYLOAD,
+        max: BuilderBootAbi::NO_MVM_BINARY,
     };
 
     /// `None` when `min` exceeds `max`: an empty range would refuse every
@@ -107,14 +119,27 @@ mod tests {
             .expect("0..=1 is a range");
         assert!(range.contains(BuilderBootAbi::LEGACY));
         assert!(range.contains(BuilderBootAbi::PAYLOAD));
-        assert!(!range.contains(BuilderBootAbi::new(2)));
+        assert!(!range.contains(BuilderBootAbi::NO_MVM_BINARY));
         assert_eq!(range.to_string(), "0..=1");
     }
 
     #[test]
     fn the_named_ranges_are_what_they_say() {
         assert_eq!(BuilderBootAbiRange::LEGACY_ONLY.to_string(), "0..=0");
-        assert_eq!(BuilderBootAbiRange::WITH_PAYLOAD.to_string(), "0..=1");
+        assert_eq!(BuilderBootAbiRange::WITH_PAYLOAD.to_string(), "0..=2");
+    }
+
+    #[test]
+    fn a_payload_boots_every_defined_abi_and_nothing_above() {
+        let range = BuilderBootAbiRange::WITH_PAYLOAD;
+        for abi in [
+            BuilderBootAbi::LEGACY,
+            BuilderBootAbi::PAYLOAD,
+            BuilderBootAbi::NO_MVM_BINARY,
+        ] {
+            assert!(range.contains(abi), "{abi}");
+        }
+        assert!(!range.contains(BuilderBootAbi::new(3)));
     }
 
     #[test]

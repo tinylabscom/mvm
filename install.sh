@@ -8,7 +8,8 @@
 #
 #   $MVM_INSTALL_LIB_DIR/.mvm-lib             marks the directory as install.sh's
 #   $MVM_INSTALL_LIB_DIR/<n>-<version>/       mvmctl, host binaries, assets/,
-#                                             and a .mvm-release marker
+#                                             guest-runtime/, and a .mvm-release
+#                                             marker
 #   $MVM_INSTALL_LIB_DIR/current              -> <n>-<version>
 #   $MVM_INSTALL_DIR/mvmctl                   -> $MVM_INSTALL_LIB_DIR/current/mvmctl
 #   $MVM_INSTALL_DIR/<host binary>            -> $MVM_INSTALL_LIB_DIR/current/<host binary>
@@ -19,6 +20,12 @@
 # An upgrade stages and verifies the new directory, then renames `current` in a
 # single step: the set is never observed half-replaced, and any failure before
 # the install is reported restores the previous `current`.
+#
+# The release's guest runtime (mvm-guest-bins-<version>.tar.gz, the programs
+# and libraries mvmctl runs inside a guest) is verified the way the mvmctl
+# archive is and staged in the release directory's guest-runtime/, so the CLI
+# and its own guest runtime switch together. A release that predates the asset
+# installs without it.
 #
 # Only directories carrying the markers are ever listed, pruned or removed, and
 # a library directory that already holds anything without the marker is refused.
@@ -401,7 +408,6 @@ mark_complete() {
 release_entries() {
   for entry in "$1"/*; do
     name="${entry##*/}"
-    [ "$name" != "install.sh" ] || continue
     if [ -f "$entry" ] && [ -x "$entry" ]; then
       printf '%s\n' "$name"
     elif [ "$name" = "assets" ] && [ -d "$entry" ]; then
@@ -790,6 +796,78 @@ finish() {
   exit "$status"
 }
 
+# Hold a downloaded release asset in $TMP to the digest the release's checksum
+# manifest records for it.
+verify_release_checksum() {
+  asset="$1"
+  got="$(sha256_of "$TMP/$asset")"
+  if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
+    warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification of $asset"
+    return 0
+  fi
+  if [ ! -f "$TMP/checksums.txt" ]; then
+    curl -fsSL "$REL/checksums-sha256.txt" -o "$TMP/checksums.txt" \
+      || die "could not download checksums-sha256.txt"
+  fi
+  want="$(grep " $asset\$" "$TMP/checksums.txt" | awk '{print $1}' | head -n1)"
+  [ -n "$want" ] || die "no checksum for $asset in checksums-sha256.txt"
+  if [ "$want" != "$got" ]; then
+    rm -f "$TMP/$asset"
+    die "checksum mismatch for $asset (want $want, got $got)"
+  fi
+  say "Checksum verified: $asset"
+}
+
+# Check a downloaded release asset in $TMP against its Sigstore bundle under
+# this release's workflow identity, with whichever verifier was chosen.
+verify_release_signature() {
+  asset="$1"
+  curl -fsSL "$REL/$asset.bundle" -o "$TMP/$asset.bundle" 2>/dev/null \
+    || die "no signature bundle published for $asset"
+
+  if [ -n "$VERIFIER" ]; then
+    "$VERIFIER" env verify-release "$TMP/$asset" --tag "$VERSION" >/dev/null \
+      || die "signature verification failed for $asset"
+    say "Signature verified: $asset"
+  elif [ -n "$COSIGN" ]; then
+    if "$COSIGN" verify-blob \
+        --bundle "$TMP/$asset.bundle" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
+        "$TMP/$asset" >/dev/null 2>&1; then
+      say "Signature verified: $asset"
+    else
+      die "cosign signature verification failed for $asset"
+    fi
+  else
+    die "no release signature verifier is available"
+  fi
+}
+
+# Download, verify and stage the release's guest runtime beside mvmctl, so the
+# release directory holds the CLI and the guest runtime of the same version.
+# Only a 404 is tolerated, and only because releases before the asset existed
+# have none; anything that fails to verify stops the install.
+stage_guest_runtime() {
+  runtime="mvm-guest-bins-${VERSION}.tar.gz"
+  if download_archive "$REL/$runtime" "$TMP/$runtime"; then
+    :
+  else
+    runtime_status="$?"
+    if [ "$runtime_status" -eq 44 ]; then
+      rm -f "$TMP/$runtime"
+      warn "release $VERSION publishes no guest runtime ($runtime); it predates the asset"
+      return 0
+    fi
+    die "download failed: $REL/$runtime"
+  fi
+  verify_release_checksum "$runtime"
+  verify_release_signature "$runtime"
+  mkdir -p "$SRC/guest-runtime"
+  mv "$TMP/$runtime" "$SRC/guest-runtime/$runtime" \
+    || die "could not stage $runtime beside mvmctl"
+}
+
 TARGET="$(detect_target)"
 ARCHIVE="mvmctl-${TARGET}.tar.gz"
 
@@ -830,38 +908,12 @@ case "$VERSION" in
   ''|*[!A-Za-z0-9._+-]*) die "release tag is not a safe directory name: $VERSION" ;;
 esac
 
-# Historical CLIs obtained their runtime from their signed image set. Keep
-# those authenticated releases installable, but never downgrade a new release
-# to that contract just because its required guest archive is missing.
-RUNTIME_REQUIRED="$(printf '%s\n' "$VERSION" | awk '
-  !/^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$/ { exit 1 }
-  {
-    version = $0
-    sub(/^v/, "", version)
-    sub(/[-+].*$/, "", version)
-    split(version, part, ".")
-    print (part[1] > 0 || part[2] > 23 || (part[2] == 23 && part[3] >= 1)) ? 1 : 0
-  }
-')" || die "release tag must be a CLI semantic version: $VERSION"
-
+verify_release_checksum "$ARCHIVE"
 got="$(sha256_of "$TMP/$ARCHIVE")"
-if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
-  warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification"
-else
-  curl -fsSL "$REL/checksums-sha256.txt" -o "$TMP/checksums.txt" \
-    || die "could not download checksums-sha256.txt"
-  want="$(grep " $ARCHIVE\$" "$TMP/checksums.txt" | awk '{print $1}' | head -n1)"
-  [ -n "$want" ] || die "no checksum for $ARCHIVE in checksums-sha256.txt"
-  if [ "$want" != "$got" ]; then
-    rm -f "$TMP/$ARCHIVE"
-    die "checksum mismatch for $ARCHIVE (want $want, got $got)"
-  fi
-  say "Checksum verified."
-fi
 
-# An explicit hash is an exact-byte handoff from an authenticated updater,
-# not merely a way to bootstrap a verifier. Enforce it even when a verifier
-# is already installed or the release-manifest checksum check was skipped.
+# An explicit hash pins the exact archive bytes, not merely the bytes used to
+# bootstrap a verifier. Enforce it even when a verifier is already installed
+# or the release-manifest checksum check was skipped.
 if [ -n "${MVM_TRUSTED_ARCHIVE_SHA256:-}" ]; then
   trusted_hash="$(trusted_archive_sha256)"
   [ "$got" = "$trusted_hash" ] \
@@ -899,63 +951,12 @@ if [ -z "$VERIFIER" ] && [ -z "$COSIGN" ]; then
   fi
 fi
 
-curl -fsSL "$REL/$ARCHIVE.bundle" -o "$TMP/$ARCHIVE.bundle" 2>/dev/null \
-  || die "no signature bundle published for $ARCHIVE"
-
-if [ -n "$VERIFIER" ]; then
-  "$VERIFIER" env verify-release "$TMP/$ARCHIVE" --tag "$VERSION" >/dev/null \
-    || die "signature verification failed for $ARCHIVE"
-  say "Signature verified."
-elif [ -n "$COSIGN" ]; then
-  if "$COSIGN" verify-blob \
-      --bundle "$TMP/$ARCHIVE.bundle" \
-      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-      --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
-      "$TMP/$ARCHIVE" >/dev/null 2>&1; then
-    say "Signature verified."
-  else
-    die "cosign signature verification failed for $ARCHIVE"
-  fi
-else
-  die "no release signature verifier is available"
-fi
+verify_release_signature "$ARCHIVE"
 
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"
 SRC="$TMP/mvmctl-${TARGET}"
 [ -f "$SRC/mvmctl" ] || die "archive missing mvmctl-${TARGET}/mvmctl"
-
-# Keep the signed, complete two-architecture runtime beside the executable.
-# It joins the same release-directory transaction: no CLI switch can expose
-# a missing or differently versioned runtime. Never extract it in the installer.
-RUNTIME="mvm-guest-bins-${VERSION}.tar.gz"
-if [ "$RUNTIME_REQUIRED" = 1 ]; then
-  mkdir -p "$TMP/guest-runtime"
-  for suffix in "" .sha256 .bundle .sha256.bundle; do
-    curl -fsSL "$REL/$RUNTIME$suffix" -o "$TMP/guest-runtime/$RUNTIME$suffix" \
-      || die "could not download $RUNTIME$suffix"
-  done
-  runtime_sum="$TMP/guest-runtime/$RUNTIME.sha256"
-  want="$(awk -v name="$RUNTIME" 'NF == 2 && $2 == name { count++; digest=$1 } END { if (count == 1 && NR == 1) print digest }' "$runtime_sum")"
-  [ -n "$want" ] && [ "$want" = "$(sha256_of "$TMP/guest-runtime/$RUNTIME")" ] \
-    || die "checksum mismatch or invalid release identity for $RUNTIME"
-  for runtime_asset in "$RUNTIME" "$RUNTIME.sha256"; do
-    if [ -n "$VERIFIER" ]; then
-      "$VERIFIER" env verify-release "$TMP/guest-runtime/$runtime_asset" --tag "$VERSION" >/dev/null \
-        || die "signature verification failed for $runtime_asset"
-    else
-      "$COSIGN" verify-blob \
-        --bundle "$TMP/guest-runtime/$runtime_asset.bundle" \
-        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-        --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
-        "$TMP/guest-runtime/$runtime_asset" >/dev/null 2>&1 \
-        || die "signature verification failed for $runtime_asset"
-    fi
-  done
-  rm -rf "$SRC/guest-runtime"
-  mv "$TMP/guest-runtime" "$SRC/guest-runtime"
-else
-  say "$VERSION predates the guest-runtime archive; its CLI uses its signed image-set runtime."
-fi
+stage_guest_runtime
 
 prepare_dirs
 acquire_lock

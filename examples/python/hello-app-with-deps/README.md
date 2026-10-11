@@ -39,7 +39,7 @@ jq '.dependencies' /tmp/hello-with-deps/launch.json
 ```sh
 mvmctl machine build examples/python/hello-app-with-deps/
 # … installs deps inside the builder VM, seals the volume …
-mvmctl machine run examples/python/hello-app-with-deps/ --prod
+mvmctl machine run --manifest examples/python/hello-app-with-deps/ --prod
 # claim 9 gate: the supervisor verifies the sealed volume before launching
 mvmctl machine run --flake examples/python/hello-app-with-deps/ --prod --entrypoint
 # expect: "hello ari"

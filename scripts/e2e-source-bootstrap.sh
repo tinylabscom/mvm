@@ -9,7 +9,8 @@
 # nothing else:
 #
 #   1. build an unembedded and an embedded `mvmctl`;
-#   2. build the SDK sidecar through the unembedded one, against a cold home;
+#   2. pack the SDK sidecars through the unembedded one, against a cold home:
+#      the guest runtime compiles on the host and no builder VM starts;
 #   3. bootstrap the builder image from source;
 #   4. build a user flake through the builder that step produced.
 #
@@ -58,8 +59,8 @@ if [[ -d "$HOME_DIR" ]] && [[ -n "$(ls -A "$HOME_DIR" 2>/dev/null)" ]]; then
 fi
 IMAGES_DIR="${MVM_IMAGES_DIR:-$REPO/../mvm-images}"
 if [[ ! -d "$IMAGES_DIR" ]]; then
-  echo "!!! no mvm-images checkout at $IMAGES_DIR; the builder image and SDK sidecar" >&2
-  echo "!!! are built from its recipes. Set MVM_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
+  echo "!!! no mvm-images checkout at $IMAGES_DIR; the builder image is built from" >&2
+  echo "!!! its recipes. Set MVM_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
   exit 2
 fi
 export MVM_IMAGES_DIR="$IMAGES_DIR"
@@ -84,8 +85,9 @@ cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
 cargo build --bin mvmctl --features "$FEATURES,embed-host-bins"
 just payload::supervisors
 
-# Against a cold home, the unembedded command owns no payload, so it must hand
-# Stage 0, the builder image and both sidecar variants to its embedded helper.
+# Against a cold home, the unembedded command packs both sidecar variants from
+# a guest runtime it compiles on the host. It needs neither the image checkout
+# nor a builder VM, so Stage 0 is first reached by the bootstrap below.
 e2e_phase sdk-sidecar
 "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 

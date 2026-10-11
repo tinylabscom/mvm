@@ -5,6 +5,7 @@ set -euo pipefail
 
 repo=/opt/mvm
 request=${1:?command argv file is required}
+source_identity=${2:?source identity file is required}
 results=/var/tmp/mvm-gcp-kvm-results
 bundle=/var/tmp/mvm-gcp-kvm-results.tar.gz
 
@@ -67,6 +68,12 @@ timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends \
   libcap-ng-dev libssl-dev musl-tools pkg-config protobuf-compiler \
   qemu-system-x86 qemu-utils xz-utils zstd dpkg-dev cpio gzip perl \
   coreutils busybox-static
+
+# The upload contains only tracked source files, never the local .git tree.
+# Fetch the exact public commit so the guest-runtime build can prove its
+# source identity and detect modifications in the uploaded worktree.
+bash "$repo/scripts/restore-gcp-source-git.sh" \
+  "$repo" "$source_identity" https://github.com/tinylabscom/mvm.git
 
 # Ubuntu 24.04 ships just 1.21, which cannot parse namespaced recipe
 # dependencies in this checkout's Justfile.

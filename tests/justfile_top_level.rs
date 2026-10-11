@@ -18,16 +18,16 @@ const RECIPE_DOCS: &[&str] = &[
     "crates/mvm-agentd/tests/runner_end_to_end.rs",
     "crates/mvm-conformance/README.md",
     "crates/mvm-sdk/src/bin/emit_schema.rs",
-    "crates/mvm-sdk/src/compile/orchestrator.rs",
+    "crates/mvm-compiler/src/orchestrator.rs",
     "nix/wrappers/README.md",
     "public/src/content/docs/contributing/ai-coding-workflow.md",
     "public/src/content/docs/contributing/development.md",
 ];
 
-/// Calls into another repository's justfile, by doc and recipe. The release
-/// table in the README names the command each train is cut with, and the
-/// image train is cut from mvm-images.
-const FOREIGN_RECIPES: &[(&str, &str)] = &[("README.md", "release")];
+/// Calls into another repository's justfile, by doc and recipe. None of the
+/// docs above names one today; the image-train release command lives in the
+/// releases reference page, which this test does not scan.
+const FOREIGN_RECIPES: &[(&str, &str)] = &[];
 
 /// Words that open a shell compound command, and the ones that continue or
 /// close it. Without a shebang `just` hands each body line to its own

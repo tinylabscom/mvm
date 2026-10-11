@@ -14,12 +14,16 @@ pub(super) fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
 pub(super) fn dispatch_baked_entrypoint(
     vm_name: &str,
     req: &ExecRequest,
+    startup_started: std::time::Instant,
+    launch_mode: crate::commands::vm::phase_timing::LaunchMode,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
-) -> Result<mvm_core::vm_backend::VmExitStatus> {
+) -> Result<(mvm_core::vm_backend::VmExitStatus, std::time::Instant)> {
     if !wait_for_agent_timed(vm_name, 30, sub) {
         emit_guest_console_diagnostic(vm_name);
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
+    let ready = std::time::Instant::now();
+    super::enforce_startup_slo(startup_started, ready, launch_mode)?;
     use crate::commands::vm::invoke::{DispatchStdin, EntrypointDispatch, dispatch};
     let code = dispatch(EntrypointDispatch {
         vm_name,
@@ -28,7 +32,7 @@ pub(super) fn dispatch_baked_entrypoint(
         session_id: None,
     })
     .with_context(|| format!("running the baked entrypoint in {vm_name}"))?;
-    Ok(dispatched_exit_status(code))
+    Ok((dispatched_exit_status(code), ready))
 }
 
 /// The entrypoint verb interprets zero as an already-expired deadline, not

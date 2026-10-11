@@ -63,6 +63,8 @@ grep -Fxq 'printf' "$argv_log"
 grep -Fxq '%s\n' "$argv_log"
 grep -Fxq 'argument with spaces' "$argv_log"
 grep -Fxq '; touch /tmp/not-executed' "$argv_log"
+[[ "$(cat "$scratch/success/gcloud.log.sha")" == \
+  "$(git -C "$repo_root" rev-parse HEAD)" ]]
 
 set +e
 PATH="$fake_bin:$PATH" MVM_CVE_FAKE_LOG="$scratch/missing.log" \
@@ -96,5 +98,54 @@ grep -Fq 'just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b
 grep -Fq '[[ "$(just --version)" == "just $just_version" ]]' "$remote_runner"
 grep -Fq 'firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558' "$remote_runner"
 grep -Fq '| sha256sum -c -' "$remote_runner"
+
+# A tracked-only upload has no .git directory. Recover the real, reachable
+# commit without changing any uploaded bytes, and reject malformed or
+# unreachable identities instead of manufacturing a clean checkout.
+source_fixture="$scratch/source-fixture"
+git init -q -b main "$source_fixture"
+git -C "$source_fixture" config user.name 'MVM test'
+git -C "$source_fixture" config user.email 'mvm-test@example.invalid'
+printf 'original\n' >"$source_fixture/example.txt"
+git -C "$source_fixture" add example.txt
+git -C "$source_fixture" commit -qm 'fixture'
+source_sha="$(git -C "$source_fixture" rev-parse HEAD)"
+git clone -q --bare "$source_fixture" "$scratch/source-remote.git"
+printf '%s\n' "$source_sha" >"$scratch/source.sha"
+
+mkdir "$scratch/uploaded"
+printf 'modified\n' >"$scratch/uploaded/example.txt"
+bash "$repo_root/scripts/restore-gcp-source-git.sh" \
+  "$scratch/uploaded" "$scratch/source.sha" "$scratch/source-remote.git"
+[[ "$(git -C "$scratch/uploaded" rev-parse HEAD)" == "$source_sha" ]]
+[[ "$(cat "$scratch/uploaded/example.txt")" == modified ]]
+[[ "$(git -C "$scratch/uploaded" status --porcelain)" == ' M example.txt' ]]
+
+printf 'not-a-sha\n' >"$scratch/invalid.sha"
+mkdir "$scratch/invalid"
+if bash "$repo_root/scripts/restore-gcp-source-git.sh" \
+  "$scratch/invalid" "$scratch/invalid.sha" "$scratch/source-remote.git" \
+  >"$scratch/invalid.out" 2>&1; then
+  echo 'invalid source identity unexpectedly accepted' >&2
+  exit 1
+fi
+grep -Fq 'invalid source commit' "$scratch/invalid.out"
+
+printf '%040d\n' 0 >"$scratch/unreachable.sha"
+mkdir "$scratch/unreachable"
+if bash "$repo_root/scripts/restore-gcp-source-git.sh" \
+  "$scratch/unreachable" "$scratch/unreachable.sha" "$scratch/source-remote.git" \
+  >"$scratch/unreachable.out" 2>&1; then
+  echo 'unreachable source identity unexpectedly accepted' >&2
+  exit 1
+fi
+[[ ! -e "$scratch/unreachable/.git/HEAD" ]] || {
+  echo 'failed source recovery left usable Git metadata' >&2
+  exit 1
+}
+
+# The live recipe must prefetch the verified release kernel, never compile a
+# workload kernel on the disposable KVM witness.
+grep -Fq 'kernel build --which workload --source download' "$repo_root/just/bdd/mod.just"
 
 echo "disposable GCP KVM runner lifecycle tests passed"

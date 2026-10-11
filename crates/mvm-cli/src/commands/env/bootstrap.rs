@@ -31,15 +31,26 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// before an OCI workload can launch.
 pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()> {
     run_steps(production)?;
+    crate::release_guest_runtime::prepare_for_running_binary()
+        .context("preparing the release guest runtime")?;
+    let local_build_requested = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode()
+        == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+        || mvm_build::image_source::configured_images_dir().is_some();
     let kernel = acquire_bootstrap_artifacts_with(
-        super::builder_vm::bootstrap_builder_vm_image,
+        || {
+            if local_build_requested {
+                super::builder_vm::bootstrap_builder_vm_image()
+            } else {
+                Ok(())
+            }
+        },
         prewarm_host_aux_helpers,
         prepare_launch_runtime_artifacts,
         prepare_pair_launch_artifacts,
-        super::builder_vm::ensure_workload_kernel,
+        super::builder_vm::prepare_workload_kernel,
     )?;
     ui::success(&format!(
-        "\nBootstrap complete. Builder VM, host helpers, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nSDK sidecars are assembled on demand when a workload needs one. Future machine runs will reuse prepared artifacts.\nWorkload kernel: {kernel}"
+        "\nBootstrap complete. Builder VM, host helpers, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nSDK sidecars for glibc and musl are ready. Future machine runs will reuse prepared artifacts.\nWorkload kernel: {kernel}"
     ));
     Ok(())
 }
@@ -53,11 +64,7 @@ fn acquire_bootstrap_artifacts_with<B, A, R, P, K>(
 ) -> Result<String>
 where
     B: FnOnce() -> Result<()>,
-    // Host-helper prewarm is best-effort by design (see
-    // `prewarm_host_aux_helpers_for`): a helper whose source build cannot
-    // succeed on this host must not abort bootstrap, so the step is not
-    // fallible at this seam.
-    A: FnOnce(),
+    A: FnOnce() -> Result<()>,
     K: FnOnce() -> Result<String>,
     R: FnOnce() -> Result<()>,
     P: FnOnce() -> Result<()>,
@@ -67,7 +74,7 @@ where
     ui::success("Builder VM ready.");
 
     ui::info("Preparing host helper binaries...");
-    host_helpers();
+    host_helpers().context("preparing host helper binaries")?;
     ui::success("Host helper binaries ready.");
 
     ui::info("Preparing shared guest runtime...");
@@ -84,79 +91,88 @@ where
 }
 
 fn prepare_launch_runtime_artifacts() -> Result<()> {
-    use mvm_client::launch::runtime_overlay::{
-        RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-        runtime_overlay_acquire_mode,
-    };
-
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let oci_cache_root = cache_root.join("oci");
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&oci_cache_root)?;
-    let mode = runtime_overlay_acquire_mode();
-    match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-                &cache_root,
-                version,
-                arch,
-            )?;
-        }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            let resolver = mvm_fs::overlay::RuntimeOverlayResolver::new(
-                cache_root.clone(),
-                version.to_string(),
-            );
-            let overlay_ready =
-                mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_ok();
-            if !overlay_ready {
-                acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-                    cache_root: &cache_root,
-                    expected_version: version,
-                    arch,
-                    source_checkout_root: None,
-                })?;
-            }
-        }
-    }
+    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&cache_root.join("oci"))?;
+    prepare_runtime_pieces_for_mode_with(
+        mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode(),
+        || prewarm_pieces_from_source(&cache_root, version, arch),
+        || prewarm_pieces_from_image_set(&cache_root, version, arch),
+    )
+}
 
-    prepare_initramfs_for_mode_with(
-        mode,
-        || {
-            let workspace_root =
-                mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
-                    .context("source guest runtime checkout is unavailable for initramfs")?;
-            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
-                &cache_root,
-                version,
-                arch,
-                &workspace_root,
-            )
-            .context("resolving shared guest runtime for initramfs")?;
-            mvm_build::initramfs::build_initramfs_from_guest_runtime(
-                &cache_root.join("initramfs"),
-                version,
-                arch,
-                &runtime,
-            )
-            .context("assembling initramfs from shared guest runtime")?;
-            Ok(())
-        },
-        || {
-            mvm_build::initramfs::resolve_or_build_local_initramfs(
-                &mvm_runtime::build_env::RuntimeBuildEnv,
-                &cache_root.join("initramfs"),
-                version,
-                arch,
-            )?;
-            Ok(())
-        },
-    )?;
+/// Assemble the overlay, the initramfs and both SDK sidecars from this
+/// checkout's guest-runtime archive, resolved once.
+fn prewarm_pieces_from_source(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    let workspace_root =
+        mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
+            .context("the source guest runtime needs an mvm source checkout")?;
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        &workspace_root,
+    )
+    .context("resolving the shared guest runtime")?;
+    mvm_build::runtime_pieces::assemble_runtime_pieces(cache_root, version, arch, &runtime)?;
+    ui::info(&format!(
+        "Runtime overlay, initramfs and SDK sidecars assembled from guest runtime archive {}.",
+        mvm_build::runtime_pieces::short_digest(&runtime.digest)
+    ));
     Ok(())
 }
 
-fn prepare_initramfs_for_mode_with<S, P>(
+/// Install whichever of the overlay, the initramfs and the SDK sidecars the
+/// cache lacks from the image set this build pins.
+fn prewarm_pieces_from_image_set(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    use mvm_client::launch::runtime_overlay::{
+        RuntimeOverlayAcquireParams, acquire_runtime_overlay,
+    };
+
+    let resolver =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
+    if mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_err() {
+        acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+            cache_root,
+            expected_version: version,
+            arch,
+            source_checkout_root: None,
+        })?;
+    }
+
+    let set = mvm_build::published_image_set::SetMemberCache::locked();
+    let initramfs_cache = mvm_build::runtime_pieces::initramfs_cache_root(cache_root);
+    if mvm_build::initramfs::resolve_image_set_initramfs(&initramfs_cache, &set, arch).is_err() {
+        mvm_build::initramfs::download_initramfs(arch, &initramfs_cache)?;
+    }
+    for libc in mvm_build::runtime_pieces::SDK_SIDECAR_LIBCS {
+        let ready =
+            mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache_root, &set, arch, libc)
+                .and_then(|resolver| {
+                    resolver
+                        .resolve(&arch.to_string(), libc)
+                        .map_err(mvm_build::sdk_sidecar::SdkSidecarBuildError::from)
+                })
+                .is_ok();
+        if !ready {
+            mvm_build::sdk_sidecar::download_sdk_sidecar(arch, libc, cache_root)?;
+        }
+    }
+    Ok(())
+}
+
+/// Run exactly one of the two acquisitions for `mode`: a source build never
+/// downloads, and a published acquisition never compiles.
+fn prepare_runtime_pieces_for_mode_with<S, P>(
     mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
     source: S,
     published: P,
@@ -173,11 +189,33 @@ where
     }
 }
 
-/// Resolve — building from this checkout when a helper is missing or older
-/// than its sources — every per-VM host helper the launch path probes at
-/// spawn, so a later `machine run` never cold-builds one.
-fn prewarm_host_aux_helpers() {
-    prewarm_host_aux_helpers_for(&mvm_vmm::host::aux_bin::HostProcess::current())
+/// Resolve every per-VM host helper the launch path probes at spawn. Published
+/// helpers are the default; source compilation requires the same explicit
+/// local-build selectors as the rest of bootstrap.
+fn prewarm_host_aux_helpers() -> Result<()> {
+    let host = mvm_vmm::host::aux_bin::HostProcess::current();
+    let local_build_requested =
+        mvm_build::artifact_acquisition::local_guest_runtime_build_requested()
+            || mvm_build::image_source::configured_images_dir().is_some();
+    if !local_build_requested {
+        let source_identity_mismatch =
+            !crate::update::published_host_helpers_match_current_build()?;
+        let missing = source_identity_mismatch
+            || launch_helper_specs()
+                .iter()
+                .any(|spec| mvm_vmm::host::aux_bin::resolve_verified_for(spec, &host).is_err());
+        if missing {
+            crate::update::prepare_release_host_binaries().with_context(|| {
+                format!(
+                    "published host helpers are unavailable; explicitly compile local helpers with \
+                     `{}=build mvmctl bootstrap`",
+                    mvm_build::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV
+                )
+            })?;
+        }
+    }
+    prewarm_host_aux_helpers_for(&host);
+    Ok(())
 }
 
 fn prewarm_host_aux_helpers_for(host: &mvm_vmm::host::aux_bin::HostProcess) {
@@ -281,43 +319,43 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_bootstrap_artifacts_with, launch_helper_specs, prepare_initramfs_for_mode_with,
-        prewarm_host_aux_helpers_for,
+        acquire_bootstrap_artifacts_with, launch_helper_specs,
+        prepare_runtime_pieces_for_mode_with, prewarm_host_aux_helpers_for,
     };
     use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
     use std::cell::RefCell;
 
     #[test]
-    fn source_bootstrap_uses_archive_initramfs_without_legacy_builder() {
+    fn source_bootstrap_assembles_from_the_archive_and_downloads_nothing() {
         let calls = RefCell::new(Vec::new());
-        prepare_initramfs_for_mode_with(
+        prepare_runtime_pieces_for_mode_with(
             RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
             || {
-                calls.borrow_mut().push("archive initramfs");
+                calls.borrow_mut().push("archive pieces");
                 Ok(())
             },
             || {
-                calls.borrow_mut().push("legacy cargo builder");
-                anyhow::bail!("legacy initramfs builder must not run for source checkout")
+                calls.borrow_mut().push("image set");
+                anyhow::bail!("a source bootstrap must not download from the image set")
             },
         )
         .unwrap();
-        assert_eq!(calls.into_inner(), ["archive initramfs"]);
+        assert_eq!(calls.into_inner(), ["archive pieces"]);
     }
 
     #[test]
-    fn published_bootstrap_retains_published_initramfs_resolution() {
+    fn published_bootstrap_acquires_from_the_image_set_and_builds_nothing() {
         let calls = RefCell::new(Vec::new());
-        prepare_initramfs_for_mode_with(
+        prepare_runtime_pieces_for_mode_with(
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
             || anyhow::bail!("source guest runtime must not build in published mode"),
             || {
-                calls.borrow_mut().push("published initramfs");
+                calls.borrow_mut().push("image set");
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(calls.into_inner(), ["published initramfs"]);
+        assert_eq!(calls.into_inner(), ["image set"]);
     }
 
     #[test]
@@ -330,6 +368,7 @@ mod tests {
             },
             || {
                 calls.borrow_mut().push("helpers");
+                Ok(())
             },
             || {
                 calls.borrow_mut().push("runtime");
@@ -358,7 +397,7 @@ mod tests {
         let runtime_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || anyhow::bail!("builder failed"),
-            || {},
+            || Ok(()),
             || {
                 runtime_called.set(true);
                 Ok(())
@@ -375,7 +414,7 @@ mod tests {
     fn bootstrap_fails_when_workload_kernel_is_not_ready() {
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || {},
+            || Ok(()),
             || Ok(()),
             || Ok(()),
             || anyhow::bail!("kernel acquisition failed"),
@@ -390,7 +429,7 @@ mod tests {
         let workload_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || {},
+            || Ok(()),
             || anyhow::bail!("overlay unavailable"),
             || Ok(()),
             || {
@@ -408,15 +447,15 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_continues_when_host_helper_prewarm_fails() {
-        // Prewarm is best-effort: a failing helper step must not abort
-        // bootstrap for launches that never spawn it, and the later steps
-        // still run.
+    fn bootstrap_fails_when_host_helpers_are_not_ready() {
         let runtime_called = std::cell::Cell::new(false);
         let helpers_called = std::cell::Cell::new(false);
-        acquire_bootstrap_artifacts_with(
+        let error = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || helpers_called.set(true),
+            || {
+                helpers_called.set(true);
+                anyhow::bail!("helper unavailable")
+            },
             || {
                 runtime_called.set(true);
                 Ok(())
@@ -424,10 +463,11 @@ mod tests {
             || Ok(()),
             || Ok("/cache/workload/vmlinux".to_string()),
         )
-        .expect("a failing host-helper step must not fail bootstrap");
+        .expect_err("missing host helpers must fail bootstrap");
 
         assert!(helpers_called.get());
-        assert!(runtime_called.get());
+        assert!(!runtime_called.get());
+        assert!(error.to_string().contains("host helper"));
     }
 
     #[test]

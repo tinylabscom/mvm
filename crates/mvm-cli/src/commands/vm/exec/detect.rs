@@ -360,8 +360,8 @@ fn refuse_if_argv_looks_like_an_image_reference(
         && looks_like_a_misplaced_image_reference(first, cwd)
     {
         anyhow::bail!(
-            "`{first}` looks like an image reference, not a command — did you mean \
-             `--image {first}`? A local path escapes the check with a leading `./`."
+            "`{first}` looks like an image reference, not a command — name the image before \
+             `--`: `mvmctl run {first} -- <cmd>`. A local path escapes the check with a leading `./`."
         );
     }
     Ok(())
@@ -606,9 +606,9 @@ mod source_resolution {
         assert!(result.is_err() || result.expect("ok") == ResolvedSource::BundledDefault);
     }
 
-    /// The exact repro from the issue: `mvmctl machine run app:1.0 -- sh`
-    /// gives no image source, so `app:1.0` would otherwise become the guest
-    /// command silently. Exercised with `ExplicitOnly` (no catalog/project
+    /// The original repro, now spelled `mvmctl machine run -- app:1.0 sh`:
+    /// no image source, so `app:1.0` would otherwise become the guest command
+    /// silently. Exercised with `ExplicitOnly` (no catalog/project
     /// detection to confound it) per the resolver-level testing convention
     /// for this check.
     #[test]
@@ -620,11 +620,11 @@ mod source_resolution {
         };
         let err = resolve_run_source(&mut args, dir.path(), Inference::ExplicitOnly)
             .expect_err("a misplaced image reference must refuse");
-        assert!(err.to_string().contains("--image app:1.0"), "{err}");
+        assert!(err.to_string().contains("mvmctl run app:1.0 --"), "{err}");
     }
 
-    /// The check runs before inference, not after: `mvmctl run node:22 --
-    /// node index.js` next to a `package.json` must still refuse rather than
+    /// The check runs before inference, not after: `mvmctl run -- node:22
+    /// index.js` next to a `package.json` must still refuse rather than
     /// quietly detecting the node runtime and running `node:22` as its
     /// command.
     #[test]
@@ -637,7 +637,7 @@ mod source_resolution {
         };
         let err = resolve_run_source(&mut args, dir.path(), Inference::Enabled)
             .expect_err("a misplaced image reference must refuse even inside a detected project");
-        assert!(err.to_string().contains("--image node:22"), "{err}");
+        assert!(err.to_string().contains("mvmctl run node:22 --"), "{err}");
         assert!(
             args.image.is_none(),
             "a refused run must not have chosen an image anyway"
@@ -660,7 +660,7 @@ mod source_resolution {
         };
         let err = resolve_run_source(&mut args, dir.path(), Inference::Enabled)
             .expect_err("a misplaced image reference must refuse beside an mvm.toml");
-        assert!(err.to_string().contains("--image node:22"), "{err}");
+        assert!(err.to_string().contains("mvmctl run node:22 --"), "{err}");
         assert!(args.manifest.is_none(), "no manifest may have been adopted");
     }
 
@@ -808,15 +808,16 @@ mod flag_after_double_dash_tests {
         assert!(err.contains(spelling), "{words:?}: {err}");
     }
 
-    /// Each verb refuses the flag only it declares and passes the other's:
-    /// `--mode` exists on `run` alone, `--name` on `machine run` alone. A
-    /// verb wired to the wrong argument struct fails one of the four.
+    /// Each verb refuses exactly the flags it declares. `run` is `machine
+    /// run` plus the SDK transport, so `machine run`'s own flags (`--name`)
+    /// are refused on both, while `--mode` exists on `run` alone. A verb wired
+    /// to the wrong argument struct fails one of these.
     #[test]
     fn each_verb_reads_its_own_argument_struct() {
         assert_refused(run_refusal(&["--mode", "live"]), &["--mode"], "`--mode`");
-        assert_eq!(run_refusal(&["--name", "web"]), None);
-        assert_refused(machine_refusal(&["--name", "web"]), &["--name"], "`--name`");
         assert_eq!(machine_refusal(&["--mode", "live"]), None);
+        assert_refused(run_refusal(&["--name", "web"]), &["--name"], "`--name`");
+        assert_refused(machine_refusal(&["--name", "web"]), &["--name"], "`--name`");
     }
 
     /// Flags both verbs share come from `RunArgs`: long, `=`-valued, the
@@ -872,7 +873,8 @@ mod flag_after_double_dash_tests {
     fn a_cluster_with_an_unknown_character_is_not_refused() {
         assert_eq!(machine_refusal(&["-iZ"]), None);
         assert_eq!(machine_refusal(&["-"]), None);
-        assert_eq!(run_refusal(&["-it"]), None, "`run` has no -i or -t");
+        assert_eq!(run_refusal(&["-iZ"]), None);
+        assert_refused(run_refusal(&["-it"]), &["-it"], "`-it`");
     }
 
     /// `--help` and `--version` on their own are forwarded to the

@@ -15,17 +15,22 @@ Each release includes, alongside the `.tar.gz` archives:
 
 | File | Purpose |
 |------|---------|
-| `checksums-sha256.txt` | SHA256 digests for all archives (verified automatically by `mvmctl env update`) |
+| `checksums-sha256.txt` | SHA256 digests for all archives (signature and digests verified automatically by `mvmctl env update`) |
 | `mvmctl-<target>.tar.gz.bundle` | Cosign signature bundle for each platform archive |
 | `sbom.cdx.json` | Software Bill of Materials (CycloneDX JSON) |
 | `sbom.cdx.json.bundle` | Cosign signature bundle for the SBOM |
-| `runtime-overlay-<arch>.tar.gz.bundle` | Cosign signature bundle for the runtime overlay (verified in-binary before install) |
-| `sdk-sidecar-<arch>.tar.gz.bundle` | Cosign signature bundle for the SDK sidecar (verified in-binary before install) |
+| `mvm-guest-bins-v<version>.tar.gz` | The guest runtime this CLI ships with: the programs and libraries mvm runs inside a guest, for both guest architectures, listed in `checksums-sha256.txt` |
+| `mvm-guest-bins-v<version>.tar.gz.bundle` | Cosign signature bundle for the guest runtime (verified in-binary before `mvmctl` reads it) |
+| `mvm-guest-bins-v<version>.tar.gz.sha256` and its `.bundle` | The guest runtime's digest, which `mvmctl` checks before the signature |
 
 Every bundle is a [Sigstore bundle](https://docs.sigstore.dev/about/bundle/)
 (`--new-bundle-format`). There is one format across the whole release — the
-in-binary verifier `mvmctl` uses for the overlay and sidecar reads only this
+in-binary verifier `mvmctl` uses for the guest runtime reads only this
 shape, and `cosign verify-blob --bundle` takes it directly.
+
+Boot images (kernels, root filesystems, the runtime overlay, the SDK sidecar
+and the initramfs) are not CLI release assets: they are members of the signed
+image set `mvmctl` pins, verified against that set's own signature.
 
 ---
 
@@ -115,7 +120,7 @@ cosign verify-blob \
 
 ## Verifying Checksums
 
-`mvmctl env update` automatically downloads `checksums-sha256.txt` and verifies the SHA256 digest of the downloaded archive before installing. No manual step needed.
+`mvmctl env update` automatically downloads `checksums-sha256.txt` and its `.bundle`, verifies the manifest's signature under the release tag before reading it, and then checks the SHA256 digest of the downloaded archive against it before installing. No manual step needed.
 
 To verify manually:
 

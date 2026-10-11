@@ -65,35 +65,13 @@ fn open(path: &Path) -> Result<LocalImageCheckout, ImageSourceError> {
 }
 
 #[test]
-fn a_sibling_checkout_is_the_contributor_default_when_nothing_is_configured() {
+fn a_configured_checkout_is_selected_and_stays_strict() {
     let tmp = tempfile::tempdir().unwrap();
-    // <tmp>/work/mvm with a sibling <tmp>/mvm-images.
-    let workspace = tmp.path().join("mvm");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let sibling = tmp.path().join("mvm-images");
-    images_checkout(&sibling);
-
-    let source = select_with_discovery(DistributionChannel::Source, None, Some(&workspace))
-        .expect("the sibling resolves");
-    assert!(
-        matches!(source, ImageSource::LocalCheckout(_)),
-        "a valid sibling is the contributor default: {source:?}"
-    );
-}
-
-#[test]
-fn the_configured_checkout_outranks_the_sibling_and_stays_strict() {
-    let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("mvm");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let sibling = tmp.path().join("mvm-images");
-    images_checkout(&sibling);
     let chosen = tmp.path().join("chosen-images");
     images_checkout(&chosen);
 
-    let source =
-        select_with_discovery(DistributionChannel::Source, Some(&chosen), Some(&workspace))
-            .expect("the configured checkout wins");
+    let source = resolve_image_source(DistributionChannel::Source, Some(&chosen))
+        .expect("the configured checkout wins");
     match source {
         ImageSource::LocalCheckout(checkout) => {
             assert_eq!(
@@ -104,48 +82,16 @@ fn the_configured_checkout_outranks_the_sibling_and_stays_strict() {
         other => panic!("expected the configured checkout, got {other:?}"),
     }
 
-    let err = select_with_discovery(
-        DistributionChannel::Source,
-        Some(Path::new("/nonexistent")),
-        Some(&workspace),
-    )
-    .expect_err("an unusable configured path is still an error, never a fall-through");
+    let err = resolve_image_source(DistributionChannel::Source, Some(Path::new("/nonexistent")))
+        .expect_err("an unusable configured path is still an error, never a fall-through");
     assert!(err.to_string().contains(MVM_IMAGES_DIR_ENV), "{err}");
 }
 
 #[test]
-fn a_discovered_sibling_that_is_not_usable_warns_and_falls_back() {
-    let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("mvm");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let sibling = tmp.path().join("mvm-images");
-    std::fs::create_dir_all(&sibling).unwrap();
-    // Names itself (flake.nix) but is not a git checkout.
-    write(&sibling.join("flake.nix"), "# not a checkout\n");
-
-    // Not the contributor default's concern on a release channel: discovery
-    // never runs there.
-    let released = select_with_discovery(DistributionChannel::Release, None, Some(&workspace))
-        .expect("release ignores the sibling");
-    assert!(matches!(released, ImageSource::Released), "{released:?}");
-
-    // A contributor build falls back to the released set rather than
-    // breaking: the warning carries the reason.
-    let source = select_with_discovery(DistributionChannel::Source, None, Some(&workspace))
-        .expect("an unusable discovered sibling falls back, never hard-fails");
-    assert_eq!(source, ImageSource::Released);
-}
-
-#[test]
-fn no_sibling_and_nothing_configured_selects_the_released_set() {
-    let tmp = tempfile::tempdir().unwrap();
-    let workspace = tmp.path().join("mvm");
-    std::fs::create_dir_all(&workspace).unwrap();
-    let source = select_with_discovery(DistributionChannel::Source, None, Some(&workspace))
-        .expect("no sibling resolves without error");
-    // Image construction lives in mvm-images: a contributor build with no
-    // image checkout in reach boots the released set, never something built
-    // from its own tree.
+fn the_process_resolver_defaults_to_released_without_an_explicit_selector() {
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.remove(MVM_IMAGES_DIR_ENV);
+    let source = resolve_current_source().expect("an unconfigured process uses the released set");
     assert_eq!(source, ImageSource::Released);
     assert_eq!(source.tier(), ImageTrustTier::VerifiedRelease);
 }

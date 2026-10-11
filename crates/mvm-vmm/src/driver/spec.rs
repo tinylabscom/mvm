@@ -15,7 +15,9 @@ use mvm_net::channel::GuestService;
 pub enum KernelImage {
     /// An explicit kernel file on the host (Firecracker, qemu, the hvf VMM).
     Path(PathBuf),
-    /// The backend supplies its own bundled kernel (libkrun's libkrunfw).
+    /// The launch named no kernel. Only the qemu dev driver accepts this, by
+    /// resolving its cached fallback kernel; Firecracker, libkrun and HVF
+    /// refuse it.
     Bundled,
 }
 

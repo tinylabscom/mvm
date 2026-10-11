@@ -44,6 +44,7 @@ pub use local::{
     verify_local_image_set,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
+pub(crate) use train_lock::image_train_lock_sha256;
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
     LegacyImageTrain, PinnedArtifact, Stage0KernelPin, image_train_lock,
@@ -56,8 +57,10 @@ pub use validate::{
     validate_structure,
 };
 pub use verify::{
-    ImageSetVerification, VerifiedArtifact, VerifiedImageSet, VerifiedSelectedArtifacts,
-    verify_image_set, verify_image_set_artifacts,
+    ImageSetVerification, VerifiedArtifact, VerifiedImageSet, VerifiedImageSetRoot,
+    VerifiedSelectedArtifacts, cache_image_set_root, image_set_root_proof_cache,
+    read_cached_image_set_root, verify_image_set, verify_image_set_artifacts,
+    verify_image_set_root,
 };
 
 pub const IMAGE_SET_SCHEMA_VERSION: u32 = 2;

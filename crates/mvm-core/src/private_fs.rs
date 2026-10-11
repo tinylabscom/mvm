@@ -113,19 +113,30 @@ pub fn mode_bits(path: &Path, _meta: &Metadata) -> io::Result<u32> {
 /// Create `dir` (and any missing parents) and leave it at
 /// [`PRIVATE_DIR_MODE`], chmodding only when it is not already there.
 ///
-/// Only `dir` itself is locked; parents created on the way keep the umask
-/// mode. A directory under the mvm home goes through
-/// [`crate::config::create_private_dir`], which walks the whole chain.
+/// Newly created directories, including missing parents, request
+/// [`PRIVATE_DIR_MODE`] at creation (the umask may remove bits). Existing
+/// ancestors are not chmodded. A directory under the mvm home goes through
+/// [`crate::config::create_private_dir`], which tightens the whole owned chain.
+///
+/// Path traversal follows symlinks; this is not a symlink-safe containment API.
+#[cfg(unix)]
 pub fn ensure_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt as _;
     let dir = dir.as_ref();
-    if cfg!(not(unix)) {
-        return Err(unsupported_platform_error(dir));
-    }
-    std::fs::create_dir_all(dir)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(PRIVATE_DIR_MODE)
+        .create(dir)?;
     if mode_bits(dir, &std::fs::metadata(dir)?)? != PRIVATE_DIR_MODE {
         set_mode(dir, PRIVATE_DIR_MODE)?;
     }
     Ok(())
+}
+
+/// Refuse directory creation on hosts without Unix permission bits.
+#[cfg(not(unix))]
+pub fn ensure_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
+    Err(unsupported_platform_error(dir.as_ref()))
 }
 
 #[cfg(all(test, unix))]
@@ -193,11 +204,62 @@ mod tests {
         ensure_private_dir(&loose).unwrap();
         assert_eq!(mode(&loose), 0o700);
     }
+
+    #[test]
+    fn ensure_private_dir_creates_private_parents_without_changing_existing_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        set_mode(root.path(), 0o755).unwrap();
+        let target = root.path().join("new/nested/leaf");
+
+        ensure_private_dir(&target).unwrap();
+
+        assert_eq!(mode(root.path()), 0o755);
+        // The umask may remove owner bits, but must never grant group/other access.
+        assert_eq!(mode(&root.path().join("new")) & 0o077, 0);
+        assert_eq!(mode(&root.path().join("new/nested")) & 0o077, 0);
+        assert_eq!(mode(&target), PRIVATE_DIR_MODE);
+    }
+
+    #[test]
+    fn ensure_private_dir_preserves_an_existing_private_target() {
+        let root = tempfile::tempdir().unwrap();
+        set_mode(root.path(), PRIVATE_DIR_MODE).unwrap();
+        let marker = root.path().join("marker");
+        std::fs::write(&marker, b"synthetic").unwrap();
+
+        ensure_private_dir(root.path()).unwrap();
+
+        assert_eq!(mode(root.path()), PRIVATE_DIR_MODE);
+        assert_eq!(std::fs::read(marker).unwrap(), b"synthetic");
+    }
+
+    #[test]
+    fn ensure_private_dir_rejects_files_as_targets_and_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("file");
+        std::fs::write(&file, b"synthetic").unwrap();
+        set_mode(&file, 0o644).unwrap();
+
+        assert!(ensure_private_dir(&file).is_err());
+        assert!(ensure_private_dir(file.join("leaf")).is_err());
+        assert_eq!(mode(&file), 0o644);
+        assert_eq!(std::fs::read(file).unwrap(), b"synthetic");
+    }
 }
 
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
+
+    #[cfg(not(unix))]
+    #[test]
+    fn ensure_private_dir_refuses_without_creating_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("missing/leaf");
+        let err = ensure_private_dir(&target).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert!(!root.path().join("missing").exists());
+    }
 
     #[test]
     fn the_refusal_is_unsupported_and_names_the_path() {

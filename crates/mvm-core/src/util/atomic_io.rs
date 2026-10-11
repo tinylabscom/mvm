@@ -231,21 +231,46 @@ fn synced_temp_with_mode(
     data: &[u8],
     mode: u32,
 ) -> std::io::Result<tempfile::NamedTempFile> {
+    let mut tmp = temp_with_mode(path, mode)?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_all()?;
+    Ok(tmp)
+}
+
+fn temp_with_mode(path: &Path, mode: u32) -> std::io::Result<tempfile::NamedTempFile> {
+    use crate::private_fs::OpenOptionsModeExt as _;
+
     let permissions = private_fs::permissions(path, mode)?;
     let mut prefix = std::ffi::OsString::from(".");
     prefix.push(path.file_name().unwrap_or_default());
     prefix.push(".");
-    let mut tmp = tempfile::Builder::new()
+    let tmp = tempfile::Builder::new()
         .prefix(&prefix)
         .suffix(".tmp")
-        .permissions(permissions.clone())
-        .tempfile_in(parent_dir(path)?)?;
+        .make_in(parent_dir(path)?, |temporary| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open_with_mode(mode, temporary)
+        })?;
     // The mode given at open is filtered through the process umask. Setting it
     // on the inode pins it to exactly `mode` before the first byte lands.
     tmp.as_file().set_permissions(permissions)?;
-    tmp.write_all(data)?;
-    tmp.as_file().sync_all()?;
     Ok(tmp)
+}
+
+/// Open a fresh, empty, write-only private file, atomically replacing `path`.
+///
+/// Intended for managed streaming diagnostics that start afresh each run.
+/// The new inode is 0600 before it is published or receives any payload.
+/// Existing files and symlinks are replaced, not opened or chmodded; other
+/// hard links to the previous inode are untouched. The parent must already
+/// exist and be trusted, just as for [`write_private`].
+///
+/// This does not sync subsequent streamed writes or impose retention.
+pub fn open_private_truncated(path: &Path) -> std::io::Result<fs::File> {
+    let tmp = temp_with_mode(path, PRIVATE_FILE_MODE)?;
+    tmp.persist(path).map_err(|err| err.error)
 }
 
 /// Replace `path` with `data` at mode 0600, so that every reader sees either
@@ -767,6 +792,24 @@ mod tests {
             .collect();
         names.sort();
         names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_temporary_is_owner_only_before_payload_or_publication() {
+        use std::io::Read as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostic.log");
+        let mut tmp = temp_with_mode(&path, PRIVATE_FILE_MODE).unwrap();
+        assert!(!path.exists());
+        assert_eq!(mode_of(tmp.path()), 0o600);
+        assert_eq!(tmp.as_file().metadata().unwrap().len(), 0);
+        assert!(tmp.as_file_mut().read(&mut [0]).is_err());
+        tmp.write_all(b"SYNTHETIC_PRIVATE_MARKER").unwrap();
+        assert_eq!(fs::read(tmp.path()).unwrap(), b"SYNTHETIC_PRIVATE_MARKER");
+        drop(tmp);
+        assert!(dir_entries(dir.path()).is_empty());
     }
 
     #[cfg(unix)]
