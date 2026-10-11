@@ -76,6 +76,10 @@ witnesses = [
     "ci:verified-boot-artifacts",
     "ci:check-abi-layout",
     "fn:verify_and_resume_rejects_tampered_mem",
+    # The runtime overlay's roothash is computed on the host when the overlay
+    # is assembled from a guest-runtime archive; for a release binary that is
+    # the signed archive its own release ships.
+    "fn:a_fresh_release_install_assembles_every_piece_from_its_own_archive",
 ]
 
 [[claim]]
@@ -448,6 +452,14 @@ statement = "Every published release artifact is authenticated under the release
 # independent hash is never executed before that pinned cosign authenticates
 # its bundle. All four consuming paths refuse a missing or invalid signature.
 #
+# The guest runtime (`mvm-guest-bins-v<version>.tar.gz`) is one of those signed
+# archives, not an image-set member. `release.yml` signs it and its `.sha256`
+# sidecar, `verify-release-assets.sh` checks both, and a release binary's
+# download of it is held to the sidecar's digest and then to the signature at
+# exactly its own version before it is parsed or cached. A copy an installer
+# placed beside mvmctl is held to its own manifest only; its signature was the
+# installer's to check.
+#
 # The `manifest-verify`-gated tests on these paths now run in the `Lint feature
 # coverage` job of ci.yml. `a_real_release_bundle_verifies_under_its_tag` is one
 # of them, and is citable because of that step: `check-claim-catalog` resolves
@@ -474,6 +486,8 @@ witnesses = [
     "fn:fresh_install_trust_precedes_verifier_execution",
     "fn:fresh_install_requires_tag_pinned_bundle",
     "fn:fresh_install_has_no_unsigned_fallback",
+    "fn:an_unsigned_release_runtime_is_refused_and_nothing_is_cached",
+    "fn:a_release_runtime_that_misses_its_digest_is_refused_before_its_signature",
 ]
 
 [[claim]]

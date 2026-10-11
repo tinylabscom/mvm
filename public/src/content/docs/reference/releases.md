@@ -7,10 +7,15 @@ Every `v*` git tag fires **`release.yml`**, which builds `mvmctl` for the
 currently published targets (`aarch64-apple-darwin`,
 `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`), packages each as
 `mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` + man
-pages), generates `checksums-sha256.txt`, cosign-signs the tarballs, the
-manifest and the SBOM, attests build provenance, and publishes one GitHub
-Release. It does not build, mirror or re-sign boot images: those come from the
-image set pinned by `crates/mvm-core/images.lock`, published by
+pages), builds the guest runtime `mvm-guest-bins-v<version>.tar.gz` (the
+programs and libraries mvm runs inside a guest, for both guest architectures),
+generates `checksums-sha256.txt`, cosign-signs the tarballs, the guest runtime
+and its `.sha256` sidecar, the manifest and the SBOM, attests build provenance,
+and publishes one GitHub Release. A release binary assembles its runtime
+overlay, universal initramfs and SDK sidecars from that guest runtime. It does
+not build, mirror or re-sign boot images: kernels, root filesystems, the
+builder image and the Stage 0 seeds come from the image set pinned by
+`crates/mvm-core/images.lock`, published by
 [`mvm-images`](https://github.com/tinylabscom/mvm-images), as described in
 [Image releases and the support window](#image-releases-and-the-support-window).
 
@@ -84,10 +89,10 @@ with the id of an earlier release run to smoke the archive that run built:
 
 | Path | What it pulls |
 |------|---------------|
-| `install.sh` (curl one-liner) | the newest full `v*` release publishing `mvmctl-<target>.tar.gz` (or `MVM_VERSION`): that tarball + `checksums-sha256.txt` + its `.bundle` |
+| `install.sh` (curl one-liner) | the newest full `v*` release publishing `mvmctl-<target>.tar.gz` (or `MVM_VERSION`): that tarball + `checksums-sha256.txt` + its `.bundle`, then `mvm-guest-bins-v<version>.tar.gz` + its `.bundle`, checked the same way and staged in the release directory's `guest-runtime/` (a release that predates the asset installs without it) |
 | `brew install tinylabscom/mvm/mvmctl` | the same tarball, via the tap formula |
 | `cargo install --git https://github.com/tinylabscom/mvm mvmctl` | source from the repository (CLI binary only; no adjacent helper bundle). `mvmctl` is not on crates.io; only `mvm-contract` is published there |
-| `mvmctl env update` | the tarball for the latest release, in-place swap |
+| `mvmctl env update` | the tarball for the latest release and that release's guest runtime, which it fetches and verifies before the in-place swap |
 | `mvmctl build kernel build --source download` | the kernel member of the pinned image set, verified against its signed root |
 | `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` from the pinned image set, verified against its signed root; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/` |
 
@@ -111,7 +116,8 @@ Which URLs a CLI reads depends on its version:
 | v0.17.0 and earlier | its own `v{version}` release on `tinylabscom/mvm` | its own `v{version}` release |
 | v0.18.0-rc.1 | `tinylabscom/mvm` release `boot-image/v0.1.5`, signed by `release-boot-image.yml` | its own `v{version}` release |
 | releases cut after 2026-09-24, before the in-tree images were deleted | the `mvm-images` `image-set/v*` release pinned by the binary's `images.lock`, admitted only after the root verifies against that release's `release.yml` identity | its own `v{version}` release, whose copies `release.yml` mirrored from the same pinned set |
-| every later release | the same pinned `image-set/v*` release | the same pinned `image-set/v*` release; the CLI's own release carries no image assets |
+| releases after the mirror ended, before the guest runtime asset | the same pinned `image-set/v*` release | the same pinned `image-set/v*` release; the CLI's own release carries no image assets |
+| releases that publish `mvm-guest-bins-v{version}.tar.gz` | the same pinned `image-set/v*` release | assembled on the host by `mvmctl bootstrap` from that guest runtime, its own release's signed asset; until the binary has bootstrapped once, the pinned image set's copies |
 
 Nothing in that table is deleted. `boot-image/v*` and every `v*` release stay
 published, so an older CLI keeps finding the bytes it was built against. What
@@ -140,6 +146,15 @@ changes over time is what is published next:
 
 ## Member identity
 
+A release binary that publishes its own guest runtime assembles the runtime
+overlay, the SDK sidecars and the initramfs from it, files them under its own
+version (`~/.mvm/cache/runtime-overlay/<version>/<arch>/` and the matching
+initramfs and sidecar directories), and computes the overlay's verity root
+hash on the host. Once it has done so it refuses the image set's copies rather
+than falling back to them. Everything below describes the image set's members,
+which an older release, a binary that has not yet run `mvmctl bootstrap`, and
+`mvmctl build runtime-overlay build --source download` still use.
+
 The runtime overlay, the SDK sidecars and the initramfs that `mvmctl` fetches
 from the image set are identified by the signed root its `images.lock` pins,
 not by the CLI's own version. Each member carries the `VERSION` of the `mvm`
@@ -164,9 +179,12 @@ are still checked against the running CLI's version.
 
 ## Runtime overlay assets
 
-The shared guest-runtime overlay is a member of the image set:
+The image set still publishes the shared guest-runtime overlay as a member:
 
 - `runtime-overlay-<arch>.tar.gz`
+
+A release binary that ships its own guest runtime assembles the same payload
+from that archive instead, and its cache entry carries the same files.
 
 It is the readonly guest-runtime payload consumed by
 overlay-backed boots — part of the shipped surface for the backends that admit
@@ -189,9 +207,10 @@ to `mvmctl`.
 
 Operationally, runtime-overlay updates are a **release + restart** story:
 
-- A fresh boot on an admitted backend resolves the runtime overlay of the image
-  set the running `mvmctl` pins, re-verifies the cached artifact checksums,
-  and mounts it read-only inside the guest.
+- A fresh boot on an admitted backend resolves the running `mvmctl`'s runtime
+  overlay — assembled from its own guest runtime, or the pinned image set's
+  member for a binary that has not adopted one — re-verifies the cached
+  artifact checksums, and mounts it read-only inside the guest.
 - A stopped VM picks up the overlay the host now resolves on its next
   `machine start` or `machine restart`.
 - A running VM keeps the overlay version it already booted with until restart.
@@ -209,9 +228,10 @@ That means the normal rollout path is:
 
 Rollback follows the same pinning rule:
 
-- If you downgrade `mvmctl` to an earlier release, the host resolves the
-  runtime overlay that earlier release pins (or, for releases that predate the
-  image set, published on its own release).
+- If you downgrade `mvmctl` to an earlier release, the host resolves that
+  release's runtime overlay: assembled from its own guest runtime when it
+  ships one, otherwise the one the image set it pins carries (or, for releases
+  that predate the image set, published on its own release).
 - Running VMs are unchanged until restart.
 - Restarted VMs come back on the downgraded version's overlay, assuming the
   matching assets are still available and verified.
@@ -233,8 +253,14 @@ cosign verify-blob \
   mvmctl-<target>.tar.gz
 ```
 
-`install.sh` and `mvmctl env update` run this automatically when `cosign` is on
-`PATH`.
+`mvmctl env update` verifies the checksum manifest and the tarball in-process,
+with no `cosign` needed. `install.sh` verifies with an installed `mvmctl` or
+`cosign` when it finds one; on a fresh host it authenticates the archive
+against the hash the published installer carries before using its `mvmctl` as
+the verifier. Both refuse a missing or invalid signature. The guest runtime
+`mvm-guest-bins-v<version>.tar.gz` is verified the same way, and a release
+binary that downloads it itself checks its `.sha256` sidecar and then its
+bundle before reading it.
 
 ## Cutting a release (maintainers)
 

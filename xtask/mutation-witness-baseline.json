@@ -76,6 +76,13 @@
       }
     },
     {
+      "path": "crates/mvm-build/src/guest_bins/release.rs",
+      "package": "mvm-build",
+      "claims": [
+        20
+      ]
+    },
+    {
       "path": "crates/mvm-build/src/published_image_set.rs",
       "package": "mvm-build",
       "claims": [
@@ -87,6 +94,13 @@
       "package": "mvm-build",
       "claims": [
         20
+      ]
+    },
+    {
+      "path": "crates/mvm-build/src/runtime_pieces.rs",
+      "package": "mvm-build",
+      "claims": [
+        3
       ]
     },
     {

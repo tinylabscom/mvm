@@ -466,6 +466,14 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    checksums inside an already digest-verified overlay archive. Never set
    it in CI.
 
+   What the image set covers is the Linux layer: the kernels, the base root
+   filesystems, the builder image and the Stage 0 seeds. It still publishes
+   runtime-overlay, SDK-sidecar and initramfs members too, but a release
+   binary that has adopted its own guest runtime refuses them
+   (`image_set_fallback_refusal`). The guest runtime it assembles those
+   pieces from is not an image-set member. It is a CLI release asset,
+   verified under claim 20, so this claim says nothing about it.
+
 7. **Cargo deps are audited on every PR.** `deny.toml` + the `deny`
    and `audit` jobs in CI. Reproducibility double-build catches
    non-determinism that could mask injection.
@@ -785,7 +793,7 @@ this row as enforced without it.
 
 20. **Every published release artifact is authenticated under the release
     workflow's identity, directly or through a signed checksum manifest, and
-    the build, fetch, and self-update paths refuse an artifact whose required
+    the build, fetch, install, and self-update paths refuse an artifact whose required
     signature is missing or invalid.** Row 20, `Shipped`. `release.yml` signs archives and
     checksum manifests keyless through GitHub OIDC and publishes bundles
     carrying the Fulcio certificate and Rekor inclusion proof. Raw kernels,
@@ -814,11 +822,30 @@ this row as enforced without it.
     (`self_update_refuses_an_unsigned_checksum_manifest_before_parsing`,
     `self_update_refuses_a_checksum_manifest_signed_for_another_tag`);
     `MVM_SKIP_HASH_VERIFY` does not waive it, and `--skip-verify` waives only
-    the tarball's own bundle. `install.sh` verifies an
-    upgrade with the installed `mvmctl env verify-release`, or with `cosign`, and
-    is best-effort only on a first install to a host with neither. ADR-001's "Claim 20
-    limits" note records both; do not paraphrase this row as covering the
-    installer.
+    the tarball's own bundle. `install.sh` verifies with the installed
+    `mvmctl env verify-release`, or with `cosign`; on a host with neither it
+    authenticates the archive against the hash the published installer
+    carries before running its `mvmctl` as the verifier, or fetches a
+    hash-pinned `cosign` (`fresh_install_has_no_unsigned_fallback`). ADR-001's
+    "Claim 20 boundaries" note records the installer's trust root.
+
+    The guest runtime (`mvm-guest-bins-v<version>.tar.gz`) — the archive a
+    release binary assembles its runtime overlay, initramfs and SDK sidecars
+    from — is one of these signed release archives. `release.yml` will not
+    publish without exactly one, named for the tag, and signs it and its
+    `.sha256` sidecar; `verify-release-assets.sh` checks both signatures, the
+    sidecar against the bytes, and the archive's manifest.
+    `acquire_release_guest_runtime` holds a download to that digest
+    (`a_release_runtime_that_misses_its_digest_is_refused_before_its_signature`)
+    and then to the signature at exactly its own version before parsing or
+    caching it (`an_unsigned_release_runtime_is_refused_and_nothing_is_cached`).
+    `install.sh` checks it against the checksum manifest and its own bundle
+    before staging it beside `mvmctl`, and tolerates only a 404, for releases
+    that predate the asset (tested in `tests/install_sh.rs`). A
+    copy found beside `mvmctl` or in the cache is held to its own manifest,
+    not re-verified against the signature, and `MVM_SKIP_COSIGN_VERIFY` skips
+    the signature here as it does everywhere. No published release carries the
+    asset yet.
 
     The release job also attests build provenance for the binary tarballs
     (`actions/attest-build-provenance`, verifiable with `gh attestation
