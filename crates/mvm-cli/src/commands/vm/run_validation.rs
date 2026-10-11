@@ -30,6 +30,9 @@ fn validate_prod_run(args: &RunArgs) -> Result<()> {
              the command to run the OCI image's declared entrypoint"
         );
     }
+    // The development override for unverified volume storage is never
+    // honoured in production; carrying it into a `--prod` run is an error.
+    mvm_core::host_storage_encryption::refuse_override_for_production()?;
     Ok(())
 }
 
@@ -149,6 +152,32 @@ mod tests {
         assert!(
             validate_prod_run(&args).is_ok(),
             "--prod with no command of its own is not refused here"
+        );
+    }
+
+    /// The development override for unverified volume storage is refused
+    /// under `--prod` whatever its value, and ignored here otherwise.
+    #[test]
+    fn prod_refuses_the_unverified_volume_storage_override() {
+        let env_var = mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV;
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let mut args = run_args(RunProfile::Standard);
+        args.argv.clear();
+        args.prod = true;
+        env.remove(env_var);
+        assert!(validate_prod_run(&args).is_ok());
+
+        env.set(env_var, "1");
+        let message = validate_prod_run(&args)
+            .expect_err("--prod must refuse the override")
+            .to_string();
+        assert!(message.contains("--prod refuses"), "{message}");
+        assert!(message.contains(env_var), "{message}");
+
+        args.prod = false;
+        assert!(
+            validate_prod_run(&args).is_ok(),
+            "outside --prod the override is the storage check's to honour"
         );
     }
 

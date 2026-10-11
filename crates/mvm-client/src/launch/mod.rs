@@ -544,7 +544,7 @@ impl LocalBackend {
         if volumes.is_empty() {
             return Ok(());
         }
-        let service = LocalVolumeService::new();
+        let service = launch_volume_service();
         let existing = service
             .list_attachments(name)
             .map_err(|e| crate::local::backend_err(format!("listing attachments: {e:#}")))?;
@@ -598,9 +598,26 @@ impl LocalBackend {
             .profile(profile)
             .unlock(UnlockPolicy::JustInTime)
             .build();
-        LocalVolumeService::new()
+        launch_volume_service()
             .acquire_launch_lease(&request)
             .map_err(|e| crate::local::backend_err(format!("volume leases for {name:?}: {e:#}")))
+    }
+}
+
+/// The volume service a library launch admits volumes through.
+///
+/// A launch can unlock, attach, and lease managed volumes, so it needs the
+/// platform's storage detector rather than the deny-all default. Unit tests
+/// supply synthetic evidence instead of running host tools against a
+/// temporary directory.
+pub(crate) fn launch_volume_service() -> LocalVolumeService {
+    #[cfg(not(test))]
+    {
+        LocalVolumeService::with_system_host_encryption_probe()
+    }
+    #[cfg(test)]
+    {
+        crate::volume::test_support::service()
     }
 }
 

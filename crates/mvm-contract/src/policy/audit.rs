@@ -41,6 +41,10 @@ pub enum LocalAuditKind {
     VolumeLock,
     VolumeSnapshot,
     VolumeRestore,
+    /// `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` admitted volume plaintext onto
+    /// storage that is not verified encrypted. Detail: `purpose=… path=…
+    /// reason=…`.
+    VolumeStorageOverride,
     UpdateInstall,
     Uninstall,
     // --- DX features ---
@@ -1230,6 +1234,7 @@ mod tests {
             LocalAuditKind::VolumeLock,
             LocalAuditKind::VolumeSnapshot,
             LocalAuditKind::VolumeRestore,
+            LocalAuditKind::VolumeStorageOverride,
             LocalAuditKind::UpdateInstall,
             LocalAuditKind::Uninstall,
             LocalAuditKind::NetworkCreate,

@@ -449,6 +449,41 @@ carries them in its `egress_denials` array instead. For a run that already ended
 refusals. The full reason table is in
 [Network egress policy](/guides/network-egress-policy/#when-a-destination-is-refused).
 
+### "refusing to place managed volume plaintext … the storage is not verified encrypted"
+
+The same refusal reads "writable disk image" for a `HOST.img:/GUEST:SIZE:rw`
+mount.
+
+**Cause**: unlocking a managed volume, or creating or attaching a writable disk
+image, would put plaintext on storage mvm cannot show is encrypted. On macOS
+that means the APFS volume does not report FileVault on (hardware "encrypted at
+rest" alone does not count). On Linux it means the location is not on ext4 over
+dm-crypt/LUKS, uses an external journal, or `tune2fs -l` could not read the
+device to prove the journal is internal. The error ends with the detector's own
+reason. `mvmctl doctor` shows the verdict for the default volume location on
+its `volume storage (encrypted backing)` line.
+
+**Fix**: enable FileVault (`sudo fdesetup enable`) or move the data onto a LUKS
+volume. To keep the default location, point the volumes elsewhere with
+`mvmctl machine volume create <name> --root /path/on/encrypted/storage`, or
+pass a disk image path on encrypted storage. On Linux, run with read access to
+the block device if only `tune2fs` failed.
+
+On a development host where that is not possible, set
+`MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1`. It is audited on every use and
+`--prod` refuses it. Nothing is lost while the refusal stands: locked volumes
+stay locked, an unlocked image is never deleted, and `mvmctl machine volume
+lock` still works.
+
+### "refusing to attach writable disk image …: other users can access it"
+
+**Cause**: an existing `HOST.img` given with `:rw` has group or other
+permission bits, or sits in a directory other users can write to. mvm creates
+new images `0600` itself but never changes the mode of a file you already own.
+
+**Fix**: `chmod 600 HOST.img`, and keep the image in a directory only you can
+write to (`chmod go-w <dir>`).
+
 ### Can't access project files inside microVM
 
 The Firecracker microVM has an **isolated filesystem** and there's no shell into the builder VM to bridge it. Pass host shares explicitly with `--mount HOST:GUEST[:rw]` (see [Sandboxed Exec](/guides/exec/)).

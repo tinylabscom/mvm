@@ -644,10 +644,22 @@ provision_guest_bin_dir
 provision_encrypted_backing_probes() {
   local probe_bin="$E2E_HOME/encrypted-backing-probe-bin"
   mkdir -p "$probe_bin"
-  printf '%s\n' '#!/bin/sh' "printf '%s\\n' /dev/mapper/mvm-e2e-crypt" > "$probe_bin/findmnt"
-  printf '%s\n' '#!/bin/sh' "printf '%s\\n' crypt" > "$probe_bin/lsblk"
+  # The shapes the shared storage detector parses: one ext4 mount with an
+  # internal journal on a dm-crypt mapping, and a FileVault-on APFS volume.
+  cat > "$probe_bin/findmnt" <<'PROBE'
+#!/bin/sh
+printf '%s\n' '{"filesystems":[{"source":"/dev/mapper/mvm-e2e-crypt","fstype":"ext4"}]}'
+PROBE
+  cat > "$probe_bin/tune2fs" <<'PROBE'
+#!/bin/sh
+printf '%s\n' 'Filesystem features: has_journal extents' 'Journal inode: 8'
+PROBE
+  cat > "$probe_bin/lsblk" <<'PROBE'
+#!/bin/sh
+printf '%s\n' '{"blockdevices":[{"type":"crypt"}]}'
+PROBE
   printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'FileVault: Yes'" > "$probe_bin/diskutil"
-  chmod 755 "$probe_bin/findmnt" "$probe_bin/lsblk" "$probe_bin/diskutil"
+  chmod 755 "$probe_bin/findmnt" "$probe_bin/tune2fs" "$probe_bin/lsblk" "$probe_bin/diskutil"
   export PATH="$probe_bin:$PATH"
 }
 provision_encrypted_backing_probes

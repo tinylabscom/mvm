@@ -24,10 +24,9 @@ mod warm_start;
 #[cfg(test)]
 mod tests;
 
-// `HostFdeStatus`, `detect_host_fde_status`, and `detect_host_path_encryption_status`
-// stay `pub(crate)` on their definitions in `security_checks` (crate-wide
-// reachable) but have no caller outside that module today, so they are not
-// re-exported here — doing so would trip the unused-import lint.
+// Whole-host FDE diagnostics stay in `security_checks`; the path-specific
+// detector lives in `mvm_core::host_storage_encryption`, shared with the
+// volume service.
 #[cfg(not(test))]
 pub(crate) use security_checks::require_local_volume_host_path_encrypted;
 pub use toolchain::{ZigbuildProbe, probe_zigbuild};
@@ -257,6 +256,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_audit_log_check());
     checks.push(security_checks::security_audit_chain_check());
     checks.push(security_checks::security_host_fde_check());
+    checks.push(security_checks::security_volume_storage_check());
     checks.push(security_checks::security_data_dir_mode_check());
     checks.push(security_checks::security_proxy_socket_mode_check());
     checks.push(security_checks::security_dev_image_check());

@@ -223,30 +223,58 @@ impl AuditSandbox {
     }
 
     fn encrypted_volume_probe_path(&self) -> PathBuf {
+        self.volume_probe_path(true)
+    }
+
+    /// Fake platform storage tools on `PATH`, in the shapes the shared
+    /// detector parses: an ext4 mount with an internal journal on a dm-crypt
+    /// mapping (or on a plain partition), and a macOS volume with FileVault on
+    /// (or only hardware-encrypted at rest).
+    fn volume_probe_path(&self, encrypted: bool) -> PathBuf {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let bin = self.home_path().join("bin");
+            let bin = self
+                .home_path()
+                .join(if encrypted { "bin" } else { "bin-plain" });
             std::fs::create_dir_all(&bin).expect("mkdir fake probe bin");
-            let diskutil = bin.join("diskutil");
-            std::fs::write(
-                &diskutil,
-                "#!/bin/sh\nprintf 'Device Identifier: disk-test\\nEncrypted: Yes\\n'\n",
-            )
-            .expect("write fake diskutil");
-            std::fs::set_permissions(&diskutil, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake diskutil");
-
-            let findmnt = bin.join("findmnt");
-            std::fs::write(&findmnt, "#!/bin/sh\nprintf '/dev/mapper/mvm-test\\n'\n")
-                .expect("write fake findmnt");
-            std::fs::set_permissions(&findmnt, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake findmnt");
-
-            let lsblk = bin.join("lsblk");
-            std::fs::write(&lsblk, "#!/bin/sh\nprintf 'crypt\\n'\n").expect("write fake lsblk");
-            std::fs::set_permissions(&lsblk, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod fake lsblk");
+            let (source, kind, filevault) = if encrypted {
+                ("/dev/mapper/mvm-test", "crypt", "Yes")
+            } else {
+                ("/dev/sda2", "part", "No (Encrypted at rest)")
+            };
+            for (name, body) in [
+                (
+                    "diskutil",
+                    format!(
+                        "#!/bin/sh\nprintf 'Device Identifier: disk-test\\nFileVault: {filevault}\\n'\n"
+                    ),
+                ),
+                (
+                    "findmnt",
+                    format!(
+                        "#!/bin/sh\nprintf '%s\\n' \
+                         '{{\"filesystems\":[{{\"source\":\"{source}\",\"fstype\":\"ext4\"}}]}}'\n"
+                    ),
+                ),
+                (
+                    "tune2fs",
+                    "#!/bin/sh\nprintf '%s\\n' 'Filesystem features: has_journal extents' \
+                     'Journal inode: 8'\n"
+                        .to_string(),
+                ),
+                (
+                    "lsblk",
+                    format!(
+                        "#!/bin/sh\nprintf '%s\\n' '{{\"blockdevices\":[{{\"type\":\"{kind}\"}}]}}'\n"
+                    ),
+                ),
+            ] {
+                let path = bin.join(name);
+                std::fs::write(&path, body).expect("write fake probe");
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                    .expect("chmod fake probe");
+            }
 
             let existing = std::env::var("PATH").unwrap_or_default();
             let sep = if existing.is_empty() { "" } else { ":" };
@@ -254,6 +282,7 @@ impl AuditSandbox {
         }
         #[cfg(not(unix))]
         {
+            let _ = encrypted;
             PathBuf::from(std::env::var("PATH").unwrap_or_default())
         }
     }
@@ -1985,9 +2014,11 @@ fn volume_unlock_and_lock_emit_audit_entries() {
     let sandbox = AuditSandbox::new();
     let root = sandbox.home_path().join("mvm-volume-root");
     std::fs::create_dir_all(&root).expect("mkdir volume root");
+    let probe_path = sandbox.encrypted_volume_probe_path();
 
     let create = sandbox
         .mvmctl()
+        .env("PATH", &probe_path)
         .args([
             "machine",
             "volume",
@@ -2008,6 +2039,7 @@ fn volume_unlock_and_lock_emit_audit_entries() {
 
     let unlock = sandbox
         .mvmctl()
+        .env("PATH", &probe_path)
         .args(["machine", "volume", "unlock", "managed"])
         .output()
         .expect("spawn mvmctl volume unlock");
@@ -2036,6 +2068,60 @@ fn volume_unlock_and_lock_emit_audit_entries() {
         count_entries_with_kind(&log, "volume_lock") >= 1,
         "expected volume_lock entry. Full log:\n{log}"
     );
+}
+
+/// Storage that is not verified encrypted refuses a managed volume and writes
+/// nothing; the development override admits it and records the use.
+#[test]
+fn volume_storage_override_emits_an_audit_entry_and_refusal_does_not() {
+    let sandbox = AuditSandbox::new();
+    let root = sandbox.home_path().join("plain-root");
+    std::fs::create_dir_all(&root).expect("mkdir volume root");
+    let probe_path = sandbox.volume_probe_path(false);
+    let create = |allow: bool| {
+        let mut command = sandbox.mvmctl();
+        command.env("PATH", &probe_path).args([
+            "machine",
+            "volume",
+            "create",
+            "plain",
+            "--root",
+            root.to_str().expect("utf-8 path"),
+            "--size",
+            "16M",
+        ]);
+        if allow {
+            command.env("MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE", "1");
+        } else {
+            command.env_remove("MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE");
+        }
+        command.output().expect("spawn mvmctl volume create")
+    };
+
+    let refused = create(false);
+    assert!(!refused.status.success(), "unverified storage must refuse");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1"),
+        "the refusal names the override: {stderr}"
+    );
+    let log = read_audit_log(&sandbox.audit_log_path());
+    assert_eq!(count_entries_with_kind(&log, "volume_storage_override"), 0);
+    assert_eq!(count_entries_with_kind(&log, "volume_create"), 0);
+
+    let admitted = create(true);
+    assert!(
+        admitted.status.success(),
+        "the override admits: stderr={}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
+    let log = read_audit_log(&sandbox.audit_log_path());
+    assert_eq!(
+        count_entries_with_kind(&log, "volume_storage_override"),
+        1,
+        "one override use, one entry. Full log:\n{log}"
+    );
+    assert!(log.contains("purpose=managed volume"), "{log}");
 }
 
 #[test]

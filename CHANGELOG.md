@@ -2,6 +2,17 @@
 
 All notable changes to mvm are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **volumes**: Refuse to place managed-volume plaintext on storage that is not verified encrypted. `machine volume create`, `unlock`, `mount`, just-in-time unlock, and every start that leases a managed volume now check the plaintext directory first (FileVault on macOS; ext4 over dm-crypt/LUKS with an internal journal on Linux, which needs `tune2fs` read access to the device). A host that cannot show this — including a Linux host whose volume root is not on a verified encrypted ext layout — is refused with the reason and the fix. Locked volumes stay sealed and unlocked images are never deleted by a refusal.
+- **volumes**: Writable `HOST.img:/GUEST:SIZE:rw` disk images get the same storage check, are created `0600` (missing parent directories `0700`), and an existing image other users can access, or one in a directory others can write to, is refused rather than used. Existing files are never chmodded.
+- **volumes**: Sealing a managed volume streams ciphertext into a private staging directory; no plaintext copy is written beside the archive.
+- **doctor**: Add a `volume storage (encrypted backing)` line. The path-specific detector is now shared by `doctor`, the volume service, and directory snapshots (`--mount DIR:/GUEST`, `volume mount --host`), so on Linux those now also need an ext4-over-LUKS layout with an internal journal that `tune2fs` can confirm.
+
+### Added
+- **volumes**: `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` accepts unverified storage on development hosts, for managed volumes, writable disk images, and directory snapshots alike. Off by default, recorded as `volume_storage_override` in the local audit log on every use (refused if it cannot be recorded), and refused by `--prod`.
+
 ## [0.23.1] — 2026-10-07
 
 ### Added

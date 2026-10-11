@@ -3,12 +3,26 @@
 use std::path::Path;
 
 use super::dto::CreateBlockVolumeRequest;
-use super::service::{LocalVolumeService, VolumeService};
+use super::service::{LocalVolumeService, VolumeService, probe_from_fn};
+
+/// A service whose storage probe reports every path as verified encrypted.
+/// Confined to disposable test homes; it never runs host tools.
+pub(crate) fn service() -> LocalVolumeService {
+    LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
+}
+
+/// A service whose storage probe refuses every path, standing in for a host
+/// whose volume storage is not verified encrypted.
+pub(crate) fn unverified_service() -> LocalVolumeService {
+    LocalVolumeService::with_host_encryption_probe(probe_from_fn(|path| {
+        anyhow::bail!("synthetic: {} has no dm-crypt mapping", path.display())
+    }))
+}
 
 /// Isolated `MVM_HOME` for one volume test. Holds the process-wide env lock
 /// (via `TestEnv`) so parallel tests never see each other's catalogs.
 pub(crate) struct TestVolumeHome {
-    _env: mvm_core::util::test_env::TestEnv,
+    env: mvm_core::util::test_env::TestEnv,
     root: tempfile::TempDir,
 }
 
@@ -17,7 +31,18 @@ impl TestVolumeHome {
         let root = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_HOME", root.path());
-        Self { _env: env, root }
+        // Hermetic: an override in the developer's shell must not leak into
+        // tests that assert a refusal.
+        env.remove(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV);
+        Self { env, root }
+    }
+
+    /// Turn on the development override for unverified volume storage.
+    pub(crate) fn allow_unverified_storage(&mut self) {
+        self.env.set(
+            mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV,
+            "1",
+        );
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -31,7 +56,7 @@ impl TestVolumeHome {
             .capacity_mib(capacity_mib)
             .build()
             .expect("create request");
-        LocalVolumeService::new()
+        service()
             .create_block_volume(&request)
             .expect("create block volume");
     }

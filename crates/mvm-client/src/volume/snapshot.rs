@@ -292,7 +292,7 @@ mod tests {
 
     use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
-    use super::super::service::{LocalVolumeService, VolumeService};
+    use super::super::service::VolumeService;
     use super::super::test_support::TestVolumeHome;
     use super::*;
 
@@ -323,7 +323,7 @@ mod tests {
     fn snapshot_restore_roundtrip_recovers_prior_encrypted_bytes() {
         let home = TestVolumeHome::new();
         home.create_block("work", 16);
-        let service = LocalVolumeService::new();
+        let service = crate::volume::test_support::service();
         service.unlock_volume("work").unwrap();
         write_marker(0x41);
         service.lock_volume("work").unwrap();

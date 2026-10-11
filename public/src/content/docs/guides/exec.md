@@ -84,6 +84,13 @@ mvmctl machine run --image alpine --mount ./state.img:/data/state:1G:rw \
 The guest mount path still has to sit under `/data` or `/work`; the profile
 decides whether a volume may be writable, not where it may mount.
 
+What the guest writes sits in that file as plaintext, so mvm creates it `0600`
+(and any missing directory above it `0700`), refuses an existing image other
+users can access or a directory others can write to, and requires the image's
+location to be on verified encrypted storage. See
+[Explicit disk images](/guides/persistent-workspaces/#explicit-disk-images)
+for the rules and the development override.
+
 ### Writable directories: never on a transient run
 
 A **transient** run's directory share is a read-only snapshot under *every*

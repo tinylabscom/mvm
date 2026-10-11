@@ -5,7 +5,7 @@ Feature: Encrypted block volume lifecycle and attachment
   path, plan, and backend boundaries.
 
   Scenario: an immutable snapshot restores prior encrypted volume bytes
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume unlock work"
@@ -27,7 +27,7 @@ Feature: Encrypted block volume lifecycle and attachment
     And managed volume "work" ends with byte 65
 
   Scenario: a locked managed volume cannot be registered for launch
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create locked --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume mount bdd-locked --volume locked --guest /data"
@@ -35,7 +35,7 @@ Feature: Encrypted block volume lifecycle and attachment
     And the error output contains "is locked"
 
   Scenario: a guest mount path cannot traverse into a denied system prefix
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create guarded --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume unlock guarded"
@@ -43,6 +43,20 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine volume mount bdd-guarded --volume guarded --guest /data/../../etc"
     Then the command exits with code 1
     And the error output contains "rejected by policy"
+
+  # Unlocked plaintext has to sit on storage that is verified encrypted. A host
+  # that cannot show that is refused at create, and the refusal names the fix
+  # and the development override; the override admits the volume and records
+  # each use in the local audit log.
+  Scenario: a managed volume on unverified storage is refused unless the override is set
+    Given an isolated mvm home on unencrypted backing storage
+    When I run mvmctl in the isolated mvm home with "machine volume create plain --size 16M"
+    Then the command exits with code 1
+    And the error output contains "not verified encrypted"
+    And the error output contains "MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1"
+    When I run mvmctl in the isolated mvm home with "machine volume create plain --size 16M" allowing unverified volume storage
+    Then the command exits with code 0
+    And the isolated home audit log records a volume storage override
 
   Scenario: a volume absent from the signed plan is refused
     Given a signed execution plan with no admitted volume shares
