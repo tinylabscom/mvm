@@ -1023,15 +1023,18 @@ jobs:
           # agent reads it once at boot and resolves it as an absolute path to
           # a wrapper under `/usr/lib/mvm/wrappers/`; the only other shape it
           # accepts is the marker file *itself* being the program, which it
-          # takes when the file starts with `#!` and carries mode 0755
+          # takes when the file starts with `#!` and carries mode 0555
           # root:root on the rootfs. A command line satisfies neither, so the
           # agent canonicalized `/bin/busybox sh -c 'exit 7'` as a path,
           # refused the entrypoint at boot, and the run exited 1 where this
           # lane asserts 7. `debugfs write` compounded it by creating the
           # file 0644 — even a correct path would have been refused on mode.
           #
-          # mkGuest bakes the shipped marker as a shebang script at 0755, so
-          # this fixture writes the same shape rather than a third one. The
+          # mkGuest bakes the shipped marker as a shebang script, and the
+          # read-only store copy it lands in strips owner-write, so the image
+          # carries it at 0555. The agent refuses a writable marker (0755)
+          # even on a read-only rootfs; this fixture stamps the same mode
+          # rather than a third one, or the run exits 1 at boot. The
           # `exec` keeps `entrypointArgv` below an honest statement of what
           # PID 1 runs, which admission reads.
           printf '%s\n' \
@@ -1042,7 +1045,7 @@ jobs:
           debugfs -w -R "rm /etc/mvm/entrypoint" "$revision_dir/rootfs.ext4"
           debugfs -w -R "write /tmp/exit-code-entrypoint /etc/mvm/entrypoint" \
             "$revision_dir/rootfs.ext4"
-          debugfs -w -R "sif /etc/mvm/entrypoint mode 0100755" \
+          debugfs -w -R "sif /etc/mvm/entrypoint mode 0100555" \
             "$revision_dir/rootfs.ext4"
 
           # Assert the marker the agent will accept, here rather than at boot.
@@ -1051,8 +1054,8 @@ jobs:
           marker_stat=$(debugfs -R "stat /etc/mvm/entrypoint" \
             "$revision_dir/rootfs.ext4" 2>/dev/null)
           case "$marker_stat" in
-            *"Mode:  0755"*) ;;
-            *) echo "::error::entrypoint marker is not mode 0755: $marker_stat" >&2; exit 1 ;;
+            *"Mode:  0555"*) ;;
+            *) echo "::error::entrypoint marker is not mode 0555: $marker_stat" >&2; exit 1 ;;
           esac
           case "$marker_stat" in
             *"User:     0   Group:     0"*) ;;
