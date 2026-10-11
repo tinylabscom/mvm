@@ -218,7 +218,19 @@ fn seed_from_default_cache(target: &Path) -> Result<bool, BuilderVmError> {
 
 /// Find the current builder image in the configured cache, seeding or
 /// bootstrapping it on a cache miss.
+///
+/// Every builder entry point resolves its image here, so a build on a home
+/// that has never held one acquires it the same way `mvmctl bootstrap` would,
+/// rather than telling the caller to run bootstrap first.
 pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
+    ensure_builder_vm_image_with(crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image)
+}
+
+/// [`ensure_builder_vm_image`] with the cold-cache acquisition supplied, which
+/// reports whether it ran.
+pub(crate) fn ensure_builder_vm_image_with(
+    acquire: impl FnOnce(&Path) -> Result<bool, BuilderVmError>,
+) -> Result<BuilderVmImage, BuilderVmError> {
     let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
     match load_from_cache(&arch_dir) {
         Ok(image) => Ok(image),
@@ -226,7 +238,7 @@ pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
             if seed_from_default_cache(&arch_dir)? {
                 return load_from_cache(&arch_dir);
             }
-            if !crate::builder_vm_bootstrap::auto_bootstrap_builder_vm_image(&arch_dir)? {
+            if !acquire(&arch_dir)? {
                 return Err(initial_error);
             }
             load_from_cache(&arch_dir)
