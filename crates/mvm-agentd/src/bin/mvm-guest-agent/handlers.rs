@@ -137,6 +137,15 @@ fn emit_captured_output(file: &mut dyn Write, output: CapturedOutput) {
     emit_controls(file, records);
 }
 
+/// `env` plus the variables the mounted runtime overlay gives every workload
+/// process. The host sends the rest; this part is the guest's to know.
+pub(crate) fn overlay_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    mvm_agentd::workload_env::with_runtime_overlay_env(
+        env,
+        std::path::Path::new(mvm_agentd::workload_env::RUNTIME_OVERLAY_ROOT),
+    )
+}
+
 /// Handle a `RunEntrypoint` request. Writes streaming events directly via
 /// `write_response` and returns the terminal event for the dispatcher to
 /// send through the existing `match` arm pattern.
@@ -149,6 +158,7 @@ fn handle_run_entrypoint(
     env: Vec<(String, String)>,
     stream_input: bool,
 ) -> GuestResponse {
+    let env = overlay_env(env);
     // When a warm-process pool is active, route through it instead
     // of the cold-respawn path. The host wire is identical;
     // the pool's `dispatch` synthesizes the same `EntrypointEvent`

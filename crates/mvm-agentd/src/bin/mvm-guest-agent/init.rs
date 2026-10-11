@@ -177,6 +177,9 @@ pub(crate) fn apply_activation(
     // first. Without it the guest still boots, and its restores are refused.
     #[cfg(target_os = "linux")]
     mvm_agentd::crng_reseed::start_helper();
+    // The telemetry signing key is the egress client's, mode 0400; read it now
+    // or the listener can never answer a session.
+    crate::telemetry::capture_session_keys_before_privilege_drop();
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);

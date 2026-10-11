@@ -103,7 +103,7 @@ pub use cgroup2::{
 pub use extensions::mount_extensions;
 #[cfg(any(target_os = "linux", test))]
 pub use service_identity::TOOL_HELPER_IDENTITY;
-pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity};
+pub use service_identity::{ADDON_DNS_IDENTITY, EGRESS_CLIENT_IDENTITY, ServiceIdentity};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -2477,6 +2477,36 @@ mod privilege_tests {
         }
     }
 
+    /// The addon resolver parses workload queries, so it shares no uid, gid or
+    /// capability with anything else the guest runs.
+    #[test]
+    fn the_addon_resolver_is_its_own_identity_with_net_bind_service_only() {
+        for uid in [
+            0,
+            WORKLOAD_UID,
+            CRNG_RESEED_HELPER_UID,
+            EGRESS_CLIENT_IDENTITY.uid(),
+        ] {
+            assert_ne!(ADDON_DNS_IDENTITY.uid(), uid);
+        }
+        for gid in [
+            0,
+            WORKLOAD_GID,
+            CRNG_RESEED_HELPER_GID,
+            EGRESS_CLIENT_IDENTITY.gid(),
+        ] {
+            assert_ne!(ADDON_DNS_IDENTITY.gid(), gid);
+        }
+        let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(ADDON_DNS_IDENTITY.capabilities(), *cap))
+            .collect();
+        assert_eq!(retained, vec![CAP_NET_BIND_SERVICE]);
+        assert_eq!(
+            ADDON_DNS_IDENTITY.capabilities() & RESTORE_AGENT_CAPABILITIES,
+            0
+        );
+    }
+
     #[test]
     fn the_egress_client_shares_no_capability_with_the_agent_or_the_reseed_helper() {
         let egress = EGRESS_CLIENT_IDENTITY.capabilities();
@@ -2529,6 +2559,22 @@ mod privilege_tests {
             body.contains("spawn_one_as(") && body.contains("EGRESS_CLIENT_IDENTITY"),
             "start_vsock_egress must spawn the client as EGRESS_CLIENT_IDENTITY:\n{body}"
         );
+    }
+
+    /// The addon resolver keeps a port-53 capability, so it is started under
+    /// its own identity, never as PID 1's root; and it starts after the egress
+    /// client, whose resolver seeding would otherwise replace its own.
+    #[test]
+    fn the_addon_resolver_starts_under_its_identity_after_the_egress_client() {
+        let launcher = bootstrap_body_of("start_addon_dns");
+        assert!(
+            launcher.contains("guest_helper_command(") && launcher.contains("ADDON_DNS_IDENTITY"),
+            "start_addon_dns must spawn the resolver as ADDON_DNS_IDENTITY:\n{launcher}"
+        );
+        let boot = bootstrap_body_of("provision_guest_environment");
+        let egress = boot.find("start_vsock_egress()").expect("egress start");
+        let addon = boot.find("start_addon_dns(").expect("addon start");
+        assert!(egress < addon, "{boot}");
     }
 
     /// The client reads a 0400 signing key, so the key has to belong to the uid

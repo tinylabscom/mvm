@@ -111,9 +111,13 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_flowmux_identity();
     provision_egress_ca();
     run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
-    if cmdline_has_flag("mvm.vsock_egress=1") {
+    let vsock_egress = cmdline_has_flag("mvm.vsock_egress=1");
+    if vsock_egress {
         start_vsock_egress()?;
     }
+    // After the egress client: its resolver seeding would otherwise overwrite
+    // the addon resolver's, and the addon resolver forwards to its stub.
+    start_addon_dns(vsock_egress);
     report_read_only_skips();
     Ok(())
 }
@@ -254,6 +258,63 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
         crate::guest_mount::EGRESS_CLIENT_IDENTITY,
     );
     Ok(())
+}
+
+/// Start the local-addon resolver when the image baked an addon zone.
+///
+/// Best-effort, like the shell `/init` it replaces: a failure leaves the guest
+/// on the resolvers it already had, and says why. See
+/// [`crate::addon_dns_launch`] for where it listens and what it forwards to.
+fn start_addon_dns(vsock_egress: bool) {
+    use crate::addon_dns_launch as addon;
+    if !Path::new(addon::BAKED_ZONE).is_file() {
+        return;
+    }
+    let Some(binary) = resolve_runtime_binary_for(addon::OVERLAY_BINARY, is_executable) else {
+        eprintln!(
+            "mvm-guest-init: image declares addons but {} is missing; addon names will not resolve",
+            addon::OVERLAY_BINARY
+        );
+        return;
+    };
+    bring_loopback_up();
+    let upstream = addon::Upstream::for_boot(vsock_egress);
+    if let Err(error) = stage_addon_dns_files(upstream) {
+        eprintln!("mvm-guest-init: addon DNS not started: {error}");
+        return;
+    }
+    let mut cmd = guest_helper_command(&binary, crate::guest_mount::ADDON_DNS_IDENTITY);
+    cmd.envs(addon::launch_env(upstream));
+    match cmd.spawn() {
+        Ok(child) => eprintln!("mvm-guest-init: spawned addon-dns pid={}", child.id()),
+        Err(error) => eprintln!("mvm-guest-init: spawn addon-dns: {error}"),
+    }
+}
+
+/// Copy the zone to tmpfs, capture the image's resolvers when they are the
+/// upstream, and point `/etc/resolv.conf` at the addon resolver.
+fn stage_addon_dns_files(upstream: crate::addon_dns_launch::Upstream) -> Result<(), String> {
+    use crate::addon_dns_launch as addon;
+    use std::os::unix::fs::PermissionsExt;
+    let readable = |path: &str| {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+            .map_err(|e| format!("chmod {path}: {e}"))
+    };
+    fs::copy(addon::BAKED_ZONE, addon::RUN_ZONE)
+        .map_err(|e| format!("copy {} to {}: {e}", addon::BAKED_ZONE, addon::RUN_ZONE))?;
+    readable(addon::RUN_ZONE)?;
+    if upstream.needs_snapshot() {
+        // An image with no resolv.conf has no upstream; the resolver then
+        // answers addon names only.
+        let image = fs::read("/etc/resolv.conf").unwrap_or_default();
+        fs::write(addon::UPSTREAM_RESOLV, image)
+            .map_err(|e| format!("write {}: {e}", addon::UPSTREAM_RESOLV))?;
+        readable(addon::UPSTREAM_RESOLV)?;
+    }
+    fs::write(addon::RESOLV_CONF, addon::resolv_conf_body())
+        .map_err(|e| format!("write {}: {e}", addon::RESOLV_CONF))?;
+    readable(addon::RESOLV_CONF)?;
+    bind_mount_file(addon::RESOLV_CONF, "/etc/resolv.conf")
 }
 
 pub const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";

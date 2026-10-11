@@ -30,6 +30,7 @@ mod sdk;
 mod sdk_sidecar;
 mod secrets_pii;
 mod service_plane;
+mod signed_artifact;
 mod snapshot;
 pub(crate) mod stream_capture;
 mod transcript;

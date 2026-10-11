@@ -4,6 +4,8 @@
 /// Loopback DNS resolver (`mvm-addon-dns`).
 #[cfg(feature = "addons")]
 pub mod addon_dns;
+/// Whether and how PID 1 starts the addon resolver.
+pub mod addon_dns_launch;
 /// Loopback TCP ↔ host-vsock bridge (`mvm-addon-vsock-bridge`).
 #[cfg(feature = "addons")]
 pub mod addon_vsock_bridge;

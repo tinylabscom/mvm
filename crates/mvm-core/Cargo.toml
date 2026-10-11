@@ -81,6 +81,8 @@ mvm-http = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
+# No-follow proof reads and the Linux seccomp syscall table use host ABI constants.
+libc.workspace = true
 
 # `default` is empty: the default `mvm-core` build is runtime-free.
 # The hostd IPC transport pulls tokio only behind
@@ -89,8 +91,6 @@ rustix = { version = "1.1", features = ["fs", "process"] }
 # `xtask check-core-runtime-free` asserts `cargo tree -p mvm-core
 # -e no-dev` carries no `tokio` so this can't silently regress.
 [target.'cfg(target_os = "linux")'.dependencies]
-# The shared seccomp syscall table needs libc constants on Linux.
-libc.workspace = true
 # TPM2 TSS bindings for the `attestation-tpm2` provider. Only resolved on
 # Linux; the provider code is also `cfg(target_os = "linux")` gated so
 # macOS builds never link against the TPM libraries.

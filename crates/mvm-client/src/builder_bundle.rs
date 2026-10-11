@@ -18,6 +18,15 @@
 //! boots, and the refusal names the missing payload rather than the image.
 //! Such a caller runs the build through `mvmctl`, or hands its own builder to
 //! [`build_and_export_bundle_on`].
+//!
+//! ## What is trusted
+//!
+//! The builder guest is not. It never holds the signing key: the signer lives
+//! in this process and is asked for a signature only by the export, after the
+//! guest has powered off. Before that, every file the bundle will carry is
+//! checked by [`verify_builder_output`], and [`export_builder_result`] takes
+//! only the [`VerifiedBuilderOutput`] that check returns, so there is no way to
+//! sign builder output that skipped it.
 
 use std::path::{Path, PathBuf};
 
@@ -25,13 +34,12 @@ use anyhow::{Context, Result};
 use mvm_build::builder_orchestrator::{
     BuildRequest, BuilderResult, run_builder_for_request, run_builder_for_request_on,
 };
+pub use mvm_build::builder_output::{VerifiedBuilderOutput, verify_builder_output};
 use mvm_build::builder_vm::BuilderVm;
 
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 
 use crate::bundle::{BundleExportInputs, BundleSigner, DebugOutput, export_bundle_with_signer};
-
-const INITRD_NAME: &str = "initrd";
 
 /// One flake attribute to build and the bundle to seal it into.
 #[derive(Debug, Clone)]
@@ -100,7 +108,7 @@ pub fn build_and_export_bundle(
 ) -> Result<BuilderBundleResult> {
     mvm_runtime::builder_runner::register_driver_backed_builders();
     let built = run_builder_for_request(&request.build_request())?;
-    export_builder_result(&built, request, signer)
+    export_builder_result(&verify_builder_output(&built)?, request, signer)
 }
 
 /// As [`build_and_export_bundle`], on a builder the caller supplies.
@@ -110,52 +118,47 @@ pub fn build_and_export_bundle_on(
     builder: &dyn BuilderVm,
 ) -> Result<BuilderBundleResult> {
     let built = run_builder_for_request_on(&request.build_request(), builder)?;
-    export_builder_result(&built, request, signer)
+    export_builder_result(&verify_builder_output(&built)?, request, signer)
 }
 
-/// Seal a finished build into a `.mvmpkg` signed by `signer`.
+/// Seal a verified build into a `.mvmpkg` signed by `signer`.
 ///
 /// A flake build records no vCPU or memory sizing, so the bundle carries none
 /// and a launch from it starts from the launching host's defaults.
 pub fn export_builder_result(
-    built: &BuilderResult,
+    verified: &VerifiedBuilderOutput,
     request: &BuilderBundleRequest,
     signer: &dyn BundleSigner,
 ) -> Result<BuilderBundleResult> {
-    let kernel = built.kernel_path.as_deref().with_context(|| {
+    let kernel = verified.kernel().with_context(|| {
         format!(
             "the build of {} produced no kernel; a bundle needs one to boot",
             request.attr_path
         )
     })?;
-    let vmlinux = utf8(kernel)?;
-    let rootfs = utf8(&built.rootfs_path)?;
-    let initrd = initrd_beside(&built.rootfs_path)?;
-
-    // The backend's probe is the source of truth for the verity pair, the
-    // same as it is for `mvmctl bundle export`.
-    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(rootfs);
-    let verity_bytes = verity_path
-        .as_deref()
-        .map(|path| {
-            std::fs::read(path).with_context(|| format!("reading verity sidecar at {path}"))
+    let verity_bytes = verified
+        .verity()
+        .map(|verity| {
+            std::fs::read(verity.hash_tree()).with_context(|| {
+                format!("reading verity sidecar at {}", verity.hash_tree().display())
+            })
         })
         .transpose()?;
 
     let exported = export_bundle_with_signer(
         &BundleExportInputs {
-            vmlinux,
-            initrd: initrd.as_deref(),
-            rootfs,
+            vmlinux: utf8(kernel)?,
+            initrd: verified.initrd().map(utf8).transpose()?,
+            rootfs: utf8(verified.rootfs())?,
             verity_bytes: verity_bytes.as_deref(),
-            roothash: roothash.as_deref(),
+            roothash: verified.verity().map(|verity| verity.roothash()),
             profile: request.profile.as_deref(),
             resources: None,
             arch_label: &request.arch_label,
             label: request.label.clone(),
             cmdline: None,
             posture: None,
-            provenance: Some(request.provenance(built)),
+            provenance: Some(request.provenance(verified.build())),
             boot_assets: None,
             out: &request.bundle_out,
             debug_out: request.debug_out.clone(),
@@ -165,18 +168,6 @@ pub fn export_builder_result(
     Ok(BuilderBundleResult {
         bundle_path: exported.path,
     })
-}
-
-/// The initrd a build left beside its rootfs, if it left one.
-fn initrd_beside(rootfs: &Path) -> Result<Option<String>> {
-    let Some(dir) = rootfs.parent() else {
-        return Ok(None);
-    };
-    let initrd = dir.join(INITRD_NAME);
-    if !initrd.is_file() {
-        return Ok(None);
-    }
-    utf8(&initrd).map(|path| Some(path.to_string()))
 }
 
 fn utf8(path: &Path) -> Result<&str> {
@@ -201,6 +192,9 @@ mod tests {
 
     const ROOTHASH: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
+    /// The least a sidecar must say for the runtime to boot its rootfs.
+    const ADMITTED_SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true}"#;
+
     /// An initrd and a complete dm-verity pair, as a build leaves them.
     const INITRD_AND_VERITY: &[(&str, &[u8])] = &[
         ("initrd", b"initrd"),
@@ -224,6 +218,36 @@ mod tests {
         }
     }
 
+    /// A signer that records whether it was ever asked to sign.
+    struct WatchedSigner {
+        inner: TestSigner,
+        asked: std::cell::Cell<u32>,
+    }
+
+    impl WatchedSigner {
+        fn new() -> Self {
+            Self {
+                inner: TestSigner(SigningKey::from_bytes(&[3; 32])),
+                asked: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl BundleSigner for WatchedSigner {
+        fn publisher_id(&self) -> String {
+            self.inner.publisher_id()
+        }
+
+        fn verifying_key(&self) -> VerifyingKey {
+            self.inner.verifying_key()
+        }
+
+        fn sign(&self, canonical_manifest: &[u8]) -> anyhow::Result<[u8; 64]> {
+            self.asked.set(self.asked.get() + 1);
+            self.inner.sign(canonical_manifest)
+        }
+    }
+
     struct OneKey(VerifyingKey);
 
     impl TrustStore for OneKey {
@@ -237,6 +261,19 @@ mod tests {
     struct StubBuilder {
         kernel: bool,
         extra: &'static [(&'static str, &'static [u8])],
+        /// Replace this output member with a link to `target`, as a guest
+        /// that wanted the host to read `target` would.
+        link: Option<(&'static str, std::path::PathBuf)>,
+    }
+
+    impl StubBuilder {
+        fn new(kernel: bool, extra: &'static [(&'static str, &'static [u8])]) -> Self {
+            Self {
+                kernel,
+                extra,
+                link: None,
+            }
+        }
     }
 
     impl BuilderVm for StubBuilder {
@@ -247,12 +284,16 @@ mod tests {
         ) -> Result<BuilderArtifacts, BuilderVmError> {
             let out = &mounts.artifact_out;
             std::fs::write(out.join("rootfs.ext4"), b"rootfs").unwrap();
-            std::fs::write(out.join(SIDECAR_FILENAME), b"{}").unwrap();
+            std::fs::write(out.join(SIDECAR_FILENAME), ADMITTED_SIDECAR).unwrap();
             if self.kernel {
                 std::fs::write(out.join("vmlinux"), b"kernel").unwrap();
             }
             for (name, bytes) in self.extra {
                 std::fs::write(out.join(name), bytes).unwrap();
+            }
+            if let Some((name, target)) = &self.link {
+                std::fs::remove_file(out.join(name)).unwrap();
+                std::os::unix::fs::symlink(target, out.join(name)).unwrap();
             }
             Ok(BuilderArtifacts::Image {
                 rootfs_path: out.join("rootfs.ext4"),
@@ -308,10 +349,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let request = request(tmp.path());
         let signer = TestSigner(SigningKey::from_bytes(&[3; 32]));
-        let builder = StubBuilder {
-            kernel: true,
-            extra: &[],
-        };
+        let builder = StubBuilder::new(true, &[]);
 
         let result = build_and_export_bundle_on(&request, &signer, &builder).expect("bundle");
 
@@ -319,7 +357,10 @@ mod tests {
         let bundle = verify(&result.bundle_path, &signer);
         assert_eq!(bundle.artifacts["artifacts/vmlinux"], b"kernel");
         assert_eq!(bundle.artifacts["artifacts/rootfs.ext4"], b"rootfs");
-        assert_eq!(bundle.artifacts["artifacts/mvm-meta.json"], b"{}");
+        assert_eq!(
+            bundle.artifacts["artifacts/mvm-meta.json"],
+            ADMITTED_SIDECAR
+        );
         let manifest = bundle.manifest;
         assert_eq!(manifest.arch, "aarch64");
         assert_eq!(manifest.profile.as_deref(), Some("minimal"));
@@ -339,10 +380,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let request = request(tmp.path());
         let signer = TestSigner(SigningKey::from_bytes(&[3; 32]));
-        let builder = StubBuilder {
-            kernel: true,
-            extra: INITRD_AND_VERITY,
-        };
+        let builder = StubBuilder::new(true, INITRD_AND_VERITY);
 
         let result = build_and_export_bundle_on(&request, &signer, &builder).expect("bundle");
 
@@ -365,10 +403,7 @@ mod tests {
     fn a_build_with_no_kernel_is_refused_and_writes_nothing() {
         let tmp = tempfile::tempdir().unwrap();
         let request = request(tmp.path());
-        let builder = StubBuilder {
-            kernel: false,
-            extra: &[],
-        };
+        let builder = StubBuilder::new(false, &[]);
 
         let err = build_and_export_bundle_on(
             &request,
@@ -389,10 +424,7 @@ mod tests {
             debug_out: Some(DebugOutput::json(&debug_path)),
             ..request(tmp.path())
         };
-        let builder = StubBuilder {
-            kernel: true,
-            extra: &[],
-        };
+        let builder = StubBuilder::new(true, &[]);
 
         build_and_export_bundle_on(
             &request,
@@ -404,5 +436,95 @@ mod tests {
         let summary: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&debug_path).expect("summary")).unwrap();
         assert_eq!(summary["manifest"]["arch"], "aarch64");
+    }
+
+    /// A compromised builder cannot see the host key, but it can name a file
+    /// in its output after one. If the host read through that name, the key
+    /// would be sealed into a bundle the host then signs and ships.
+    #[test]
+    fn output_that_links_to_the_signing_key_is_refused_before_the_signer_is_asked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = request(tmp.path());
+        let keys = tmp.path().join("keys");
+        crate::bundle::HostBundleSigner::load_at(&keys).expect("host key");
+        let key_file = keys.join("host-signer.ed25519");
+        assert!(
+            key_file.is_file(),
+            "the host key exists where a guest would aim"
+        );
+
+        for member in ["rootfs.ext4", "vmlinux", SIDECAR_FILENAME] {
+            let _ = std::fs::remove_dir_all(&request.artifact_out);
+            std::fs::create_dir_all(&request.artifact_out).unwrap();
+            let signer = WatchedSigner::new();
+            let builder = StubBuilder {
+                link: Some((member, key_file.clone())),
+                ..StubBuilder::new(true, &[])
+            };
+
+            let err = build_and_export_bundle_on(&request, &signer, &builder)
+                .expect_err("a linked member is refused");
+
+            assert_eq!(
+                mvm_build::builder_orchestrator::failure_category(&err),
+                mvm_build::builder_job_contract::FailureCategory::OutputContract,
+                "{member}: {err:#}"
+            );
+            assert_eq!(signer.asked.get(), 0, "{member}: the signer was asked");
+            assert!(
+                !request.bundle_out.exists(),
+                "{member}: a bundle was written"
+            );
+        }
+    }
+
+    #[test]
+    fn output_the_runtime_would_not_boot_is_refused_before_the_signer_is_asked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = request(tmp.path());
+        let signer = WatchedSigner::new();
+        let builder = StubBuilder::new(true, &[(SIDECAR_FILENAME, br#"{"overlayAware":false}"#)]);
+
+        let err = build_and_export_bundle_on(&request, &signer, &builder).expect_err("refused");
+
+        assert!(format!("{err:#}").contains("would not boot"), "{err:#}");
+        assert_eq!(signer.asked.get(), 0);
+        assert!(!request.bundle_out.exists());
+    }
+
+    /// The probe a boot uses drops a malformed root hash and boots unsealed.
+    /// An export that did the same would sign a rootfs the build meant to seal
+    /// as an unsealed one.
+    #[test]
+    fn a_malformed_verity_root_hash_is_refused_not_exported_unsealed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = request(tmp.path());
+        let signer = WatchedSigner::new();
+        let builder = StubBuilder::new(
+            true,
+            &[
+                ("rootfs.verity", b"hash tree"),
+                ("rootfs.roothash", b"not a root hash"),
+            ],
+        );
+
+        let err = build_and_export_bundle_on(&request, &signer, &builder).expect_err("refused");
+
+        assert!(format!("{err:#}").contains("64-hex"), "{err:#}");
+        assert_eq!(signer.asked.get(), 0);
+        assert!(!request.bundle_out.exists());
+    }
+
+    #[test]
+    fn verified_output_is_signed_exactly_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let request = request(tmp.path());
+        let signer = WatchedSigner::new();
+
+        build_and_export_bundle_on(&request, &signer, &StubBuilder::new(true, &[]))
+            .expect("bundle");
+
+        assert_eq!(signer.asked.get(), 1);
+        verify(&request.bundle_out, &signer.inner);
     }
 }

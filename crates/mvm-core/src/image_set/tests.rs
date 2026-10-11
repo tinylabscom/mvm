@@ -1700,6 +1700,7 @@ mod verification {
     use super::*;
     use crate::image_set::verify::{
         ImageSetVerification, verify_checked, verify_checked_selected, verify_image_set,
+        verify_root_checked,
     };
     use crate::pack_trust::{PackTrustConfig, RevokedPack};
     use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus};
@@ -1787,6 +1788,87 @@ mod verification {
             }],
             ..PackTrustConfig::default()
         }
+    }
+
+    #[test]
+    fn root_only_authentication_does_not_certify_member_bytes() {
+        let set = staged();
+        let name = set.first_artifact_name();
+        std::fs::remove_file(set.path(&name)).unwrap();
+        let root = verify_root_checked(&set.request(), accept_signature).unwrap();
+        assert_eq!(root.manifest_sha256(), &set.lock.manifest_sha256);
+        assert_eq!(root.manifest().members.len(), manifest().members.len());
+        assert!(matches!(
+            verify_checked(&set.request(), accept_signature),
+            Err(ImageSetError::ArtifactMissing { .. })
+        ));
+        assert!(matches!(
+            verify_checked_selected(&set.request(), &[], accept_signature),
+            Err(ImageSetError::EmptyArtifactSelection)
+        ));
+    }
+
+    #[test]
+    fn root_only_authentication_preserves_lock_and_real_signature_gates() {
+        let mut set = staged();
+        assert!(verify_image_set_root(&set.request()).is_err());
+        set.manifest_bytes.push(b' ');
+        assert!(matches!(
+            verify_root_checked(&set.request(), accept_signature),
+            Err(ImageSetError::ManifestDigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn root_only_authentication_preserves_completeness_and_protocol_gates() {
+        let mut incomplete = manifest();
+        incomplete
+            .members
+            .retain(|m| m.role != ImageSetRole::RuntimeOverlay);
+        let set = stage(incomplete);
+        verify_root_checked(&set.request(), accept_signature).unwrap();
+        assert!(matches!(
+            verify_root_checked(
+                &set.request().require(&ImageSetRequirement::current_train()),
+                accept_signature
+            ),
+            Err(ImageSetError::Incomplete { .. })
+        ));
+        let incompatible = HostProtocolSupport {
+            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            builder_cache_contract: 4,
+            builder_boot_abi: payload_capable(),
+        };
+        assert!(matches!(
+            verify_root_checked(
+                &set.request().with_host_protocols(&incompatible),
+                accept_signature
+            ),
+            Err(ImageSetError::GuestAgentProtocolDisjoint { .. })
+        ));
+    }
+
+    #[test]
+    fn root_only_authentication_preserves_set_and_member_revocations() {
+        let set = staged();
+        let revocations = revoking(&set.lock, &set.lock.manifest_sha256);
+        assert!(matches!(
+            verify_root_checked(
+                &set.request().with_revocations(&revocations),
+                accept_signature
+            ),
+            Err(ImageSetError::SetRevoked { .. })
+        ));
+        let manifest: ImageSetManifest = serde_json::from_slice(&set.manifest_bytes).unwrap();
+        let revoked = manifest.members[2].pack_hash.as_ref().unwrap();
+        let revocations = revoking(&set.lock, revoked);
+        assert!(matches!(
+            verify_root_checked(
+                &set.request().with_revocations(&revocations),
+                accept_signature
+            ),
+            Err(ImageSetError::MemberRevoked { .. })
+        ));
     }
 
     #[test]

@@ -131,7 +131,14 @@ impl SnapshotKeyResolver {
 
     /// The sources this host offers, in the order the module documents.
     pub fn host() -> Self {
-        if std::env::var_os(SNAPSHOT_TENANT_KEY_ENV).is_some() {
+        Self::host_for(SNAPSHOT_TENANT_ID)
+    }
+
+    /// The sources this host offers for `tenant_id`'s key, in the same order:
+    /// its explicit variable alone when that is set, else the keystore and
+    /// the key directory.
+    pub fn host_for(tenant_id: &str) -> Self {
+        if std::env::var_os(EnvKeyProvider::variable_for(tenant_id)).is_some() {
             return Self::empty().source(SnapshotKeySource::Explicit, Box::new(EnvKeyProvider));
         }
         Self::host_stores()
@@ -162,8 +169,14 @@ impl SnapshotKeyResolver {
 
     /// Resolve and validate the key, or say why there is none.
     pub fn admit(&self) -> Result<SnapshotKey, SnapshotKeyError> {
+        self.admit_for(SNAPSHOT_TENANT_ID)
+    }
+
+    /// Resolve and validate `tenant_id`'s key from these sources, with the
+    /// same stop-on-unreadable rule as [`SnapshotKeyResolver::admit`].
+    pub fn admit_for(&self, tenant_id: &str) -> Result<SnapshotKey, SnapshotKeyError> {
         for (origin, provider) in &self.sources {
-            match provider.get_data_key(SNAPSHOT_TENANT_ID) {
+            match provider.get_data_key(tenant_id) {
                 Ok(key) => {
                     return SnapshotKey::from_bytes(key.expose_secret().clone())
                         .ok_or(SnapshotKeyError::Invalid { origin: *origin });

@@ -86,6 +86,14 @@ pub const TOOL_HELPER_IDENTITY: ServiceIdentity = ServiceIdentity::new(
     (1u64 << super::CAP_SETUID) | (1u64 << super::CAP_SETGID),
 );
 
+/// Identity of the local-addon resolver (`mvm-addon-dns`).
+///
+/// It parses every DNS query the workload sends, so it gets a uid of its own
+/// for the same reason the egress client does, and keeps only
+/// `CAP_NET_BIND_SERVICE` for its port-53 listener. It holds no key.
+pub const ADDON_DNS_IDENTITY: ServiceIdentity =
+    ServiceIdentity::new(987, 987, 1u64 << super::CAP_NET_BIND_SERVICE);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,6 +109,7 @@ mod tests {
         );
         assert_ne!(identity.uid(), super::super::WORKLOAD_UID);
         assert_ne!(identity.uid(), super::EGRESS_CLIENT_IDENTITY.uid());
+        assert_ne!(identity.uid(), super::ADDON_DNS_IDENTITY.uid());
     }
 
     #[test]

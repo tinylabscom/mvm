@@ -62,7 +62,10 @@ pub fn attach_runtime_overlay(
     resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<()> {
-    if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
+    // Every backend that boots a kernel boots the universal initramfs, and
+    // that initramfs mounts the overlay. `apple-container` is the HVF runner
+    // with another kernel image, so it needs the overlay exactly as HVF does.
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&hypervisor) {
         return Ok(());
     }
     match mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch) {
@@ -348,8 +351,8 @@ fn resolve_image_set_sidecar_attachment(
 /// \`host.kv.get\`` — an error that points at the broker rather than at the
 /// stale image.
 ///
-/// A warning, not an implicit rebuild: source construction boots Stage 0 and
-/// therefore remains an explicit operator action outside a workload launch.
+/// A warning, not an implicit rebuild: a launch resolves prepared artifacts
+/// only, and repacking stays the explicit bootstrap step.
 ///
 /// Silent for a release binary, which has no checkout and for which the
 /// published artifact is exactly right.
@@ -406,8 +409,8 @@ fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String 
         "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
          crates/mvm-host-services in this checkout. Host-service calls from the guest use \
          the verbs it shipped with; one added here answers `unknown method`. Run \
-         `mvmctl build sdk-sidecar build` and wait for both libc variants to report cached \
-         successfully. Provenance marker: {}.",
+         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`, which repacks both libc \
+         variants from this checkout's guest runtime. Provenance marker: {}.",
         marker.display()
     )
 }
@@ -438,6 +441,12 @@ mod sdk_sidecar_host_resolution_tests {
         assert!(warning.contains("crates/mvm-host-services"), "{warning}");
         assert!(!warning.contains("changes to crates/mvm-sdk"), "{warning}");
         assert!(warning.contains("both libc variants"), "{warning}");
+        // The remedy is the one a checkout without an image checkout can run.
+        assert!(
+            warning.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap"),
+            "{warning}"
+        );
+        assert!(!warning.contains("sdk-sidecar build"), "{warning}");
         assert!(warning.contains(&marker.display().to_string()), "{warning}");
     }
 
@@ -954,6 +963,27 @@ mod runtime_overlay_attach_tests {
             ..VmStartConfig::default()
         };
         attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
+        assert!(sc.runtime_overlay_path.is_some());
+        assert!(sc.runtime_overlay_verity_path.is_some());
+        assert!(sc.runtime_overlay_roothash.is_some());
+        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
+    }
+
+    /// `apple-container` is the HVF runner with Apple's kernel: the same
+    /// initramfs, the same activation, and the same overlay-contract gate. A
+    /// launch that attached no overlay reached that gate with no egress client
+    /// and failed activation on any boot that admitted egress.
+    #[test]
+    fn apple_container_with_cached_overlay_populates_all_three_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let ver = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        seed_cache(dir.path(), ver, arch);
+        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "apple-container", &resolver, arch).unwrap();
         assert!(sc.runtime_overlay_path.is_some());
         assert!(sc.runtime_overlay_verity_path.is_some());
         assert!(sc.runtime_overlay_roothash.is_some());

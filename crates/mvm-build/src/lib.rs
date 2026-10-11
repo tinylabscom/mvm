@@ -37,6 +37,8 @@ pub mod builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 pub mod builder_orchestrator;
+/// What the host checks in a builder VM's output before it uses or signs it.
+pub mod builder_output;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in

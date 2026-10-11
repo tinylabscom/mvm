@@ -50,6 +50,11 @@ fn do_exec_streaming(
     GuestResponse::ExecEvent(terminal)
 }
 
+/// The reporter a detached workload's reaper runs with the exit code. Like
+/// every other helper it comes from the runtime overlay: neither mkGuest nor
+/// OCI injection bakes a copy into the image.
+const EXIT_REPORT_OVERLAY: &str = "/mvm/runtime/exit-report";
+
 /// Spawn `argv` as a detached workload and return its ack (DevOnly).
 ///
 /// Models the image `/init` entrypoint launch, but agent-driven and
@@ -57,22 +62,22 @@ fn do_exec_streaming(
 /// `/dev/null`, and stdout/stderr on `/dev/console` (which the host
 /// backend captures to `console.log`). The call returns immediately with
 /// `DetachedStarted { pid }`; a detached reaper thread waits on the child
-/// and reports its exit code to the host's workload-exit port via
-/// `mvm-exit-report`, so the VM powers off when the workload finishes
+/// and reports its exit code to the host's workload-exit port through the
+/// runtime overlay's exit reporter, so the VM powers off when the workload finishes
 /// (docker `-d` semantics). The reaper never blocks the agent request loop.
 fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
     do_run_detached_with(
         argv,
-        env,
+        crate::handlers::overlay_env(env),
         std::path::Path::new("/dev/console"),
-        std::path::Path::new("/usr/local/bin/mvm-exit-report"),
+        std::path::Path::new(EXIT_REPORT_OVERLAY),
     )
 }
 
 /// Testable core of [`do_run_detached`]. `console` receives the workload's
 /// stdout/stderr (production: `/dev/console`, captured by the backend to
 /// `console.log`); `exit_report_bin` is the reporter the reaper execs with the
-/// workload's exit code (production: `/usr/local/bin/mvm-exit-report`). A test
+/// workload's exit code (production: the overlay's `/mvm/runtime/exit-report`). A test
 /// points both at a tempdir to observe the spawn, the console redirect, and the
 /// reported exit code without a live guest.
 fn do_run_detached_with(
@@ -176,7 +181,14 @@ fn do_run_detached_with(
         let mut command = std::process::Command::new(&exit_report_bin);
         command.arg(code.to_string());
         mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
-        let _ = command.status();
+        // Best-effort, but never silent: an unreported exit leaves the VM
+        // running with nothing on the console to say why.
+        if let Err(e) = command.status() {
+            eprintln!(
+                "mvm-guest-agent: run-detached exit report via {} failed (code={code}): {e}",
+                exit_report_bin.display()
+            );
+        }
     });
 
     GuestResponse::DetachedStarted { pid }
@@ -606,6 +618,21 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
+    }
+
+    /// The reaper's reporter is the overlay copy. The old baked
+    /// `/usr/local/bin/mvm-exit-report` is shipped by neither mkGuest nor OCI
+    /// injection, so a detached workload's exit was never reported and the VM
+    /// kept running after it finished.
+    #[test]
+    fn run_detached_reports_through_the_runtime_overlay() {
+        let reporter = std::path::Path::new(EXIT_REPORT_OVERLAY);
+        assert!(
+            reporter.starts_with("/mvm/runtime"),
+            "{}",
+            reporter.display()
+        );
+        assert_eq!(reporter.file_name().unwrap(), "exit-report");
     }
 
     #[test]

@@ -238,7 +238,10 @@ jobs:
       # runner budget above.
       max-parallel: 1
       matrix:
-        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60}]' || '[{"witness":"ci_live","timeout":90},{"witness":"tool_live","timeout":60}]') }}
+        # bundle_boot_live seals an OCI image into a signed .mvmpkg with the
+        # home's own signer and boots it as `machine run ./witness.mvmpkg`: the
+        # Firecracker boot witness for the single-file artifact.
+        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60}]' || '[{"witness":"ci_live","timeout":90},{"witness":"tool_live","timeout":60},{"witness":"bundle_boot_live","timeout":60}]') }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
@@ -317,7 +320,15 @@ jobs:
           cargo test -p mvm-agentd --bin mvm-tool-shim
 
       - name: Run the selected live witness
+        if: matrix.witness != 'bundle_boot_live'
         run: just bdd::live-ci ${{ matrix.witness }}
+
+      # Its own step so the claims register can cite it: MVM-SEC-25's boot
+      # witness is this leg, and a matrix entry is not something the ledger
+      # can anchor to.
+      - name: Boot a sealed OCI image as a signed .mvmpkg (bundle_boot_live)
+        if: matrix.witness == 'bundle_boot_live'
+        run: just bdd::live-ci bundle_boot_live
 
       - name: Dump VMM diagnostics on failure
         if: failure()
@@ -843,6 +854,11 @@ jobs:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
       MVM_BUILDER_VM_TIMEOUT_SECS: 7200
+      # The guest runtime under test is this checkout's. Launches default to
+      # published artifacts, so name the source arm; without it bootstrap
+      # installs the published overlay and never builds the guest runtime the
+      # cache step below hands to the QEMU smoke.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
 
@@ -899,6 +915,11 @@ jobs:
       - name: Bootstrap source-matched launch artifacts
         env:
           MVM_KERNEL_SOURCE: auto
+          # This lane's artifacts are the source-matched ones the smoke job
+          # boots against, and the guest-runtime cache it restores is the
+          # source build's. Downloads are the default even from a checkout, so
+          # the build arm is selected explicitly.
+          MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
       # The published workload asset is the uncompressed ELF required by
@@ -1153,6 +1174,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       MVM_HOME: ${{ github.workspace }}/.mvm-ci
+      # Resolve the guest runtime restored below rather than the published one.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
       # The QEMU transport re-execs mvmctl as its per-VM vsock bridge. This
       # witness intentionally installs the exact source binary under a unique
       # name, so point helper resolution at those same tested bytes.

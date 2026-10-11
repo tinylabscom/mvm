@@ -224,6 +224,10 @@ pub(in crate::commands) fn settle_manifest_archive(
     }
     let loaded = load_bundle(arg, LoadOptions::default())?;
     let trust = trust_store(None)?;
+    // Timed from here, after the archive is local: verification is the cost a
+    // launch from a signed artifact pays on every run, and the launch sample
+    // reports it beside the boot so the two are never folded together.
+    let verify_started = std::time::Instant::now();
     let sha256 = if dry_run {
         let sha256 = verify_bundle_file(loaded.path(), &trust)
             .with_context(|| format!("verifying bundle archive {arg}"))?
@@ -255,6 +259,7 @@ pub(in crate::commands) fn settle_manifest_archive(
         }
         bundle.sha256
     };
+    mvm_core::launch_trace::record_bundle_verify(verify_started.elapsed());
     *manifest = Some(sha256);
     Ok(())
 }
@@ -433,6 +438,15 @@ mod tests {
 
         let (manifest, result) = settle(&path, false);
         result.expect("a signed archive settles");
+        // The launch sample reads this to put the artifact launch in its own
+        // lane; an archive that verified without recording it would be
+        // measured as a prepared launch that never verified anything.
+        assert!(
+            mvm_core::launch_trace::recorded_acquisition()
+                .bundle_verify_us
+                .is_some(),
+            "a settled archive must record its verification"
+        );
 
         let sha = bundle_sha256(&bytes);
         assert_eq!(manifest.as_deref(), Some(sha.as_str()));
@@ -495,6 +509,36 @@ mod tests {
             format!("{err:#}").contains("trust store has no entry for key_id"),
             "the refusal names the missing key: {err:#}"
         );
+        assert!(host.installed().is_empty());
+    }
+
+    /// The trust store is keyed by `key_id`, so the file it hands back is the
+    /// only link from the id an archive declares to the key that must have
+    /// signed it. A store entry for the archive's id holding some other key is
+    /// a misfiled or substituted key, and the run refuses rather than trusting
+    /// whichever key happens to sit under that name.
+    #[test]
+    fn an_archive_whose_key_id_is_enrolled_under_another_key_is_refused() {
+        let host = Host::new(false);
+        let declared = key_id_from_pubkey(&host.key.verifying_key());
+        let substituted = SigningKey::from_bytes(&[9; 32]).verifying_key();
+        let trust = host.home.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trust).expect("trust store");
+        std::fs::write(
+            trust.join(format!("{}.pub", declared.0)),
+            substituted.to_bytes(),
+        )
+        .expect("misfile a key");
+        let (_dir, path, _) = host.archive();
+
+        let (manifest, result) = settle(&path, false);
+
+        let err = result.expect_err("an archive must verify under its own key");
+        assert!(
+            format!("{err:#}").contains("but trust store entry is for"),
+            "the refusal names the key mismatch: {err:#}"
+        );
+        assert_eq!(manifest, Some(path.display().to_string()));
         assert!(host.installed().is_empty());
     }
 

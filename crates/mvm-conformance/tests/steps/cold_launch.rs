@@ -83,7 +83,7 @@ fn launch_with_dispatch_window(world: &mut CliWorld, milliseconds: f64) {
 }
 
 #[given(
-    regex = r"^a release launch sample whose launch performed (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan)$"
+    regex = r"^a release launch sample whose launch performed (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan|bundle_verify)$"
 )]
 fn contaminated_launch_sample(world: &mut CliWorld, work: String) {
     let mut sample = clean_sample(BuildProfile::Release);
@@ -104,6 +104,9 @@ fn contaminated_launch_sample(world: &mut CliWorld, work: String) {
         "artifact_hash" => sample.work.artifact_bytes_hashed = 1_205_739_520,
         // Host maintenance charged to a launch that spawned nothing to clean.
         "process_table_scan" => sample.work.process_table_scans = 1,
+        // A signed archive verified before the launch: real work, reported in
+        // its own lane rather than hidden inside the prepared number.
+        "bundle_verify" => sample.work.bundle_verify_us = Some(12_500),
         other => panic!("unknown work kind {other:?}"),
     }
     world.cold_launch_sample = Some(sample);
@@ -119,14 +122,17 @@ fn warm_launch_without_the_flag(world: &mut CliWorld) {
     sample.work.warm_claim = false;
 }
 
-#[when("the sample is offered to the prepared-cold lane")]
-fn offer_to_the_prepared_cold_lane(world: &mut CliWorld) {
+#[when(regex = r"^the sample is offered to the (prepared-cold|prepared-cold-artifact) lane$")]
+fn offer_to_lane(world: &mut CliWorld, lane: String) {
+    let lane: LaunchLane = lane
+        .replace('-', "_")
+        .parse()
+        .expect("the scenario names a real lane");
     let sample = world
         .cold_launch_sample
         .as_ref()
         .expect("a launch sample was staged");
-    world.cold_launch_lane_result =
-        Some(validate_lane(LaunchLane::PreparedCold, sample).map_err(|e| e.to_string()));
+    world.cold_launch_lane_result = Some(validate_lane(lane, sample).map_err(|e| e.to_string()));
 }
 
 #[when("the dispatch timing is checked against the hard boot requirement")]
@@ -141,7 +147,7 @@ fn check_hard_boot_requirement(world: &mut CliWorld) {
     );
 }
 
-#[then("the prepared-cold lane accepts the sample")]
+#[then(regex = r"^the (?:prepared-cold|prepared-cold-artifact) lane accepts the sample$")]
 fn the_lane_accepts(world: &mut CliWorld) {
     let outcome = world
         .cold_launch_lane_result
@@ -165,7 +171,7 @@ fn hard_boot_requirement_fails(world: &mut CliWorld) {
 }
 
 #[then(
-    regex = r"^the prepared-cold lane refuses the sample naming (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan)$"
+    regex = r"^the (?:prepared-cold|prepared-cold-artifact) lane refuses the sample naming (image_pull|image_build|mount_materialize|warm_claim|artifact_hash|process_table_scan|bundle_verify)$"
 )]
 fn the_lane_refuses_naming(world: &mut CliWorld, work: String) {
     let rendered = refusal(world);

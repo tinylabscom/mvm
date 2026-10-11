@@ -38,6 +38,12 @@ use crate::crypto::image_verify::{sha256_file, verify_signed_payload_under_any_i
 use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus, Sha256Hex};
 use crate::plan::bundle::{KeyId, key_id_from_identity};
 
+#[path = "root_cache.rs"]
+mod root_cache;
+pub use root_cache::{
+    cache_image_set_root, image_set_root_proof_cache, read_cached_image_set_root,
+};
+
 /// One image set to verify, and the optional policy inputs that add checks.
 ///
 /// A params struct because four of the inputs are borrowed byte slices and
@@ -98,6 +104,53 @@ impl<'a> ImageSetVerification<'a> {
 }
 
 /// What a verification established, for a caller that now wants to use the set.
+///
+/// This result verifies the root only. No member bytes have been read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedImageSetRoot {
+    manifest: ImageSetManifest,
+    release: ReleaseProducer,
+    manifest_sha256: Sha256Hex,
+    signer_key_id: KeyId,
+}
+
+impl VerifiedImageSetRoot {
+    pub fn manifest(&self) -> &ImageSetManifest {
+        &self.manifest
+    }
+
+    pub fn manifest_sha256(&self) -> &Sha256Hex {
+        &self.manifest_sha256
+    }
+}
+
+/// Authenticate the root without authorizing any member bytes.
+///
+/// `artifact_dir` is not read. Completeness is checked only when the request
+/// supplies a requirement, just as for selected-artifact verification.
+pub fn verify_image_set_root(
+    request: &ImageSetVerification<'_>,
+) -> Result<VerifiedImageSetRoot, ImageSetError> {
+    verify_root_checked(request, check_keyless_signature)
+}
+
+pub(super) fn verify_root_checked(
+    request: &ImageSetVerification<'_>,
+    check_signature: SignatureChecker,
+) -> Result<VerifiedImageSetRoot, ImageSetError> {
+    let root = verify_root_structure(request, check_signature)?;
+    if let Some(revocations) = request.revocations {
+        check_revocations(
+            &root.manifest,
+            &root.manifest_sha256,
+            &root.signer_key_id,
+            revocations,
+        )?;
+    }
+    Ok(root)
+}
+
+/// An authenticated root together with verified bytes for every member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedImageSet {
     pub manifest: ImageSetManifest,
@@ -199,6 +252,32 @@ fn verify_checked_scope(
     selected: Option<&[ArtifactName]>,
     check_signature: SignatureChecker,
 ) -> Result<VerifiedSelectedArtifacts, ImageSetError> {
+    let root = verify_root_structure(request, check_signature)?;
+    let artifacts = match selected {
+        Some(names) => verify_selected_artifacts(&root.manifest, request.artifact_dir, names)?,
+        None => verify_artifacts(&root.manifest, request.artifact_dir)?,
+    };
+    if let Some(revocations) = request.revocations {
+        check_revocations(
+            &root.manifest,
+            &root.manifest_sha256,
+            &root.signer_key_id,
+            revocations,
+        )?;
+    }
+    Ok(VerifiedSelectedArtifacts {
+        manifest: root.manifest,
+        release: root.release,
+        manifest_sha256: root.manifest_sha256,
+        signer_key_id: root.signer_key_id,
+        artifacts,
+    })
+}
+
+fn verify_root_structure(
+    request: &ImageSetVerification<'_>,
+    check_signature: SignatureChecker,
+) -> Result<VerifiedImageSetRoot, ImageSetError> {
     let lock = request.lock;
     check_lock_schema_version(lock)?;
 
@@ -221,21 +300,13 @@ fn verify_checked_scope(
         check_protocol_compatibility(&manifest, host)?;
     }
 
-    let artifacts = match selected {
-        Some(names) => verify_selected_artifacts(&manifest, request.artifact_dir, names)?,
-        None => verify_artifacts(&manifest, request.artifact_dir)?,
-    };
     let signer_key_id = locked_signer_key_id(lock);
-    if let Some(revocations) = request.revocations {
-        check_revocations(&manifest, &manifest_sha256, &signer_key_id, revocations)?;
-    }
 
-    Ok(VerifiedSelectedArtifacts {
+    Ok(VerifiedImageSetRoot {
         manifest,
         release,
         manifest_sha256,
         signer_key_id,
-        artifacts,
     })
 }
 

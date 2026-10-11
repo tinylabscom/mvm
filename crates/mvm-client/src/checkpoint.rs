@@ -55,12 +55,20 @@ impl Checkpoints {
     /// The metadata membership check is security-relevant: callers never get
     /// an arbitrary path assembled from a volume name that the checkpoint did
     /// not declare.
-    pub fn workspace_image(&self, id: &CheckpointId, volume: &str) -> Result<PathBuf> {
+    ///
+    /// A protected checkpoint stores no plaintext image to point at, so its
+    /// image is opened into a private directory the returned value owns and
+    /// removes when dropped.
+    pub fn workspace_image(&self, id: &CheckpointId, volume: &str) -> Result<WorkspaceImage> {
         let meta = self.read(id)?;
         self.workspace_image_for_meta(&meta, volume)
     }
 
-    fn workspace_image_for_meta(&self, meta: &CheckpointMeta, volume: &str) -> Result<PathBuf> {
+    fn workspace_image_for_meta(
+        &self,
+        meta: &CheckpointMeta,
+        volume: &str,
+    ) -> Result<WorkspaceImage> {
         let id = validated_id(meta.id.as_str()).context("checkpoint metadata id")?;
         let blob = checked_workspace_blob_name(volume)?;
         if !meta.content.iter().any(|content| content.name == blob) {
@@ -70,7 +78,45 @@ impl Checkpoints {
                 meta.id.as_str()
             );
         }
-        Ok(self.store.content_dir(&id).join(blob))
+        if meta.protection.is_unprotected() {
+            return Ok(WorkspaceImage::existing(
+                self.store.content_dir(&id).join(blob),
+            ));
+        }
+        let scratch = tempfile::Builder::new()
+            .prefix(".open-")
+            .tempdir_in(self.store.root())
+            .context("creating private staging for a protected workspace image")?;
+        let path =
+            mvm_runtime::checkpoint::materialized_source(&self.store, meta, &blob, scratch.path())?;
+        Ok(WorkspaceImage {
+            path,
+            _staging: Some(scratch),
+        })
+    }
+}
+
+/// A workspace image ready to read. When it had to be opened from a protected
+/// checkpoint, the plaintext lives in private staging this value owns, and is
+/// removed when it is dropped.
+#[derive(Debug)]
+pub struct WorkspaceImage {
+    path: PathBuf,
+    _staging: Option<tempfile::TempDir>,
+}
+
+impl WorkspaceImage {
+    /// An image file that already exists and is owned elsewhere.
+    pub fn existing(path: PathBuf) -> Self {
+        Self {
+            path,
+            _staging: None,
+        }
+    }
+
+    /// Where the image can be read.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 

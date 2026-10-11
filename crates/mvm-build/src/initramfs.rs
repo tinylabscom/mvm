@@ -176,7 +176,6 @@ pub fn resolve_or_seed_from_default_cache(
         Ok(artifact) => Ok(artifact),
         Err(initial_error) => {
             if seed_from_default_cache(cache_root, version, arch)? {
-                record_built_source_fingerprint(cache_root, version, arch);
                 Ok(InitramfsResolver::new(cache_root, version).resolve(&arch_str)?)
             } else {
                 Err(initial_error.into())
@@ -204,9 +203,32 @@ fn seed_from_default_cache(
                 .map(|_| resolver.artifact_dir(&arch_dir))
         },
         |source_dir| {
-            install_initramfs_into_cache(&source_dir, cache_root, version, arch).map(|_| ())
+            install_initramfs_into_cache(&source_dir, cache_root, version, arch)?;
+            carry_source_fingerprint(&source_dir, cache_root, version, arch)
         },
     )
+}
+
+/// Copy the donor's recorded source fingerprint — the guest-runtime digest it
+/// was packed from — beside a seeded copy. The seeded bytes are the donor's, so
+/// its provenance is the donor's: fresh for this checkout exactly when the
+/// donor was packed from this checkout's archive, and evicted at boot otherwise.
+fn carry_source_fingerprint(
+    donor_dir: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<(), InitramfsBuildError> {
+    match std::fs::read_to_string(donor_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE)) {
+        Ok(fingerprint) => Ok(record_source_fingerprint(
+            cache_root,
+            version,
+            arch,
+            fingerprint.trim(),
+        )?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Whether a failed version-keyed resolve can be recovered by the
@@ -227,14 +249,14 @@ fn is_recoverable_resolve_miss(error: &InitramfsBuildError) -> bool {
 }
 
 /// Resolve a cached universal initramfs, or return an error describing why it
-/// is unavailable. A cold contributor cache falls back to the deterministic
-/// Cargo build on every host; release distributions use the published
-/// download.
+/// is unavailable. A cold contributor cache packs the sealed initramfs agent
+/// from this checkout's guest-runtime archive — the same archive the overlay
+/// and SDK sidecar are assembled from — on every host; release distributions
+/// use the published download.
 ///
-/// The build is not host-gated. It cross-compiles the guest agent with
-/// `cargo zigbuild` to the arch's musl triple and packs it into a
-/// deterministic cpio — the same portable path the runtime overlay already
-/// takes on macOS. Gating it to Linux left the macOS contributor with the
+/// The build is not host-gated: the archive cross-compiles with
+/// `cargo zigbuild` and the agent is packed into a deterministic cpio on the
+/// host. Gating it to Linux left the macOS contributor with the
 /// download as its only arm; when the release carried no initramfs for the
 /// arch, the absence was negative-cached for a day and every launch on that
 /// host booted with no initramfs at all.
@@ -268,15 +290,12 @@ pub fn resolve_or_build_local_initramfs(
     // fails whenever the locked image set carries no initramfs for this arch,
     // and on its own that reads as "unavailable" rather than "your checkout did
     // not build".
-    if crate::guest_agent_build::detect_source_workspace().is_some() {
+    if crate::image_source::guest_runtime_source_checkout().is_some() {
         mvm_vmm::host::ui::admit_cold_build("the universal initramfs")
             .map_err(|reason| InitramfsBuildError::CargoBuildFailed { reason })?;
     }
-    let build_err = match build_initramfs_with_cargo(cache_root, version, arch) {
-        Ok(artifact) => {
-            record_built_source_fingerprint(cache_root, version, arch);
-            return Ok(artifact);
-        }
+    let build_err = match build_initramfs_from_source_checkout(cache_root, version, arch) {
+        Ok(artifact) => return Ok(artifact),
         Err(e) => e,
     };
     match resolve_or_download_image_set_initramfs(arch, cache_root) {
@@ -291,67 +310,33 @@ pub fn resolve_or_build_local_initramfs(
     }
 }
 
-/// Record the checkout fingerprint beside a locally installed artifact so the
-/// boot-time freshness eviction recognizes it. The local cargo build and the
-/// cross-root seed both install without one, and the eviction treats a missing
-/// fingerprint as stale — so without this, every boot under a source checkout
-/// discarded a fresh artifact and rebuilt it.
-fn record_built_source_fingerprint(cache_root: &Path, version: &str, arch: GuestArch) {
-    let Some(workspace) = crate::guest_agent_build::detect_source_workspace() else {
-        return;
-    };
-    if let Ok(fingerprint) =
-        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace)
-    {
-        let _ = record_source_fingerprint(cache_root, version, arch, &fingerprint);
-    }
-}
-
-/// Build the universal initramfs as a deterministic cargo artifact and
-/// install it into the cache.
-///
-/// The initramfs is a tiny artifact — one static binary in a deterministic
-/// cpio — so its attestability comes from the reproducible cargo build plus
-/// the content hash, not from Nix: the pinned agent source is
-/// cross-compiled once by the shared guest-binary builder (`cargo
-/// zigbuild` → the arch's musl triple, content-keyed cache, reused as-is),
-/// then packed as exactly `/init` (mode 0755) in an epoch-zero,
-/// stably-ordered newc cpio, gzipped without name/timestamp. Same source +
-/// same toolchain ⇒ the same `initramfs.hash`. Nix remains the build for
-/// kernels, images, and overlays, where toolchain variance matters; the
-/// flake's initramfs package stays as the optional publish-path build of
-/// the same artifact.
-fn build_initramfs_with_cargo(
+/// Pack the initramfs from this checkout's guest-runtime archive, which lives
+/// beside the initramfs cache under the mvm cache root. The installed artifact
+/// records the archive digest, which is what the boot-time freshness eviction
+/// compares against.
+fn build_initramfs_from_source_checkout(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
 ) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    let workspace = crate::guest_agent_build::detect_source_workspace().ok_or_else(|| {
-        InitramfsBuildError::CargoBuildFailed {
-            reason: "no source checkout detected to build the guest agent from".into(),
-        }
+    let failed = |reason: String| InitramfsBuildError::CargoBuildFailed { reason };
+    let workspace = crate::image_source::guest_runtime_source_checkout().ok_or_else(|| {
+        failed("no source checkout detected to build the guest runtime from".into())
     })?;
-    let cache_key = crate::guest_agent_build::source_cache_key(&workspace).map_err(|e| {
-        InitramfsBuildError::CargoBuildFailed {
-            reason: format!("fingerprint guest sources: {e}"),
-        }
+    let shared_cache_root = cache_root.parent().ok_or_else(|| {
+        failed(format!(
+            "initramfs cache {} has no parent for the shared guest runtime",
+            cache_root.display()
+        ))
     })?;
-    let phase = mvm_vmm::host::ui::activity::start(format!(
-        "Building the {arch} universal initramfs from local sources"
-    ));
-    let binaries = crate::guest_agent_build::resolve_or_build_guest_binaries(
-        cache_root, &cache_key, arch, &workspace,
+    let runtime = crate::guest_runtime::resolve_or_build_source_guest_runtime(
+        shared_cache_root,
+        version,
+        arch,
+        &workspace,
     )
-    .map_err(|e| InitramfsBuildError::CargoBuildFailed {
-        reason: format!("build the static guest agent: {e}"),
-    })?;
-    let agent_bytes = std::fs::read(&binaries.agent)?;
-
-    let staging = tempfile::tempdir()?;
-    assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
-    let installed = install_initramfs_into_cache(staging.path(), cache_root, version, arch)?;
-    phase.finish();
-    Ok(installed)
+    .map_err(|e| failed(format!("build the guest runtime: {e}")))?;
+    build_initramfs_from_guest_runtime(cache_root, version, arch, &runtime)
 }
 
 /// Pack the size-tuned initramfs agent from the verified guest runtime as
@@ -1005,6 +990,10 @@ mod tests {
             std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
             runtime.digest
         );
+        // The boot-time eviction keys on the same digest, so a fresh pack
+        // survives the next boot instead of being discarded and rebuilt.
+        assert!(!evict_if_source_changed(cache.path(), "1.2.3", arch, &runtime.digest).unwrap());
+        assert!(artifact.image_path.is_file());
 
         let stale = tempfile::tempdir().unwrap();
         assemble_initramfs_artifact(b"older-agent", "1.2.3", stale.path()).unwrap();
@@ -1136,34 +1125,6 @@ mod tests {
         assert!(
             !dir.exists(),
             "the stale artifact must be gone, not merely ignored"
-        );
-    }
-
-    /// A local build (or a cross-root seed) used to install the artifact
-    /// without recording the fingerprint the boot-time eviction compares, and
-    /// the eviction reads a missing fingerprint as stale — so every boot under
-    /// a source checkout discarded a fresh artifact and paid the rebuild.
-    #[test]
-    fn a_local_build_records_the_fingerprint_the_boot_eviction_compares() {
-        let Some(workspace) = crate::guest_agent_build::detect_source_workspace() else {
-            eprintln!("test binary did not build from a source checkout; skipping");
-            return;
-        };
-        let cache = tempfile::tempdir().unwrap();
-        let version = "0.0.0-test";
-        let arch = GuestArch::host();
-        let dir = cache.path().join(version).join(arch.to_string());
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("initramfs.cpio.gz"), b"fresh").unwrap();
-
-        record_built_source_fingerprint(cache.path(), version, arch);
-
-        let fingerprint =
-            crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace)
-                .expect("the checkout fingerprint computes");
-        assert!(
-            cached_artifact_matches_source(cache.path(), version, arch, &fingerprint),
-            "the freshly built artifact must survive the boot-time eviction"
         );
     }
 
@@ -2096,10 +2057,23 @@ mod tests {
             .join("0.18.0")
             .join(GuestArch::Aarch64.to_string());
         write_initramfs_artifact(&default_artifact_dir, "0.18.0", b"default-cpio-payload");
+        std::fs::write(
+            default_artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
+            "donor-runtime-digest\n",
+        )
+        .unwrap();
 
         let artifact =
             resolve_or_seed_from_default_cache(&isolated_cache, "0.18.0", GuestArch::Aarch64)
                 .unwrap();
+        // The seeded copy keeps the donor's provenance rather than being
+        // relabelled as built from whatever checkout is asking.
+        assert!(cached_artifact_matches_source(
+            &isolated_cache,
+            "0.18.0",
+            GuestArch::Aarch64,
+            "donor-runtime-digest"
+        ));
 
         let expected_dir = isolated_cache
             .join("0.18.0")
