@@ -38,9 +38,16 @@ mvmctl machine pause agent-sandbox
 ```
 
 `mvmctl machine pause` asks the backend snapshot transport to write `vmstate.bin` and
-`mem.bin` under the VM's instance snapshot directory, encrypts both, seals the
-sidecar with an epoch-bound HMAC envelope over the ciphertext, and marks the VM
-as paused in the local registry.
+`mem.bin` into a private staging directory beside the VM's instance snapshot
+directory, encrypts both, seals the sidecar with an epoch-bound HMAC envelope
+over the ciphertext, publishes the result as the instance snapshot, and marks
+the VM as paused in the local registry.
+
+The published snapshot is replaced only once its replacement is complete. A
+pause that fails, or is killed, before that point leaves the previous
+snapshot and its epoch as they were, so the machine can still be resumed from
+it; the failed attempt's staging is removed with it, or reclaimed later as
+described under [Plaintext staging](#plaintext-staging).
 
 ### Snapshot encryption is required
 
@@ -266,12 +273,50 @@ Fork a checkpoint to a new identity (new VM name, same state):
 mvmctl machine checkpoint fork <checkpoint-id> --new-id new-sandbox
 ```
 
+## Plaintext staging
+
+Some operations have to hold guest memory or disk on the host in the clear for
+a moment. Each does it in a staging directory created mode `0700` before the
+first byte is written, whatever the umask, and named after the process that
+owns it:
+
+| Staging                                   | Holds                                    | Lifetime                                                                            |
+| ----------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------- |
+| `instances/<vm>/.capture-<pid>-*`         | A pause's capture, until it is encrypted | Becomes the published snapshot, or is removed when the pause fails                  |
+| `instances/<vm>/.snapshot.previous`       | The snapshot a pause is replacing        | Only between the two renames that publish its replacement; removed right after      |
+| `instances/<vm>/.restore-<pid>-*`         | A resume's decrypted snapshot            | Removed when the load returns                                                       |
+| `checkpoints/.staging/<pid>-*`            | A checkpoint capture                     | Sealed and published, or removed when the capture fails                             |
+| `checkpoints/.restore-<pid>-*`            | A `vm_full` restore's opened blobs       | Removed when the restore returns                                                    |
+| A fork's or restored VM's state directory | The blobs that VM runs from              | Removed with the VM                                                                 |
+
+Every one is also removed on Ctrl-C, SIGTERM or SIGHUP. A process that is
+killed outright or aborts cannot remove its own, so the next operation reclaims
+it:
+
+- The next pause or resume of that machine, and the reconcile pass every
+  state-touching command runs on entry, remove `.capture-*` and `.restore-*`
+  staging whose owning process is gone, and finish a publication a pause was
+  interrupted in: `.snapshot.previous` with no published snapshot is published
+  again, and one left beside a published snapshot is removed. Reconcile covers
+  every directory under `instances/`, registered machine or not, and records
+  each change as a `registry_reconcile` entry in the local audit log
+  (`snapshot_staging_reclaimed`, `snapshot_previous_restored`,
+  `snapshot_replaced_removed`).
+- The next checkpoint capture removes abandoned capture staging, the next
+  restore abandoned restore staging, and `mvmctl cache prune` both.
+
+Staging whose owner is still alive is never touched, and neither is a machine
+whose pause or resume holds its lifecycle lock. Nothing outside these names is
+treated as staging, so writable data in an instance directory is never
+removed by reclamation.
+
 ## Security implications
 
 - Snapshot files contain guest memory and runtime state. Treat them as sensitive.
 - Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; checkpoints use the audit-chain record digest plus their authenticated object envelopes.
 - An encrypted checkpoint is decrypted to disk while a VM restored from it runs, in that VM's own private state directory, and removed with it.
-- Deleting a snapshot removes the recovery artifact but does not by itself prove storage-level erasure.
+- Deleting a snapshot, a checkpoint or reclaimed staging is logical deletion: it unlinks the files. It does not overwrite them, and it does not reach copies outside `mvmctl`'s directories — filesystem snapshots, backups, SSD blocks not yet reused, or guest memory the host swapped out. Encrypting at rest is what limits what those copies expose; staging is plaintext for as long as it exists. Keeping `~/.mvm` on an encrypted volume, and its backups encrypted, is the operator's part.
+- Changing a snapshot or checkpoint key does not re-encrypt what is stored: snapshots and checkpoints sealed under the old key keep needing it and are refused without it. Keep the old key until they are re-captured or removed.
 - Snapshots can preserve credentials or derived tokens that existed inside the guest at snapshot time.
 
 ## Docs rule

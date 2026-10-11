@@ -1287,10 +1287,18 @@ pub fn restore_checkpoint(
     verify_checkpoint_against_chain(anchor, &meta)?;
     verify_content_except(store, &meta, restore.verifies_on_load())?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
-    let materialized = tempfile::Builder::new()
-        .prefix(".restore-")
-        .tempdir_in(store.root())
-        .context("creating checkpoint restore materialization")?;
+    // A restore killed before it returned left its plaintext behind.
+    staging::reclaim_abandoned_restores(store.root());
+    let materialized =
+        crate::private_staging::create(store.root(), staging::RESTORE_MATERIALIZATION_PREFIX)
+            .context("creating checkpoint restore materialization")?;
+    // An interrupt exits without running destructors; remove it from there too.
+    let _remove_on_interrupt = {
+        let path = materialized.path().to_path_buf();
+        crate::interrupt_cleanup::on_interrupt("checkpoint restore staging", move || {
+            let _ = std::fs::remove_dir_all(&path);
+        })
+    };
     if meta.protection.is_sealed() {
         return protection::restore_protected(
             store,
