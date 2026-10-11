@@ -1807,7 +1807,7 @@ fn fake_codesign(host: &Host) -> (String, PathBuf) {
     std::fs::write(
         &codesign,
         format!(
-            "#!/bin/sh\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+            "#!/bin/sh\n[ \"$1\" = --sign ] || exit 1\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
             log.display()
         ),
     )
