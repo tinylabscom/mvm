@@ -32,10 +32,13 @@ pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
 mod run_mode;
+mod transient_mounts;
+
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
 pub(in crate::commands) use run_mode::resolve_run_mode;
+use transient_mounts::parse_transient_mounts;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -899,31 +902,6 @@ pub(in crate::commands) fn run_secure_started(
             startup_started,
         },
     )
-}
-
-struct TransientMounts {
-    dir_shares: Vec<crate::commands::DirShareSpec>,
-    disk_volumes: Vec<mvm_core::vm_backend::VmVolume>,
-}
-
-fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
-    let mut dir_shares = Vec::new();
-    let mut disk_volumes = Vec::new();
-    for raw in specs {
-        let parsed = super::shared::parse_volume_spec(raw)?;
-        match parsed {
-            super::shared::VolumeSpec::DirShare { .. } => {
-                dir_shares.push(crate::commands::parse_dir_share_spec(raw)?);
-            }
-            super::shared::VolumeSpec::Disk { .. } => {
-                disk_volumes.push(super::shared::vm_volume_from_spec_validated(&parsed)?);
-            }
-        }
-    }
-    Ok(TransientMounts {
-        dir_shares,
-        disk_volumes,
-    })
 }
 
 /// The boot-time admission hook plus the plumbing needed to chain-audit the
