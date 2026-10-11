@@ -158,7 +158,18 @@ jobs:
           # not exec, and a PR touching only mk-guest.nix used to resolve
           # code=false, so the one test that would have caught that change
           # never ran on it.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|third_party/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          #
+          # Prose is out of scope only where no Rust test reads it. The files
+          # named below are prose that tests do read, so an edit to one alone
+          # can turn the workspace suite red: the claims ledger under
+          # specs/adrs/ (xtask's ledger tests), the instruction files and their
+          # signatures (claude_md_cli_claims, justfile_top_level, instruction
+          # trust), the published pages a sync test compares against code
+          # (perf_doc_sync, release_assets, justfile_top_level), examples/
+          # (example and conformance tests), and the flake and deny policy the
+          # structure tests parse. Everything else under public/, specs/ and
+          # the root markdown still skips the Rust lanes.
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|third_party/|examples/|specs/adrs/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$|flake\.(nix|lock)$|deny\.toml$|\.gitignore$|(AGENTS|CLAUDE|README|CONFORMANCE|SECURITY)\.md$|(AGENTS|CLAUDE)\.md\.sigstore\.json$|public/src/content/docs/(reference/performance|security/cve-demonstrations|contributing/development|contributing/ai-coding-workflow)\.md$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -913,7 +924,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64-build, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     runs-on: ubuntu-slim
@@ -944,6 +955,7 @@ jobs:
           WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
+          WORKSPACE_AARCH64_BUILD_RESULT: ${{ needs.test-workspace-aarch64-build.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
@@ -991,7 +1003,7 @@ jobs:
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" "$WINDOWS_RESULT" \
             "$WORKSPACE_BUILD_RESULT" "$WORKSPACE_RESULT" "$WORKSPACE_EXTRAS_RESULT" \
-            "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
+            "$WORKSPACE_AARCH64_BUILD_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
             "$RELEASE_WITNESS_RESULT" "$MUSL_CONFINEMENT_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
@@ -1136,24 +1148,28 @@ jobs:
       - name: Run doctests
         run: cargo test --workspace --doc
 
-  test-workspace-aarch64:
-    name: Test workspace (aarch64)
+  # The only lane that executes mvm's aarch64 code paths. Everything else in
+  # this workflow runs on x86_64, so arch-gated code compiles here for the
+  # first time and its tests run for the first time. The sharpest example is
+  # `jailer::seccomp::CONFINED_ROLE_SYSCALLS`, which is a *separate table* per
+  # architecture: a wrong or missing entry in the aarch64 half SIGSYS-kills a
+  # confined role at the moment it starts working, and no x86_64 runner can
+  # see it. `GuestArch::host()`, the bundle arch gate, and the aarch64
+  # `mvm-seccomp-apply` arm are in the same position.
+  #
+  # SCOPE, honestly: this proves the suite passes natively on aarch64. It does
+  # NOT prove a guest boots — GitHub's arm64 runners expose no nested KVM, so
+  # `backend.start()` is unreachable here exactly as it is in every other lane.
+  # A green run here is not a Tier-1 boot witness; that still needs real
+  # hardware.
+  #
+  # Built once and run in three shards, like the x86_64 suite. As one job it
+  # compiled for ~13 minutes and then ran for ~19, and at ~34 minutes it was
+  # the longest lane in the workflow and the critical path of every code run.
+  test-workspace-aarch64-build:
+    name: Build workspace tests (aarch64)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
-    # The only lane that executes mvm's aarch64 code paths. Everything else in
-    # this workflow runs on x86_64, so arch-gated code compiles here for the
-    # first time and its tests run for the first time. The sharpest example is
-    # `jailer::seccomp::CONFINED_ROLE_SYSCALLS`, which is a *separate table* per
-    # architecture: a wrong or missing entry in the aarch64 half SIGSYS-kills a
-    # confined role at the moment it starts working, and no x86_64 runner can
-    # see it. `GuestArch::host()`, the bundle arch gate, and the aarch64
-    # `mvm-seccomp-apply` arm are in the same position.
-    #
-    # SCOPE, honestly: this proves the suite passes natively on aarch64. It does
-    # NOT prove a guest boots — GitHub's arm64 runners expose no nested KVM, so
-    # `backend.start()` is unreachable here exactly as it is in every other lane.
-    # A green run here is not a Tier-1 boot witness; that still needs real
-    # hardware.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
     steps:
@@ -1186,14 +1202,25 @@ jobs:
       # bearing on x86_64 — so the oracle stays an x86_64 oracle rather than
       # being dropped. `mvm-fs`'s own library still builds here as a dependency
       # of everything else; it is only its test targets that are skipped.
-      - name: Build
-        run: cargo build --workspace --exclude mvm-fs --all-targets
-
-      - name: Run tests
-        # The workspace suite only. The arch-independent extras Test workspace
-        # also runs (man pages, the addons feature, doctests) are covered on
-        # x86_64 and would only duplicate cost here.
-        run: cargo nextest run --workspace --exclude mvm-fs --all-targets
+      #
+      # The workspace suite only. The arch-independent extras Test workspace
+      # also runs (man pages, the addons feature, doctests) are covered on
+      # x86_64 and would only duplicate cost here.
+      - name: Build the aarch64 workspace test archive
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Some workspace tests clear /tmp on Linux; keep their own binaries safe.
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          mkdir -p -- "$archive_root"
+          cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
+          cd "$archive_root"
+          cargo nextest archive --workspace --exclude mvm-fs --all-targets \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
+          ls -lh "$RUNNER_TEMP/workspace-tests.tar.zst"
+          du -sh target
+          df -h /
 
       - name: Run the privileged CRNG reseed helper tests
         # The reseed helper is killed on any syscall outside its seccomp
@@ -1203,8 +1230,14 @@ jobs:
         # privilege witness drops its own process for good, so each runs alone,
         # and each must report one test passed — a filter that matched nothing
         # would otherwise pass silently.
+        #
+        # Run from the archive's copy of the tree so the build above is reused
+        # rather than repeated in a second target directory.
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
+          cd "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           executables=$(cargo test -p mvm-agentd --lib --test crng_reseed_helper --no-run --message-format=json \
             | jq -r 'select(.profile.test == true and .executable != null) | "\(.target.kind[0]) \(.executable)"')
           lib=$(awk '$1 == "lib" { print $2 }' <<<"$executables")
@@ -1222,6 +1255,42 @@ jobs:
             --exact tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials \
             2>&1 | tee attribution.log
           grep -q "1 passed" attribution.log
+
+      - name: Upload the aarch64 workspace test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests-aarch64
+          path: ${{ runner.temp }}/workspace-tests.tar.zst
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Remove archived workspace
+        if: always()
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+
+  test-workspace-aarch64:
+    name: Test workspace (aarch64)
+    needs: [scope, test-workspace-aarch64-build]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    permissions:
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['1', '2', '3']
+    uses: ./.github/workflows/workspace-shard.yml
+    with:
+      commit_sha: ${{ github.sha }}
+      shard: ${{ matrix.shard }}
+      shard_count: '3'
+      runner_kind: github
+      arch: aarch64
+      archive_run_id: ${{ github.run_id }}
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
