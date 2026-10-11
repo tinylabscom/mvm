@@ -218,28 +218,22 @@ jobs:
               exit "$status"
             }
 
-      - name: Remove archived workspace
-        if: always() && inputs.archive_run_id != ''
-        env:
-          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
-        run: |
-          set -euo pipefail
-          [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
-
+      # Last step, always: kill by PID whatever this job started (a VMM
+      # launched through `sudo setsid` outlives the job's process tree), then
+      # remove the isolated HOME/MVM_HOME/TMPDIR, the extracted archive and
+      # the test state. tests/github_actions_self_hosted_runner.rs requires
+      # this step on every job that can run on the KVM pool.
       - name: Clean isolated state
         if: always()
         env:
           SHARD: ${{ inputs.shard }}
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
             printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
           fi
-          if [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]; then
-            base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
-            if [ -d "$base" ] && [ ! -L "$base" ]; then
-              chmod -R u+rwX -- "$base"
-              rm -rf -- "$base"
-            fi
-            fi
+          if [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          fi
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"

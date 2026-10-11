@@ -10,6 +10,55 @@ longer `cargo fuzz` runs).
 | ---------------- | ---------------------------------------------------------------------- |
 | `cloud-init.yaml`| Hetzner first-boot config — installs deps, Rust, Nix, Firecracker, clones the repo, creates the `mvm` user. |
 | `run-tests.sh`   | The pinned suite the box runs (fmt, clippy, workspace tests, seccomp functional, cargo deny / audit). |
+| `job-cleanup.sh` | The always-run last step of every CI job that can land on the self-hosted KVM runner. |
+| `disk-sweep.sh` + `mvm-disk-sweep.{service,timer}` | Hourly box-side sweep of stale test and runner temporary directories. |
+
+## Working on the shared box
+
+The self-hosted KVM runner (`mvm-hetzner`) is one persistent machine shared
+by CI and by every person and agent who logs in to it. Nothing on it is
+cleaned up for you between sessions, so leave it as you found it.
+
+**By hand.** Work only inside a private directory, `/srv/mvm/<name>`, with
+`<name>` unique to you and your task (for example `/srv/mvm/alice-4198`). Put
+the checkout, `CARGO_TARGET_DIR`, `MVM_HOME` and `TMPDIR` under it, never under
+`/root` or directly in `/tmp`. `/srv/mvm` is the large data disk; the root
+disk is small. Before you finish, stop every VM and process you started, by
+PID (`mvmctl machine stop`, then `kill <pid>` for anything left; never
+`pkill` by pattern on this host, because other sessions' processes match
+too), then `rm -rf /srv/mvm/<name>`. Nothing else on the box is yours to
+delete.
+
+**In CI.** Every job that can run on the KVM pool points `HOME`, `MVM_HOME`
+and `TMPDIR` at `/tmp/mvm-w-<run>-<attempt>-<shard>` and ends with an
+`if: always()` step running `job-cleanup.sh`. That step kills, by PID, every
+process whose command line names a path the job owned (a VMM started through
+`sudo setsid` is outside the job's process tree, so the runner does not reap
+it), then removes the isolated directories and the extracted test archive. The
+workspace `target/` stays warm for the next job until it passes
+`MVM_TARGET_BUDGET_GIB` (40 GiB). `tests/github_actions_self_hosted_runner.rs`
+fails the build when a job that can reach the pool lacks that last step.
+
+**Safety net.** `mvm-disk-sweep.timer` runs `disk-sweep.sh` hourly. It removes
+test and temporary directories in `/tmp` (`.tmp*`, `tmp.*`, `mvm-w-*`,
+`mvm-workspace-*`, `mvm-sock-*`, `mvm-test-*`), and, while no runner job is
+running, the runner's `_work/_temp` and `.mvm-test` leftovers, but only when
+no process has anything under the directory open and nothing in it changed in
+the last six hours. It never kills a process: a VMM that outlived its job is
+logged as `leaked-vmm` for a person to decide. Every removal is logged to the
+journal and to `/var/log/mvm-disk-sweep.log`. It does not touch `/srv/mvm`.
+
+Install or update it from a checkout of `main`:
+
+```sh
+scp nix/ops/hetzner/disk-sweep.sh root@<box>:/usr/local/sbin/mvm-disk-sweep
+scp nix/ops/hetzner/mvm-disk-sweep.{service,timer} root@<box>:/etc/systemd/system/
+ssh root@<box> 'chmod 755 /usr/local/sbin/mvm-disk-sweep &&
+  DRY_RUN=1 /usr/local/sbin/mvm-disk-sweep | tail &&
+  systemctl daemon-reload && systemctl enable --now mvm-disk-sweep.timer'
+```
+
+`journalctl -u mvm-disk-sweep` shows each run.
 
 ## Pick the right instance shape
 
