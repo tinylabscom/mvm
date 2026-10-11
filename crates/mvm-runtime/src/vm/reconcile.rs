@@ -323,13 +323,46 @@ fn remove_state_dir(dir: &Path) -> Result<(), String> {
 /// spawn, no VM boot (the cheapness budget).
 pub struct FsRuntimeView {
     vms_root: PathBuf,
+    standby_pool: Option<PathBuf>,
 }
 
 impl FsRuntimeView {
     pub fn new(vms_root: impl Into<PathBuf>) -> Self {
         Self {
             vms_root: vms_root.into(),
+            standby_pool: None,
         }
+    }
+
+    /// Shield the state dirs of standbys recorded under `pool_root`.
+    ///
+    /// A saved-state standby has no registry record and no live process — its
+    /// VM is a sealed checkpoint until a claim restores it — yet its state dir
+    /// holds what the claim needs, such as the guest identity the restored
+    /// child's endpoint pins. Without this, every sweep reaps it as an orphan
+    /// and every later claim of that standby fails.
+    #[must_use]
+    pub fn with_standby_pool(mut self, pool_root: impl Into<PathBuf>) -> Self {
+        self.standby_pool = Some(pool_root.into());
+        self
+    }
+
+    /// State-dir names owned by recorded standbys. `None` when the pool cannot
+    /// be read, which the caller treats as "reap nothing": a transient read
+    /// error must not cost a standby its state.
+    fn standby_owned_dirs(&self) -> Option<BTreeSet<String>> {
+        let Some(root) = &self.standby_pool else {
+            return Some(BTreeSet::new());
+        };
+        let handles = crate::standby_pool::SupervisorStandbyPool::at(root)
+            .list()
+            .ok()?;
+        Some(
+            handles
+                .into_iter()
+                .flat_map(|handle| std::iter::once(handle.id).chain(handle.preloaded_child_vm_name))
+                .collect(),
+        )
     }
 }
 
@@ -347,6 +380,9 @@ impl RuntimeView for FsRuntimeView {
         crate::vm::admission::is_unaccounted(&self.vms_root.join(name))
     }
     fn orphan_dirs(&self, known: &BTreeSet<String>) -> Vec<String> {
+        let Some(standbys) = self.standby_owned_dirs() else {
+            return Vec::new();
+        };
         let Ok(entries) = std::fs::read_dir(&self.vms_root) else {
             return Vec::new();
         };
@@ -362,7 +398,8 @@ impl RuntimeView for FsRuntimeView {
             // Canonical layout is `vms/<name>`, so the dir basename is the
             // registry key. A dir with a live owner is an in-flight or
             // specially-managed VM (e.g. the dev VM) — never an orphan.
-            if known.contains(name) || state_dir_has_live_process(&path) {
+            if known.contains(name) || standbys.contains(name) || state_dir_has_live_process(&path)
+            {
                 continue;
             }
             out.push(name.to_string());
@@ -464,7 +501,14 @@ impl ReconcileActions for FsReconcileActions {
 ///
 /// Does not emit audit; that belongs to the real entry point [`converge`]
 /// so this stays free of process-global state and hermetically testable.
-pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -> ConvergeReport {
+/// `pool_root` is the standby pool whose recorded standbys' state dirs are
+/// never orphans.
+pub fn converge_at(
+    registry_path: &Path,
+    vms_root: &Path,
+    pool_root: &Path,
+    opts: &ConvergeOpts,
+) -> ConvergeReport {
     // Held for the whole pass, so a record changed by another process between
     // this load and the save below is not overwritten with a stale copy.
     let _registry_lock = match crate::vm::name_registry::acquire_registry_lock(registry_path) {
@@ -488,7 +532,7 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
         }
     };
 
-    let view = FsRuntimeView::new(vms_root);
+    let view = FsRuntimeView::new(vms_root).with_standby_pool(pool_root);
     let actions = FsReconcileActions::new(vms_root).with_registry(registry_path);
     let mut report = sweep(&mut registry, &view, &actions, opts);
 
@@ -516,7 +560,15 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
 pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     let registry_path = crate::vm::name_registry::registry_path();
     let vms_root = mvm_core::config::vms_dir();
-    let report = converge_at(&registry_path, &vms_root, opts);
+    let report = match mvm_core::config::mvm_pool_dir() {
+        Ok(pool_root) => converge_at(&registry_path, &vms_root, &pool_root, opts),
+        // Without the pool root no standby can be told from an orphan, so the
+        // pass does nothing rather than reap one.
+        Err(e) => ConvergeReport {
+            errors: vec![format!("resolve standby pool root: {e}")],
+            ..ConvergeReport::default()
+        },
+    };
     if !opts.dry_run {
         emit_audit(&report);
         for (machine, action) in reconcile_snapshot_staging(&mvm_core::config::instances_root()) {
@@ -581,7 +633,10 @@ pub fn reconcile_snapshot_staging(instances_root: &Path) -> Vec<(String, &'stati
 pub fn reap_orphan_state_dirs(protect: Option<&str>) -> Vec<String> {
     let registry_path = crate::vm::name_registry::registry_path();
     let vms_root = mvm_core::config::vms_dir();
-    let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, protect);
+    let Ok(pool_root) = mvm_core::config::mvm_pool_dir() else {
+        return Vec::new();
+    };
+    let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, &pool_root, protect);
     for dir in &reaped {
         mvm_core::audit_emit!(RegistryReconcile, vm: dir.as_str(), "action=orphan_state_no_record");
     }
@@ -595,6 +650,7 @@ pub fn reap_orphan_state_dirs(protect: Option<&str>) -> Vec<String> {
 pub fn reap_orphan_state_dirs_at(
     registry_path: &Path,
     vms_root: &Path,
+    pool_root: &Path,
     protect: Option<&str>,
 ) -> Vec<String> {
     let mut known: BTreeSet<String> = match VmNameRegistry::load(registry_path) {
@@ -604,7 +660,7 @@ pub fn reap_orphan_state_dirs_at(
     if let Some(name) = protect {
         known.insert(name.to_string());
     }
-    let view = FsRuntimeView::new(vms_root);
+    let view = FsRuntimeView::new(vms_root).with_standby_pool(pool_root);
     let actions = FsReconcileActions::new(vms_root);
     let mut reaped = Vec::new();
     for dir in view.orphan_dirs(&known) {
@@ -1341,7 +1397,8 @@ mod tests {
             .unwrap()
             .expect("nothing else holds the lock");
 
-        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, None);
+        let reaped =
+            reap_orphan_state_dirs_at(&registry_path, &vms_root, &tmp.path().join("pool"), None);
 
         assert_eq!(reaped, vec!["dead-orphan".to_string()]);
         assert!(vms_root.join("restoring").exists());
@@ -1375,7 +1432,12 @@ mod tests {
         // A dead orphan (no record, no live process, unprotected) — reaped.
         make_state_dir(&vms_root, "dead-orphan", Some(i32::MAX));
 
-        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, Some("current-run"));
+        let reaped = reap_orphan_state_dirs_at(
+            &registry_path,
+            &vms_root,
+            &tmp.path().join("pool"),
+            Some("current-run"),
+        );
 
         assert_eq!(reaped, vec!["dead-orphan".to_string()]);
         assert!(!vms_root.join("dead-orphan").exists(), "dead orphan reaped");
@@ -1393,6 +1455,74 @@ mod tests {
         );
     }
 
+    fn saved_state_standby(id: &str) -> mvm_core::vm_backend::StandbyHandle {
+        mvm_core::vm_backend::StandbyHandle {
+            id: id.into(),
+            template_id: None,
+            control_socket: String::new(),
+            // A saved-state standby: no process, a sealed parent checkpoint.
+            pid: 0,
+            kernel_sha256: "aa".repeat(32),
+            vcpus: 2,
+            mem_mib: 512,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: mvm_core::vm_backend::StandbyState::Idle,
+            image_sha256: None,
+            root_strategy: Default::default(),
+            parent_checkpoint: Some(format!("standby-{id}")),
+            preloaded_child_vm_name: None,
+            vsock_egress: false,
+        }
+    }
+
+    #[test]
+    fn a_recorded_saved_state_standby_keeps_its_state_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("vms");
+        let pool_root = tmp.path().join("pool");
+        // Neither has a record or a live process; only one is a standby.
+        make_state_dir(&vms_root, "standby-1", None);
+        make_state_dir(&vms_root, "dead-orphan", None);
+        crate::standby_pool::SupervisorStandbyPool::at(&pool_root)
+            .record(&saved_state_standby("standby-1"))
+            .unwrap();
+        let registry_path = tmp.path().join("registry.json");
+        VmNameRegistry::default().save(&registry_path).unwrap();
+
+        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, &pool_root, None);
+        assert_eq!(reaped, vec!["dead-orphan".to_string()]);
+        assert!(
+            vms_root.join("standby-1").exists(),
+            "a claim of this standby needs its state dir"
+        );
+
+        let report = converge_at(
+            &registry_path,
+            &vms_root,
+            &pool_root,
+            &ConvergeOpts::default(),
+        );
+        assert!(report.orphan_state_reaped.is_empty(), "{report:?}");
+        assert!(vms_root.join("standby-1").exists());
+    }
+
+    #[test]
+    fn an_unreadable_standby_pool_reaps_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vms_root = tmp.path().join("vms");
+        make_state_dir(&vms_root, "maybe-a-standby", None);
+        // A file where the pool directory should be cannot be listed.
+        let pool_root = tmp.path().join("pool");
+        std::fs::write(&pool_root, b"not a directory").unwrap();
+        let registry_path = tmp.path().join("registry.json");
+        VmNameRegistry::default().save(&registry_path).unwrap();
+
+        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, &pool_root, None);
+        assert!(reaped.is_empty());
+        assert!(vms_root.join("maybe-a-standby").exists());
+    }
+
     #[test]
     fn reap_orphan_state_dirs_reaps_nothing_when_the_registry_is_unreadable() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1404,7 +1534,8 @@ mod tests {
         let registry_path = tmp.path().join("registry.json");
         std::fs::write(&registry_path, b"not valid json {").unwrap();
 
-        let reaped = reap_orphan_state_dirs_at(&registry_path, &vms_root, None);
+        let reaped =
+            reap_orphan_state_dirs_at(&registry_path, &vms_root, &tmp.path().join("pool"), None);
 
         assert!(reaped.is_empty());
         assert!(vms_root.join("would-be-orphan").exists());
@@ -1554,7 +1685,12 @@ mod tests {
         .unwrap();
         reg.save(&registry_path).unwrap();
 
-        let report = converge_at(&registry_path, &vms_root, &ConvergeOpts::default());
+        let report = converge_at(
+            &registry_path,
+            &vms_root,
+            &tmp.path().join("pool"),
+            &ConvergeOpts::default(),
+        );
         assert_eq!(report.live, vec!["live".to_string()]);
         assert_eq!(report.dead_process_reaped, vec!["dead".to_string()]);
         assert_eq!(report.stale_record_dropped, vec!["gone".to_string()]);
@@ -1568,7 +1704,12 @@ mod tests {
         assert!(Path::new(&live_dir).exists());
 
         // Idempotent on disk: a second pass is clean and rewrites nothing.
-        let again = converge_at(&registry_path, &vms_root, &ConvergeOpts::default());
+        let again = converge_at(
+            &registry_path,
+            &vms_root,
+            &tmp.path().join("pool"),
+            &ConvergeOpts::default(),
+        );
         assert!(
             again.is_clean(),
             "second converge_at must be clean: {again:?}"
@@ -1587,7 +1728,12 @@ mod tests {
             .unwrap();
         reg.save(&registry_path).unwrap();
 
-        let report = converge_at(&registry_path, &vms_root, &ConvergeOpts { dry_run: true });
+        let report = converge_at(
+            &registry_path,
+            &vms_root,
+            &tmp.path().join("pool"),
+            &ConvergeOpts { dry_run: true },
+        );
         assert_eq!(report.dead_process_reaped, vec!["dead".to_string()]);
         // Disk + registry untouched.
         assert!(Path::new(&dead_dir).exists());
@@ -1605,7 +1751,12 @@ mod tests {
         // A directory where a registry file is expected → read_to_string errors.
         let registry_path = tmp.path().join("vm-names.json");
         std::fs::create_dir_all(&registry_path).unwrap();
-        let report = converge_at(&registry_path, tmp.path(), &ConvergeOpts::default());
+        let report = converge_at(
+            &registry_path,
+            tmp.path(),
+            &tmp.path().join("pool"),
+            &ConvergeOpts::default(),
+        );
         assert_eq!(report.errors.len(), 1, "{report:?}");
         assert!(report.errors[0].contains("load registry"));
         // Fail-open: no panic, returns a report.
