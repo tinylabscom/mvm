@@ -1,4 +1,7 @@
-//! Functional integration test for `mvm-seccomp-apply`.
+//! Functional integration test for `mvm-seccomp-apply`, and for the tier the
+//! guest agent installs in the workload processes it starts — admitted at
+//! activation off the kernel cmdline, or on the post-restore handshake of a
+//! warm-claimed child.
 //!
 //! The unit tests in `mvm-core::crypto::seccomp` cover tier *structure*
 //! (cumulative-subset, no duplicates, manifest roundtrip). They don't
@@ -159,5 +162,66 @@ fn a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket() {
     assert!(
         matches!(terminal, ProcWaitEvent::Exit { code } if code == libc::EPERM),
         "socket() must fail with EPERM under the admitted standard tier, got {terminal:?}"
+    );
+}
+
+// ── A warm-claimed child ────────────────────────────────────────────────
+//
+// A child restored out of a standby parent never reads a tier off its kernel
+// cmdline: the parent booted with no plan, and the child inherits that
+// cmdline. Its tier arrives on the post-restore handshake, which admits it
+// through `admit_restored`. These run the workload spawn path after admitting
+// that way, so they prove the claim's tier — not a boot-time one — is what
+// lands in the workload. Every test in this binary admits `standard`, so the
+// process state they share agrees whichever runs first.
+
+fn admit_as_a_warm_claimed_child() {
+    let admitted = mvm_agentd::workload_seccomp::admit_restored(
+        mvm_core::crypto::seccomp::SeccompTier::Standard,
+        false,
+    )
+    .expect("a restored child admits its claim's tier");
+    assert_eq!(admitted, mvm_core::crypto::seccomp::SeccompTier::Standard);
+}
+
+#[test]
+fn a_warm_claimed_child_under_standard_cannot_open_a_socket() {
+    admit_as_a_warm_claimed_child();
+    let (terminal, _) = exec_and_collect(&[probe()]);
+    assert!(
+        matches!(terminal, ExecEvent::Exit { code } if code == libc::EPERM),
+        "socket() must fail with EPERM in a warm-claimed child under standard, got {terminal:?}"
+    );
+}
+
+#[test]
+fn a_warm_claimed_childs_workload_reports_a_seccomp_filter() {
+    admit_as_a_warm_claimed_child();
+    let (terminal, stdout) = exec_and_collect(&["/bin/sh", "-c", "cat /proc/self/status"]);
+    assert!(
+        matches!(terminal, ExecEvent::Exit { code: 0 }),
+        "a shell must run under the standard tier: {terminal:?}"
+    );
+    let seccomp = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("Seccomp:"))
+        .map(str::trim);
+    assert_eq!(seccomp, Some("2"), "2 is SECCOMP_MODE_FILTER:\n{stdout}");
+}
+
+/// Admit-once holds across the handshake: a second claim's handshake cannot
+/// swap the tier the first one admitted.
+#[test]
+fn a_warm_claimed_child_refuses_a_second_different_tier() {
+    admit_as_a_warm_claimed_child();
+    let refusal = mvm_agentd::workload_seccomp::admit_restored(
+        mvm_core::crypto::seccomp::SeccompTier::Network,
+        false,
+    )
+    .expect_err("a different tier is refused once one is admitted");
+    assert!(refusal.contains("already standard"), "{refusal}");
+    assert_eq!(
+        mvm_agentd::workload_seccomp::admitted_tier(),
+        Some(mvm_core::crypto::seccomp::SeccompTier::Standard)
     );
 }

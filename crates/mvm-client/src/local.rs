@@ -676,6 +676,9 @@ fn post_restore_signal(name: &str) -> VsockPostRestoreSignal {
         token: mvm_core::crypto::vmgenid::fresh_generation_token(name).token,
         hostname: Some(name.to_string()),
         grant_envelope: None,
+        // A resume wakes the same guest it paused, which still holds the tier
+        // it admitted at boot.
+        seccomp_tier: None,
     }
 }
 
@@ -1536,6 +1539,7 @@ mod tests {
                     reseeded,
                     clock_resynced,
                     reseed_shortfall,
+                    seccomp_tier: None,
                 })
             };
             match *self {

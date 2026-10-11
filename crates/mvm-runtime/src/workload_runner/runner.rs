@@ -17,7 +17,6 @@ use mvm_core::plan::{ExecutionPlan, SecretBinding};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
-use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
     StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
@@ -52,7 +51,7 @@ use mvm_vmm::host::network_endpoint_spawn::{
     EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
 };
 use mvm_vmm::host::spec_map::{WorkloadSpecInputs, workload_spec, workload_vsock_ports};
-use mvm_vmm::post_restore::PostRestoreOutcome;
+use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
 
 mod admission;
 mod backend;
@@ -67,7 +66,10 @@ mod warm_claim;
 use admission::{admitted_ingress, admitted_network_limits, admitted_tool_rules};
 pub use broker::RealBrokerRegistrar;
 use claim_lease::WarmClaimLease;
-use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
+use refusal::{
+    admitted_seccomp_tier, map_lineage_refusal, refuse, require_admitted_seccomp_tier,
+    require_fresh_child_identity,
+};
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
@@ -760,7 +762,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // of one parent that skipped this would draw identical randomness, which
         // is the whole reason a warm child needs a fresh identity — so a child
         // that cannot prove it is never admitted.
-        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token, grant_envelope) {
+        //
+        // The same answer admits the child's seccomp tier. The parent booted
+        // with no plan and so holds none; the tier comes from the plan this
+        // claim was admitted under, and the guest must report holding exactly
+        // that tier before the claim commits and any workload process starts.
+        let identity = ChildIdentity {
+            token,
+            grant_envelope,
+            seccomp_tier: Some(admitted_seccomp_tier(&plan)),
+        };
+        if let Err(refusal) = self.take_fresh_child_identity(&child.0, identity) {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
             // exists to prevent, so stop it before returning. `force_stop`
@@ -793,19 +805,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     fn take_fresh_child_identity(
         &self,
         child_vm_name: &str,
-        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-        grant_envelope: Option<VerbGrantEnvelope>,
+        identity: ChildIdentity,
     ) -> std::result::Result<(), StandbyError> {
+        let requested_tier = identity.seccomp_tier;
         let outcome = self
             .driver
-            .deliver_child_identity(child_vm_name, token, grant_envelope)
+            .deliver_child_identity(child_vm_name, identity)
             .map_err(|e| {
                 StandbyError::ClaimFailed(format!(
                     "forked child '{child_vm_name}' never answered the post-restore identity \
-                     handshake: {e:#}"
+                     handshake: {e:#}; a guest agent too old to take the claim's seccomp tier \
+                     refuses this handshake, and the claim is refused rather than run \
+                     unfiltered — `mvmctl bootstrap` refreshes the guest runtime"
                 ))
             })?;
-        require_fresh_child_identity(child_vm_name, &outcome)
+        require_fresh_child_identity(child_vm_name, &outcome)?;
+        require_admitted_seccomp_tier(child_vm_name, requested_tier, &outcome)
     }
 
     /// Boot a standby parent, capture its whole live state, and release it.
@@ -4125,6 +4140,15 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].child_vm_name, child.0);
         assert_eq!(delivered[0].token, forks[0].genid.token);
+        // The parent booted with no plan and so holds no seccomp tier; the
+        // child's comes from the plan this claim was admitted under, on the
+        // same handshake, before the claim commits.
+        let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json).unwrap();
+        assert_eq!(
+            delivered[0].seccomp_tier,
+            Some(plan.admission_profile.seccomp_tier.into()),
+            "the claimed child is handed its own plan's seccomp tier"
+        );
         let delivered_grant = delivered[0]
             .grant_envelope
             .as_ref()
@@ -4590,9 +4614,10 @@ mod tests {
 
     /// A forked child comes back resumed on its parent's saved memory, so until
     /// it answers the identity handshake it is still drawing on the parent's
-    /// CSPRNG and reading the parent's frozen clock. Every way that proof can
-    /// fail — the guest never answers, answers without acknowledging, without
-    /// rotating, or without resynchronizing its clock — must refuse the claim,
+    /// CSPRNG and reading the parent's frozen clock, and holds no seccomp tier.
+    /// Every way that proof can fail — the guest never answers, answers without
+    /// acknowledging, without rotating, without resynchronizing its clock, or
+    /// without holding exactly the plan's seccomp tier — must refuse the claim,
     /// stop the live child, return the healthy parent to claimable, and leave no
     /// child dir. Admitting on any of them would hand out a VM whose "random"
     /// values match every sibling forked from the same parent.
@@ -4605,6 +4630,7 @@ mod tests {
                 reseeded,
                 clock_resynced,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             })
         };
         let cases = [
@@ -4617,6 +4643,21 @@ mod tests {
             (
                 "guest did not resync its clock",
                 unproven(true, true, false),
+            ),
+            // A guest that proved a fresh identity but took no seccomp tier
+            // would run the workload unfiltered; one holding a different tier
+            // would run it under a filter the plan did not admit.
+            ("guest holds no seccomp tier", unproven(true, true, true)),
+            (
+                "guest holds another seccomp tier",
+                MockDriver::default().with_child_identity(PostRestoreOutcome {
+                    acknowledged: true,
+                    detail: None,
+                    reseeded: true,
+                    clock_resynced: true,
+                    reseed_shortfall: None,
+                    seccomp_tier: Some(mvm_core::crypto::seccomp::SeccompTier::Unrestricted),
+                }),
             ),
         ];
 
@@ -4662,6 +4703,7 @@ mod tests {
                 reseeded: false,
                 clock_resynced: true,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             },
         ));
         assert!(out.result.is_err());

@@ -18,6 +18,7 @@ pub mod syscall_table;
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SeccompTier {
     /// ~40 syscalls: just enough to load and exit a binary (linker, glibc init).
     Essential,
@@ -85,6 +86,20 @@ impl SeccompTier {
             action: SeccompAction::KillProcess,
             allowed_syscalls: self.syscalls().iter().map(|s| (*s).to_string()).collect(),
         })
+    }
+}
+
+/// The filter a signed plan's tier name selects.
+impl From<crate::plan::PlanSeccompTier> for SeccompTier {
+    fn from(tier: crate::plan::PlanSeccompTier) -> Self {
+        use crate::plan::PlanSeccompTier as Plan;
+        match tier {
+            Plan::Essential => Self::Essential,
+            Plan::Minimal => Self::Minimal,
+            Plan::Standard => Self::Standard,
+            Plan::Network => Self::Network,
+            Plan::Unrestricted => Self::Unrestricted,
+        }
     }
 }
 
@@ -445,6 +460,22 @@ fn network_extra() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
+    /// A plan's tier and the filter it selects share a name, which is how the
+    /// cmdline carries it; the conversion has to agree with that.
+    #[test]
+    fn every_plan_tier_selects_the_filter_of_the_same_name() {
+        use crate::plan::PlanSeccompTier;
+        for plan in [
+            PlanSeccompTier::Essential,
+            PlanSeccompTier::Minimal,
+            PlanSeccompTier::Standard,
+            PlanSeccompTier::Network,
+            PlanSeccompTier::Unrestricted,
+        ] {
+            assert_eq!(SeccompTier::from(plan).to_string(), plan.to_string());
+        }
+    }
+
     use super::*;
 
     #[test]

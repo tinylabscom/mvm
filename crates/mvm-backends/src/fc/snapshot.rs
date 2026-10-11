@@ -81,6 +81,7 @@ pub fn warm_restore_instance_from_path(
             token,
             hostname: Some(name.to_string()),
             grant_envelope: None,
+            seccomp_tier: None,
         },
         POST_RESTORE_READY_TIMEOUT,
     ) {

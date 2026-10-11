@@ -33,6 +33,7 @@ use mvm_agentd::vsock::{
 };
 use mvm_core::arch::GuestArch;
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
+use mvm_core::crypto::seccomp::SeccompTier;
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::vm_backend::{RuntimeSourceRootStrategy, StandbySpec, StandbyState, StartMode};
 use mvm_runtime::checkpoint::{
@@ -346,6 +347,48 @@ fn read_getrandom(vsock_path: &str) -> Vec<u8> {
     stdout
 }
 
+/// Run `script` in the child as a workload process and return its exit code
+/// and stdout.
+fn exec_in_child(vsock_path: &str, script: &str) -> (ExecEvent, String) {
+    let mut stream = connect_to(vsock_path, CHILD_AGENT_TIMEOUT_SECS)
+        .expect("connect to restored child for the seccomp witness");
+    let mut stdout = Vec::new();
+    let terminal = send_exec_streaming(
+        &mut stream,
+        script,
+        None,
+        Some(CHILD_AGENT_TIMEOUT_SECS),
+        |event| {
+            if let ExecEvent::Stdout { chunk } = event {
+                stdout.extend_from_slice(chunk);
+            }
+        },
+    )
+    .expect("run the seccomp witness through the guest agent");
+    (terminal, String::from_utf8_lossy(&stdout).into_owned())
+}
+
+/// A workload process in the warm-claimed child carries a seccomp filter, and
+/// it is the standard tier's: `socket()` fails with `EPERM`.
+fn assert_workload_runs_under_standard(vsock_path: &str) {
+    let (terminal, status) = exec_in_child(vsock_path, "grep '^Seccomp:' /proc/self/status");
+    assert_eq!(terminal, ExecEvent::Exit { code: 0 }, "{status}");
+    assert_eq!(
+        status.split_whitespace().nth(1),
+        Some("2"),
+        "a warm-claimed child's workload must run under a seccomp filter: {status}"
+    );
+    let (terminal, out) = exec_in_child(
+        vsock_path,
+        "python3 -c 'import errno,socket,sys\ntry:\n socket.socket()\nexcept OSError as e:\n sys.exit(e.errno)'",
+    );
+    assert_eq!(
+        terminal,
+        ExecEvent::Exit { code: libc::EPERM },
+        "socket() must fail with EPERM in a warm-claimed child under standard: {out}"
+    );
+}
+
 struct ChildObservation {
     random: Vec<u8>,
     generation_token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
@@ -412,8 +455,17 @@ fn restore_child_and_read_random(
     let resume_ms = t_resume.elapsed().as_millis();
 
     let t_identity = Instant::now();
+    // The parent booted with no plan and holds no seccomp tier, so the child's
+    // arrives here, as a claim delivers it.
     let identity = driver
-        .deliver_child_identity(child_id, generation_token, None)
+        .deliver_child_identity(
+            child_id,
+            mvm_vmm::post_restore::ChildIdentity {
+                token: generation_token,
+                grant_envelope: None,
+                seccomp_tier: Some(SeccompTier::Standard),
+            },
+        )
         .expect("the restored child must complete the authenticated identity handshake");
     let identity_ms = t_identity.elapsed().as_millis();
     assert!(
@@ -428,11 +480,17 @@ fn restore_child_and_read_random(
         identity.clock_resynced,
         "the guest must resynchronize its wall clock before readiness"
     );
+    assert_eq!(
+        identity.seccomp_tier,
+        Some(SeccompTier::Standard),
+        "the guest must report holding the seccomp tier it was handed"
+    );
     let claim_ms = t_claim.elapsed().as_millis();
 
     let child_vsock =
         mvm_runtime::microvm::firecracker_vsock_uds_path(&child_dir.to_string_lossy());
     let random = read_getrandom(&child_vsock);
+    assert_workload_runs_under_standard(&child_vsock);
 
     let _ = mvm_runtime::microvm::stop_vm(child_id);
 

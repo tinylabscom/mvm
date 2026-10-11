@@ -362,6 +362,13 @@
       ]
     },
     {
+      "path": "crates/mvm-runtime/src/workload_runner/runner/refusal.rs",
+      "package": "mvm-runtime",
+      "claims": [
+        1
+      ]
+    },
+    {
       "path": "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
       "package": "mvm-vmm",
       "claims": [

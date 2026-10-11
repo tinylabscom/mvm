@@ -613,8 +613,16 @@ pub(crate) fn handle_post_restore(
     hostname: Option<&str>,
     host_epoch_secs: Option<u64>,
     grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
 ) -> GuestResponse {
-    // First, rotate the generation token: feed the host-minted token to the
+    // Admit the claiming plan's seccomp tier before anything else here can
+    // start a process: the init signal below restarts services, and the claim
+    // commits on this answer, after which the host may start the workload.
+    let seccomp = seccomp_tier.map(|tier| {
+        let workers_running = matches!(WARM_POOL.get(), Some(Some(_)));
+        mvm_agentd::workload_seccomp::admit_restored(tier, workers_running)
+    });
+    // Then rotate the generation token: feed the host-minted token to the
     // process-resident reseeder. Its state is captured in the snapshot,
     // so two clones of one snapshot both diverge from the captured
     // value when the host delivers each a distinct fresh token. A
@@ -660,8 +668,15 @@ pub(crate) fn handle_post_restore(
     }
     // Then signal PID 1 directly: a minimal guest image need not carry a
     // `kill` executable, and restore must not depend on shell utilities.
-    let signal_detail = send_init_signal_with(send_sigusr1_to_init);
+    // A child whose tier was refused is about to be torn down by the host;
+    // restarting its services first would only start them unfiltered.
+    let signal_detail = if matches!(seccomp, Some(Err(_))) {
+        None
+    } else {
+        send_init_signal_with(send_sigusr1_to_init)
+    };
     post_restore_ack(PostRestoreSteps {
+        seccomp,
         reseed,
         hostname_requested: hostname.is_some(),
         hostname_error,
@@ -700,6 +715,9 @@ fn send_sigusr1_to_init() -> std::io::Result<()> {
 /// What each post-restore step did, gathered so the acknowledgement is decided
 /// in one place that can be tested without a guest.
 struct PostRestoreSteps {
+    /// The seccomp tier admission the request asked for, `None` when it named
+    /// no tier.
+    seccomp: Option<Result<mvm_core::crypto::seccomp::SeccompTier, String>>,
     reseed: mvm_agentd::genid::GenIdAction,
     hostname_requested: bool,
     hostname_error: Option<String>,
@@ -732,10 +750,20 @@ fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
             (None, None)
         }
     };
-    let errors = [steps.hostname_error, steps.clock_error, steps.signal_error]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+    let (seccomp_tier, seccomp_error) = match steps.seccomp {
+        None => (None, None),
+        Some(Ok(tier)) => (Some(tier), None),
+        Some(Err(error)) => (None, Some(format!("seccomp tier refused: {error}"))),
+    };
+    let errors = [
+        seccomp_error,
+        steps.hostname_error,
+        steps.clock_error,
+        steps.signal_error,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let success = errors.is_empty();
     let summary = if success {
         match (steps.hostname_requested, steps.clock_requested) {
@@ -758,6 +786,7 @@ fn post_restore_ack(steps: PostRestoreSteps) -> GuestResponse {
         reseeded,
         clock_resynced: steps.clock_resynced,
         reseed_shortfall,
+        seccomp_tier,
     }
 }
 
@@ -1182,6 +1211,7 @@ mod post_restore_ack_tests {
 
     fn steps(reseed: GenIdAction) -> PostRestoreSteps {
         PostRestoreSteps {
+            seccomp: None,
             reseed,
             hostname_requested: true,
             hostname_error: None,
@@ -1207,6 +1237,7 @@ mod post_restore_ack_tests {
             reseeded,
             clock_resynced,
             reseed_shortfall,
+            ..
         } = post_restore_ack(steps(failed(
             ReseedShortfall::Failed,
             "forcing the kernel generator to rekey failed: EPERM",
@@ -1266,6 +1297,63 @@ mod post_restore_ack_tests {
             detail.contains("kill failed") && detail.contains("restore reseed failed"),
             "{detail}"
         );
+    }
+
+    /// The admitted tier comes back on the ack, so the host can hold the
+    /// claim to the tier its plan signed rather than to a bare `success`.
+    #[test]
+    fn an_admitted_seccomp_tier_is_reported_on_the_ack() {
+        let mut admitted = steps(GenIdAction::Reseeded);
+        admitted.seccomp = Some(Ok(mvm_core::crypto::seccomp::SeccompTier::Standard));
+        let GuestResponse::PostRestoreAck {
+            success,
+            seccomp_tier,
+            ..
+        } = post_restore_ack(admitted)
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(success);
+        assert_eq!(
+            seccomp_tier,
+            Some(mvm_core::crypto::seccomp::SeccompTier::Standard)
+        );
+    }
+
+    /// A refused tier fails the acknowledgement and reports no tier, so the
+    /// claim is refused rather than committed with an unfiltered child.
+    #[test]
+    fn a_refused_seccomp_tier_fails_the_ack_and_says_why() {
+        let mut refused = steps(GenIdAction::Reseeded);
+        refused.seccomp = Some(Err("workload seccomp tier is already network".into()));
+        let GuestResponse::PostRestoreAck {
+            success,
+            detail,
+            seccomp_tier,
+            ..
+        } = post_restore_ack(refused)
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert!(!success);
+        assert_eq!(seccomp_tier, None);
+        let detail = detail.unwrap_or_default();
+        assert!(
+            detail.contains("seccomp tier refused") && detail.contains("already network"),
+            "{detail}"
+        );
+    }
+
+    /// A request that names no tier gets an ack without one, so a host that
+    /// never asks never sees the field.
+    #[test]
+    fn an_ack_for_a_request_without_a_tier_carries_none() {
+        let GuestResponse::PostRestoreAck { seccomp_tier, .. } =
+            post_restore_ack(steps(GenIdAction::Reseeded))
+        else {
+            panic!("post-restore must answer with a PostRestoreAck");
+        };
+        assert_eq!(seccomp_tier, None);
     }
 
     #[test]

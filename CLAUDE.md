@@ -397,13 +397,22 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    `an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`,
    `a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`
    and `an_exec_child_reports_a_seccomp_filter_and_no_new_privs` in the
-   `seccomp-functional` lane. Before this the tier was admitted and audited
-   and applied to nothing. It still applies to nothing on a boot whose cmdline
-   names no tier: a standby parent booted without an admitted plan, or a
-   guest agent older than the token — including the one in the pinned image
-   set a release binary boots, until that set is re-pinned. A warm-claimed
-   child runs under its parent's tier. ADR-001's claim-1 row carries the
-   limits.
+   `seccomp-functional` lane. A standby parent boots with no plan, so its
+   cmdline names no tier and a child warm-claimed out of it — the default
+   unnamed launch — gets its tier from the claiming launch's signed plan
+   instead: the runner hands it over on the post-restore handshake
+   (`ChildIdentity`), the child's agent admits it once (`admit_restored`)
+   before the claim commits, and the claim is refused unless the agent reports
+   holding exactly that tier (`require_admitted_seccomp_tier`). An agent too
+   old for the field refuses the handshake, so the claim fails rather than
+   running unfiltered; so does a warm-process worker pool started unfiltered
+   in the parent. Witnessed by
+   `a_warm_claimed_child_under_standard_cannot_open_a_socket` and
+   `a_warm_claimed_childs_workload_reports_a_seccomp_filter`. Before #4305 the
+   tier was admitted and audited and applied to nothing. It still applies to
+   nothing on a cold boot whose guest agent is older than the token —
+   including the one in the pinned image set a release binary boots until it
+   assembles its own guest runtime. ADR-001's claim-1 row carries the limits.
 2. **No guest binary can elevate to uid 0.** `mvm-setpriv --no-new-privs`
    in the launch path; `/etc/{passwd,group,nsswitch.conf}` are
    read-only bind-mounts so a compromised service can't mint a uid 0

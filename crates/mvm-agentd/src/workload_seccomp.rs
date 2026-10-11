@@ -19,8 +19,12 @@
 //! sees a failed call it can report, not a SIGSYS core.
 //!
 //! A boot whose cmdline names no tier — a standby parent booted before any
-//! workload was admitted, or a host that predates the token — admits nothing,
-//! and its workloads run unfiltered, exactly as before the tier was enforced.
+//! workload was admitted, or a host that predates the token — admits nothing.
+//! A child restored out of such a parent receives its tier from the claiming
+//! launch's signed plan on the post-restore handshake instead
+//! ([`admit_restored`]), before the claim commits and so before any workload
+//! process starts. A cold boot from a host that predates the token is the one
+//! launch whose workloads still run unfiltered.
 
 use mvm_core::crypto::seccomp::SeccompTier;
 use std::sync::OnceLock;
@@ -113,6 +117,49 @@ pub fn admit_from_cmdline(cmdline: &str) -> Result<Option<SeccompTier>, String> 
     };
     admit(tier)?;
     Ok(Some(tier))
+}
+
+/// Why a restored child cannot take `tier`, or `None` when it can.
+///
+/// `admitted` is what the guest already holds; `workers_running` says whether
+/// a warm-process worker pool is already up. A pool started in the standby
+/// parent, before any tier existed, holds long-lived workers that were spawned
+/// unfiltered, and a filter can only be installed by the process it confines,
+/// so admitting an enforcing tier over them would claim a confinement those
+/// workers do not have. `unrestricted` asks for none, so it is admissible
+/// either way. A tier that differs from one already admitted is refused, as
+/// [`admit`] refuses it.
+#[must_use]
+pub fn restored_admission_refusal(
+    admitted: Option<SeccompTier>,
+    tier: SeccompTier,
+    workers_running: bool,
+) -> Option<String> {
+    match admitted {
+        Some(held) if held == tier => None,
+        Some(held) => Some(format!(
+            "workload seccomp tier is already {held}; refusing {tier}"
+        )),
+        None if workers_running && !tier.is_unrestricted() => Some(format!(
+            "warm-process workers started before a seccomp tier was admitted and run \
+             unfiltered; refusing to admit {tier} over them"
+        )),
+        None => None,
+    }
+}
+
+/// Admit the tier a restored child's claiming plan names, once, before the
+/// claim commits. See [`restored_admission_refusal`] for what is refused.
+///
+/// # Errors
+///
+/// The tier is refused, or fails to compile.
+pub fn admit_restored(tier: SeccompTier, workers_running: bool) -> Result<SeccompTier, String> {
+    if let Some(refusal) = restored_admission_refusal(admitted_tier(), tier, workers_running) {
+        return Err(refusal);
+    }
+    admit(tier)?;
+    Ok(tier)
 }
 
 /// The tier workload processes start under, `None` before activation admitted
@@ -284,6 +331,50 @@ mod tests {
         assert!(error.contains("refusing standard"), "{error}");
         assert_eq!(admitted_tier(), Some(SeccompTier::Unrestricted));
         install_admitted().expect("unrestricted installs no filter");
+    }
+
+    /// A child restored out of a parent that admitted nothing takes the
+    /// claiming plan's tier; one that already holds that tier takes it again.
+    #[test]
+    fn a_restored_child_takes_the_claimed_tier_once() {
+        for tier in SeccompTier::ALL {
+            assert_eq!(restored_admission_refusal(None, *tier, false), None);
+            assert_eq!(restored_admission_refusal(Some(*tier), *tier, false), None);
+            assert_eq!(restored_admission_refusal(Some(*tier), *tier, true), None);
+        }
+    }
+
+    /// A tier cannot be changed after it is admitted, whichever way the change
+    /// goes: a looser tier would widen the filter, and a tighter one would
+    /// claim a filter already-running workloads do not carry.
+    #[test]
+    fn a_restored_child_refuses_a_tier_other_than_the_one_it_holds() {
+        let refusal = restored_admission_refusal(
+            Some(SeccompTier::Standard),
+            SeccompTier::Unrestricted,
+            false,
+        )
+        .expect("a looser tier is refused");
+        assert!(refusal.contains("already standard"), "{refusal}");
+        assert!(
+            restored_admission_refusal(Some(SeccompTier::Network), SeccompTier::Essential, false)
+                .is_some(),
+            "a tighter tier is refused too"
+        );
+    }
+
+    /// Workers spawned in the parent run unfiltered, so an enforcing tier
+    /// cannot be admitted over them; `unrestricted` can, since it asks for no
+    /// filter.
+    #[test]
+    fn an_enforcing_tier_is_refused_over_workers_started_unfiltered() {
+        let refusal = restored_admission_refusal(None, SeccompTier::Standard, true)
+            .expect("workers already running unfiltered refuse the tier");
+        assert!(refusal.contains("unfiltered"), "{refusal}");
+        assert_eq!(
+            restored_admission_refusal(None, SeccompTier::Unrestricted, true),
+            None
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -191,3 +191,24 @@ Carries the admitted seccomp tier to the guest on the kernel cmdline. Without \
 a caller in the shared cmdline assembly the guest is never told a tier and \
 admits none, so its workloads run unfiltered while the plan and the audit \
 chain still name one."""
+
+[[control]]
+symbol = "require_admitted_seccomp_tier"
+file = "crates/mvm-runtime/src/workload_runner/runner/refusal.rs"
+dormant = false
+why = """
+Holds a warm claim to the seccomp tier its signed plan admits. A standby \
+parent boots with no plan and so holds no tier; the claimed child gets one \
+only on the post-restore handshake. Without this caller in the claim path a \
+child whose agent took no tier, or a different one, would be committed and \
+run its workload unfiltered while the plan and the audit chain name a tier."""
+
+[[control]]
+symbol = "admit_restored"
+file = "crates/mvm-agentd/src/workload_seccomp.rs"
+dormant = false
+why = """
+Admits the claiming plan's seccomp tier in a warm-claimed child, which reads \
+no tier off the cmdline it inherited from a planless parent. Losing its \
+caller in the agent's post-restore handler leaves every warm-claimed \
+workload — the default unnamed launch — without a filter."""
