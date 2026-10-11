@@ -6,6 +6,11 @@
 # transient run deletes its state dir on exit — the positive witness
 # asserts on the per-VM gpu-endpoint.log after the guest program ran, and
 # the negative one proves the state dir carries no endpoint at all.
+#
+# The GPU grant also decides the workload's seccomp tier. A --gpu launch is
+# admitted under `vsock`, which lets the shims open an AF_VSOCK socket and no
+# other family. A launch without --gpu keeps `standard`, so the guest refuses
+# the vsock socket itself with EPERM before any dial reaches the VMM.
 
 Feature: GPU over vsock — end-to-end witness
 
@@ -31,7 +36,7 @@ Scenario: a --gpu launch remotes CUDA driver and NVML calls to the host endpoint
   Then the command exits with code 0
 
 @live @gpu_e2e
-Scenario: a launch without --gpu refuses the GPU channel
+Scenario: a launch without --gpu cannot open the GPU channel
   Given a gpu probe staging dir
   And the image "python:3.12" is prepared in the live home
   When I run mvmctl in an isolated live home with a gpu staging mount and "machine create bdd-gpu-negative --image python:3.12"
@@ -41,8 +46,8 @@ Scenario: a launch without --gpu refuses the GPU channel
   When I run mvmctl in an isolated live home with "machine start bdd-gpu-negative"
   Then the command exits with code 0
   When I run mvmctl in an isolated live home with "machine exec bdd-gpu-negative -- /data/shims/gpu_guest_probe dial"
-  Then the command exits with code 3
-  And the output contains "CONNECT_REFUSED"
+  Then the command exits with code 4
+  And the output contains "CONNECT_ERROR errno=1 (socket)"
   And the vm bdd-gpu-negative state dir has no gpu endpoint
   When I run mvmctl in an isolated live home with "machine stop bdd-gpu-negative --yes"
   Then the command exits with code 0

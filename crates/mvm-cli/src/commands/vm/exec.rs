@@ -662,6 +662,8 @@ pub(in crate::commands) fn run_secure_started(
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
+    // The start config arms the GPU endpoint from this same flag.
+    let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
@@ -708,6 +710,7 @@ pub(in crate::commands) fn run_secure_started(
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
                 .with_materialized_mounts(&instruction_mounts),

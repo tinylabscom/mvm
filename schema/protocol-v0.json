@@ -5311,6 +5311,13 @@
           ]
         },
         {
+          "description": "`standard` plus `AF_VSOCK` stream sockets: `socket` is granted only for that family (see [`SeccompTier::argument_scoped_syscalls`]), with `connect` and the `sendto`/`recvfrom` pair a stream read and write lower to. No other address family can be opened, so the only peers a process can reach are the vsock ports the VMM exposes. For a launch that needs its GPU endpoint and nothing else.",
+          "type": "string",
+          "enum": [
+            "vsock"
+          ]
+        },
+        {
           "description": "~160 syscalls: adds sockets, connect, bind, sendmsg. For networked agents.",
           "type": "string",
           "enum": [
