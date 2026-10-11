@@ -41,6 +41,6 @@ Feature: The --peer flag authors a route the runtime honours
   Scenario: the documented peer route carries a guest dial to the host service
     Given an artifact-warm mvm home
     And a host TCP service on port 34567 that greets its caller
-    When I launch "run --peer db.mvm.peer:5432=127.0.0.1:34567" with a guest that dials the peer
+    When I launch "run --name e2e-peer-dial --peer db.mvm.peer:5432=127.0.0.1:34567" with a guest that dials the peer
     Then the launch succeeds
     And the guest reached the peer service
