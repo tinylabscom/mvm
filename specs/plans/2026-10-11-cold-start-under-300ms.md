@@ -11,8 +11,8 @@ checkboxes are a reading aid, not a tracker.
 ## The window
 
 "Startup" here is what a caller waits before its command can be sent:
-resolution, drives, admission, VMM start and guest boot to an answering agent
-(`RunPhaseTimings::startup_ms`). The prepared-cold dispatch ceiling starts after
+resolution, drives, admission, VMM start and guest boot to an answering agent.
+The prepared-cold dispatch ceiling starts after
 admission, so it never saw the costs this note is mostly about.
 
 The shape measured is the one a warm standby cannot serve today: a named
