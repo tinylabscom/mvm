@@ -176,9 +176,13 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "5";
+const LOCAL_BUILD_EPOCH: &str = "6";
 
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
+/// Guest runtime executables staged at the overlay root, as (archive member
+/// name, name under `/mvm/runtime`). Every one but `mvm-setpriv` is an
+/// `mvm-agentd` binary; the privilege helper is its own package, built beside
+/// them into the same archive, and rides here so a root needs no copy of it.
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 10] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -188,6 +192,7 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
+    ("mvm-setpriv", "setpriv"),
 ];
 /// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
 /// archive's own cdylib table so the two cannot name different libraries.

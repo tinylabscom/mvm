@@ -106,18 +106,81 @@ in
   # ── Privilege model invariants (rootless) ─────────────────────
   #
   # Defaults: dev image runs entrypoint as root (debug-friendly
-  # shell); prod image runs entrypoint as uid 1000 (rootless
-  # workload, defense in depth); agent always uid 990.
+  # shell); prod image runs entrypoint as uid 901, the uid the
+  # universal initramfs agent drops every workload to; the agent
+  # runs as 901 too.
 
   dev_default_entrypoint_is_root = (meta shellGuest).uids.entrypoint == 0
     && (meta shellGuest).rootlessEntrypoint == false;
 
-  prod_default_entrypoint_is_rootless = (meta commandGuest).uids.entrypoint == 1000
+  prod_default_entrypoint_is_the_workload_uid = (meta commandGuest).uids.entrypoint == 901
     && (meta commandGuest).rootlessEntrypoint == true;
 
-  agent_uid_is_always_990_by_default = (meta shellGuest).uids.agent == 990
-    && (meta commandGuest).uids.agent == 990
-    && (meta servicesGuest).uids.agent == 990;
+  agent_uid_is_the_workload_uid_by_default = (meta shellGuest).uids.agent == 901
+    && (meta commandGuest).uids.agent == 901
+    && (meta servicesGuest).uids.agent == 901;
+
+  # ── Fixed guest identities ────────────────────────────────────
+  #
+  # Every root names the same set, in this order, whatever its mode.
+
+  default_identities_are_the_fixed_set =
+    let
+      fixed = [
+        { name = "root"; uid = 0; }
+        { name = "mvm-worker"; uid = 901; }
+        { name = "mvm-dns"; uid = 987; }
+        { name = "mvm-crng"; uid = 988; }
+        { name = "mvm-egress"; uid = 989; }
+      ];
+    in
+    (meta shellGuest).identities == fixed
+    && (meta commandGuest).identities == fixed
+    && (meta servicesGuest).identities == fixed;
+
+  # An overridden uid outside the set gets its own row, after the fixed ones.
+  overridden_uids_are_named_after_the_fixed_set =
+    let
+      g = mkGuest {
+        name = "override-rows";
+        entrypoint.command = [ "/bin/x" ];
+        uids = { agent = 5000; entrypoint = 1000; };
+        builderUid = 902;
+      };
+    in
+    builtins.map (row: row.name) (meta g).identities == [
+      "root"
+      "mvm-worker"
+      "mvm-dns"
+      "mvm-crng"
+      "mvm-egress"
+      "mvm-agent"
+      "mvm-entrypoint"
+      "mvm-builder"
+    ]
+    && builtins.map (row: row.uid) (meta g).identities == [ 0 901 987 988 989 5000 1000 902 ];
+
+  # The service uids belong to their services alone.
+  agent_on_addon_dns_uid_is_rejected =
+    rejects (meta (mkGuest {
+      name = "agent-987";
+      entrypoint.command = [ "/bin/x" ];
+      uids = { agent = 987; };
+    })).identities;
+
+  entrypoint_on_crng_uid_is_rejected =
+    rejects (meta (mkGuest {
+      name = "entry-988";
+      entrypoint.command = [ "/bin/x" ];
+      uids = { entrypoint = 988; };
+    })).identities;
+
+  builder_on_egress_uid_is_rejected =
+    rejects (meta (mkGuest {
+      name = "builder-989";
+      entrypoint.shell = "/bin/sh";
+      builderUid = 989;
+    })).identities;
 
   # ── Override path (uids = { ... } argument) ───────────────────
 
@@ -126,12 +189,12 @@ in
       g = mkGuest {
         name = "rootless-dev";
         entrypoint.shell = "/bin/sh";
-        uids = { entrypoint = 1000; agent = 990; };
+        uids = { entrypoint = 901; };
       };
     in
     (meta g).rootlessEntrypoint == true
     && (meta g).accessible == true   # still dev mode
-    && (meta g).uids.entrypoint == 1000;
+    && (meta g).uids.entrypoint == 901;
 
   rootful_prod_via_uids_override =
     let
@@ -154,7 +217,7 @@ in
       };
     in
     (meta g).uids.agent == 5000
-    && (meta g).uids.entrypoint == 1000;  # default unaffected
+    && (meta g).uids.entrypoint == 901;  # default unaffected
 
   builder_uid_round_trips =
     let

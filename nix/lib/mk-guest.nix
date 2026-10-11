@@ -134,10 +134,12 @@ in
   # this `true` and runs the probe as its entrypoint; the production guest
   # closure never includes it.
   withAuditProbe ? false,
-  # Whether to bake the static `mvm-setpriv` helper into the rootfs. Every
-  # workload image needs it. A builder image at builder boot ABI 2 sets this
-  # `false`: `mvmctl` hands the builder its own copy in the boot payload, and
-  # the generated scripts then name that copy instead.
+  # Whether to bake the static `mvm-setpriv` helper into the rootfs. The
+  # runtime overlay carries the helper too, at `/mvm/runtime/setpriv`, and
+  # `/init` prefers that copy; the baked one serves a rootfs_only boot and an
+  # overlay built before it carried the helper. A builder image at builder
+  # boot ABI 2 sets this `false`: `mvmctl` hands the builder its own copy in
+  # the boot payload, and the generated scripts then name that copy instead.
   withSetpriv ? true,
   # Optional kernel package. When set, mkGuest copies its module
   # tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
@@ -376,31 +378,42 @@ let
   # ── Privilege model (uids) ─────────────────────────────────────
   #
   # PID 1 must be uid 0 (kernel requirement); everything we can
-  # drop is dropped via `setpriv` before exec. Two configurable
-  # uids:
+  # drop is dropped via `setpriv` before exec.
+  #
+  # Every root names one fixed set of guest identities, the same
+  # numbers the universal initramfs agent drops to:
+  #
+  #   0    root
+  #   901  mvm-worker — the guest agent and the workload
+  #   987  mvm-dns    — the local addon resolver
+  #   988  mvm-crng   — the CRNG reseed helper
+  #   989  mvm-egress — the FlowMux egress client
+  #
+  # The agent mounts every root read-only, so the names it resolves
+  # are the ones baked here; it cannot add its own.
+  #
+  # Two uids stay configurable for the shell `/init`:
   #
   #   agent       — the host-mediated tool agent (vsock RPC handler).
-  #                 Always non-root; never needs privilege.
+  #                 Always non-root; defaults to 901.
   #
   #   entrypoint  — the workload the user declared. Defaults differ
   #                 by mode:
   #                   dev = true  → uid 0 (root shell;
   #                                  apt install / mount work)
-  #                   dev = false → uid 1000 (rootless workload;
-  #                                  defense in depth)
+  #                   dev = false → uid 901 (rootless workload)
   #
-  # Override either via `uids = { agent = N; entrypoint = M; }` —
-  # e.g. `entrypoint = 1000` forces a rootless dev shell, or
-  # `entrypoint = 0` forces a rootful prod workload (rare; usually
-  # a misconfiguration).
-  defaultEntrypointUid = if isDev then 0 else 1000;
+  # Override either via `uids = { agent = N; entrypoint = M; }`. A
+  # uid outside the fixed set gets its own account row. The service
+  # uids 987–989 are refused.
+  workloadUid = 901;
+  defaultEntrypointUid = if isDev then 0 else workloadUid;
   resolvedUids = {
-    agent = if uids != null && uids ? agent then uids.agent else 990;
+    agent = if uids != null && uids ? agent then uids.agent else workloadUid;
     entrypoint = if uids != null && uids ? entrypoint then uids.entrypoint else defaultEntrypointUid;
   };
 
   # GID == UID by convention. /etc/group entries below mirror this.
-  # Per-service derived gids come later; for now we keep it simple.
   agentUid = resolvedUids.agent;
   entrypointUid = resolvedUids.entrypoint;
   # Dedicated owner for the root-provisioned FlowMux signing key. It must not
@@ -433,8 +446,104 @@ let
       throw "mkGuest: uid 988 is reserved for the CRNG reseed helper"
     else
       true;
+  # Dedicated owner for the local addon resolver. It parses every DNS query
+  # the workload sends, so a compromise of it yields this uid rather than the
+  # agent's. The guest agent's `ADDON_DNS_IDENTITY` is the same number.
+  addonDnsUid = 987;
+  assertDedicatedAddonDnsUid =
+    if
+      addonDnsUid == 0
+      || addonDnsUid == agentUid
+      || addonDnsUid == entrypointUid
+      || (builderUid != null && addonDnsUid == builderUid)
+    then
+      throw "mkGuest: uid 987 is reserved for the addon DNS resolver"
+    else
+      true;
 
-  # Wrap a command-line in `setpriv` when the target uid is non-zero.
+  assertDedicatedServiceUids = builtins.seq assertDedicatedEgressUid (
+    builtins.seq assertDedicatedCrngReseedUid assertDedicatedAddonDnsUid
+  );
+
+  # The account rows every root carries, in uid order. `home` is created in
+  # the rootfs for the rows that log in with a shell.
+  fixedIdentities = [
+    {
+      name = "root";
+      uid = 0;
+      gecos = "root";
+      home = "/root";
+      shell = "/bin/sh";
+    }
+    {
+      name = "mvm-worker";
+      uid = workloadUid;
+      gecos = "mvm workload";
+      home = "/home/mvm-worker";
+      shell = "/bin/sh";
+    }
+    {
+      name = "mvm-dns";
+      uid = addonDnsUid;
+      gecos = "mvm addon DNS";
+      home = "/var/empty";
+      shell = "/bin/false";
+    }
+    {
+      name = "mvm-crng";
+      uid = crngReseedUid;
+      gecos = "mvm CRNG reseed";
+      home = "/var/empty";
+      shell = "/bin/false";
+    }
+    {
+      name = "mvm-egress";
+      uid = egressUid;
+      gecos = "mvm FlowMux egress";
+      home = "/var/empty";
+      shell = "/bin/false";
+    }
+  ];
+  # Rows for an overridden uid outside the fixed set, first claim wins.
+  extraIdentityCandidates = [
+    {
+      name = "mvm-agent";
+      uid = agentUid;
+      gecos = "mvm guest agent";
+      home = "/var/empty";
+      shell = "/bin/false";
+    }
+    {
+      name = "mvm-entrypoint";
+      uid = entrypointUid;
+      gecos = "mvm workload";
+      home = "/home/mvm-entrypoint";
+      shell = "/bin/sh";
+    }
+  ]
+  ++ lib.optional (builderUid != null) {
+    name = "mvm-builder";
+    uid = builderUid;
+    gecos = "mvm build worker";
+    home = "/tmp";
+    shell = "/bin/sh";
+  };
+  guestIdentities = lib.foldl' (
+    rows: candidate:
+    if lib.any (row: row.uid == candidate.uid) rows then rows else rows ++ [ candidate ]
+  ) fixedIdentities extraIdentityCandidates;
+  passwdText = lib.concatMapStrings (
+    row:
+    "${row.name}:x:${toString row.uid}:${toString row.uid}:${row.gecos}:${row.home}:${row.shell}\n"
+  ) guestIdentities;
+  groupText = lib.concatMapStrings (row: "${row.name}:x:${toString row.uid}:\n") guestIdentities;
+  identityHomes = map (row: row.home) (
+    lib.filter (row: row.uid != 0 && lib.hasPrefix "/home/" row.home) guestIdentities
+  );
+
+  # Wrap a command-line in `setpriv` when the target uid is non-zero. The
+  # helper is the one /init resolved into MVM_SETPRIV_BIN (Stage 2.4775),
+  # falling back to the baked path where the fragment runs outside /init.
   #
   # **mvm-setpriv, not busybox's setpriv applet.** `pkgsStatic.busybox`
   # only supports the bare `-d / --nnp / --inh-caps / --ambient-caps`
@@ -452,7 +561,7 @@ let
     else
       # No exec: PID 1 runs the workload as a child so /init can capture $?.
       # Persistent services exec `sleep infinity` inside and never return.
-      "${setpriv} "
+      "\"\${MVM_SETPRIV_BIN:-${setpriv}}\" "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
 
@@ -778,6 +887,18 @@ let
       fi
     fi
 
+    # Stage 2.4775 — resolve the privilege helper every launch below drops
+    # through. Prefer the runtime overlay's copy, which ships with the guest
+    # runtime; fall back to the one baked into the root (or, on a builder,
+    # the boot payload's). A rootfs_only boot uses the baked copy. This does
+    # not fail closed under required_overlay: an overlay built before it
+    # carried the helper is still a complete overlay, and the baked copy is
+    # the same program.
+    MVM_SETPRIV_BIN=${setpriv}
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" != rootfs_only ] && [ -x /mvm/runtime/setpriv ]; then
+      MVM_SETPRIV_BIN=/mvm/runtime/setpriv
+    fi
+
     # Stage 2.478 — optional SDK sidecar mount. The glibc host-services cdylib
     # the language SDKs dlopen is not in this rootfs and not in the runtime
     # overlay, so a workload that was admitted to call a host service gets it as
@@ -877,8 +998,8 @@ let
       /bin/busybox chmod 0644 /run/mvm/resolv.conf
       /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf
 
-      /bin/busybox setsid ${setpriv} \
-        --reuid=${toString agentUid} --regid=${toString agentUid} \
+      /bin/busybox setsid "$MVM_SETPRIV_BIN" \
+        --reuid=${toString addonDnsUid} --regid=${toString addonDnsUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
         -- "$MVM_ADDON_DNS_BIN" &
@@ -991,7 +1112,7 @@ let
       else
         /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
       fi
-      /bin/busybox setsid ${setpriv} \
+      /bin/busybox setsid "$MVM_SETPRIV_BIN" \
         --reuid=${toString egressUid} --regid=${toString egressUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
@@ -1057,7 +1178,7 @@ let
     /bin/busybox mkdir -p /run/mvm/crng-reseed
     /bin/busybox chown ${toString crngReseedUid}:${toString agentUid} /run/mvm/crng-reseed
     /bin/busybox chmod 0750 /run/mvm/crng-reseed
-    /bin/busybox setsid ${setpriv} \
+    /bin/busybox setsid "$MVM_SETPRIV_BIN" \
       --reuid=${toString crngReseedUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
       --inh-caps=+sys_admin --ambient-caps=+sys_admin --no-new-privs \
@@ -1066,7 +1187,7 @@ let
     # Static-musl mvm-setpriv — the helper applies the uid/gid, group, and
     # no-new-privileges drop before the agent exec. Without this step the
     # agent never forks and vsock port 5252 stays unbound.
-    /bin/busybox setsid ${setpriv} \
+    /bin/busybox setsid "$MVM_SETPRIV_BIN" \
       --reuid=${toString agentUid} --regid=${toString agentUid} \
       --clear-groups --securebits=keep-caps \
       --inh-caps=+kill --ambient-caps=+kill \
@@ -1176,16 +1297,14 @@ let
   # one under-indented line anywhere in the block above silently moves every
   # other line — including the shebang — one column right. Assert the rendered
   # bytes instead of trusting the indentation to stay uniform.
-  initScript = builtins.seq assertDedicatedEgressUid (
-    builtins.seq assertDedicatedCrngReseedUid (
-      lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
-        mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
-        The kernel exec()s /init and will panic with ENOEXEC. This almost always
-        means a line inside the /init block of nix/lib/mk-guest.nix is indented
-        less than its neighbours, which moves the whole script one or more
-        columns right. Re-align that line.
-      '' (pkgs.writeScript "mvm-init" initText)
-    )
+  initScript = builtins.seq assertDedicatedServiceUids (
+    lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
+      mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
+      The kernel exec()s /init and will panic with ENOEXEC. This almost always
+      means a line inside the /init block of nix/lib/mk-guest.nix is indented
+      less than its neighbours, which moves the whole script one or more
+      columns right. Re-align that line.
+    '' (pkgs.writeScript "mvm-init" initText)
   );
 
   # Render the entrypoint as a shell-sourced fragment. /init does
@@ -1416,52 +1535,18 @@ let
         ""
     }
 
-    # /etc/passwd + /etc/group provision root (mandatory for PID 1)
-    # plus the egress service, agent, and entrypoint uids resolved at build time.
-    # These become read-only via bind-mount once the security
-    # overlay lands; for now they're plain mode 0644.
-    #
-    # When entrypoint uid happens to be 0 (dev-mode default), the
-    # entry collapses to the root row — guarded against the
-    # duplicate by skipping the second cat. Same for the agent
-    # uid in the unlikely override case.
-    cat > "$out/etc/passwd" <<EOF
-    root:x:0:0:root:/root:/bin/sh
-    EOF
-    printf 'mvm-egress:x:${toString egressUid}:${toString egressUid}:mvm FlowMux egress:/var/empty:/bin/false\n' >> "$out/etc/passwd"
-    if [ "${toString agentUid}" != "0" ]; then
-      printf 'mvm-agent:x:${toString agentUid}:${toString agentUid}:mvm guest agent:/var/empty:/bin/false\n' >> "$out/etc/passwd"
-    fi
-    if [ "${toString entrypointUid}" != "0" ] && [ "${toString entrypointUid}" != "${toString agentUid}" ]; then
-      printf 'mvm-worker:x:${toString entrypointUid}:${toString entrypointUid}:mvm workload:/home/mvm-worker:/bin/sh\n' >> "$out/etc/passwd"
-      mkdir -p "$out/home/mvm-worker"
-      chmod 0755 "$out/home/mvm-worker"
-    fi
-    ${lib.optionalString
-      (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid)
-      ''
-        printf 'mvm-builder:x:${toString builderUid}:${toString builderUid}:mvm build worker:/tmp:/bin/sh\n' >> "$out/etc/passwd"
-      ''
-    }
+    # /etc/passwd + /etc/group name the fixed guest identities (see
+    # `fixedIdentities`) plus any overridden uid outside that set. The
+    # universal initramfs agent mounts the root read-only, so these files
+    # are what every process on it resolves names against.
+    printf '%s' ${lib.escapeShellArg passwdText} > "$out/etc/passwd"
     chmod 0644 "$out/etc/passwd"
-
-    cat > "$out/etc/group" <<EOF
-    root:x:0:
-    EOF
-    printf 'mvm-egress:x:${toString egressUid}:\n' >> "$out/etc/group"
-    if [ "${toString agentUid}" != "0" ]; then
-      printf 'mvm-agent:x:${toString agentUid}:\n' >> "$out/etc/group"
-    fi
-    if [ "${toString entrypointUid}" != "0" ] && [ "${toString entrypointUid}" != "${toString agentUid}" ]; then
-      printf 'mvm-worker:x:${toString entrypointUid}:\n' >> "$out/etc/group"
-    fi
-    ${lib.optionalString
-      (builderUid != null && builderUid != 0 && builderUid != agentUid && builderUid != entrypointUid)
-      ''
-        printf 'mvm-builder:x:${toString builderUid}:\n' >> "$out/etc/group"
-      ''
-    }
+    printf '%s' ${lib.escapeShellArg groupText} > "$out/etc/group"
     chmod 0644 "$out/etc/group"
+    ${lib.concatMapStrings (home: ''
+      mkdir -p "$out${home}"
+      chmod 0755 "$out${home}"
+    '') identityHomes}
 
     # Default /etc/resolv.conf and CA cert bundle — needed for any
     # guest that talks to the network over TLS (most Nix flake
@@ -1731,6 +1816,11 @@ let
       agent = agentUid;
       entrypoint = entrypointUid;
     };
+    # Every account row the root's /etc/passwd and /etc/group carry, as
+    # { name, uid } in file order. Forcing it runs the reserved-uid checks.
+    identities = builtins.seq assertDedicatedServiceUids (
+      map (row: { inherit (row) name uid; }) guestIdentities
+    );
     inherit builderUid;
     rootlessEntrypoint = entrypointUid != 0;
     # Agent binary kind: "real" — the cross-compiled Rust binary.

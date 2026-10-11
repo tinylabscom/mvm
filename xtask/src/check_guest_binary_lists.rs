@@ -27,6 +27,10 @@
 //! feature, so cargo's feature unification cannot hand the sealed agent an
 //! async runtime. The initramfs agent is the same split's third leg: it must
 //! be a sealed overlay bin, built in its own invocation with no features.
+//! The staging table also carries the guest runtime's other executables —
+//! those `guest_bins/extras.rs` builds from their own packages, such as
+//! `mvm-setpriv` — and must stage every one of them, under its name without
+//! the `mvm-` prefix.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -182,6 +186,15 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         .map(|c| (c[1].to_string(), c[2].to_string()))
         .collect();
 
+    let extra_exes = extract_extra_executables(workspace)?;
+    if let Some(both) = extra_exes.intersection(&overlay_bins).next() {
+        bail!(
+            "{both} is built both by the overlay invocations and as an extra in \
+             {GUEST_BINS_EXTRAS}; the archive would carry it twice"
+        );
+    }
+    let staged_expected: BTreeSet<String> = overlay_bins.union(&extra_exes).cloned().collect();
+
     for (label, len) in [
         ("overlay build lists", overlay_bins.len()),
         ("install_one pairs", bin_to_field.len()),
@@ -204,14 +217,26 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
             "archive member names",
             archived.keys().cloned().collect::<BTreeSet<_>>(),
         ),
-        (
-            "runtime_overlay.rs staging table",
-            bin_to_staged.keys().cloned().collect::<BTreeSet<_>>(),
-        ),
     ] {
         if set != overlay_bins {
             bail!(
                 "runtime-overlay binary lists drift:\n  overlay build lists = {overlay_bins:?}\n  {label} = {set:?}"
+            );
+        }
+    }
+    let staged: BTreeSet<String> = bin_to_staged.keys().cloned().collect();
+    if staged != staged_expected {
+        bail!(
+            "runtime-overlay binary lists drift:\n  overlay build lists = {overlay_bins:?}\n  \
+             extra executables = {extra_exes:?}\n  runtime_overlay.rs staging table = {staged:?}"
+        );
+    }
+    for exe in &extra_exes {
+        let want = exe.trim_start_matches("mvm-");
+        if bin_to_staged[exe] != want {
+            bail!(
+                "extra executable {exe} is staged as {:?}; it must stage as {want:?}",
+                bin_to_staged[exe]
             );
         }
     }
@@ -244,6 +269,8 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
 }
 
 const ARTIFACTS_FN: &str = "pub fn artifacts(&self)";
+const EXTRA_EXECUTABLE_RE: &str =
+    r#"GuestBinsMember::executable\(\s*arch,\s*"(mvm-[a-z0-9-]+)"\s*\)"#;
 const STAGING_TABLE: &str = "const GUEST_RUNTIME_OVERLAY_BINARIES:";
 const INITRAMFS_AGENT_FN: &str = "fn initramfs_agent_build(";
 const SEALED_BINS_CONST: &str = "RUNTIME_OVERLAY_SEALED_BINS";
@@ -282,6 +309,17 @@ fn check_initramfs_agent_is_sealed(workspace: &Path, sealed: &BTreeSet<String>) 
         }
     }
     Ok(())
+}
+
+/// The executables `guest_bins/extras.rs` builds outside the overlay
+/// invocations, by their `GuestBinsMember::executable(arch, "mvm-x")` member.
+fn extract_extra_executables(workspace: &Path) -> Result<BTreeSet<String>> {
+    let extras = read(workspace, GUEST_BINS_EXTRAS)?;
+    let re = Regex::new(EXTRA_EXECUTABLE_RE).unwrap();
+    Ok(re
+        .captures_iter(&extras)
+        .map(|c| c[1].to_string())
+        .collect())
 }
 
 /// The quoted `mvm-*` names in `pub const <name>: [&str; N] = [ ... ];`.
@@ -572,7 +610,9 @@ required-features = ["addons"]
          install_one(&output_dir.join(\"mvm-ping\"), &layout.ping)?;\n\
          install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n";
     const FIXTURE_ARTIFACTS: &str = r#"("mvm-guest-agent", self.agent.as_path()), ("mvm-ping", self.ping.as_path()), ("mvm-egress-client", self.egress_client.as_path())"#;
-    const FIXTURE_STAGING: &str = r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping"), ("mvm-egress-client", "egress-client")"#;
+    const FIXTURE_STAGING: &str = r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping"), ("mvm-egress-client", "egress-client"), ("mvm-setpriv", "setpriv")"#;
+    const FIXTURE_EXTRAS: &str =
+        "member: member(GuestBinsMember::executable(arch, \"mvm-setpriv\"))?,";
     const FIXTURE_INITRAMFS_AGENT: &str = "mvm-guest-agent";
     const FIXTURE_INITRAMFS_BUILD: &str =
         "selection: package_bin_args(\"mvm-agentd\", &[super::member::INITRAMFS_AGENT_NAME]),";
@@ -588,6 +628,7 @@ required-features = ["addons"]
         staging: &'static str,
         initramfs_agent: &'static str,
         initramfs_build: String,
+        extras: &'static str,
     }
 
     impl Default for OverlayFixture {
@@ -601,6 +642,7 @@ required-features = ["addons"]
                 staging: FIXTURE_STAGING,
                 initramfs_agent: FIXTURE_INITRAMFS_AGENT,
                 initramfs_build: FIXTURE_INITRAMFS_BUILD.to_string(),
+                extras: FIXTURE_EXTRAS,
             }
         }
     }
@@ -635,7 +677,7 @@ required-features = ["addons"]
             write(
                 RUNTIME_OVERLAY_RS,
                 &format!(
-                    "const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 3] = [{}];\n",
+                    "const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 4] = [{}];\n",
                     self.staging
                 ),
             );
@@ -649,9 +691,10 @@ required-features = ["addons"]
             write(
                 GUEST_BINS_EXTRAS,
                 &format!(
-                    "fn initramfs_agent_build(arch: GuestArch) -> ExtraBuild {{\n\
+                    "fn setpriv_build(arch: GuestArch) -> ExtraBuild {{\n{}\n}}\n\
+                     fn initramfs_agent_build(arch: GuestArch) -> ExtraBuild {{\n\
                      {}\n}}\n",
-                    self.initramfs_build
+                    self.extras, self.initramfs_build
                 ),
             );
             write("crates/mvm-agentd/Cargo.toml", FIXTURE_MANIFEST);
@@ -785,6 +828,47 @@ required-features = ["addons"]
         );
     }
 
+    /// An extra the archive carries but the overlay does not stage leaves a
+    /// root depending on a copy of its own.
+    #[test]
+    fn an_extra_executable_the_overlay_never_stages_is_drift() {
+        let fixture = OverlayFixture {
+            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping"), ("mvm-egress-client", "egress-client")"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("extra executables = "), "{error}");
+    }
+
+    #[test]
+    fn a_staged_name_nothing_builds_is_drift() {
+        let fixture = OverlayFixture {
+            extras: "",
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("staging table = "), "{error}");
+    }
+
+    #[test]
+    fn an_extra_staged_under_another_name_fails() {
+        let fixture = OverlayFixture {
+            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping"), ("mvm-egress-client", "egress-client"), ("mvm-setpriv", "privdrop")"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("must stage as \"setpriv\""), "{error}");
+    }
+
+    #[test]
+    fn the_real_extras_stage_setpriv() {
+        let root = workspace_root();
+        assert_eq!(
+            extract_extra_executables(&root).unwrap(),
+            BTreeSet::from(["mvm-setpriv".to_string()])
+        );
+    }
+
     #[test]
     fn a_bin_the_archive_never_carries_is_drift() {
         let fixture = OverlayFixture {
@@ -808,7 +892,7 @@ required-features = ["addons"]
     #[test]
     fn a_bin_staged_under_another_name_fails() {
         let fixture = OverlayFixture {
-            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "icmp"), ("mvm-egress-client", "egress-client")"#,
+            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "icmp"), ("mvm-egress-client", "egress-client"), ("mvm-setpriv", "setpriv")"#,
             ..OverlayFixture::default()
         };
         let error = parity_error(&fixture);
