@@ -67,7 +67,7 @@ The MOTD prints these paths on every login.
 `run-tests.sh` is the canonical pinned set of invocations:
 
 1. `cargo fmt --all -- --check` — formatting.
-2. `cargo clippy --workspace --all-targets -- -D warnings` — full clippy under real x86\_64-linux (catches the aarch64-only `unnecessary_cast` warnings on the seccomp `syscall_nr` table that a macOS host misses).
+2. `cargo clippy --workspace --all-targets -- -D warnings` — full clippy under real x86\_64-linux (catches Linux-only and arch-gated warnings, such as `unnecessary_cast` in the seccomp syscall table, that a macOS host misses).
 3. `cargo test --workspace --no-fail-fast` — every test, including the Linux-gated ones.
 4. `cargo test -p mvm-agentd --test seccomp_apply` — the [seccomp functional probes](../../../crates/mvm-agentd/tests/seccomp_apply.rs) (PR #75) that need `/dev/kvm`-class isolation to validate.
 5. `cargo deny check` — supply-chain audit (deny.toml).

@@ -170,3 +170,24 @@ The host half of the prompt grant: a plan whose agent-verb list omits \
 recorded or sent. The replay dispatcher calls it for every fork it \
 re-delivers onto; losing that caller would let a replay deliver prompts to a \
 fork whose plan never granted them, leaving only the guest's check."""
+
+[[control]]
+symbol = "admit_from_cmdline"
+file = "crates/mvm-agentd/src/workload_seccomp.rs"
+dormant = false
+why = """
+Admits the plan's seccomp tier at guest activation. Before it existed the tier \
+was admitted, signed and audited, and no workload process was ever placed \
+under it: the shell `/init` that used to wrap services in `mvm-seccomp-apply` \
+was gone and nothing replaced it. Losing its caller in the agent's activation \
+path puts claim 1's seccomp control straight back there."""
+
+[[control]]
+symbol = "seccomp_cmdline_token"
+file = "crates/mvm-vmm/src/host/cmdline.rs"
+dormant = false
+why = """
+Carries the admitted seccomp tier to the guest on the kernel cmdline. Without \
+a caller in the shared cmdline assembly the guest is never told a tier and \
+admits none, so its workloads run unfiltered while the plan and the audit \
+chain still name one."""

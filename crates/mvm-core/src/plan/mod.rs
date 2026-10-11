@@ -61,7 +61,7 @@ pub use signing::{
 };
 pub use synthesis::{
     DEFAULT_AUDIT_EVENT_PREFIX, DEFAULT_INTENT, DEFAULT_POLICY_REF, DEFAULT_TENANT, SynthesisInput,
-    VALIDITY_WINDOW_MINUTES, synthesize_plan,
+    VALIDITY_WINDOW_MINUTES, synthesize_plan, workload_seccomp_tier,
 };
 pub use types::{
     AdmissionProfile, ArtifactPolicy, AssetIdentity, AssetKind, AttestationMode,

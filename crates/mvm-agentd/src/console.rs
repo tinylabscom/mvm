@@ -482,6 +482,13 @@ fn spawn_shell(
             // Start in $HOME.
             let _ = chdir(start_dir.as_ptr().cast());
 
+            // The workload's seccomp tier goes on last, after every call above
+            // that a tier may refuse. A shell that cannot be confined does not
+            // run.
+            if crate::workload_seccomp::install_admitted().is_err() {
+                libc::_exit(126);
+            }
+
             // Exec the prepared absolute command path. There is no PATH search
             // here because the post-fork child must avoid allocation.
             execve(command_path, argv_ptrs.as_ptr(), envp.as_ptr());

@@ -208,8 +208,10 @@ particular hypervisor, VPN, or Internet route.
 
 Pick the guest's security posture with `--profile`. It governs env injection,
 host-share permissions, and whether the guest gets the dev profile. It does
-**not** select a seccomp tier — every plan is synthesised at the `standard`
-tier and there is no per-launch selector:
+**not** select a seccomp tier. Admission gives a run with no network surface the
+`standard` tier, which refuses `socket`, and raises a run that admits egress,
+an ingress mapping or a host service to `network`; there is no per-launch
+selector:
 
 ```bash
 mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares

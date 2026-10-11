@@ -265,6 +265,7 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         Leader::ProcessGroup => {
             #[cfg(unix)]
             builder.process_group(0);
+            crate::workload_seccomp::confine(&mut builder);
             builder.spawn().map(|child| (child, None))
         }
         #[cfg(any(target_os = "linux", test))]

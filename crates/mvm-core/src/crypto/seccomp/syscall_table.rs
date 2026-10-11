@@ -95,6 +95,7 @@ const fn common_syscalls() -> &'static [(&'static str, i64)] {
         ("rt_sigreturn", libc::SYS_rt_sigreturn),
         ("rt_sigpending", libc::SYS_rt_sigpending),
         ("rt_sigtimedwait", libc::SYS_rt_sigtimedwait),
+        ("rt_sigsuspend", libc::SYS_rt_sigsuspend),
         ("rt_sigqueueinfo", libc::SYS_rt_sigqueueinfo),
         ("ioctl", libc::SYS_ioctl),
         ("pread64", libc::SYS_pread64),

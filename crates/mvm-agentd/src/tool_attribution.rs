@@ -130,6 +130,8 @@ fn spawn_attributed_in_group(
             assume_group(gid)
         });
     }
+    // After the group change, which every tier refuses.
+    crate::workload_seccomp::confine(command);
     let mut live = live();
     let child = command.spawn()?;
     let session = child.id();

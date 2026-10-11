@@ -158,6 +158,10 @@ pub mod worker_protocol;
 /// declared runtime config through it.
 pub mod workload_env;
 
+/// The admitted seccomp tier, compiled once at activation and installed in
+/// every workload process the agent starts.
+pub mod workload_seccomp;
+
 /// Names the fixed workload uid/gid in the workload rootfs account databases,
 /// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.
 pub mod workload_identity;
