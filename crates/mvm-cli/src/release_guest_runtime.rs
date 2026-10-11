@@ -82,7 +82,7 @@ pub(crate) fn installed_for_running_binary(
     arch: mvm_core::arch::GuestArch,
 ) -> Result<mvm_build::guest_runtime::GuestRuntime> {
     let release = prepare_for_running_binary()?
-        .context("only a release binary of mvmctl ships a guest runtime")?;
+        .context("only a release binary has a guest runtime of its own")?;
     mvm_build::guest_runtime::install_release_guest_runtime(
         cache_root,
         &release.archive,
