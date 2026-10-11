@@ -42,6 +42,10 @@ suite = "host_shares"
 statement = "No host-fs access from a guest beyond explicit shares"
 witnesses = [
     "fn:seccomp_allows_listed_denies_unlisted",
+    "fn:an_exec_under_the_admitted_standard_tier_cannot_open_a_socket",
+    "fn:a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket",
+    "fn:an_exec_child_reports_a_seccomp_filter_and_no_new_privs",
+    "fn:admitted_seccomp_tier_grants_sockets_only_to_a_launch_that_needs_them",
     "fn:validated_conversion_enforces_mount_allow_list",
     "fn:bare_mnt_is_refused_because_it_shadows_the_config_drive",
     "fn:dir_share_two_part_defaults_ro",
