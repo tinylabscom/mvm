@@ -15,7 +15,6 @@ pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
 pub mod manifest_ref;
-pub mod pair_stage;
 pub mod persistent;
 mod request;
 pub mod runtime_overlay;

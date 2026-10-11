@@ -236,6 +236,41 @@ pub fn cached_source_guest_runtime(
     }
 }
 
+/// The digest of the archive this source tree's runtime is cached under, read
+/// from its pointer alone: nothing is hashed, extracted or verified. For
+/// diagnostics that must stay cheap. Anything that uses the runtime goes
+/// through [`cached_source_guest_runtime`], which verifies the object.
+pub fn source_guest_runtime_digest(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+) -> Result<Option<String>, GuestRuntimeError> {
+    let sources = cache_root.join("guest-runtime").join("v1").join("sources");
+    if !sources.is_dir() {
+        return Ok(None);
+    }
+    let fingerprint = source_fingerprint(version, arch, workspace_root)?;
+    match fs::read_to_string(sources.join(fingerprint)) {
+        Ok(digest) => {
+            let digest = digest.trim();
+            if !is_archive_digest(digest) {
+                return Err(GuestRuntimeError::Cache(
+                    "invalid archive digest pointer".to_string(),
+                ));
+            }
+            Ok(Some(digest.to_string()))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether `value` has the shape of an archive digest: 64 hex characters.
+pub fn is_archive_digest(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn load_cached_source(
     base: &Path,
     digest: &str,
@@ -416,7 +451,7 @@ fn load_cached_at(
     arch: GuestArch,
     now: std::time::SystemTime,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !is_archive_digest(digest) {
         return Err(GuestRuntimeError::Cache(
             "invalid archive digest pointer".to_string(),
         ));
@@ -1107,6 +1142,37 @@ mod tests {
         )
         .unwrap();
         runtime
+    }
+
+    #[test]
+    fn the_source_digest_is_read_from_the_pointer_without_touching_the_object() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let cache = temp.path().join("cache");
+        assert_eq!(
+            source_guest_runtime_digest(&cache, "1.2.3", GuestArch::X86_64, &workspace).unwrap(),
+            None
+        );
+        let runtime = source_cache_fixture(&cache, &workspace);
+        // The object is gone; the pointer alone answers.
+        fs::remove_dir_all(runtime.root.parent().unwrap()).unwrap();
+        assert_eq!(
+            source_guest_runtime_digest(&cache, "1.2.3", GuestArch::X86_64, &workspace).unwrap(),
+            Some(runtime.digest.clone())
+        );
+        assert_eq!(
+            source_guest_runtime_digest(&cache, "1.2.4", GuestArch::X86_64, &workspace).unwrap(),
+            None
+        );
+        let pointer = cache
+            .join("guest-runtime/v1/sources")
+            .join(source_fingerprint("1.2.3", GuestArch::X86_64, &workspace).unwrap());
+        fs::write(pointer, "../outside").unwrap();
+        assert!(
+            source_guest_runtime_digest(&cache, "1.2.3", GuestArch::X86_64, &workspace).is_err()
+        );
     }
 
     #[test]

@@ -159,23 +159,6 @@ pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
-/// A staging directory holding a pair entry's contract files under their
-/// canonical names, for installers that read a fixed layout (the overlay
-/// reader, the SDK sidecar installer). Removed on drop.
-pub(crate) fn staged_contract_files(
-    entry: &mvm_build::image_source::CachedImageSet,
-    files: &[(&str, &str)],
-) -> Result<tempfile::TempDir> {
-    let parent = Path::new(&mvm_core::config::mvm_cache_dir()).join("local-image-builds");
-    std::fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
-    let tmp = tempfile::Builder::new()
-        .prefix("contract-")
-        .tempdir_in(&parent)
-        .with_context(|| format!("creating a staging directory in {}", parent.display()))?;
-    mvm_build::image_source::stage_contract_files(entry, files, tmp.path())?;
-    Ok(tmp)
-}
-
 /// Under a selected checkout, put the pair's workload kernel where the
 /// template path's kernel fallback reads it. The template source prefers a
 /// built vmlinux, then the verified workload-kernel cache, and only then the

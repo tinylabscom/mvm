@@ -104,12 +104,9 @@ pub(crate) use kernel::KernelSource;
 use kernel::format_compile_start;
 pub(crate) use kernel::resolve_kernel_source;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
-#[cfg(test)]
-pub(crate) use local_pair::derive_pair_key;
 pub(crate) use local_pair::ensure_pair_built;
 pub(crate) use local_pair::ensure_pair_workload_kernel;
 pub(crate) use local_pair::seed_pair_workload_kernel_cache;
-pub(crate) use local_pair::staged_contract_files;
 #[cfg(test)]
 use stage0_cache::builder_vm_artifact_names;
 use stage0_cache::download_builder_vm_image;

@@ -95,27 +95,34 @@ The tag-push release workflow always turns the feature on, so a downloaded
 binary is self-sufficient.
 
 After changing the guest-facing C ABI in `crates/mvm-host-services`, refresh
-the source sidecar by running bootstrap with the source selector:
+the source sidecar explicitly:
 
 ```sh
-MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build ./target/debug/mvmctl bootstrap
+./target/debug/mvmctl build sdk-sidecar build
 ```
 
-The selector also opts bootstrap into source-built host helpers, which an
-unreleased version needs. Bootstrap packs both libc variants on the host from
-the guest runtime's `libmvm_host_services.so`
-(`build_sdk_sidecar_from_guest_runtime`, the pure-Rust ext4 writer), with no
-mvm-images checkout and no builder VM, and stamps each with the cdylib source
-fingerprint a launch compares against this checkout. The source-built image
-carries no loader and no `libc.so.6`; the workload process that loads the
-library already has its own. A launch only resolves prepared sidecars, so a
-stale or missing one is a warning or a refusal naming bootstrap, never an
-implicit rebuild.
+It packs both libc variants on the host from this checkout's guest-runtime
+archive (`pack_sdk_sidecars` over `build_sdk_sidecar_from_guest_runtime`, the
+pure-Rust ext4 writer), building the archive first if it is not cached, with no
+mvm-images checkout and no builder VM. Each variant is stamped with the cdylib
+source fingerprint a launch compares against this checkout, and with the digest
+of the archive it was packed from. The packed image carries no loader and no
+`libc.so.6`; the workload process that loads the library already has its own.
+`--source download` installs the pinned image set's members instead, and is
+what `auto` does outside a source checkout. A launch only resolves prepared
+sidecars, so a stale or missing one is a warning or a refusal naming this
+verb or bootstrap, never an implicit rebuild.
 
-`mvmctl build sdk-sidecar build` still exists and still builds both variants
-from a selected mvm-images checkout inside the builder VM; it moves onto the
-guest runtime with the rest of the explicit build routes
-([#4104](https://github.com/tinylabscom/mvm/issues/4104)).
+`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap` prewarms all four
+pieces (overlay, initramfs, both sidecars) the same way, from one resolved
+archive (`mvm_build::runtime_pieces::assemble_runtime_pieces`); the selector
+also opts bootstrap into source-built host helpers, which an unreleased version
+needs. `mvmctl build runtime-overlay build` assembles the overlay from the same
+archive, and a selected `MVM_IMAGES_DIR` checkout no longer turns it into a pair
+build. Each assembled piece records its archive digest in a file beside its
+files (`ARCHIVE_ORIGIN_FILE`), and `mvmctl doctor`'s
+`guest runtime` line names, per piece, the archive (and whether it is this
+tree's) or the image-set member it came from.
 
 Provision the toolchain with one command — it installs the exact pinned zig
 (from the `ziglang` PyPI package, read out of

@@ -125,9 +125,20 @@ and cite #4100 for the direction, never the reverse.
   (`mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime`). The Wasm
   tier preopens the same overlay files as a directory. A selected checkout
   pair-builds only workload images and kernels.
-- The explicit `mvmctl build sdk-sidecar build` still builds from a selected
-  `mvm-images` checkout in the builder VM, and a release build acquires all
-  three pieces from the pinned image set.
+- In a source checkout every route goes through that one archive and those
+  assemblers. Bootstrap resolves the archive once and assembles all four
+  pieces from it (`mvm_build::runtime_pieces::assemble_runtime_pieces`); the
+  explicit `mvmctl build runtime-overlay build` and
+  `mvmctl build sdk-sidecar build` assemble the piece they name from it, with
+  no `mvm-images` checkout and no builder VM, and `--source download` installs
+  the pinned image set's member instead. Each assembled piece records the
+  digest of the archive it came from beside its version-keyed files, and
+  `mvmctl doctor`'s `guest runtime` line reports, per piece, that archive (and
+  whether it is the one this tree builds today) or the image-set member a
+  launch would attach. The archive object is the one digest-keyed cache; the
+  pieces keep their version-keyed slots because that is what the launch
+  resolvers read, and the sidecar keys reuse on its host-services sources
+  rather than the archive digest.
 - The builder boot payload (builder boot ABI 1) already hands the builder
   `mvm-host-vm-init` and `mvm-builderd` per boot. `mvm-setpriv` is the one mvm
   binary the builder image still bakes, and `mvm-host-vm-init` runs it from
