@@ -374,8 +374,29 @@ Companion doc: the Cardoso minimum-viable-policy mapping lives in
 ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
 
 1. **No host-fs access from a guest beyond explicit shares.** Per-service
-   uid, seccomp `standard` default, `mvm-setpriv --no-new-privs`, and the
+   uid, the admitted seccomp tier, `mvm-setpriv --no-new-privs`, and the
    agent's `PR_CAPBSET_DROP` bounding-set narrowing confine each service.
+   The tier is `standard` unless the launch admits egress, an ingress mapping
+   or a host service, in which case admission raises it to `network` and signs
+   the raised tier (`workload_seccomp_tier`). The host names it on the guest
+   kernel cmdline as `mvm.seccomp=<tier>` (`seccomp_cmdline_token`) — not in
+   `ActivateEnvironment`, whose `deny_unknown_fields` would make every older
+   guest agent refuse activation. The agent admits it at activation
+   (`admit_from_cmdline`) and installs it, with `no_new_privs` and after the
+   child's other pre-exec setup, in every workload process it starts:
+   entrypoint runs and the worker pool, exec, process control, detached runs,
+   the console, lifecycle hooks and health probes. A denied call fails with
+   `EPERM`. Witnessed on Linux by
+   `an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`,
+   `a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`
+   and `an_exec_child_reports_a_seccomp_filter_and_no_new_privs` in the
+   `seccomp-functional` lane. Before this the tier was admitted and audited
+   and applied to nothing. It still applies to nothing on a boot whose cmdline
+   names no tier: a standby parent booted without an admitted plan, or a
+   guest agent older than the token — including the one in the pinned image
+   set a release binary boots, until that set is re-pinned. A warm-claimed
+   child runs under its parent's tier. ADR-001's claim-1 row carries the
+   limits.
 2. **No guest binary can elevate to uid 0.** `mvm-setpriv --no-new-privs`
    in the launch path; `/etc/{passwd,group,nsswitch.conf}` are
    read-only bind-mounts so a compromised service can't mint a uid 0

@@ -218,6 +218,7 @@
       "path": "crates/mvm-core/src/plan/synthesis.rs",
       "package": "mvm-core",
       "claims": [
+        1,
         8,
         19
       ]

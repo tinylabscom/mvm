@@ -23,8 +23,10 @@ path = "src/bin/mvm-display-bridge.rs"
 
 # Exec-shim that compiles a syscall allowlist into a BPF program via
 # seccompiler, applies it via prctl, and execve's into the wrapped
-# command. mkServiceBlock wraps every guest service launch with this
-# shim so per-service seccomp filters are the default.
+# command. Built from the same `workload_seccomp` builder the agent
+# installs in every workload process it starts; nothing in the guest
+# launches through the shim any more, and `tests/seccomp_apply.rs`
+# drives it as a standalone check of the tier filters.
 [[bin]]
 name = "mvm-seccomp-apply"
 path = "src/bin/mvm-seccomp-apply.rs"

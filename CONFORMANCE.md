@@ -102,7 +102,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_any_virtio_fs_share_before_mapping`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
+| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`, `fn:a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`, `fn:an_exec_child_reports_a_seccomp_filter_and_no_new_privs`, `fn:admitted_seccomp_tier_grants_sockets_only_to_a_launch_that_needs_them`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_any_virtio_fs_share_before_mapping`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
 
 ## oci_provenance
 

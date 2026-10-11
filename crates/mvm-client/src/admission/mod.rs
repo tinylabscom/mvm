@@ -653,6 +653,12 @@ pub fn admit_plan_for_boot_configured_ingress(
         hex::encode(hasher.finalize())
     };
 
+    let seccomp_tier = mvm_core::plan::workload_seccomp_tier(
+        p.seccomp_tier,
+        &p.network_policy,
+        &ingress,
+        &p.services,
+    );
     let input = SynthesisInput {
         outputs: p.outputs.clone(),
         // The resolved permission set rides into the plan body, so the ceiling
@@ -670,7 +676,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         image_sha256: &sha,
         image_cosign_bundle: None,
         intent: None,
-        seccomp_tier: p.seccomp_tier,
+        seccomp_tier,
         network_policy_ref: generated_policy_ref,
         fs_policy_ref: generated_policy_ref,
         egress_policy_ref: generated_policy_ref,
@@ -2345,6 +2351,13 @@ pub(crate) mod admit_plan_tests {
         })
         .expect("admission");
 
+        // Egress reaches the network through a loopback proxy the workload
+        // dials, so the admitted tier has to grant sockets.
+        assert_eq!(
+            ctx.admitted.plan().admission_profile.seccomp_tier,
+            mvm_core::plan::PlanSeccompTier::Network
+        );
+        assert_eq!(ctx.admitted.plan().audit_labels["seccomp_tier"], "network");
         assert_ne!(
             ctx.admitted.plan().network_policy.0,
             policy_resolver::LOCAL_DEFAULT

@@ -863,6 +863,8 @@ pub fn execute_streaming(
             crate::guest_mount::drop_workload_capability_bounding_set()
         });
     }
+    // Last, so the hooks above run before the filter can refuse them.
+    crate::workload_seccomp::confine(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,

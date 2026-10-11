@@ -17,6 +17,31 @@ pub fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
     mvm_core::vm_backend::encode_verb_grant_cmdline(&envelope)
 }
 
+/// The cmdline key carrying the admitted workload seccomp tier. The guest
+/// agent reads it at activation and installs that tier's filter in every
+/// workload process it starts.
+pub const SECCOMP_CMDLINE_KEY: &str = "mvm.seccomp";
+
+/// `mvm.seccomp=<tier>`, taken from the admitted plan's admission profile.
+///
+/// `None` when the launch carries no plan — a standby parent boots before any
+/// workload is admitted — or when the plan cannot be decoded. A plan that does
+/// not decode fails the launch at activation regardless, because the
+/// activation message is built from the same `plan_json`.
+///
+/// The cmdline rather than `ActivateEnvironment` carries it because the
+/// activation message is `deny_unknown_fields`: a field added there is refused
+/// by every guest agent built before it, and the published image set's agent
+/// is one of those. An older agent ignores an unknown cmdline key instead, so
+/// the token is safe to send to any guest.
+pub fn seccomp_cmdline_token(config: &mvm_core::vm_backend::VmStartConfig) -> Option<String> {
+    let plan = mvm_core::plan::plan_from_admitted_json(config.plan_json.as_deref()?).ok()?;
+    Some(format!(
+        "{SECCOMP_CMDLINE_KEY}={}",
+        plan.admission_profile.seccomp_tier
+    ))
+}
+
 /// The `mvm.require_grant=1` token when a verb-grant sidecar exists.
 pub fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");

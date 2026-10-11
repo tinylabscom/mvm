@@ -121,6 +121,7 @@ pub(crate) fn apply_activation(
     env: &ActivateEnvironment,
     boot_state: &AgentBootState,
 ) -> Result<(), guest_mount::MountError> {
+    admit_workload_seccomp()?;
     if !is_pid1() {
         return Ok(());
     }
@@ -172,6 +173,30 @@ pub(crate) fn apply_activation(
     guest_mount::drop_guest_agent_privilege(guest_mount::WORKLOAD_UID, guest_mount::WORKLOAD_GID)?;
 
     boot_state.set_activation(ActivationState::Activated);
+    Ok(())
+}
+
+/// Admit the seccomp tier the host named on the kernel cmdline, so every
+/// workload process started after activation runs under it. Done whether or
+/// not this agent is PID 1: the filter goes on the agent's children, not on
+/// the agent, and needs no privilege to prepare.
+fn admit_workload_seccomp() -> Result<(), guest_mount::MountError> {
+    #[cfg(target_os = "linux")]
+    {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").map_err(|error| {
+            guest_mount::MountError::InvalidConfig(format!(
+                "read /proc/cmdline for the workload seccomp tier: {error}"
+            ))
+        })?;
+        match mvm_agentd::workload_seccomp::admit_from_cmdline(&cmdline)
+            .map_err(guest_mount::MountError::InvalidConfig)?
+        {
+            Some(tier) => eprintln!("mvm-guest-agent: workload seccomp tier {tier}"),
+            None => eprintln!(
+                "mvm-guest-agent: no workload seccomp tier on the cmdline; workloads run unfiltered"
+            ),
+        }
+    }
     Ok(())
 }
 
