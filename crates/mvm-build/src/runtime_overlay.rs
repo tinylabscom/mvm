@@ -176,9 +176,13 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "6";
+const LOCAL_BUILD_EPOCH: &str = "7";
 
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 11] = [
+/// Guest runtime executables staged at the overlay root, as (archive member
+/// name, name under `/mvm/runtime`). Every one but `mvm-setpriv` is an
+/// `mvm-agentd` binary; the privilege helper is its own package, built beside
+/// them into the same archive, and rides here so a root needs no copy of it.
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 12] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -190,6 +194,7 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 11] = [
     ("mvm-exit-report", "exit-report"),
     ("mvm-tool-shim", "tool-shim"),
     ("mvm-tool-helper", "tool-helper"),
+    ("mvm-setpriv", "setpriv"),
 ];
 /// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
 /// archive's own cdylib table so the two cannot name different libraries.
@@ -295,10 +300,14 @@ pub fn build_runtime_overlay_from_guest_runtime(
         });
     }
     let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
-    if local_source_cache_is_fresh(&resolver.layout(&arch.to_string()), &runtime.digest)?
+    let layout = resolver.layout(&arch.to_string());
+    if local_source_cache_is_fresh(&layout, &runtime.digest)?
         && let Ok(cached) = resolver.resolve(&arch.to_string())
         && verify_guest_runtime_overlay_verity(&cached).is_ok()
     {
+        // The slot was assembled from this digest; a slot written before
+        // pieces recorded their origin gains the record here.
+        crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
         return Ok(cached);
     }
     let staging = tempfile::tempdir()?;
@@ -309,6 +318,7 @@ pub fn build_runtime_overlay_from_guest_runtime(
     verify_guest_runtime_overlay_verity(&artifact)?;
     write_local_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
     write_local_build_epoch(cache_root, version, arch)?;
+    crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
     Ok(artifact)
 }
 
@@ -918,12 +928,12 @@ pub fn download_runtime_overlay_from(
 }
 
 /// Fetch `asset` from the per-version directory `release_url` of a CLI
-/// release, the way clients that predate the image set acquire it: its
-/// `.sha256` sidecar first, then the archive held to that digest, then the
-/// archive held to the CLI release workflow's signing identity.
+/// release: its `.sha256` sidecar first, then the archive held to that
+/// digest, then the archive held to the CLI release workflow's signing
+/// identity at exactly `version`. Nothing reads the archive before both pass.
 ///
-/// The CLI release still publishes these archives for those clients, and its
-/// workflow proves each one survives this path before publishing.
+/// The guest runtime each CLI release publishes is acquired through here
+/// ([`crate::guest_bins::release`]).
 pub fn fetch_cli_release_archive(
     release_url: &str,
     version: &str,
@@ -1578,6 +1588,11 @@ mod tests {
             &runtime,
         )
         .unwrap();
+        assert_eq!(
+            crate::runtime_pieces::archive_origin(a.overlay_ext4.parent().unwrap()).unwrap(),
+            Some(runtime.digest.clone()),
+            "the assembled overlay names the archive it came from"
+        );
         let fs = ext4_view::Ext4::load_from_path(&a.overlay_ext4).unwrap();
         let names_in = |path: &str| {
             let mut names: Vec<Vec<u8>> = fs

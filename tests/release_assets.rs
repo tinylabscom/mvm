@@ -618,7 +618,7 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 
     let job = job_block(&workflow, "distro-packages");
     assert!(
-        job.contains("needs: build")
+        job.contains("needs: [build, guest-runtime]")
             && job.contains("uses: ./.github/workflows/distro-packages.yml")
             && job.contains("tarballs: build"),
         "the release must package the tarballs its own build job produced:\n{job}"
@@ -674,6 +674,10 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 /// lock pins; a CLI release that rebuilt, mirrored or re-signed one would be a
 /// second producer under a second identity, which is what moving images out
 /// of this repository ended.
+///
+/// The guest runtime is not an image and is admitted by name: it is the
+/// guest programs and libraries built from this tree, and the CLI release is
+/// the one place it ships from.
 #[test]
 fn the_cli_release_carries_no_image() {
     let workflow = release_workflow();
@@ -694,6 +698,126 @@ fn the_cli_release_carries_no_image() {
             "release.yml names {image_asset:?}; images ship from mvm-images, not from a CLI release"
         );
     }
+    assert!(
+        workflow.contains("artifacts/mvm-guest-bins-v*.tar.gz"),
+        "the guest runtime is the one guest artifact a CLI release carries, by name"
+    );
+}
+
+/// The guest runtime ships with every CLI release the way a tarball does:
+/// built by the guest-bins workflow before publication, required by the
+/// publish job, held to the tag's version, signed with the tarballs and with
+/// its digest sidecar, listed in the signed checksum manifest, covered by
+/// build provenance and attached with its bundles.
+#[test]
+fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
+    let workflow = release_workflow();
+
+    let job = job_block(&workflow, "guest-runtime");
+    assert!(
+        job.contains("uses: ./.github/workflows/guest-bins.yml"),
+        "the release must build its guest runtime with the guest-bins workflow:\n{job}"
+    );
+    let lane = fs::read_to_string(".github/workflows/guest-bins.yml").expect("guest-bins.yml");
+    assert!(
+        lane.contains("  workflow_call:\n")
+            && lane.contains("build guest-bins --out dist")
+            && lane.contains("name: mvm-guest-bins\n"),
+        "guest-bins.yml must be callable and upload the archive under the name the release reads"
+    );
+
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("guest-runtime, release-archive-smoke")
+            && release.contains("needs.guest-runtime.result == 'success'"),
+        "publication must wait for the guest runtime build and require it to succeed"
+    );
+    assert!(
+        release.contains(r#"artifacts/mvm-guest-bins-${TAG_NAME}.tar.gz"#),
+        "a tag must publish the guest runtime named for its own version"
+    );
+    assert!(
+        release.contains("guest-runtime job one for its archive")
+            && release.contains("cat ./*.sha256 > checksums-sha256.txt"),
+        "the runtime's sidecar must join the combined checksum manifest"
+    );
+
+    let sign_loop = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step")
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    for blob in [
+        "artifacts/*.tar.gz",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+    ] {
+        assert!(sign_loop.contains(blob), "{blob} must be cosign-signed");
+    }
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+    for asset in [
+        "artifacts/*.tar.gz",
+        "artifacts/*.tar.gz.bundle",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256.bundle",
+    ] {
+        assert!(
+            assets.contains(asset),
+            "{asset} must be attached to the release"
+        );
+    }
+
+    let attest = workflow
+        .find("actions/attest-build-provenance")
+        .expect("the release job must attest build provenance");
+    assert!(
+        workflow[attest..]
+            .lines()
+            .take(7)
+            .any(|line| line.trim() == "artifacts/*.tar.gz"),
+        "build provenance must cover the guest runtime with the tarballs"
+    );
+
+    let verify = fs::read_to_string("nix/packaging/release/verify-release-assets.sh")
+        .expect("verify-release-assets.sh");
+    assert!(
+        verify.contains("check_guest_runtime\n")
+            && verify.contains(r#"mvm-guest-bins-v${EXPECT_VERSION}.tar.gz"#),
+        "the post-publish verifier must require the guest runtime of the tag's version"
+    );
+}
+
+/// The archive smoke stages the guest runtime its release run built beside
+/// the unpublished mvmctl, so the CLI and the runtime it ships with are paired
+/// before anything is published.
+#[test]
+fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
+    let lane = fs::read_to_string(".github/workflows/release-archive-smoke.yml")
+        .expect("release-archive-smoke.yml");
+    let smoke = job_block(&lane, "release-archive-smoke");
+    assert_eq!(
+        smoke.matches("name: mvm-guest-bins\n").count(),
+        2,
+        "both download paths must fetch the guest runtime the release run built"
+    );
+    assert!(
+        smoke.contains(r#"sha256sum --check "${runtimes[0]}.sha256""#)
+            && smoke
+                .contains("MVM_SMOKE_GUEST_RUNTIME: ${{ steps.guest-runtime.outputs.archive }}"),
+        "the smoke must stage the checked runtime beside the unpacked mvmctl"
+    );
+    let script = fs::read_to_string("scripts/smoke-fresh-install.sh").expect("smoke script");
+    assert!(
+        script.contains("ready (installed beside mvmctl)"),
+        "the smoke must require bootstrap to adopt the staged runtime"
+    );
 }
 
 /// Slice one job's block out of a workflow — from its key to the next line at
@@ -1353,7 +1477,7 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
 
     let gate = job_block(&workflow, "release-archive-smoke");
     assert!(
-        gate.contains("    needs: [build]\n")
+        gate.contains("    needs: [build, guest-runtime]\n")
             && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
         "the archive smoke must run the shared lane on what `build` uploaded"
     );

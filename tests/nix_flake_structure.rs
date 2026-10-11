@@ -1121,7 +1121,7 @@ fn mk_guest_exports_a_proxy_environment_naming_one_loopback_listener() {
 /// and including the `&` that backgrounds it.
 fn setpriv_launches(block: &str) -> Vec<&str> {
     block
-        .match_indices("/bin/busybox setsid ${setpriv}")
+        .match_indices("/bin/busybox setsid \"$MVM_SETPRIV_BIN\"")
         .map(|(start, _)| {
             let rest = &block[start..];
             let end = rest.find(" &\n").expect("each launch is backgrounded");
@@ -1221,6 +1221,122 @@ fn mk_guest_gives_sys_admin_to_the_reseed_helper_and_never_the_agent() {
             "uid {helper_uid} is reserved for the CRNG reseed helper"
         )) && content.contains("builtins.seq assertDedicatedCrngReseedUid"),
         "a collision with the reserved uid must fail the image build"
+    );
+}
+
+/// Every mkGuest root names the identities the universal initramfs agent drops
+/// to, under the same numbers and the workload's name and home. The agent
+/// mounts the root read-only, so a number it uses that the root does not name
+/// stays unnamed for the life of the guest.
+#[test]
+fn mk_guest_names_the_identities_the_initramfs_agent_uses() {
+    use mvmctl::guest::guest_mount::{
+        ADDON_DNS_IDENTITY, CRNG_RESEED_HELPER_UID, EGRESS_CLIENT_IDENTITY, WORKLOAD_HOME,
+        WORKLOAD_UID,
+    };
+    use mvmctl::guest::workload_identity::WORKLOAD_USER;
+    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
+        .expect("mk-guest.nix must be readable");
+
+    for binding in [
+        format!("workloadUid = {WORKLOAD_UID};"),
+        format!("addonDnsUid = {};", ADDON_DNS_IDENTITY.uid()),
+        format!("crngReseedUid = {CRNG_RESEED_HELPER_UID};"),
+        format!("egressUid = {};", EGRESS_CLIENT_IDENTITY.uid()),
+    ] {
+        assert!(content.contains(&binding), "mkGuest must bind {binding}");
+    }
+    let fixed_start = content
+        .find("fixedIdentities = [")
+        .expect("mkGuest declares its fixed identities");
+    let fixed = &content[fixed_start..];
+    let fixed = &fixed[..fixed.find("\n  ];").expect("the fixed list closes")];
+    for uid in [
+        "uid = 0;",
+        "uid = workloadUid;",
+        "uid = addonDnsUid;",
+        "uid = crngReseedUid;",
+        "uid = egressUid;",
+    ] {
+        assert!(fixed.contains(uid), "the fixed identities must carry {uid}");
+    }
+    assert!(
+        fixed.contains(&format!("name = \"{WORKLOAD_USER}\";"))
+            && fixed.contains(&format!("home = \"{WORKLOAD_HOME}\";")),
+        "the workload row must use the agent's account name and home"
+    );
+    assert!(
+        content.contains("uid 987 is reserved for the addon DNS resolver")
+            && content.contains("assertDedicatedAddonDnsUid"),
+        "a collision with the addon resolver's uid must fail the image build"
+    );
+    assert!(
+        content.contains(r#"printf '%s' ${lib.escapeShellArg passwdText} > "$out/etc/passwd""#)
+            && content
+                .contains(r#"printf '%s' ${lib.escapeShellArg groupText} > "$out/etc/group""#),
+        "the account databases are written from the identity rows and nothing else"
+    );
+}
+
+/// The addon resolver runs under its own uid, as it does on the initramfs path,
+/// not the agent's.
+#[test]
+fn mk_guest_runs_addon_dns_under_its_own_uid() {
+    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
+        .expect("mk-guest.nix must be readable");
+    let start = content
+        .find("# Stage 2.48 — local addon DNS bootstrap")
+        .expect("addon DNS stage");
+    let end = start
+        + content[start..]
+            .find("# Stage 2.55")
+            .expect("egress opt-in stage follows");
+    let launches = setpriv_launches(&content[start..end]);
+    let [launch] = launches.as_slice() else {
+        panic!("one addon DNS launch, got {launches:?}");
+    };
+    assert!(
+        launch.contains("--reuid=${toString addonDnsUid} --regid=${toString addonDnsUid}")
+            && launch.ends_with("-- \"$MVM_ADDON_DNS_BIN\""),
+        "{launch}"
+    );
+}
+
+/// Every privilege drop in `/init` goes through the helper resolved once,
+/// after the runtime overlay is mounted, preferring the overlay's copy.
+#[test]
+fn mk_guest_init_drops_privilege_through_the_resolved_helper() {
+    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
+        .expect("mk-guest.nix must be readable");
+    assert!(
+        !content.contains("setsid ${setpriv}"),
+        "no launch may name the baked helper directly"
+    );
+    let mounted = content
+        .find("mounted runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime")
+        .expect("overlay mount stage");
+    let resolved = content
+        .find("MVM_SETPRIV_BIN=${setpriv}")
+        .expect("the baked helper is the fallback");
+    let preferred = content
+        .find("MVM_SETPRIV_BIN=/mvm/runtime/setpriv")
+        .expect("the overlay's helper is preferred");
+    let first_launch = content
+        .find("/bin/busybox setsid \"$MVM_SETPRIV_BIN\"")
+        .expect("launches use the resolved helper");
+    assert!(
+        mounted < resolved && resolved < preferred && preferred < first_launch,
+        "the helper must be resolved after the overlay mounts and before any launch"
+    );
+    assert!(
+        content.contains(
+            r#"[ "$MVM_RUNTIME_SOURCE_POLICY" != rootfs_only ] && [ -x /mvm/runtime/setpriv ]"#
+        ),
+        "a rootfs_only boot keeps the baked helper"
+    );
+    assert!(
+        content.contains(r#""\"\${MVM_SETPRIV_BIN:-${setpriv}}\" ""#),
+        "entrypoint fragments fall back to the baked helper outside /init"
     );
 }
 

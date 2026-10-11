@@ -3,12 +3,15 @@ name: Guest bins
 # Builds the mvm-guest-bins artifact (the static guest executables, the
 # initramfs agent, the host-services and GPU shared objects for glibc and musl,
 # for aarch64 and x86_64, plus the Python SDK and the manifest pinning them)
-# from the dispatched ref, and uploads it as a workflow artifact. The archive
-# is the guest runtime each CLI release is to carry for mvmctl; this lane is the
-# unsigned dev copy, for inspecting it before the release workflow carries it.
-# Nothing here publishes or signs.
+# from the dispatched ref, and uploads it with its `.sha256` sidecar as a
+# workflow artifact. The archive is the guest runtime each CLI release
+# publishes for mvmctl: release.yml calls this workflow, and its release job
+# signs, attests and publishes what was uploaded. Dispatched on its own, the
+# lane produces an unsigned copy for inspection. Nothing here publishes or
+# signs.
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

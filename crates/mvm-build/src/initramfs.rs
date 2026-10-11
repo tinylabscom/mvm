@@ -204,7 +204,8 @@ fn seed_from_default_cache(
         },
         |source_dir| {
             install_initramfs_into_cache(&source_dir, cache_root, version, arch)?;
-            carry_source_fingerprint(&source_dir, cache_root, version, arch)
+            carry_source_fingerprint(&source_dir, cache_root, version, arch)?;
+            carry_archive_origin(&source_dir, cache_root, version, arch)
         },
     )
 }
@@ -229,6 +230,23 @@ fn carry_source_fingerprint(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Copy the donor's archive-origin record beside a seeded copy, for the same
+/// reason as its source fingerprint: the bytes are the donor's.
+fn carry_archive_origin(
+    donor_dir: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<(), InitramfsBuildError> {
+    let origin = crate::runtime_pieces::archive_origin(donor_dir)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    if let Some(digest) = origin {
+        let dir = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
+        crate::runtime_pieces::record_archive_origin(&dir, &digest)?;
+    }
+    Ok(())
 }
 
 /// Whether a failed version-keyed resolve can be recovered by the
@@ -374,15 +392,20 @@ pub fn build_initramfs_from_guest_runtime(
             reason: format!("guest runtime member changed while packing: {member}"),
         });
     }
+    let artifact_dir = InitramfsResolver::new(cache_root, version).artifact_dir(&arch.to_string());
     if cached_artifact_matches_source(cache_root, version, arch, &runtime.digest)
         && let Ok(cached) = InitramfsResolver::new(cache_root, version).resolve(&arch.to_string())
     {
+        // Packed from this digest; a copy written before pieces recorded
+        // their origin gains the record here.
+        crate::runtime_pieces::record_archive_origin(&artifact_dir, &runtime.digest)?;
         return Ok(cached);
     }
     let staging = tempfile::tempdir()?;
     assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
     let installed = install_initramfs_into_cache(staging.path(), cache_root, version, arch)?;
     record_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
+    crate::runtime_pieces::record_archive_origin(&artifact_dir, &runtime.digest)?;
     Ok(installed)
 }
 
@@ -989,6 +1012,11 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
             runtime.digest
+        );
+        assert_eq!(
+            crate::runtime_pieces::archive_origin(&cache.path().join("1.2.3/x86_64")).unwrap(),
+            Some(runtime.digest.clone()),
+            "the packed initramfs names the archive it came from"
         );
         // The boot-time eviction keys on the same digest, so a fresh pack
         // survives the next boot instead of being discarded and rebuilt.

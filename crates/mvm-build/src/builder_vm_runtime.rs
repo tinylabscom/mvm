@@ -678,7 +678,10 @@ rm -f "$BUILD_HOOK_ROOTFS"
 if [ -n "$KERNEL_SRC" ]; then
     cp -L "$KERNEL_SRC" /out/vmlinux
 fi
-
+# The image's other members (an initrd among them). Not its dm-verity pair:
+# that covers the rootfs Nix built, and the hook above rewrote it, so the host
+# computes the pair over what it receives.
+{copy_members_sh}
 # Permissions for the host-side reader. Ignore failures —
 # virtio-fs may map the uid such that chmod is a no-op.
 chmod 0644 /out/rootfs.ext4 2>/dev/null || true
@@ -754,6 +757,7 @@ fi
         seal_rootfs_journal_sh = seal_rootfs_journal_sh("\"/out/rootfs.ext4\""),
         host_vm_init_sh =
             crate::builder_boot::guest_host_binary_sh("HOST_VM_INIT", "mvm-host-vm-init"),
+        copy_members_sh = crate::builder_output::copy_nix_output_members_sh("\"$NIX_OUT\"", "/out"),
     )
 }
 
@@ -1221,6 +1225,10 @@ pub fn finalize_flake_job(
     }
     let kernel_path =
         crate::builder_output::regular_member_if_present(&artifact_out.join("vmlinux"))?;
+    // The job rewrote the rootfs after Nix built it (the `before_build` hook,
+    // the journal seal), so a hash tree the image built would not match it.
+    // The pair is computed here, over the bytes that are actually shipped.
+    crate::builder_output::seal_declared_rootfs(artifact_out)?;
 
     Ok(BuilderArtifacts::Image {
         rootfs_path,
@@ -1803,6 +1811,38 @@ mod tests {
     }
 
     #[test]
+    fn finalize_flake_job_seals_a_sealed_image_over_the_rootfs_it_received() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let job_dir = scratch.path().join("job");
+        let artifact_out = scratch.path().join("out");
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
+        // What the guest returned: a rootfs the hook rewrote, a sealed sidecar,
+        // and no verity pair, because no script copies the Nix-built one.
+        let rootfs: Vec<u8> = (0..8 * 4096).map(|i| (i % 241) as u8).collect();
+        std::fs::write(artifact_out.join("rootfs.ext4"), &rootfs).unwrap();
+        std::fs::write(
+            artifact_out.join(crate::builder_vm::SIDECAR_FILENAME),
+            br#"{"overlayAware":true,"runtimeLean":true,"sealed":true}"#,
+        )
+        .unwrap();
+
+        finalize_flake_job(&job_dir, &artifact_out, "job-id").unwrap();
+
+        let roothash = std::fs::read_to_string(artifact_out.join("rootfs.roothash")).unwrap();
+        let expected = mvm_fs::ext4::verity::format(&rootfs, &[0u8; 32], 4096, 4096);
+        assert_eq!(
+            roothash.trim(),
+            mvm_fs::ext4::verity::to_hex(&expected.root_hash)
+        );
+        assert_eq!(
+            std::fs::read(artifact_out.join("rootfs.verity")).unwrap(),
+            expected.hash_tree
+        );
+    }
+
+    #[test]
     fn finalize_flake_job_falls_back_to_job_id_without_store_path() {
         let scratch = tempfile::TempDir::new().unwrap();
         let job_dir = scratch.path().join("job");
@@ -2206,6 +2246,24 @@ mod tests {
     // Builder persistent /nix store auto-GC. The cap is resolved on the host
     // and baked into the rendered cmd.sh; `TestEnv` serializes env mutation.
     // -----------------------------------------------------------------
+
+    #[test]
+    fn render_flake_cmd_sh_copies_the_image_members_but_never_a_verity_pair() {
+        let body = render_flake_cmd_sh(".", "default", false);
+        assert!(
+            body.contains(&crate::builder_output::copy_nix_output_members_sh(
+                "\"$NIX_OUT\"",
+                "/out"
+            )),
+            "the shared member copy is missing from:\n{body}"
+        );
+        assert!(!body.contains("rootfs.verity"), "{body}");
+        assert!(!body.contains("rootfs.roothash"), "{body}");
+        // The members are copied after the rewritten rootfs lands in /out.
+        let rootfs_idx = body.find("/out/rootfs.ext4").unwrap();
+        let members_idx = body.find("for member in").unwrap();
+        assert!(members_idx > rootfs_idx, "{body}");
+    }
 
     #[test]
     fn render_flake_cmd_sh_embeds_gc_tail_with_default_cap() {

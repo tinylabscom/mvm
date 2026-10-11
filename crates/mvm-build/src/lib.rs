@@ -211,6 +211,9 @@ pub mod release_signature;
 /// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
 /// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// The overlay, initramfs and SDK sidecars assembled from one guest runtime,
+/// and the archive digest each records as its origin.
+pub mod runtime_pieces;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
 /// Fetches the per-arch, per-libc member of the signed image set, proves it
 /// against the verified root and its own manifest, and installs it under

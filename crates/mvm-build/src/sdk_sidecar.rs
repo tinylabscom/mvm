@@ -302,7 +302,7 @@ pub fn install_sidecar_into_cache(
     arch: &str,
     libc: GuestLibc,
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
-    install_sidecar_with_fingerprint(source, cache_root, version, arch, libc, None)
+    install_sidecar_with_markers(source, cache_root, version, arch, libc, &[])
 }
 
 /// Install a sidecar produced from the current checkout and publish its source
@@ -318,6 +318,20 @@ pub fn install_source_built_sidecar(
     arch: GuestArch,
     libc: GuestLibc,
     fingerprint: &str,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    install_source_built_sidecar_from(source, cache_root, version, arch, libc, fingerprint, None)
+}
+
+/// [`install_source_built_sidecar`], also recording the guest-runtime archive
+/// the sidecar was packed from inside the same staging rename.
+fn install_source_built_sidecar_from(
+    source: &Path,
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    fingerprint: &str,
+    archive_digest: Option<&str>,
 ) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
     if fingerprint.trim().is_empty() {
         return Err(SdkSidecarBuildError::InstallInvalid {
@@ -338,14 +352,16 @@ pub fn install_source_built_sidecar(
         });
     }
     let arch_dir = arch.to_string();
-    install_sidecar_with_fingerprint(
-        source,
-        cache_root,
-        version,
-        &arch_dir,
-        libc,
-        Some(fingerprint.trim()),
-    )?;
+    let mut markers = vec![(LOCAL_SOURCE_FINGERPRINT_FILE, fingerprint.trim())];
+    if let Some(digest) = archive_digest {
+        if !crate::guest_runtime::is_archive_digest(digest) {
+            return Err(SdkSidecarBuildError::InstallInvalid {
+                reason: format!("{digest:?} is not a guest-runtime archive digest"),
+            });
+        }
+        markers.push((crate::runtime_pieces::ARCHIVE_ORIGIN_FILE, digest));
+    }
+    install_sidecar_with_markers(source, cache_root, version, &arch_dir, libc, &markers)?;
     Ok(
         SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string())
             .resolve(&arch_dir, libc)?,
@@ -360,7 +376,9 @@ pub fn install_source_built_sidecar(
 /// fingerprint — the inputs its one file was compiled from — so a later archive
 /// that rebuilt only other guest binaries reuses it, and
 /// [`cached_sidecar_provenance`] can tell whether it carries this checkout's
-/// host-services sources.
+/// host-services sources. It also records the archive digest it was packed
+/// from ([`crate::runtime_pieces::ARCHIVE_ORIGIN_FILE`]); a reused sidecar
+/// keeps naming the archive whose member it carries.
 pub fn build_sdk_sidecar_from_guest_runtime(
     cache_root: &Path,
     version: &str,
@@ -441,13 +459,14 @@ pub fn build_sdk_sidecar_from_guest_runtime(
         hex::encode(sha2::Sha256::digest(format!("{version}\n").as_bytes())),
     );
     std::fs::write(&manifest_path, body).map_err(io_at("writing", &manifest_path))?;
-    install_source_built_sidecar(
+    install_source_built_sidecar_from(
         staging.path(),
         cache_root,
         version,
         arch,
         libc,
         source_fingerprint,
+        Some(&runtime.digest),
     )
 }
 
@@ -473,13 +492,15 @@ fn require_canonical_sidecar_files(source: &Path) -> Result<(), SdkSidecarBuildE
     Ok(())
 }
 
-fn install_sidecar_with_fingerprint(
+/// Install `source`'s canonical files, plus each `(file name, value)` marker,
+/// as one staged directory published by a single rename.
+fn install_sidecar_with_markers(
     source: &Path,
     cache_root: &Path,
     version: &str,
     arch: &str,
     libc: GuestLibc,
-    fingerprint: Option<&str>,
+    markers: &[(&str, &str)],
 ) -> Result<SdkSidecarLayout, SdkSidecarBuildError> {
     let layout = SdkSidecarLayout::under(cache_root, version, arch, libc);
     let parent =
@@ -494,9 +515,9 @@ fn install_sidecar_with_fingerprint(
             })?;
     std::fs::create_dir_all(parent).map_err(io_at("creating", parent))?;
     let staging = stage_sidecar_artifact(parent, arch, source)?;
-    if let Some(fingerprint) = fingerprint {
-        let marker = staging.join(LOCAL_SOURCE_FINGERPRINT_FILE);
-        std::fs::write(&marker, format!("{fingerprint}\n")).map_err(io_at("writing", &marker))?;
+    for (name, value) in markers {
+        let marker = staging.join(name);
+        std::fs::write(&marker, format!("{value}\n")).map_err(io_at("writing", &marker))?;
         crate::runtime_overlay::set_cache_perms(&marker)?;
     }
     promote_staging(&staging, &layout.artifact_dir)?;
@@ -716,6 +737,58 @@ pub(crate) mod tests {
                 },
                 files,
             },
+        }
+    }
+
+    /// The explicit verb and bootstrap pack both variants through
+    /// `pack_sdk_sidecars`. Each records the archive it was packed from, and a
+    /// later archive with the same host-services sources reuses the sidecar
+    /// without relabelling it.
+    #[test]
+    fn packed_sidecars_record_the_archive_they_came_from() {
+        use crate::runtime_pieces::{
+            PieceOrigin, RuntimePiece, SDK_SIDECAR_LIBCS, pack_sdk_sidecars, piece_origin,
+        };
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
+        let mut runtime = sidecar_runtime(source.path(), arch, &"s".repeat(64));
+
+        let packed = pack_sdk_sidecars(cache.path(), FIXTURE_VERSION, arch, &runtime).unwrap();
+        assert_eq!(
+            packed.iter().map(|a| a.libc).collect::<Vec<_>>(),
+            SDK_SIDECAR_LIBCS
+        );
+        let origin = |libc| {
+            piece_origin(
+                cache.path(),
+                FIXTURE_VERSION,
+                arch,
+                RuntimePiece::SdkSidecar(libc),
+                &set,
+            )
+            .unwrap()
+        };
+        for libc in SDK_SIDECAR_LIBCS {
+            assert_eq!(
+                origin(libc),
+                PieceOrigin::Archive {
+                    digest: "d".repeat(64)
+                }
+            );
+        }
+
+        runtime.digest = "e".repeat(64);
+        pack_sdk_sidecars(cache.path(), FIXTURE_VERSION, arch, &runtime).unwrap();
+        for libc in SDK_SIDECAR_LIBCS {
+            assert_eq!(
+                origin(libc),
+                PieceOrigin::Archive {
+                    digest: "d".repeat(64)
+                },
+                "a reused sidecar still names the archive its bytes came from"
+            );
         }
     }
 

@@ -155,7 +155,7 @@ const CHECKSUM_MANIFEST: &str = "checksums-sha256.txt";
 
 /// Per-version release directory the archive, its manifest, and both
 /// signature bundles are published under.
-fn release_base(tag: &str) -> String {
+pub(crate) fn release_base(tag: &str) -> String {
     format!(
         "{}/{}/releases/download/{}",
         github_download_base(),
@@ -1144,6 +1144,11 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     verify_signature_if_required(skip_verify, || {
         verify_signature(&latest_tag, &archive_name, &archive_path)
     })?;
+    // The CLI and its guest runtime are one release. The runtime is acquired
+    // and verified first, under its own signature whatever `--skip-verify`
+    // says, so a runtime that cannot be verified leaves the old binary in
+    // place rather than installing a CLI without one.
+    crate::release_guest_runtime::stage_for_update(&latest_tag)?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
     ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));

@@ -411,6 +411,20 @@ impl MachineRunArgs {
             || !self.port.is_empty()
     }
 
+    /// Whether this run may infer a boot source it was not given.
+    ///
+    /// Only a fresh transient boot infers. A persistent machine outlives the
+    /// command, so its base image is never guessed from the directory it was
+    /// started in, and `--attach` boots nothing at all: it dispatches into a
+    /// machine that is already running.
+    pub(in crate::commands) fn source_inference(&self) -> crate::commands::vm::exec::Inference {
+        if self.persistent() || self.attach {
+            crate::commands::vm::exec::Inference::ExplicitOnly
+        } else {
+            crate::commands::vm::exec::Inference::Enabled
+        }
+    }
+
     /// Refuse environment overrides that the persistent machine spec cannot
     /// carry. This must run before source resolution or a build so the caller
     /// never pays for work that cannot preserve the requested environment.

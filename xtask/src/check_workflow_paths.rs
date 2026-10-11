@@ -768,7 +768,7 @@ mod tests {
             "needs: [scope, lint-core, lint-policy, lint-features, \
              lint-features-test-support, lint-features-embed, lint-windows, \
              test-workspace-build, test-workspace, test-workspace-extras, \
-             test-workspace-aarch64, test-linux, \
+             test-workspace-aarch64-build, test-workspace-aarch64, test-linux, \
              test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
              bdd-conformance, boot-latency, nix-flake-check]"
         ));
@@ -803,6 +803,7 @@ mod tests {
             "test-workspace-build",
             "test-workspace",
             "test-workspace-extras",
+            "test-workspace-aarch64-build",
             "test-workspace-aarch64",
             "test-release-witness",
             "test-musl-confinement",
@@ -830,6 +831,8 @@ mod tests {
             "\"$WORKSPACE_BUILD_RESULT\"",
             "\"$WORKSPACE_RESULT\"",
             "\"$WORKSPACE_EXTRAS_RESULT\"",
+            "\"$WORKSPACE_AARCH64_BUILD_RESULT\"",
+            "\"$WORKSPACE_AARCH64_RESULT\"",
             "\"$CORE_RESULT\"",
             "\"$POLICY_RESULT\"",
             "\"$FEATURES_RESULT\"",
@@ -891,6 +894,7 @@ mod tests {
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
         assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
+        assert_aarch64_suite_compiles_once_and_runs_everything(&workflow);
         for expected in [
             "permissions:",
             "actions: read",
@@ -924,11 +928,17 @@ mod tests {
             "archive_run_id:",
             "--archive-file \"$RUNNER_TEMP/workspace-tests.tar.zst\"",
             "--partition hash:${{ inputs.shard }}/2",
+            "--partition \"hash:${SHARD}/${SHARD_COUNT}\"",
+            "SHARD_COUNT: ${{ inputs.shard_count || '2' }}",
+            "\"$SHARD\" -le \"$SHARD_COUNT\"",
+            "inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest'",
+            "inputs.arch == 'aarch64' && 'workspace-tests-aarch64' || 'workspace-tests'",
             "cargo nextest run -p xtask --features man",
             "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
             "actions: read",
             "workspace-archive-{0}",
-            "workspace-shard-{0}-{1}",
+            "workspace-shard-{0}-{1}-{2}",
+            "inputs.arch || 'x86_64'",
             "if: inputs.archive_run_id == ''",
             "if: inputs.archive_run_id != ''",
             "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
@@ -1087,6 +1097,51 @@ mod tests {
                 "{once:?} must run exactly once in ci.yml"
             );
         }
+    }
+
+    /// The aarch64 suite has the same shape as the x86_64 one: one job
+    /// compiles an archive on the arm64 pool and three shards run all of it.
+    /// Pin the parts whose loss would shrink aarch64 coverage while every
+    /// lane stays green: the archive's target selection (everything but the
+    /// `mvm-fs` oracle that cannot build there), the privileged witnesses,
+    /// and a matrix whose size matches the partition count it declares.
+    fn assert_aarch64_suite_compiles_once_and_runs_everything(workflow: &str) {
+        let build = job_block(workflow, "test-workspace-aarch64-build");
+        for expected in [
+            "needs: [scope]",
+            "runs-on: ubuntu-24.04-arm",
+            "cargo nextest archive --workspace --exclude mvm-fs --all-targets",
+            "name: workspace-tests-aarch64",
+            "MVM_GUEST_PRIVILEGED_TESTS=1",
+            "grep -q \"test result: ok. 4 passed\" helper.log",
+            "tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials",
+        ] {
+            assert!(
+                build.contains(expected),
+                "the aarch64 archive build must contain {expected:?}"
+            );
+        }
+
+        let shards = job_block(workflow, "test-workspace-aarch64");
+        for expected in [
+            "name: Test workspace (aarch64)",
+            "needs: [scope, test-workspace-aarch64-build]",
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "archive_run_id: ${{ github.run_id }}",
+            "arch: aarch64",
+            "runner_kind: github",
+            "shard: ['1', '2', '3']",
+            "shard_count: '3'",
+        ] {
+            assert!(
+                shards.contains(expected),
+                "the aarch64 shards must run the archive: missing {expected:?}"
+            );
+        }
+        assert!(
+            !shards.contains("cargo build") && !shards.contains("cargo nextest archive"),
+            "an aarch64 shard must run the archive it was handed, not compile its own"
+        );
     }
 
     #[test]
@@ -1384,6 +1439,19 @@ mod tests {
             build.contains("'#!/bin/sh'") && build.contains("sif /etc/mvm/entrypoint mode 0100755"),
             "the exit-code fixture must bake a shebang marker at mode 0755 — \
              the only shape the guest agent's sealed-marker policy accepts"
+        );
+        // The guest agent builds the dm-verity table at the data device's ext4
+        // block size, read from its superblock; it has no other source for it.
+        // The published default rootfs is a 1 KiB-block filesystem, so a hash
+        // tree formatted at a literal 4096 covers a quarter of the blocks the
+        // guest hashes, and activation refuses it as "hash device too small".
+        // The fixture has to format at the block size of the rootfs it edits.
+        assert!(
+            build.contains(r#"dumpe2fs -h "$revision_dir/rootfs.ext4""#)
+                && build.contains(r#"--data-block-size="$data_block_size""#)
+                && !build.contains("--data-block-size=4096"),
+            "the exit-code fixture must format verity at the rootfs's own ext4 \
+             block size, the size the guest agent pairs the hash device with"
         );
         // The published builder boots first; source compilation only starts
         // after the mvm-images checkout and host boot inputs are in place.
