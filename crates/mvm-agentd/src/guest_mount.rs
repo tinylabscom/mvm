@@ -68,9 +68,7 @@ pub const CAP_SETGID: u32 = mvm_setpriv::CAP_SETGID;
 /// port 53.
 pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
 /// Linux capability the tool helper needs to read a non-dumpable tool's
-/// descriptor links in procfs: the kernel gates `/proc/<pid>/fd` link reads on
-/// `ptrace_may_access`, which a privilege-transitioned (non-dumpable) child
-/// refuses to anything but a `CAP_SYS_PTRACE` holder.
+/// `/proc/<pid>/fd` links (which answer only a `ptrace_may_access` holder).
 pub const CAP_SYS_PTRACE: u32 = mvm_setpriv::CAP_SYS_PTRACE;
 /// Linux capability used by the guest agent to correct a restored wall clock.
 pub const CAP_SYS_TIME: u32 = mvm_setpriv::CAP_SYS_TIME;
