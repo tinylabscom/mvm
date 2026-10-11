@@ -995,8 +995,10 @@ fn documented_surface_installs_a_deterministic_encrypted_backing_fixture() {
 
     assert!(
         script.contains("provision_encrypted_backing_probes()")
-            && script.contains("/dev/mapper/mvm-e2e-crypt")
-            && script.contains("' crypt\"")
+            && script.contains("\"source\":\"/dev/mapper/mvm-e2e-crypt\",\"fstype\":\"ext4\"")
+            && script.contains("'Journal inode: 8'")
+            && script.contains("\"type\":\"crypt\"")
+            && script.contains("\"$probe_bin/tune2fs\"")
             && script.contains("'FileVault: Yes'")
             && script.contains("export PATH=\"$probe_bin:$PATH\""),
         "live volume and mount-cache scenarios need a declared encrypted-backing fixture; the hosted runner's root disk is not one"
