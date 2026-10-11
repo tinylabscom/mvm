@@ -149,6 +149,37 @@ fn combined(output: &Output) -> String {
     )
 }
 
+/// A launch reads only the local cache and an unnamed run must claim a
+/// standby, so a pull or a warm-up that fails leaves the README's first command
+/// nothing to run: the smoke stops there and names the step.
+#[test]
+fn a_failed_preparation_step_fails_before_the_first_command() {
+    let smoke = Smoke::new();
+    let mvmctl = fake_mvmctl("1.2.3", ECHO_TOKEN).replace(
+        "  machine) shift 2",
+        "  pool) echo 'no snapshot key is configured' >&2; exit 1 ;;\n  machine) shift 2",
+    );
+    let installer = stand_in_installer(smoke.dir.path(), &mvmctl, 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[]);
+
+    assert!(!output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(
+        transcript
+            .contains("FAIL: 'env MVM_RESIDENCY=warm mvmctl pool warm 1 --image alpine' exited 1"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("no snapshot key is configured"),
+        "the transcript must carry the step's stderr: {transcript}"
+    );
+    assert!(
+        !transcript.contains("=== first command"),
+        "the first command must not run after a failed warm-up: {transcript}"
+    );
+}
+
 #[test]
 fn a_first_command_that_prints_the_token_passes() {
     let smoke = Smoke::new();
@@ -167,13 +198,13 @@ fn a_first_command_that_prints_the_token_passes() {
         "the transcript must name the command it ran: {transcript}"
     );
     assert!(
-        transcript.contains("second boot from the same HOME (mvmctl machine run --image alpine -- echo mvm-fresh-install-")
+        transcript.contains("second boot from the same HOME (mvmctl machine run --name smoke-second --image alpine -- echo mvm-fresh-install-")
             && transcript.contains("-second </dev/null)"),
         "the transcript must name the second boot's command: {transcript}"
     );
     assert!(
         transcript
-            .contains("mvmctl machine run --image alpine --host-service host.time.v1 -- sh -c")
+            .contains("mvmctl machine run --name smoke-sdk --image alpine --host-service host.time.v1 -- sh -c")
             && transcript.contains("/mvm/sdk/lib/libmvm_host_services.so"),
         "the transcript must name the SDK boot's command: {transcript}"
     );
@@ -186,6 +217,23 @@ fn a_first_command_that_prints_the_token_passes() {
             "mvmctl machine run --image curlimages/curl:8.21.0 --allow-host example.com -- sh -c \"curl -fsS -o /dev/null https://example.com/ && echo mvm-fresh-install-"
         ),
         "the transcript must name the egress boot's command: {transcript}"
+    );
+    let prepared: Vec<usize> = [
+        "prepare: mvmctl image pull alpine",
+        "prepare: mvmctl image pull curlimages/curl:8.21.0",
+        "prepare: env MVM_RESIDENCY=warm mvmctl pool warm 1 --image alpine",
+        "first command (MVM_RESIDENCY=warm mvmctl machine run --image alpine -- echo",
+    ]
+    .iter()
+    .map(|step| {
+        transcript
+            .find(step)
+            .unwrap_or_else(|| panic!("the transcript must show `{step}`: {transcript}"))
+    })
+    .collect();
+    assert!(
+        prepared.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README's pull and warm-up must run, in order, before the first command: {transcript}"
     );
     for step in ["first command", "second boot", "SDK boot", "egress boot"] {
         assert!(
