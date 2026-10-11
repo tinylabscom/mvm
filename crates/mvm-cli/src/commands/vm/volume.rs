@@ -23,11 +23,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
-use mvm_client::profile::RunProfile;
 use mvm_client::volume::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, CreateBlockVolumeRequest,
-    EncryptionState, LaunchLeaseRequest, LocalVolumeService, VolumeRecord, VolumeService,
-    VolumeSourceKind, probe_from_fn,
+    EncryptionState, LocalVolumeService, VolumeRecord, VolumeService, VolumeSourceKind,
+    probe_from_fn,
 };
 use mvm_core::user_config::MvmConfig;
 
@@ -348,29 +347,8 @@ fn kind_label(record: &VolumeRecord) -> String {
     }
 }
 
-/// Where a writable `--host` snapshot image lives. The immutable base stays in
-/// the shared content-addressed cache; a guest that may write receives this
-/// private reflink/copy so it cannot poison another launch's cache object.
-fn host_snapshot_image(vm_name: &str, volume_name: &str) -> std::path::PathBuf {
-    mvm_core::config::volumes_dir()
-        .join("host-snapshots")
-        .join(vm_name)
-        .join(format!("{volume_name}.ext4"))
-}
-
-fn host_snapshot_volume_label(volume_name: &str) -> String {
-    format!("mvmvol{volume_name}")
-}
-
-/// The registered size, in MiB, rounded up so a sub-MiB image is not recorded
-/// as zero.
-fn image_size_mib(image: &Path) -> Result<u32> {
-    let bytes = std::fs::metadata(image)
-        .with_context(|| format!("stat snapshot image {}", image.display()))?
-        .len();
-    let mib = bytes.div_ceil(1024 * 1024).max(1);
-    u32::try_from(mib).with_context(|| format!("snapshot image {} is too large", image.display()))
-}
+#[cfg(test)]
+use mvm_client::volume::image_size_mib;
 
 pub(in crate::commands) fn mount(
     vm_name: &str,
@@ -401,27 +379,8 @@ fn mount_with_service(
         .build()?;
     let record = match host {
         Some(host) => {
-            let host = Path::new(host);
-            if !host.is_absolute() {
-                bail!("--host path must be absolute, got {:?}", host.display());
-            }
             let cache = crate::mount_cache::MountImageCache::new()?;
-            let fingerprint = cache.fingerprint(host, &host_snapshot_volume_label(volume_name))?;
-            volume_service.require_host_encryption(fingerprint.source())?;
-            let image = cache.lookup(fingerprint)?.resolve()?;
-            let attachment_image = if rw {
-                image.writable_image(&host_snapshot_image(vm_name, volume_name))?
-            } else {
-                image.path().to_path_buf()
-            };
-            let size_mib = image_size_mib(&attachment_image)?;
-            volume_service.prepare_ad_hoc_snapshot_attachment(
-                &request,
-                image.fingerprint().source(),
-                &attachment_image,
-                image.fingerprint().cache_key(),
-                size_mib,
-            )?
+            volume_service.mount_host_snapshot(&request, Path::new(host), &cache)?
         }
         None => volume_service.prepare_attachment(&request)?,
     };
@@ -443,12 +402,7 @@ fn mount_with_service(
 /// the machine exists; there is no profile to check yet, so it registers as
 /// the dev lane, and the machine's start applies its own profile.
 fn registration_profile(vm_name: &str) -> Result<AdmittedProfile> {
-    if !mvm_core::config::machine_spec_path(vm_name).exists() {
-        return Ok(RunProfile::Dev.into());
-    }
-    let spec = mvm_runtime::machine::persist::load_machine_spec(vm_name)
-        .with_context(|| format!("reading the stored profile of machine {vm_name:?}"))?;
-    Ok(AdmittedProfile::from_profile_name(&spec.profile))
+    mvm_client::volume::registration_profile(vm_name)
 }
 
 fn ls(vm_name: &str, json: bool) -> Result<()> {
@@ -497,146 +451,20 @@ pub(in crate::commands) fn release_volume_leases_for_vm(vm_name: &str) -> Result
     service().release_owner_leases(vm_name).map(|_| ())
 }
 
-/// The resolved, leased volume set handed to admission and the backend.
-/// Commit only after the backend start succeeds — dropping uncommitted rolls
-/// the leases back so a failed launch leaks nothing.
-pub(in crate::commands) type PreparedLaunchVolumes = mvm_client::volume::LaunchPreparation;
-
-/// Merge persisted local registrations into the volume list used to construct
-/// both signed admission grants and the backend launch configuration.
 /// The attachments registered against `vm_name`, without taking a lease.
 ///
-/// Distinct from [`merge_registered_volumes_for_launch`], which acquires the
-/// exclusive launch lease. This is for callers that only need to *know*
-/// registrations exist — a transient run that will not attach them, for
-/// instance — and must not disturb a persistent machine that holds them.
+/// This is for callers that only need to *know* registrations exist — a
+/// transient run that will not attach them, for instance — and must not
+/// disturb a persistent machine that holds them. Launch-time lease acquisition
+/// lives in `mvm_client::volume`.
 pub(crate) fn list_registered_attachments(
     vm_name: &str,
 ) -> Result<Vec<mvm_client::volume::AttachmentRecord>> {
     service().list_attachments(vm_name)
 }
 
-pub(in crate::commands) fn merge_registered_volumes_for_launch(
-    vm_name: &str,
-    explicit: &[mvm_runtime::image::RuntimeVolume],
-    profile: AdmittedProfile,
-) -> Result<PreparedLaunchVolumes> {
-    merge_registered_volumes_with_service(&service(), vm_name, explicit, profile)
-}
-
-fn merge_registered_volumes_with_service(
-    volume_service: &LocalVolumeService,
-    vm_name: &str,
-    explicit: &[mvm_runtime::image::RuntimeVolume],
-    profile: AdmittedProfile,
-) -> Result<PreparedLaunchVolumes> {
-    refresh_registered_host_snapshots_with_service(volume_service, vm_name)?;
-    // Leased under the machine's own profile; locked managed volumes keep
-    // failing closed (the operator unlocks explicitly before launch).
-    let request = LaunchLeaseRequest::builder(vm_name)
-        .with_context(|| format!("Invalid VM name: {vm_name:?}"))?
-        .explicit_volumes(explicit.to_vec())
-        .profile(profile)
-        .build();
-    volume_service
-        .acquire_launch_lease(&request)
-        .context("resolving registered local volumes for launch")
-}
-
-fn refresh_registered_host_snapshots_with_service(
-    volume_service: &LocalVolumeService,
-    vm_name: &str,
-) -> Result<()> {
-    refresh_registered_host_snapshots_using(
-        volume_service,
-        vm_name,
-        crate::mount_cache::MountImageCache::new,
-    )
-}
-
-/// The cache constructor is a parameter so a test can observe *whether* it
-/// runs.
-///
-/// It has to be: `MountImageCache::new` is `#[cfg(test)]`-stubbed to skip the
-/// encrypted-backing verification, so under test the eager construction this
-/// function used to do was indistinguishable from the lazy one. The check that
-/// failed in production did not exist in the build that tested it, which is
-/// how a launch-blocking refusal reached a live lane unnoticed.
-fn refresh_registered_host_snapshots_using(
-    volume_service: &LocalVolumeService,
-    vm_name: &str,
-    open_cache: impl FnOnce() -> Result<crate::mount_cache::MountImageCache>,
-) -> Result<()> {
-    // Nothing to refresh means nothing to build. Constructing the cache
-    // verifies that its directory sits on encrypted backing storage, and that
-    // check is about where a *mounted host directory's* bytes come to rest.
-    // Running it before looking at the attachments charged it to every launch:
-    // a named machine with no registered volumes and no `--mount` at all was
-    // refused on any host without a dm-crypt/LUKS mapping, for a cache it was
-    // never going to write to.
-    //
-    // The enforcement is unchanged where it applies. One attachment carrying a
-    // host snapshot is enough to construct the cache, and `require_host_encryption`
-    // below still guards each snapshot's source directory separately.
-    let attachments = volume_service.list_attachments(vm_name)?;
-    if !attachments
-        .iter()
-        .any(|attachment| attachment.host_snapshot.is_some())
-    {
-        return Ok(());
-    }
-    let cache = open_cache()?;
-    for attachment in attachments {
-        let Some(snapshot) = attachment.host_snapshot else {
-            continue;
-        };
-        let fingerprint = cache
-            .fingerprint(
-                Path::new(&snapshot.source_path),
-                &host_snapshot_volume_label(&attachment.volume),
-            )
-            .with_context(|| {
-                format!(
-                    "refreshing host snapshot for volume {:?}",
-                    attachment.volume
-                )
-            })?;
-        volume_service
-            .require_host_encryption(fingerprint.source())
-            .with_context(|| {
-                format!(
-                    "rechecking host snapshot source for {:?}",
-                    attachment.volume
-                )
-            })?;
-        let unchanged = fingerprint.cache_key() == snapshot.fingerprint;
-        if !attachment.access.is_read_only()
-            && unchanged
-            && Path::new(&attachment.host_path).is_file()
-        {
-            continue;
-        }
-        let cached = cache.lookup(fingerprint)?.resolve()?;
-        let attachment_image = if attachment.access.is_read_only() {
-            cached.path().to_path_buf()
-        } else {
-            cached.writable_image(&host_snapshot_image(vm_name, &attachment.volume))?
-        };
-        let size_mib = image_size_mib(&attachment_image)?;
-        volume_service.refresh_ad_hoc_snapshot_attachment(
-            vm_name,
-            &attachment.guest_path,
-            &attachment_image,
-            cached.fingerprint().cache_key(),
-            size_mib,
-        )?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
-
     /// The `--guest` help restates the allow-root policy, and a doc comment
     /// cannot read the constant it restates. The two drifted once: the help
     /// kept offering `/mnt` after it was removed from the allow-roots, and
@@ -672,10 +500,6 @@ mod tests {
     };
 
     use super::*;
-
-    fn dev() -> AdmittedProfile {
-        RunProfile::Dev.into()
-    }
 
     struct DataDirGuard {
         _env: mvm_core::util::test_env::TestEnv,
@@ -757,265 +581,6 @@ mod tests {
             format!("{error:#}").contains("stat snapshot image"),
             "got: {error:#}"
         );
-    }
-
-    #[test]
-    fn registered_managed_mount_is_consumed_by_launch_resolution() {
-        let guard = DataDirGuard::new();
-        let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
-        unlock("work").unwrap();
-        mount("vm-1", "work", None, "/data/work", true).unwrap();
-
-        let prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
-        assert_eq!(prepared.volumes.len(), 1);
-        assert_eq!(prepared.volumes[0].guest, "/data/work");
-        assert!(!prepared.volumes[0].read_only);
-        assert!(matches!(
-            prepared.volumes[0].kind,
-            mvm_core::vm_backend::VmVolumeKind::Disk
-        ));
-        assert!(Path::new(&prepared.volumes[0].host).is_file());
-    }
-
-    #[test]
-    fn block_attachment_lease_is_exclusive_and_released_on_stop() {
-        let guard = DataDirGuard::new();
-        let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
-        unlock("work").unwrap();
-        mount("vm-1", "work", None, "/data/work", true).unwrap();
-        mount("vm-2", "work", None, "/data/work", true).unwrap();
-
-        let prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
-        drop(prepared);
-        assert!(merge_registered_volumes_for_launch("vm-2", &[], dev()).is_ok());
-
-        let mut prepared = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap();
-        prepared.commit();
-        drop(prepared);
-        let lock_error = lock("work").unwrap_err();
-        assert!(
-            format!("{lock_error:#}").contains("attached to VM \"vm-1\""),
-            "got: {lock_error:#}"
-        );
-        let error = match merge_registered_volumes_for_launch("vm-2", &[], dev()) {
-            Ok(_) => panic!("second VM must not acquire an active block lease"),
-            Err(error) => error,
-        };
-        assert!(
-            format!("{error:#}").contains("already attached to VM \"vm-1\""),
-            "got: {error:#}"
-        );
-
-        release_volume_leases_for_vm("vm-1").unwrap();
-        assert!(merge_registered_volumes_for_launch("vm-2", &[], dev()).is_ok());
-    }
-
-    #[test]
-    fn launch_resolution_refuses_volume_locked_after_registration() {
-        let guard = DataDirGuard::new();
-        let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
-        unlock("work").unwrap();
-        mount("vm-1", "work", None, "/data/work", false).unwrap();
-        lock("work").unwrap();
-
-        let err = merge_registered_volumes_for_launch("vm-1", &[], dev()).unwrap_err();
-        assert!(format!("{err:#}").contains("locked"), "got: {err:#}");
-    }
-
-    #[test]
-    fn launch_resolution_refuses_explicit_guest_path_collision() {
-        let guard = DataDirGuard::new();
-        let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
-        unlock("work").unwrap();
-        mount("vm-1", "work", None, "/data/work", false).unwrap();
-        let explicit = mvm_runtime::image::RuntimeVolume {
-            host: "/explicit.ext4".to_string(),
-            guest: "/data/work".to_string(),
-            size: "1G".to_string(),
-            read_only: true,
-            materialized_image: None,
-            kind: mvm_core::vm_backend::VmVolumeKind::Disk,
-            encrypted: false,
-        };
-
-        let err = merge_registered_volumes_for_launch("vm-1", &[explicit], dev()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("duplicate guest mount path"),
-            "got: {err:#}"
-        );
-    }
-
-    fn read_snapshot_marker(image: &Path) -> String {
-        ext4_view::Ext4::load_from_path(image)
-            .unwrap()
-            .read_to_string("/marker")
-            .unwrap()
-    }
-
-    fn accepting_host_encryption_service() -> LocalVolumeService {
-        LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
-    }
-
-    /// A launch with nothing mounted never opens the mount-image cache.
-    ///
-    /// Opening it verifies that its directory sits on encrypted backing
-    /// storage. Doing that on entry charged the check to every launch: a named
-    /// machine with no registered volumes and no `--mount` was refused on any
-    /// host without a dm-crypt/LUKS mapping, for a cache it would never write
-    /// to. That is what stopped `mvmctl machine run -d` on an ordinary disk,
-    /// and it took down the SDK live lane, which mounts nothing at all.
-    ///
-    /// The constructor is injected because `MountImageCache::new` is
-    /// `#[cfg(test)]`-stubbed to skip the very verification that failed, so
-    /// calling the real one here would prove nothing either way.
-    #[test]
-    fn a_launch_with_no_host_snapshots_never_opens_the_mount_cache() {
-        let _guard = DataDirGuard::new();
-        let volume_service = accepting_host_encryption_service();
-
-        refresh_registered_host_snapshots_using(&volume_service, "vm-no-mounts", || {
-            panic!("the mount-image cache must not be opened for a launch with no host snapshots")
-        })
-        .expect("a launch that mounts nothing must not be refused");
-    }
-
-    /// The converse, so the laziness cannot be "never opens it".
-    ///
-    /// One attachment carrying a host snapshot is enough: the cache is opened,
-    /// and the encrypted-backing verification it performs still applies
-    /// wherever a host directory's bytes actually come to rest.
-    #[test]
-    fn a_launch_with_a_host_snapshot_opens_the_mount_cache() {
-        let guard = DataDirGuard::new();
-        let volume_service = accepting_host_encryption_service();
-        let source = guard.path().join("mounted");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("marker"), b"bytes").unwrap();
-        mount_with_service(
-            &volume_service,
-            "vm-mounted",
-            "mounted",
-            Some(source.to_str().unwrap()),
-            "/data/mounted",
-            false,
-        )
-        .unwrap();
-
-        let opened = std::cell::Cell::new(false);
-        refresh_registered_host_snapshots_using(&volume_service, "vm-mounted", || {
-            opened.set(true);
-            crate::mount_cache::MountImageCache::new()
-        })
-        .expect("refresh succeeds");
-
-        assert!(
-            opened.get(),
-            "a registered host snapshot must still open the cache, or the \
-             encrypted-backing verification stops applying where it matters"
-        );
-    }
-
-    #[test]
-    fn changed_host_bytes_with_equal_mtime_refresh_before_launch() {
-        let guard = DataDirGuard::new();
-        let volume_service = accepting_host_encryption_service();
-        let source = guard.path().join("source");
-        fs::create_dir(&source).unwrap();
-        let marker = source.join("marker");
-        fs::write(&marker, b"before").unwrap();
-        let original_mtime = fs::metadata(&marker).unwrap().modified().unwrap();
-        mount_with_service(
-            &volume_service,
-            "vm-1",
-            "source",
-            Some(source.to_str().unwrap()),
-            "/data/source",
-            false,
-        )
-        .unwrap();
-        let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "before");
-
-        fs::write(&marker, b"after!").unwrap();
-        File::options()
-            .write(true)
-            .open(&marker)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(original_mtime))
-            .unwrap();
-        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
-        let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_ne!(before.host_path, after.host_path);
-        assert_ne!(
-            before.host_snapshot.unwrap().fingerprint,
-            after.host_snapshot.unwrap().fingerprint
-        );
-        assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "after!");
-    }
-
-    #[test]
-    fn missing_host_snapshot_source_refuses_launch_and_keeps_last_image() {
-        let guard = DataDirGuard::new();
-        let volume_service = accepting_host_encryption_service();
-        let source = guard.path().join("source");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("marker"), b"last-known").unwrap();
-        mount_with_service(
-            &volume_service,
-            "vm-1",
-            "source",
-            Some(source.to_str().unwrap()),
-            "/data/source",
-            false,
-        )
-        .unwrap();
-        let registered = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        fs::remove_dir_all(&source).unwrap();
-
-        let error = match merge_registered_volumes_with_service(&volume_service, "vm-1", &[], dev())
-        {
-            Ok(_) => panic!("a missing source must refuse before a launch lease is acquired"),
-            Err(error) => error,
-        };
-        assert!(format!("{error:#}").contains("does not exist"), "{error:#}");
-        assert_eq!(
-            read_snapshot_marker(Path::new(&registered.host_path)),
-            "last-known"
-        );
-    }
-
-    #[test]
-    fn changed_host_source_replaces_a_private_writable_snapshot() {
-        let guard = DataDirGuard::new();
-        let volume_service = accepting_host_encryption_service();
-        let source = guard.path().join("source");
-        fs::create_dir(&source).unwrap();
-        fs::write(source.join("marker"), b"first").unwrap();
-        mount_with_service(
-            &volume_service,
-            "vm-1",
-            "source",
-            Some(source.to_str().unwrap()),
-            "/data/source",
-            true,
-        )
-        .unwrap();
-        let before = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_eq!(
-            Path::new(&before.host_path),
-            host_snapshot_image("vm-1", "source")
-        );
-        assert_eq!(read_snapshot_marker(Path::new(&before.host_path)), "first");
-
-        fs::write(source.join("marker"), b"second").unwrap();
-        refresh_registered_host_snapshots_with_service(&volume_service, "vm-1").unwrap();
-        let after = volume_service.list_attachments("vm-1").unwrap().remove(0);
-        assert_eq!(before.host_path, after.host_path);
-        assert_eq!(read_snapshot_marker(Path::new(&after.host_path)), "second");
     }
 
     #[test]

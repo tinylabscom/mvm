@@ -16,9 +16,13 @@
 //! it ends both go through here; [`ExitApplyRequest`] decides which of the
 //! three exit outcomes a run gets.
 
+pub mod cache;
 mod exit;
 #[cfg(test)]
 mod tests;
+mod timing;
+pub mod wire;
+mod workspace;
 
 use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
@@ -27,7 +31,7 @@ use anyhow::{Context, Result};
 use mvm_contract::policy::protected_paths::{
     ProtectedPath, ProtectedPathSet, ProtectedPathsPolicy,
 };
-use mvm_fs::tree_diff::Ext4Tree;
+use mvm_fs::tree_diff::{Ext4Tree, TreeSource};
 use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
 use mvm_fs::workspace_apply::{PlanParams, RelationKind, plan};
 use mvm_hostd::audit::emitter::{
@@ -37,6 +41,11 @@ use mvm_hostd::audit::emitter::{
 pub use exit::{ExitApply, ExitApplyRequest, apply_command, is_affirmative};
 pub use mvm_fs::workspace_apply::store::AppliedRelation;
 pub use mvm_fs::workspace_apply::{ApplyPlan, FileOp, OpAction};
+pub use timing::{StopDetail, StopTiming};
+pub use workspace::{
+    RegisteredWorkspace, Workspace, WorkspaceImage, WorkspaceRequest, baseline_image, capture_set,
+    flush_running_guest, select_workspace, workspaces_in, workspaces_of,
+};
 
 /// One workspace volume, named by the machine and volume it belongs to and
 /// the host directory an apply writes.
@@ -68,7 +77,8 @@ pub enum Review {
     /// Nothing differs from the host tree.
     Unchanged,
     /// A plan that passed the gate, ready for [`WorkspaceApplier::apply`].
-    Ready(PendingApply),
+    /// Boxed: a `PendingApply` is far larger than the other variants.
+    Ready(Box<PendingApply>),
 }
 
 /// A reviewed plan and the image its post-images come from. Only [`review`]
@@ -76,12 +86,53 @@ pub enum Review {
 pub struct PendingApply {
     plan: ApplyPlan,
     live: Ext4Tree,
+    baseline_image: PathBuf,
+    live_image: PathBuf,
+    protected_paths: Vec<String>,
+    vm: String,
+    volume: String,
+    source_dir: PathBuf,
+    registration: Option<Workspace>,
 }
 
 impl PendingApply {
     #[must_use]
     pub fn plan(&self) -> &ApplyPlan {
         &self.plan
+    }
+
+    /// Canonical identity of the reviewed content, target and policy. A
+    /// stateless caller can return this with its review and require the same
+    /// digest when committing a freshly reviewed plan.
+    pub fn fingerprint(&self) -> Result<String> {
+        use sha2::{Digest, Sha256};
+        let operations: Vec<_> = self
+            .plan
+            .ops
+            .iter()
+            .map(|op| {
+                let (action, link) = match &op.action {
+                    OpAction::WriteFile => ("write-file", None),
+                    OpAction::WriteSymlink { target } => ("write-symlink", Some(target.as_str())),
+                    OpAction::Remove => ("remove", None),
+                };
+                (&op.path, action, link, &op.pre, &op.post)
+            })
+            .collect();
+        let bytes = serde_jcs::to_vec(&(
+            "mvm-workspace-review-v1",
+            &self.vm,
+            &self.volume,
+            &self.source_dir,
+            &self.baseline_image,
+            &self.live_image,
+            &self.protected_paths,
+            &self.plan.exclusion_patterns,
+            &self.plan.skipped_excluded,
+            &self.registration,
+            operations,
+        ))?;
+        Ok(hex::encode(Sha256::digest(bytes)))
     }
 }
 
@@ -111,6 +162,7 @@ pub enum Recovered {
 ///
 /// A refusal is recorded in the local audit log before it is returned.
 pub fn review(target: WorkspaceTarget<'_>, request: &ReviewRequest<'_>) -> Result<Review> {
+    validate_target(target)?;
     let baseline = Ext4Tree::open(request.baseline_image)?;
     let live = Ext4Tree::open(request.live_image)?;
     let protected = protected_set(request.protected_paths)?;
@@ -139,7 +191,48 @@ pub fn review(target: WorkspaceTarget<'_>, request: &ReviewRequest<'_>) -> Resul
     if plan.ops.is_empty() {
         return Ok(Review::Unchanged);
     }
-    Ok(Review::Ready(PendingApply { plan, live }))
+    bind_reviewed_content(&mut plan, &live, target.source_dir)?;
+    Ok(Review::Ready(Box::new(PendingApply {
+        plan,
+        live,
+        baseline_image: request.baseline_image.to_path_buf(),
+        live_image: request.live_image.to_path_buf(),
+        protected_paths: request.protected_paths.to_vec(),
+        vm: target.vm.to_string(),
+        volume: target.volume.to_string(),
+        source_dir: target.source_dir.to_path_buf(),
+        registration: None,
+    })))
+}
+
+/// Pin bytes as well as operation shapes: an equal-length edit while the
+/// operator is answering must not silently become part of the approved apply.
+fn bind_reviewed_content(plan: &mut ApplyPlan, live: &Ext4Tree, source: &Path) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    for op in &mut plan.ops {
+        let path = source.join(&op.path);
+        op.pre.sha256 = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => Some(hex::encode(Sha256::digest(
+                std::fs::read_link(&path)?.as_os_str().as_encoded_bytes(),
+            ))),
+            Ok(metadata) if metadata.is_file() => {
+                Some(mvm_core::crypto::image_verify::sha256_file(&path)?)
+            }
+            Ok(_) => anyhow::bail!("workspace host path changed type during review"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(post) = &mut op.post {
+            post.sha256 = match &op.action {
+                OpAction::WriteFile => Some(live.sha256(&op.path)?),
+                OpAction::WriteSymlink { target } => {
+                    Some(hex::encode(Sha256::digest(target.as_bytes())))
+                }
+                OpAction::Remove => None,
+            };
+        }
+    }
+    Ok(())
 }
 
 /// The protected set in force: the shipped default classes plus the
@@ -251,6 +344,16 @@ pub fn apply_store_root(vm: &str, volume: &str) -> PathBuf {
         .join(volume)
 }
 
+fn validate_target(target: WorkspaceTarget<'_>) -> Result<()> {
+    crate::validate_vm_name(target.vm)?;
+    mvm_core::domain::volume::VolumeName::new(target.volume)?;
+    anyhow::ensure!(
+        target.source_dir.is_absolute(),
+        "workspace source must be absolute"
+    );
+    Ok(())
+}
+
 /// One workspace's apply store, opened with interrupted work settled.
 pub struct WorkspaceApplier<'a> {
     target: WorkspaceTarget<'a>,
@@ -265,6 +368,7 @@ impl<'a> WorkspaceApplier<'a> {
         target: WorkspaceTarget<'a>,
         audit: &'a dyn WorkspaceAudit,
     ) -> Result<(Self, Vec<Recovered>)> {
+        validate_target(target)?;
         Self::open_at(apply_store_root(target.vm, target.volume), target, audit)
     }
 
@@ -279,6 +383,7 @@ impl<'a> WorkspaceApplier<'a> {
         target: WorkspaceTarget<'a>,
         audit: &'a dyn WorkspaceAudit,
     ) -> Result<(Self, Vec<Recovered>)> {
+        validate_target(target)?;
         let store = ApplyStore::open(root)?;
         let mut recovered = Vec::new();
         if let Some(id) = store.recover_source(target.source_dir)? {
@@ -307,9 +412,34 @@ impl<'a> WorkspaceApplier<'a> {
     /// returns its error.
     pub fn apply(&self, pending: PendingApply) -> Result<Applied> {
         let target = self.target;
+        anyhow::ensure!(
+            pending.vm == target.vm
+                && pending.volume == target.volume
+                && pending.source_dir == target.source_dir,
+            "reviewed workspace identity does not match the apply target"
+        );
+        // Approval can take minutes. Re-open the images and repeat every path
+        // gate immediately before staging; never silently approve a new plan.
+        let fresh = review(
+            target,
+            &ReviewRequest {
+                baseline_image: &pending.baseline_image,
+                live_image: &pending.live_image,
+                exclude: &pending.plan.exclusion_patterns,
+                protected_paths: &pending.protected_paths,
+            },
+        )?;
+        let Review::Ready(fresh) = fresh else {
+            anyhow::bail!("workspace changed after review; review again before applying");
+        };
+        anyhow::ensure!(
+            fresh.plan.ops == pending.plan.ops
+                && fresh.plan.skipped_excluded == pending.plan.skipped_excluded,
+            "workspace changed after review; review again before applying"
+        );
         let staged = self
             .store
-            .stage(pending.plan, target.source_dir, &pending.live, None)?;
+            .stage(fresh.plan, target.source_dir, &fresh.live, None)?;
         let snapshot_root = self.commit_audited(&staged)?;
         mvm_core::audit_emit!(
             WorkspaceApply,
@@ -491,7 +621,7 @@ impl ExitSettlement<'_> {
         if decision == ExitApply::Prompt && !confirm(&pending.plan)? {
             return Ok(settled(ExitOutcome::Declined(pending.plan)));
         }
-        let applied = applier.apply(pending)?;
+        let applied = applier.apply(*pending)?;
         Ok(settled(ExitOutcome::Applied(applied)))
     }
 }

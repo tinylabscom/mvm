@@ -15,16 +15,11 @@
 //! is a fork. A mid-replay failure leaves the fork running at the last prompt
 //! it answered.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args as ClapArgs;
 use mvm_client::agent_prompt::DEFAULT_PROMPT_TIMEOUT_SECS;
-use mvm_contract::protocol::agent_session::AgentSessionId;
-use mvm_runtime::agent_session::AgentSessionStore;
-use mvm_runtime::agent_session::replay::{ReplayPlan, prepare_replay, timeline_base};
-use mvm_runtime::agent_session::replay_input::ReplayInputStore;
-use mvm_runtime::checkpoint::CheckpointStore;
+use mvm_client::replay::{SessionReplayRequest, SessionReplayRunRequest, SessionReplaySummary};
 
-use super::checkpoint::{self, SignedChainAnchor, validated_checkpoint_id};
 use crate::ui;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -47,49 +42,32 @@ pub(in crate::commands) struct ReplayArgs {
 }
 
 pub(in crate::commands) fn run(args: &ReplayArgs) -> Result<()> {
-    let session_id = AgentSessionId::parse(args.session_id.clone())
-        .map_err(|e| anyhow::anyhow!("invalid session id '{}': {e}", args.session_id))?;
-    let record = AgentSessionStore::open().load(&session_id)?;
-    let checkpoints = CheckpointStore::open();
-    let inputs = ReplayInputStore::open();
-    let from = match &args.from {
-        Some(raw) => validated_checkpoint_id(raw)?,
-        None => timeline_base(&checkpoints, &record)?,
-    };
-    let anchor = SignedChainAnchor::load().context("loading the signed audit chain")?;
-    let plan = prepare_replay(&checkpoints, &inputs, &from, &record, &anchor)
-        .with_context(|| format!("planning the replay of session {session_id}"))?;
-
-    let fork_name = mvm_client::replay::replay_target_name(&from, args.as_name.as_deref())?;
-    if args.dry_run {
-        print_plan(&plan, &fork_name);
+    let report = super::invoke::replay_prompts(&SessionReplayRunRequest {
+        selection: SessionReplayRequest {
+            session_id: args.session_id.clone(),
+            from: args.from.clone(),
+            as_name: args.as_name.clone(),
+        },
+        dry_run: args.dry_run,
+        timeout_secs: args.timeout,
+        tenant: super::tenant_resolution::resolve_tenant(None),
+    })?;
+    let plan = &report.summary;
+    let from = &plan.checkpoint;
+    let fork_name = &plan.restored_name;
+    let Some(replayed) = report.execution else {
+        print_plan(plan, fork_name);
         return Ok(());
-    }
-
-    checkpoint::fork(checkpoint::ForkCmdParams {
-        id: from.as_str(),
-        new_id: Some(fork_name.clone()),
-        boot: true,
-        hypervisor: "",
-        cpus: None,
-        memory: None,
-        declared_secrets: &[],
-        allow_secret_drop: false,
-        json: false,
-        intent: checkpoint::ForkIntent::Ordinary,
-    })
-    .with_context(|| format!("restoring checkpoint {:?} for replay", from.as_str()))?;
-
-    let replayed = super::invoke::replay_prompts(&fork_name, &plan, &inputs, args.timeout)?;
+    };
     ui::notice(&format!(
         "replayed {} prompt(s) from {} onto {fork_name:?}; the machine is running",
-        replayed.report.applied,
+        replayed.applied,
         from.as_str(),
     ));
-    if replayed.report.duplicates > 0 {
+    if replayed.duplicates > 0 {
         ui::info(&format!(
             "{} prompt(s) had already been delivered to {fork_name:?} and were not sent again",
-            replayed.report.duplicates
+            replayed.duplicates
         ));
     }
     for (cursor, code) in &replayed.nonzero_exits {
@@ -100,24 +78,73 @@ pub(in crate::commands) fn run(args: &ReplayArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_plan(plan: &ReplayPlan, fork_name: &str) {
-    println!(
+fn print_plan(plan: &SessionReplaySummary, fork_name: &str) {
+    print!("{}", render_plan(plan, fork_name));
+}
+
+fn render_plan(plan: &SessionReplaySummary, fork_name: &str) -> String {
+    let mut lines = vec![format!(
         "replay session {} from {} onto {fork_name:?}",
         plan.session_id,
         plan.checkpoint.as_str()
-    );
+    )];
     for input in &plan.inputs {
-        println!(
+        lines.push(format!(
             "  prompt at journal cursor {}: {}",
-            input.binding.journal_cursor, input.artifact_digest
-        );
+            input.journal_cursor, input.artifact_digest
+        ));
     }
-    println!("  {} prompt(s)", plan.inputs.len());
+    lines.push(format!("  {} prompt(s)", plan.inputs.len()));
+    format!("{}\n", lines.join("\n"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replay_arguments_preserve_defaults_and_dry_run_selection() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Command {
+            #[command(flatten)]
+            args: ReplayArgs,
+        }
+        let parsed = Command::try_parse_from([
+            "replay",
+            "session-one",
+            "--from",
+            "base",
+            "--as",
+            "fork-one",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert_eq!(parsed.args.session_id, "session-one");
+        assert_eq!(parsed.args.from.as_deref(), Some("base"));
+        assert_eq!(parsed.args.as_name.as_deref(), Some("fork-one"));
+        assert!(parsed.args.dry_run);
+        assert_eq!(parsed.args.timeout, DEFAULT_PROMPT_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn replay_dry_run_renders_only_summary_metadata() {
+        let summary = SessionReplaySummary {
+            checkpoint: mvm_core::checkpoint::CheckpointId::new("base"),
+            session_id: "session-one".into(),
+            generation: 2,
+            checkpoint_cursor: 4,
+            restored_name: "fork-one".into(),
+            inputs: vec![mvm_client::replay::SessionReplayInput {
+                journal_cursor: 7,
+                artifact_digest: "sha256:artifact".into(),
+            }],
+        };
+        assert_eq!(
+            render_plan(&summary, &summary.restored_name),
+            "replay session session-one from base onto \"fork-one\"\n  prompt at journal cursor 7: sha256:artifact\n  1 prompt(s)\n"
+        );
+    }
 
     #[test]
     fn an_invalid_session_id_is_refused_before_any_store_is_read() {

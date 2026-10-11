@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use mvm_build::builder_vm::GuestSidecar;
 
 use crate::commands::env::builder_vm::default_microvm::DefaultMicrovmVariant;
@@ -142,40 +142,10 @@ fn sidecar_mtime(dir: &Path) -> Option<String> {
 /// and "how did this reach this host" is not a fact about the build at all —
 /// a published image is built locally *somewhere*, and calling that
 /// `built-local` here is exactly the misreading `source` exists to prevent.
-pub(crate) struct AcquiredProvenance {
-    pub(crate) image_tag: String,
-    pub(crate) source: &'static str,
-    pub(crate) acquired_at: String,
-}
-
-impl AcquiredProvenance {
-    pub(crate) fn fetched(tag: &str) -> Self {
-        Self {
-            image_tag: tag.to_string(),
-            source: "fetched",
-            acquired_at: mvm_core::util::time::utc_now(),
-        }
-    }
-}
+pub(crate) use mvm_client::builder_images::acquisition::AcquiredProvenance;
 
 /// Rewrite `dir`'s sidecar with the acquisition facts, leaving every build
 /// fact the producer recorded untouched.
 pub(crate) fn stamp_provenance(dir: &Path, provenance: &AcquiredProvenance) -> Result<()> {
-    let mut sidecar = GuestSidecar::read_from_dir(dir)
-        .with_context(|| format!("read the sidecar in {}", dir.display()))?
-        .with_context(|| {
-            format!(
-                "{} carries no {} sidecar; refusing to boot-tag an image that did not \
-                 declare what it is",
-                dir.display(),
-                mvm_build::builder_vm::SIDECAR_FILENAME
-            )
-        })?;
-    sidecar.image_tag = provenance.image_tag.clone();
-    sidecar.source = provenance.source.to_string();
-    sidecar.built_at = provenance.acquired_at.clone();
-    sidecar
-        .write_to_dir(dir)
-        .with_context(|| format!("write the stamped sidecar to {}", dir.display()))?;
-    Ok(())
+    mvm_client::builder_images::acquisition::stamp_provenance(dir, provenance)
 }

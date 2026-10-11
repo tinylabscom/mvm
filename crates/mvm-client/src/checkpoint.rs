@@ -1,4 +1,4 @@
-//! Read-only local checkpoint access for command and embedder workflows.
+//! Local checkpoint operations for command and embedder workflows.
 //!
 //! Checkpoint storage layout is runtime-owned. This service keeps callers from
 //! opening that store or reconstructing its content paths themselves.
@@ -9,7 +9,36 @@ use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_runtime::checkpoint::{CheckpointStore, checked_workspace_blob_name};
 
-/// Read-only access to the local checkpoint catalog and its workspace images.
+mod admitted;
+mod capture;
+mod catalog;
+mod fork;
+mod fork_vm_full;
+mod lineage;
+mod machine;
+mod prompt_step;
+#[cfg(test)]
+mod regression;
+mod restore;
+mod revert;
+mod session_replay;
+mod timeline;
+mod vm_state;
+pub mod wire;
+pub use capture::CaptureRequest;
+pub use catalog::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation};
+pub use fork::{ForkIntent, ForkReport, ForkRequest};
+pub use lineage::SignedChainAnchor;
+pub use machine::{ForkBatchReport, ForkMachineInput, ForkVmFullMachineInput, RestoreMachineInput};
+pub use prompt_step::VmFullStepCheckpointer;
+pub use restore::{RestoreReport, RestoreRequest};
+pub use revert::{AdvanceRequest, RevertImageSource, RevertOutcome, RevertRequest, RevertRunImage};
+pub use timeline::{LineageKind, ResolvedTarget, Timeline, TimelineNode};
+pub use vm_state::{
+    fc_pause_marker_matches_live_pid, resolve_quiesced_vm_rootfs, vm_is_quiesced, vm_is_running,
+};
+
+/// Access to the local checkpoint catalog and its workspace images.
 pub struct Checkpoints {
     store: CheckpointStore,
 }

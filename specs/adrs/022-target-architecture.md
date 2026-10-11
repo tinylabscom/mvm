@@ -110,6 +110,12 @@ the optional remote `GatewayBackend` are two implementations of the same
 contract, selected by how the caller connects, not by two different
 consumer-facing APIs.
 
+**Subsequent constraint:** [ADR-056](056-in-process-client-operations.md)
+requires client operations to remain in-process throughout their implementation.
+Calling a library that shells out, including through a lower-level provider,
+does not satisfy this consumption topology. Existing subprocess implementations
+must be replaced, not grandfathered during CLI extraction.
+
 ### 5. The SDK is the central derivation engine
 
 Every path to a microVM workload derives through `mvm-sdk`: the

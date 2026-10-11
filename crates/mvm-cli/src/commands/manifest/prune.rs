@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
+use mvm_client::manifest::{self, PruneCandidate, PruneRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 
@@ -25,19 +25,16 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    if !args.orphans {
-        anyhow::bail!(
-            "no prune mode specified. Pass `--orphans` to remove slots whose manifest file is gone."
-        );
-    }
-
+    let report = manifest::prune(&PruneRequest {
+        orphans: args.orphans,
+        dry_run: args.dry_run,
+    })?;
     if args.dry_run {
-        return run_dry(args.json);
+        return run_dry(args.json, report.candidates);
     }
 
-    let (count, removed) = tmpl::template_prune_orphan_slots()?;
-
-    mvm_core::audit_emit!(SlotPrune, "source=manifest_prune count={count}");
+    let count = report.removed_count;
+    let removed = report.removed;
 
     if args.json {
         #[derive(serde::Serialize)]
@@ -66,38 +63,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     Ok(())
 }
 
-fn run_dry(json: bool) -> Result<()> {
-    // Re-walk slots and predict orphans without deleting. We use the
-    // same classification as `template_prune_orphan_slots` but skip
-    // the delete step.
-    use mvm_core::manifest::PersistedManifest;
-
-    let mut would_remove: Vec<(String, String)> = Vec::new(); // (slot_hash, reason)
-    for slot_hash in tmpl::template_list_slot_hashes()? {
-        let dir = mvm_core::manifest::slot_dir(&slot_hash);
-        let persisted = PersistedManifest::read_from_slot(std::path::Path::new(&dir));
-        match persisted {
-            Ok(p) if !std::path::Path::new(&p.manifest_path).exists() => {
-                would_remove.push((slot_hash, format!("manifest gone: {}", p.manifest_path)));
-            }
-            Err(e) => {
-                would_remove.push((slot_hash, format!("unreadable manifest.json: {e}")));
-            }
-            Ok(_) => {}
-        }
-    }
-
+fn run_dry(json: bool, would_remove: Vec<PruneCandidate>) -> Result<()> {
     if json {
-        #[derive(serde::Serialize)]
-        struct Row {
-            slot_hash: String,
-            reason: String,
-        }
-        let rows: Vec<Row> = would_remove
-            .into_iter()
-            .map(|(slot_hash, reason)| Row { slot_hash, reason })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&rows)?);
+        println!("{}", serde_json::to_string_pretty(&would_remove)?);
         return Ok(());
     }
 
@@ -108,9 +76,34 @@ fn run_dry(json: bool) -> Result<()> {
             "(dry-run) Would remove {} orphaned slot(s):",
             would_remove.len()
         );
-        for (h, reason) in would_remove {
+        for PruneCandidate {
+            slot_hash: h,
+            reason,
+        } in would_remove
+        {
             println!("  {}  ({})", &h[..h.len().min(12)], reason);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn prune_keeps_its_explicit_mode_and_apply_default() {
+        let args = Harness::parse_from(["prune", "--orphans"]).args;
+        assert!(args.orphans);
+        assert!(!args.dry_run);
+        let args = Harness::parse_from(["prune", "--orphans", "--dry-run", "--json"]).args;
+        assert!(args.orphans && args.dry_run && args.json);
+    }
 }

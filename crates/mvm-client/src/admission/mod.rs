@@ -14,9 +14,12 @@ use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
-    AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run,
+    AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, RunPosture, SystemClock,
+    admit_for_run,
 };
+// The per-run nonce ledger is part of the admission request a frontend
+// builds, so the client re-exports it rather than having callers name hostd.
+pub use mvm_hostd::plan_admission::InMemoryNonceLedger;
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
@@ -2109,12 +2112,22 @@ pub(crate) mod admit_plan_tests {
         audit_dir: &std::path::Path,
         vm_name: &str,
     ) -> AdmissionContext {
+        admitted_outputs_into(keys_dir, audit_dir, vm_name, Vec::new(), Vec::new())
+    }
+
+    pub(crate) fn admitted_outputs_into(
+        keys_dir: &std::path::Path,
+        audit_dir: &std::path::Path,
+        vm_name: &str,
+        outputs: Vec<mvm_core::plan::OutputGrant>,
+        shares: Vec<mvm_core::plan::HostShareGrant>,
+    ) -> AdmissionContext {
         let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
             instructions: Default::default(),
-            outputs: Vec::new(),
+            outputs,
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name,
@@ -2137,7 +2150,7 @@ pub(crate) mod admit_plan_tests {
             bundle_pin: None,
             bundle_posture: None,
             deps_volume: None,
-            shares: Vec::new(),
+            shares,
             redaction: mvm_core::policy::RedactionPolicy::default(),
             tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),

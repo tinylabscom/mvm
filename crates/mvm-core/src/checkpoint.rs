@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 /// Stable identifier for a checkpoint (also its on-disk directory name under
 /// `config::checkpoints_dir()`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckpointId(String);
 
 impl CheckpointId {
@@ -37,6 +38,7 @@ impl std::fmt::Display for CheckpointId {
 /// there is no `From`/`Into`/`Deref` to or from any of them (nor to
 /// [`CheckpointId`]), so handing one where another is expected does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct CheckpointDigest(String);
 
@@ -113,6 +115,7 @@ pub enum CheckpointDigestParseError {
 /// implemented; `VmFull` is reserved so the memory-state path can slot into the
 /// same model without a new surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointClass {
     /// Copy-on-write clone of a quiesced rootfs (filesystem state only).
@@ -123,6 +126,7 @@ pub enum CheckpointClass {
 
 /// One named artifact inside a checkpoint's `content/` dir, with its hash.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ContentBlob {
     pub name: String,
@@ -136,6 +140,7 @@ pub struct ContentBlob {
 /// lineage verification fail. Storage code hashes this value before using it
 /// as a directory name; tenant-controlled text never becomes a path component.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct CheckpointKeyDomain(String);
 
@@ -291,6 +296,7 @@ pub struct DeviceAnchors {
 /// sits inside `CheckpointMeta`'s digest input, whichever encoding shipped
 /// first would freeze into every sealed record's `meta_digest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
 pub struct ApprovalHead(String);
 
@@ -376,6 +382,7 @@ pub enum ApprovalHeadParseError {
 /// `replay_input_digest`, when present, commits the encrypted input artifact
 /// executed immediately before this step was captured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SessionBinding {
     pub session_id: mvm_contract::protocol::agent_session::AgentSessionId,
@@ -401,6 +408,7 @@ pub struct SessionBinding {
 /// chain-signed entry is emitted; it and `meta_digest` are excluded from the
 /// digest so the backfill does not perturb the content-address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CheckpointMeta {
     pub id: CheckpointId,

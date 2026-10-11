@@ -56,6 +56,8 @@ pub mod manifest;
 // under the original path so every call site here is unchanged.
 use mvm_contract::oci::manifest_types;
 pub use mvm_contract::oci::{error, reference};
+#[cfg(test)]
+mod referrers_tests;
 mod registry;
 // Layer-to-tree unpacker. Public because callers outside this crate
 // (`mvm-build::rootfs::materialize_ext4`; `mvm-cli`'s `image run` verb)
@@ -79,7 +81,10 @@ pub use manifest::{FetchedManifest, ManifestFetcher, OciManifestFetcher, current
 pub use mvm_contract::oci::verify_sha256_digest;
 pub use mvm_contract::oci::{LinuxPlatform, matches_linux_platform};
 pub use reference::ImageReference;
-pub use registry::{BearerRefusal, ClientConfig, ClientProtocol, RegistryAuthConfig};
+pub use registry::{
+    BearerRefusal, ClientConfig, ClientProtocol, RegistryAuthConfig, RegistryClient,
+    RegistryResponse,
+};
 pub use unpack::{
     RefusalReason, RefusedEntry, UnpackError, UnpackOptions, UnpackReport, unpack_layer,
 };

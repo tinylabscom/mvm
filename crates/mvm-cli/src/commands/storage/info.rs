@@ -3,13 +3,10 @@
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use std::sync::Arc;
 
 use super::Cli;
+use mvm_client::storage::{self, InfoRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::storage::{
-    DeviceMapperBackend, DmsetupBackend, MockBackend, PoolConfig, ThinPool, ThinPoolImpl,
-};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -25,16 +22,11 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let backend: Arc<dyn DeviceMapperBackend> = if args.mock {
-        Arc::new(MockBackend::new())
-    } else {
-        Arc::new(DmsetupBackend::new())
-    };
-    let pool = ThinPoolImpl::new(PoolConfig::default(), backend);
-
-    let stats = match pool.stats() {
-        Ok(s) => s,
-        Err(e) => {
+    let report = storage::info(&InfoRequest { mock: args.mock })?;
+    let stats = match report.stats {
+        Some(s) => s,
+        None => {
+            let e = report.reason.as_deref().unwrap_or_default();
             // BackendUnavailable is the common case on macOS dev hosts
             // before phase 2 lands. Fall through to a "no pool" report
             // rather than fail the verb.
@@ -42,31 +34,31 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 println!(
                     "{}",
                     serde_json::json!({
-                        "pool": pool.config().name,
+                        "pool": report.pool,
                         "available": false,
                         "reason": e.to_string(),
                     })
                 );
             } else {
-                println!("pool {}: unavailable ({e})", pool.config().name);
+                println!("pool {}: unavailable ({e})", report.pool);
             }
             return Ok(());
         }
     };
-    let volumes = pool.list_volumes().unwrap_or_default();
+    let volumes = report.volumes;
 
     if args.json {
         println!(
             "{}",
             serde_json::json!({
-                "pool": pool.config().name,
+                "pool": report.pool,
                 "available": true,
                 "stats": stats,
                 "volumes": volumes,
             })
         );
     } else {
-        println!("pool: {}", pool.config().name);
+        println!("pool: {}", report.pool);
         println!(
             "  used: {} / {} bytes ({:.1}%)",
             stats.used_bytes,
@@ -74,13 +66,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             stats.fill_fraction() * 100.0
         );
         println!("  volumes: {}", stats.volume_count);
-        for name in &volumes {
-            if let Ok(vs) = pool.volume_stats(&mvm_runtime::storage::VolumeId::new(name)) {
-                println!(
-                    "    {name}: {} / {} bytes",
-                    vs.used_bytes, vs.virtual_size_bytes
-                );
-            }
+        for vs in &report.volume_stats {
+            let name = &vs.name;
+            println!(
+                "    {name}: {} / {} bytes",
+                vs.used_bytes, vs.virtual_size_bytes
+            );
         }
     }
 

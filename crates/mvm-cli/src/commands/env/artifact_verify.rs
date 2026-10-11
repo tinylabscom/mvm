@@ -1,7 +1,7 @@
 //! Artifact download + SHA-256 integrity verification for the dev-image
 //! / builder-VM fetch paths.
 //!
-//! These are the generic "pull a file over curl and check it against the
+//! These are the generic "transfer a file in-process and check it against the
 //! published checksum manifest" helpers that back hash-verified downloads;
 //! the dev-image and builder-VM download orchestration in
 //! `builder_vm.rs` calls them.
@@ -11,9 +11,6 @@
 //! whoever answered the request.
 
 use anyhow::{Context, Result};
-
-#[cfg(test)]
-use crate::ui;
 
 /// Bump the dev_image_verify_<outcome> counter.
 ///
@@ -28,29 +25,7 @@ use crate::ui;
 /// alerting channel; the audit line is the forensics channel.
 #[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
-    let m = mvm_core::observability::metrics::global();
-    let counter = match outcome {
-        "sig_invalid" => &m.dev_image_verify_sig_invalid,
-        "digest_mismatch" => &m.dev_image_verify_digest_mismatch,
-        "version_skew" => &m.dev_image_verify_version_skew,
-        "revoked" => &m.dev_image_verify_revoked,
-        "expired" => &m.dev_image_verify_expired,
-        "network" => &m.dev_image_verify_network,
-        // Defensive: an unknown outcome is itself a bug worth surfacing
-        // — log a warning rather than silently swallowing the metric.
-        _ => {
-            tracing::warn!("bump_verify_outcome: unknown outcome '{outcome}'");
-            return;
-        }
-    };
-    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if outcome != "network" {
-        let mvmctl_version = env!("CARGO_PKG_VERSION");
-        mvm_core::audit_emit!(
-            ImageVerifyFailed,
-            "outcome={outcome} mvmctl_version={mvmctl_version}"
-        );
-    }
+    mvm_client::builder_images::verification::bump_verify_outcome(outcome);
 }
 
 /// A published checksum manifest, named the way the signature rung needs it.
@@ -61,24 +36,7 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
 #[cfg(test)]
-pub(crate) struct ChecksumManifest<'a> {
-    /// Per-version release base URL, no trailing slash.
-    pub base_url: &'a str,
-    /// The manifest's published asset name, e.g. `kernel-aarch64-checksums-sha256.txt`.
-    pub asset: &'a str,
-    /// Release version whose signing identity is accepted for this manifest.
-    pub version: &'a str,
-    /// Which release train published the manifest, and therefore which
-    /// workflow identity may have signed it.
-    pub train: mvm_build::release_signature::ReleaseTrain,
-}
-
-#[cfg(test)]
-impl ChecksumManifest<'_> {
-    fn url(&self) -> String {
-        format!("{}/{}", self.base_url, self.asset)
-    }
-}
+pub(crate) use mvm_client::builder_images::verification::ChecksumManifest;
 
 /// Download the per-release `sha256sum`-format checksum file, prove it against
 /// the release's Sigstore bundle, and parse it into a `name -> hex-digest` map
@@ -183,79 +141,7 @@ pub(crate) fn verify_artifact_hash(
     name: &str,
     expected: Option<&String>,
 ) -> Result<()> {
-    if std::env::var_os("MVM_SKIP_HASH_VERIFY").is_some() {
-        tracing::warn!(
-            "MVM_SKIP_HASH_VERIFY set — skipping integrity check on {name}. \
-             ADR-002 §W5.1 documents this as an emergency-rotation escape hatch."
-        );
-        return Ok(());
-    }
-    let Some(expected) = expected else {
-        // fetch_expected_hashes already enforced presence, but defend
-        // against a refactor that decouples the steps.
-        anyhow::bail!("internal: no expected hash recorded for {name}");
-    };
-
-    use sha2::{Digest, Sha256};
-    use std::io::Read as _;
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("Failed to open downloaded artifact at {path}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .with_context(|| format!("Failed to hash downloaded artifact at {path}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let actual = hex::encode(hasher.finalize());
-
-    if actual != *expected {
-        let _ = std::fs::remove_file(path);
-        bump_verify_outcome("digest_mismatch");
-        anyhow::bail!(
-            "Integrity check failed for {name}.\n\
-             expected sha256: {expected}\n\
-             actual   sha256: {actual}\n\
-             \n\
-             The downloaded artifact does not match the published checksum.\n\
-             Refusing to use it. Possible causes:\n\
-             - mid-flight corruption (retry the download);\n\
-             - mirror/CDN cache poisoning (open an issue);\n\
-             - the release was re-uploaded and the manifest is stale.\n\
-             ADR-002 §W5.1."
-        );
-    }
-    ui::info(&format!("  ✓ verified {name} sha256={}", &actual[..12]));
-    Ok(())
-}
-
-/// Build the curl argv for a (resumable) download to `dest`.
-/// `-C -` resumes from a partial `dest` if present; on a fresh or
-/// already-complete file curl handles it gracefully. Corruption is
-/// still caught downstream by the SHA-256 gate (`verify_artifact_hash`),
-/// which deletes on mismatch so the next run restarts clean.
-/// Transient transport failures are retried three times with a short fixed
-/// delay. HTTP failures remain visible through `-f`, and no downloaded bytes
-/// are trusted until the existing signature and digest gates accept them.
-pub(super) fn curl_download_args(dest: &str, url: &str) -> Vec<String> {
-    vec![
-        "-fSL".to_string(),
-        "--progress-bar".to_string(),
-        "--retry".to_string(),
-        "3".to_string(),
-        "--retry-delay".to_string(),
-        "2".to_string(),
-        "--retry-all-errors".to_string(),
-        "-C".to_string(),
-        "-".to_string(),
-        "-o".to_string(),
-        dest.to_string(),
-        url.to_string(),
-    ]
+    mvm_client::builder_images::verification::verify_artifact_hash(path, name, expected)
 }
 
 fn download_failure_message() -> String {
@@ -275,36 +161,16 @@ fn download_failure_message() -> String {
     )
 }
 
-/// Acquire the image set this build pins, fetching through [`download_file`]
-/// so a large member resumes, retries, and reports progress on a terminal.
+/// Acquire the pinned image set through the client-owned verified operation.
 pub(crate) fn acquire_image_set() -> Result<mvm_build::published_image_set::PublishedImageSet> {
-    mvm_build::published_image_set::PublishedImageSet::acquire_from(
-        mvm_build::published_image_set::ImageSetSource::locked().with_download(download_to),
-    )
+    mvm_client::builder_images::acquisition::acquire_image_set()
 }
 
-fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
-    download_file(url, &dest.to_string_lossy())
-}
-
-/// Download a file from a URL using curl, resuming a partial `dest`.
+/// Use the shared in-process transport and add CLI recovery guidance.
+/// Retries restart in private staging; only complete responses replace `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = mvm_core::env_hygiene::helper_command("curl")
-        .args(curl_download_args(dest, url))
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .context("Failed to run curl")?;
-
-    if !status.success() {
-        // Keep any partial file: curl's `-C -` resumes it on the next
-        // run. It's never hash-accepted while incomplete — verify runs
-        // only after a successful download, and the SHA-256 gate deletes
-        // on mismatch — so leaving it is safe and saves re-fetching.
-        anyhow::bail!("{}", download_failure_message());
-    }
-    Ok(())
+    mvm_build::artifact_download::download(url, std::path::Path::new(dest))
+        .with_context(download_failure_message)
 }
 
 #[cfg(test)]
@@ -314,30 +180,18 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     #[test]
-    fn curl_download_args_request_resume() {
-        let args = curl_download_args("/tmp/out", "https://example/x");
-        assert!(
-            args.contains(&"-C".to_string()),
-            "must pass -C for resume: {args:?}"
-        );
-        assert!(
-            args.windows(2).any(|w| w == ["-C", "-"]),
-            "expected `-C -`: {args:?}"
-        );
-        assert!(args.contains(&"-fSL".to_string()));
-        assert!(
-            args.windows(2).any(|w| w == ["--retry", "3"]),
-            "expected three bounded retries: {args:?}"
-        );
-        assert!(
-            args.windows(2).any(|w| w == ["--retry-delay", "2"]),
-            "expected a fixed retry delay: {args:?}"
-        );
-        assert!(
-            args.contains(&"--retry-all-errors".to_string()),
-            "connection resets must be retried: {args:?}"
-        );
-        assert_eq!(args.last().unwrap(), "https://example/x");
+    fn download_adapter_preserves_bytes_and_adds_recovery_context() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("destination");
+        std::fs::write(&source, b"artifact").unwrap();
+        let url = mvm_http::Url::from_file_path(&source).unwrap();
+        download_file(url.as_str(), destination.to_str().unwrap()).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"artifact");
+        std::fs::remove_file(source).unwrap();
+        let error = download_file(url.as_str(), destination.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("Download failed"));
+        assert_eq!(std::fs::read(destination).unwrap(), b"artifact");
     }
 
     #[test]

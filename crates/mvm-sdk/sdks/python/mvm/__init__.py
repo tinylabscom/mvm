@@ -161,14 +161,25 @@ from mvm._runtime.runtime import (
 # first call, never at import — so this stays inert in host authoring use.
 from mvm import audit, host, kv
 
-# Host-side built-manifest inspection; the host library loads only on use.
-from mvm import manifest
+# Host-side operations; the host library loads only on use.
+from mvm import bundle, maintenance, manifest, storage
+from mvm import agent_sessions, artifact, checkpoints, posture, replay, volumes, workspaces
 
 __all__ = [
+    "artifact",
+    "agent_sessions",
+    "checkpoints",
+    "replay",
+    "posture",
+    "volumes",
+    "workspaces",
     "audit",
     "host",
     "kv",
+    "maintenance",
     "manifest",
+    "storage",
+    "bundle",
     "DEFAULT_TTL_SECONDS",
     "MVM_HOSTLIB_PATH_ENV",
     "MVM_SDK_MODE_ENV",

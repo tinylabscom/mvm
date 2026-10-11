@@ -30,9 +30,23 @@ pub const PAYLOAD_FILE_NAME: &str = "boot-payload.cpio";
 pub trait BootPayloadSource: Send + Sync {
     /// Assemble the payload for one boot.
     fn boot_payload(&self) -> Result<BuilderBootPayload, BootPayloadError>;
+
+    /// Verified host binaries for persistent dispatch. Payload-only providers
+    /// need not support this; callers must not substitute an unverified tree.
+    fn host_bin_dir(&self) -> Result<Option<PathBuf>, BootPayloadError> {
+        Ok(None)
+    }
 }
 
 static SOURCE: OnceLock<Box<dyn BootPayloadSource>> = OnceLock::new();
+
+/// Ask the registered payload provider for its verified host binary tree.
+pub fn registered_host_bin_dir() -> Result<Option<PathBuf>, BootPayloadError> {
+    match SOURCE.get() {
+        Some(source) => source.host_bin_dir(),
+        None => Ok(None),
+    }
+}
 
 /// Register the payload source. Called once at CLI startup; later calls are
 /// ignored.
@@ -207,6 +221,12 @@ mod tests {
         fn boot_payload(&self) -> Result<BuilderBootPayload, BootPayloadError> {
             BuilderBootPayload::builder().host_bin_dir(&self.0).build()
         }
+    }
+
+    #[test]
+    fn payload_only_sources_do_not_offer_an_unverified_host_tree() {
+        let source = FakeSource(PathBuf::from("/unverified-tree"));
+        assert_eq!(source.host_bin_dir().unwrap(), None);
     }
 
     fn image_with_marker(dir: &Path, marker: Option<&str>) -> PathBuf {

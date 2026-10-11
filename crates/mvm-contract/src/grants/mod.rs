@@ -27,6 +27,7 @@ pub use display::{
 /// "unspecified", which each dimension resolves differently — an absent
 /// `egress` is deny-all, an absent `cpu` is uncapped.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Grants {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,6 +49,7 @@ pub struct Grants {
 /// and no conversion between them is offered: a share is a fraction of host
 /// wall-clock CPU, fuel is a count of executed instructions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "unit", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CpuGrant {
     /// Thousandths of one host core. 1500 = 1.5 cores. Integer because the
@@ -66,6 +68,7 @@ pub enum CpuGrant {
 /// mean "no time allowed" would get "no limit" — the exact inversion of their
 /// intent. `NonZeroU32` makes that unrepresentable here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WallClockGrant {
     Unbounded,
@@ -76,6 +79,7 @@ pub enum WallClockGrant {
 /// an absent `EgressGrant`, which is also deny-all — both are closed, so the
 /// distinction never opens anything.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct EgressGrant {
     pub allow: Vec<HostPort>,

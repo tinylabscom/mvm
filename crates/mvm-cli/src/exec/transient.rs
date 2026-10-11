@@ -64,7 +64,7 @@ pub(super) fn boot_transient_vm(
     // this on-use reap is what enforces the standby TTL between invocations —
     // without it a one-off run (or runs against different images) leaves warm
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
-    crate::commands::pool::reap_stale_standbys_best_effort();
+    mvm_client::pool::reap_stale_standbys_best_effort();
     report_phase("standby_reap");
 
     if let Some(marks) = warm_claim_marks.as_mut() {
@@ -81,7 +81,7 @@ pub(super) fn boot_transient_vm(
     // is returned as an actionable error; only an ineligible launch shape
     // proceeds cold.
     let (vm_name, warm_claimed) =
-        match crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, false) {
+        match mvm_client::pool::try_warm_claim(attempt.backend, attempt.start_config, false) {
             Ok(Some(id)) => {
                 ui::info(&format!(
                     "Claimed a warm standby ({}) — skipping cold boot.",

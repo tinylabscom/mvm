@@ -10,6 +10,123 @@ use mvm_core::template::SnapshotInfo;
 use mvm_runtime::vm::template::lifecycle as tmpl;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod operation_tests;
+mod operations;
+pub use operations::{
+    ExportOciReport, ExportOciRequest, PruneCandidate, PruneReport, PruneRequest, RemoveReport,
+    RemoveRequest, export_oci, prune, remove,
+};
+
+/// Shared argument semantics with launch, including alias and wasm refusals.
+pub(crate) fn resolve_artifact_key(template: &str) -> Result<String> {
+    match crate::launch::manifest_ref::resolve_manifest_arg(template)? {
+        crate::launch::manifest_ref::ManifestArgRef::Slot { slot_hash } => {
+            let spec = tmpl::template_load_dispatched(&slot_hash)?;
+            anyhow::ensure!(
+                spec.template_id == slot_hash,
+                "template records mismatched identity"
+            );
+            Ok(slot_hash)
+        }
+        crate::launch::manifest_ref::ManifestArgRef::WasmModule { .. } => {
+            anyhow::bail!("a wasm manifest has no template artifacts to export")
+        }
+    }
+}
+
+/// Runtime artifact dispatch validates revision labels; this boundary also
+/// confines symlink targets before exporting bytes or signing them.
+pub(crate) fn checked_artifact(key: &str, path: &Path) -> Result<PathBuf> {
+    anyhow::ensure!(
+        mvm_core::manifest::is_slot_hash_dirname(key),
+        "invalid artifact key"
+    );
+    let slot = PathBuf::from(mvm_core::manifest::slot_dir(key));
+    let base = if slot.exists() {
+        PathBuf::from(mvm_core::template::templates_base_dir())
+    } else {
+        mvm_core::config::bundles_dir()
+    };
+    let base = base.canonicalize()?;
+    let root = base.join(key).canonicalize()?;
+    anyhow::ensure!(
+        root.parent() == Some(base.as_path()),
+        "artifact registry entry escapes registry"
+    );
+    let file = path.canonicalize()?;
+    anyhow::ensure!(
+        file.starts_with(&root) && file.is_file(),
+        "artifact escapes registry entry or is not a regular file"
+    );
+    Ok(file)
+}
+
+/// Do not let an export (or optional source deletion) overwrite runtime state,
+/// keys, or the artifact registry. Resolve existing parents even for new files.
+pub(crate) fn check_export_destination(path: &Path) -> Result<()> {
+    let resolved = resolve_export_path(path)?;
+    for protected in [
+        PathBuf::from(mvm_core::template::templates_base_dir()),
+        mvm_core::config::bundles_dir(),
+        mvm_core::config::mvm_keys_dir(),
+        mvm_core::config::vm_state_dir(""),
+        mvm_core::config::machine_state_root(),
+    ] {
+        let protected = resolve_export_path(&protected)?;
+        anyhow::ensure!(
+            !resolved.starts_with(protected),
+            "output targets protected runtime resources"
+        );
+    }
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("inspecting export destination"),
+    };
+    if let Some(metadata) = metadata {
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink() && metadata.is_file(),
+            "output must be a regular file, not a symlink"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            anyhow::ensure!(metadata.nlink() == 1, "output must not be hard-linked");
+        }
+    }
+    Ok(())
+}
+
+/// Resolve existing components before interpreting `..`, and preserve absent
+/// suffixes. The same rule applies to destinations and not-yet-created roots.
+fn resolve_export_path(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+    let absolute = std::path::absolute(path)?;
+    let mut resolved = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => {
+                resolved.push(other.as_os_str());
+                match std::fs::symlink_metadata(&resolved) {
+                    Ok(_) => {
+                        resolved = resolved
+                            .canonicalize()
+                            .context("resolving export path component")?;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("inspecting export path component"),
+                }
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// Filters for built slots. Tags have intersection semantics.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -178,7 +295,7 @@ mod tests {
     use serde_json::json;
     use sha2::{Digest, Sha256};
 
-    fn fixture(root: &Path, name: Option<&str>) -> (PathBuf, PersistedManifest) {
+    pub(super) fn fixture(root: &Path, name: Option<&str>) -> (PathBuf, PersistedManifest) {
         std::fs::create_dir_all(root).unwrap();
         let path = root.join("mvm.toml");
         std::fs::write(

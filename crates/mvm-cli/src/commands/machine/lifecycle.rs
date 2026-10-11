@@ -1,6 +1,5 @@
 use super::*;
-use crate::commands::vm::up;
-use crate::commands::{image, shared};
+use crate::commands::shared;
 
 pub(super) fn run_start(cmd: MachineStartCmd) -> Result<()> {
     if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
@@ -116,12 +115,12 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         policy: &args.create_flags.policy,
         project: manifest_source.as_ref().map(|source| &source.project),
     })?;
-    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.create_flags.force)?;
-    let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
-        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
-    };
-    Ok((spec, action))
+    mvm_client::launch::detached::resolve_spec(
+        &args.name,
+        Some(desired),
+        existing,
+        args.create_flags.force,
+    )
 }
 
 pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
@@ -139,28 +138,22 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         }
         return Ok(());
     }
-    if machine_is_running(&args.name) {
-        match action {
-            SpecReconcile::Reuse => {
-                println!("{}", already_running_notice(&args.name, args.json));
-                return Ok(());
-            }
-            SpecReconcile::Recreate { ref changed } => {
-                eprintln!(
-                    "machine {:?}: config changed ({changed}) — stopping the old instance and recreating it",
-                    args.name
-                );
-                stop_running_machine(&args.name);
-            }
-            SpecReconcile::Create => {
-                // A freshly-created spec cannot already be running; proceed to save and boot.
-            }
-        }
+    if let SpecReconcile::Recreate { ref changed } = action {
+        eprintln!(
+            "machine {:?}: config changed ({changed}) — stopping the old instance and recreating it",
+            args.name
+        );
     }
-    match action {
-        SpecReconcile::Create => save_machine_spec(&spec, false)?,
-        SpecReconcile::Recreate { .. } => overwrite_machine_spec(&spec)?,
-        SpecReconcile::Reuse => {}
+    if !mvm_client::launch::detached::persist_for_start(
+        mvm_client::launch::detached::DetachedBoot {
+            name: &args.name,
+            spec: &spec,
+            action,
+            secret_refs: None,
+        },
+    )? {
+        println!("{}", already_running_notice(&args.name, args.json));
+        return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
     enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
@@ -172,7 +165,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let started = mvm_client::launch::machine_start::start_machine_spec(
         &spec,
-        &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
+        &prepared_start_host(&spec, args.kernel_pin.is_some())?,
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
@@ -185,21 +178,12 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
     }
-    mark_machine_started(&mut spec, boot_digest);
-    let started_at = spec
-        .last_started_at
-        .clone()
-        .expect("mark_machine_started always stamps last_started_at");
-    if let Err(err) = overwrite_machine_spec(&spec) {
-        tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
-    }
+    let recorded =
+        mvm_client::launch::machine_start::record_started_definition(&mut spec, boot_digest);
     let outcome = MachineStartReceiptOutcome {
-        resolved_digest: spec
-            .resolved_digest
-            .clone()
-            .expect("mark_machine_started always stamps resolved_digest"),
-        started_at,
-        init_commands_executed: spec.init.len(),
+        resolved_digest: recorded.resolved_digest,
+        started_at: recorded.started_at,
+        init_commands_executed: recorded.init_commands_executed,
     };
     if let Some(path) = args.receipt.as_deref() {
         write_machine_start_receipt(path, receipt_input.clone(), outcome.clone())?;
@@ -214,79 +198,16 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     Ok(())
 }
 
-/// How the CLI supplies a machine start with what differs by process: it may
-/// build the workload kernel through the builder VM, and it prepares volumes
-/// through its mount cache.
-pub(super) struct CliStartHost {
-    /// `--kernel-pin` was passed: boot the pinned kernel.
+pub(super) fn prepared_start_host(
+    spec: &MachineSpec,
     kernel_pinned: bool,
-    /// The profile the machine's stored spec names. Its registered volumes
-    /// are leased under it, so a writable one is admitted exactly where a
-    /// writable `--mount` disk image is; a name that is not a profile admits
-    /// nothing writable.
-    profile: mvm_client::volume::AdmittedProfile,
-}
-
-impl CliStartHost {
-    pub(super) fn for_spec(spec: &MachineSpec, kernel_pinned: bool) -> Self {
-        let profile = mvm_client::profile::RunProfile::from_name(&spec.profile)
-            .map(mvm_client::volume::AdmittedProfile::new)
-            .unwrap_or_default();
-        Self {
-            kernel_pinned,
-            profile,
-        }
-    }
-}
-
-impl mvm_client::launch::machine_start::StartHost for CliStartHost {
-    /// The CLI boots an explicit kernel on every backend: the pinned one, or a
-    /// workload kernel prepared by `mvmctl bootstrap`. Launch never acquires
-    /// one on a cache miss.
-    fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
-        match up::resolve_kernel_pin_path(self.kernel_pinned)? {
-            Some(kernel_path) => Ok(Some(kernel_path)),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
-        }
-    }
-
-    fn resolve_image(
-        &self,
-        reference: &str,
-    ) -> Result<mvm_client::launch::machine_start::BootImage> {
-        let cached = image::resolve_or_pull_run_image(&image::oci_cache_root(), reference, false)?;
-        if cached.pulled {
-            let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-            mvm_core::audit_emit!(
-                ImageFetch,
-                "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
-                cached.reference,
-                cached.resolved_digest,
-                cached.provenance.layer_digests.len(),
-                cached.provenance.trust_policy,
-                cached.provenance.verification_status,
-                auth_source
-            );
-        }
-        Ok(mvm_client::launch::machine_start::BootImage {
-            label: cached.reference.clone(),
-            rootfs: cached.rootfs_path.clone(),
-            digest: cached.resolved_digest.clone(),
-        })
-    }
-
-    fn prepare_volumes(
-        &self,
-        name: &str,
-        volume_specs: &[String],
-    ) -> Result<mvm_client::volume::LaunchPreparation> {
-        let volume_cfg = build_machine_volume_cfg(volume_specs)?;
-        crate::commands::vm::volume::merge_registered_volumes_for_launch(
-            name,
-            &volume_cfg,
-            self.profile,
-        )
-    }
+) -> Result<mvm_client::launch::prepared_start::PreparedStartHost> {
+    let volumes = build_machine_volume_cfg(&spec.volumes)?;
+    Ok(mvm_client::launch::prepared_start::PreparedStartHost::new(
+        &spec.profile,
+        kernel_pinned,
+        volumes,
+    ))
 }
 
 /// Gate `machine shell` / `machine exec` on the machine existing at all,

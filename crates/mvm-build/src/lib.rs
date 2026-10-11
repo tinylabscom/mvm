@@ -3,6 +3,7 @@ pub mod app_deps_gate;
 /// Compiled distribution channel and the default build-vs-download contract
 /// shared by every launch-critical artifact resolver.
 pub mod artifact_acquisition;
+pub mod artifact_download;
 pub mod backend;
 /// Production admission gate over the base-image sidecar pair: missing
 /// scan, foreign shape, digest mismatch, or a high/critical finding

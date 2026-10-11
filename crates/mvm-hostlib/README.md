@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.5.
+   fields. The ABI is 1.8.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -43,6 +43,83 @@ gen-stubs` renders it into `schema/host-abi-v0.json` and
 classes and method tables for both SDKs.
 
 ### Methods
+
+ABI 1.8 extends host-local maintenance with `manifest.remove`,
+`manifest.prune`, `manifest.export_oci`, `storage.info`, `storage.gc`, and
+`bundle.export`. Like manifest inspection, these are classified `ProdSafe`,
+not guest-agent verbs. That classification is not a host privilege grant:
+they run with the embedding process's host permissions, may invoke local
+helpers, and are not a guest protocol. No runtime driver or private signing
+key can be supplied over the ABI.
+
+Requests and reports are the client's types. Removal takes `path` (cwd
+discovery when omitted), `force=false`, and `manifest_file=false`, with no
+interactive prompt. Prune requires `orphans=true` and defaults to
+`dry_run=true`; unlike the CLI, programmatic callers must explicitly apply.
+Storage inspection takes `mock=false`; collection takes `apply=false`,
+`mock=false`, and `keep_prefix=[]` (matching volume names are retained).
+An unavailable pool is represented in the report.
+
+Both exports require `template` and the host output path `out`. Bundle export
+also accepts `label`, a host `cmdline` file path, and optional `posture`
+(`profile`, `allow_egress`, `allow_volumes`, `allow_unauthenticated`; all allow
+flags default false). It signs with the host key, never returns key material,
+and reports `path`, `size_bytes`, and `key_id`. OCI export reports `slot_hash`,
+`path`, and `size_bytes`. Removal reports slot/source identity and whether the
+source was deleted; prune/GC reports identify candidates and actual removals.
+Client error chains and opaque report fields are preserved by both SDKs.
+
+The same unreleased ABI 1.8 batch also exposes these host-local families:
+
+| ABI methods | Python / TypeScript namespace | Contract |
+|---|---|---|
+| `artifact.inspect`, `artifact.validate`, `artifact.configure_firecracker` | `artifact` | Published ID or unique prefix; configuration writing is explicit. |
+| `volume.list`, `volume.inspect`, `volume.create`, `volume.unlock`, `volume.lock`, `volume.mount`, `volume.detach`, `volume.attachments`, `volume.snapshot`, `volume.restore` | `volumes` | Client-owned encryption, profile admission, recovery and lease checks; mounting defaults read-only. |
+| `workspace.review`, `workspace.apply`, `workspace.undo`, `workspace.redo` | `workspaces` | Registered workspaces only; no caller-assembled plan or global approval handle. |
+| `audit.sessions.list`, `audit.sessions.show`, `audit.sessions.verify` | `audit.sessions` | Configured trust context and verified tenant chains; no raw unchecked lines or supplied keys. |
+| `posture.inspect` | `posture` | Configured host only; no root or trust-key override. |
+
+Plural `volumes` and `workspaces` distinguish host operations from authored
+declarations. Existing `audit.emit` / `emit_batch` (`emitBatch` in TypeScript)
+remain the in-guest host-service operations. Session queries are host-library
+calls, not additional guest protocol verbs.
+
+`workspace.review` can recover interrupted changes before reviewing: it is not
+strictly read-only. Its reply contains `workspace`, `recoveries`, and `review`.
+The review status is `unchanged`, `refused` (with safe path/action summary and
+refusal reasons), or `ready` (with summary and fingerprint). Mandatory protected
+defaults remain enabled; `protected_paths` only adds protection. Apply takes
+`{workspace, expected_fingerprint, approved}`; the client freshly reviews,
+compares the fingerprint, then immediately revalidates before mutation. The SDK
+requires a fingerprint argument and defaults approval to false. Undo/redo also
+default approval to false. Recovery reports remain visible on successful calls,
+and completed recovery is included in error context if later work fails.
+
+For example, explicit Python approval after reviewing the report:
+
+```python
+review = mvm.workspaces.review("worker", volume="source")
+print(review["recoveries"], review["review"])
+# Only after the application obtains approval for this exact review:
+if review["review"]["status"] == "ready":
+    result = mvm.workspaces.apply(
+        "worker", review["review"]["fingerprint"],
+        volume="source", approved=True,
+    )
+```
+
+Volume creation uses MiB (`capacity_mib` / `capacityMib`) and starts locked.
+Unlock delegates to the existing configured key provider; no key bytes cross
+the ABI. A host-directory mount delegates to the shared host-snapshot operation,
+including host encryption verification. Snapshot and restore retain the client's
+locked-state, attached-volume and integrity refusals. Lifecycle reads can also
+recover interrupted work.
+
+Audit session queries default to tenant `local`. Date bounds are RFC 3339
+strings validated by Rust. A missing chain returns an empty session list with
+`ledger: null`, not a claim that a chain was verified. Verification verdicts,
+including `NOT_FOUND`, `UNSEALED` and `MISMATCH`, are report data rather than SDK
+exceptions. Operational failures retain their complete client error chain.
 
 | Family | Methods | Answered by |
 |---|---|---|

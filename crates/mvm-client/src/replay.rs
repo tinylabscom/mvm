@@ -9,6 +9,114 @@ use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 
 use crate::checkpoint::Checkpoints;
 
+pub mod input_journal;
+mod session_run;
+pub use session_run::{SessionReplayRunReport, SessionReplayRunRequest};
+
+/// Select a signed session timeline without exposing its encrypted input store.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct SessionReplayRequest {
+    pub session_id: String,
+    pub from: Option<String>,
+    pub as_name: Option<String>,
+}
+
+/// Public metadata for one encrypted input. Never contains prompt bytes.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionReplayInput {
+    pub journal_cursor: u64,
+    pub artifact_digest: String,
+}
+
+/// A validated replay selection suitable for dry-run output and host APIs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionReplaySummary {
+    pub checkpoint: CheckpointId,
+    pub session_id: String,
+    pub generation: u64,
+    pub checkpoint_cursor: u64,
+    pub restored_name: String,
+    pub inputs: Vec<SessionReplayInput>,
+}
+
+/// Replay outcome without runtime implementation types.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionReplayReport {
+    pub applied: usize,
+    pub duplicates: usize,
+    pub last_cursor: u64,
+    pub nonzero_exits: Vec<(u64, i32)>,
+}
+
+/// An opaque, validated session replay. Neither serializable nor debug-printable.
+///
+/// Input references and decryption state stay client-owned. Dispatch rechecks
+/// encrypted artifacts and the destination's admitted prompt grant.
+pub struct PreparedSessionReplay {
+    plan: mvm_runtime::agent_session::replay::ReplayPlan,
+    inputs: mvm_runtime::agent_session::replay_input::ReplayInputStore,
+    summary: SessionReplaySummary,
+}
+
+impl PreparedSessionReplay {
+    pub(crate) fn new(
+        plan: mvm_runtime::agent_session::replay::ReplayPlan,
+        inputs: mvm_runtime::agent_session::replay_input::ReplayInputStore,
+        restored_name: String,
+    ) -> Self {
+        let summary = SessionReplaySummary {
+            checkpoint: plan.checkpoint.clone(),
+            session_id: plan.session_id.as_str().to_owned(),
+            generation: plan.generation,
+            checkpoint_cursor: plan.checkpoint_cursor,
+            restored_name,
+            inputs: plan
+                .inputs
+                .iter()
+                .map(|input| SessionReplayInput {
+                    journal_cursor: input.binding.journal_cursor,
+                    artifact_digest: input.artifact_digest.clone(),
+                })
+                .collect(),
+        };
+        Self {
+            plan,
+            inputs,
+            summary,
+        }
+    }
+
+    pub fn summary(&self) -> &SessionReplaySummary {
+        &self.summary
+    }
+
+    /// Deliver only to the target selected during preparation.
+    pub fn dispatch(
+        &self,
+        timeout_secs: u64,
+        observer: &mut dyn crate::entrypoint::CallObserver,
+    ) -> Result<SessionReplayReport> {
+        let replayed = crate::agent_prompt::replay::replay_onto(
+            &self.summary.restored_name,
+            &self.plan,
+            &self.inputs,
+            timeout_secs,
+            observer,
+        )?;
+        Ok(SessionReplayReport {
+            applied: replayed.report.applied,
+            duplicates: replayed.report.duplicates,
+            last_cursor: replayed.report.last_cursor,
+            nonzero_exits: replayed.nonzero_exits,
+        })
+    }
+}
+
 /// The source state and collision-free target selected for a replay.
 #[derive(Debug)]
 pub struct ReplaySource {
@@ -30,6 +138,11 @@ impl ReplayService {
 
     pub fn with_checkpoints(checkpoints: Checkpoints) -> Self {
         Self { checkpoints }
+    }
+
+    /// Verify the signed session timeline and every selected encrypted input.
+    pub fn prepare_session(&self, request: &SessionReplayRequest) -> Result<PreparedSessionReplay> {
+        self.checkpoints.prepare_session_replay(request)
     }
 
     /// Load the replay source and choose a target that does not overwrite a

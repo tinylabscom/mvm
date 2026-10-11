@@ -13,17 +13,15 @@ use crate::ui;
 
 use std::path::PathBuf;
 
+#[cfg(test)]
 use ed25519_dalek::VerifyingKey;
-use mvm_client::audit::{AuditSourceId, AuditSourceKind, LocalAuditReader};
-use mvm_contract::merkle::{InclusionProof, SignedAuditRoot, verify_membership};
+use mvm_client::audit::{AuditSourceId, AuditSourceKind};
+#[cfg(test)]
+use mvm_contract::merkle::{InclusionProof, SignedAuditRoot};
 use mvm_core::user_config::MvmConfig;
-use mvm_hostd::supervisor::SignedEnvelope;
 
-use super::super::vm::audit_chain::{AuditEmitter, audit_path_for_tenant, default_audit_dir};
-use super::super::vm::host_signer;
 use super::Cli;
-use mvm_contract::provenance::DecisionId;
-use mvm_hostd::audit::decisions::DecisionStore;
+use mvm_client::audit::query::{self, DecisionRequest};
 
 use inspect::audit_tail;
 
@@ -494,20 +492,12 @@ fn audit_provenance_export(
     output: Option<&std::path::Path>,
     local: bool,
 ) -> Result<()> {
-    use std::io::BufReader;
-
-    let (reader, source_name): (Box<dyn std::io::BufRead>, &str) = if local {
-        let path = mvm_core::policy::audit::default_audit_log();
-        let file = std::fs::File::open(&path)
-            .with_context(|| format!("opening local audit log: {path}"))?;
-        (Box::new(BufReader::new(file)), "local audit log")
+    let (source, source_name) = if local {
+        (query::ProvenanceSource::LocalLog, "local audit log")
     } else {
-        let dir = default_audit_dir().context("resolving audit directory")?;
-        let path = audit_path_for_tenant(&dir, tenant);
-        let file = std::fs::File::open(&path)
-            .with_context(|| format!("opening chain-signed audit log: {}", path.display()))?;
-        (Box::new(BufReader::new(file)), "tenant audit chain")
+        (query::ProvenanceSource::TenantChain, "tenant audit chain")
     };
+    let bytes = query::export_provenance(tenant, source)?;
 
     let mut output_writer: Box<dyn Write> = match output {
         Some(path) => {
@@ -518,13 +508,14 @@ fn audit_provenance_export(
         None => Box::new(std::io::stdout()),
     };
 
-    if local {
-        mvm_core::provenance::export_local_audit_log(reader, &mut output_writer)
-            .context("exporting local audit log to PROV-O")?;
-    } else {
-        mvm_core::provenance::export_tenant_audit_log(reader, &mut output_writer)
-            .context("exporting tenant audit log to PROV-O")?;
-    }
+    output_writer
+        .write_all(&bytes)
+        .context("Failed to write Turtle output")
+        .context(if local {
+            "exporting local audit log to PROV-O"
+        } else {
+            "exporting tenant audit log to PROV-O"
+        })?;
 
     if output.is_none() {
         // Ensure stdout ends with a newline when writing to a terminal.
@@ -560,25 +551,13 @@ pub(in crate::commands) struct ExportArgs {
     pub full_chain: bool,
 }
 
-impl ExportArgs {
-    /// Scope the archive covers.
-    ///
-    /// `--full-chain` wins over `--plan-id`: asking for the whole chain and a
-    /// single plan at once is contradictory, and the wider scope is the one a
-    /// verifier can actually check.
-    fn scope(&self) -> mvm_core::receipt_archive::ArchiveScope {
-        match (&self.plan_id, self.full_chain) {
-            (Some(plan_id), false) => mvm_core::receipt_archive::ArchiveScope::Plan {
-                plan_id: plan_id.clone(),
-            },
-            _ => mvm_core::receipt_archive::ArchiveScope::Tenant,
-        }
-    }
-}
-
 fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
-    let signer = host_signer::load_or_init().context("loading host signer to export receipts")?;
-    let dir = default_audit_dir().context("resolving audit directory")?;
+    use mvm_client::audit::query::{ReceiptExportRequest, export_receipt_archive, export_receipts};
+    let request = ReceiptExportRequest {
+        tenant: args.tenant.clone(),
+        plan_id: args.plan_id.clone(),
+        full_chain: args.full_chain,
+    };
 
     if let Some(path) = &args.archive {
         if args.plan_id.is_some() && args.full_chain {
@@ -586,13 +565,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
                 "--full-chain covers the whole tenant chain; the --plan-id filter is ignored.",
             );
         }
-        let req = mvm_hostd::audit::receipt_archive::ArchiveRequest::builder()
-            .audit_dir(&dir)
-            .tenant(args.tenant.clone())
-            .scope(args.scope())
-            .build()?;
-        let bytes = mvm_hostd::audit::receipt_archive::write_archive(&req, &signer.signing)
-            .with_context(|| format!("building the evidence archive for '{}'", args.tenant))?;
+        let bytes = export_receipt_archive(&request)?;
         std::fs::write(path, &bytes)
             .with_context(|| format!("writing archive to {}", path.display()))?;
         ui::success(&format!(
@@ -603,10 +576,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
         // Keyed off the resolved scope, not the flag: with no --plan-id the
         // scope is already the whole tenant, and warning about attestation
         // there would describe an archive the caller did not ask for.
-        if matches!(
-            args.scope(),
-            mvm_core::receipt_archive::ArchiveScope::Plan { .. }
-        ) {
+        if request.plan_scoped_archive() {
             // notice, not info: info is verbosity-gated chatter and this is a
             // caveat about what the archive does not attest. A limit nobody
             // sees is not a limit that was stated.
@@ -618,13 +588,7 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
         return Ok(());
     }
 
-    let evidence = mvm_hostd::audit::receipt_export::export_evidence(
-        &dir,
-        &args.tenant,
-        args.plan_id.as_deref(),
-        &signer.signing,
-    )
-    .with_context(|| format!("exporting receipts for tenant '{}'", args.tenant))?;
+    let evidence = export_receipts(&request)?;
 
     if args.json {
         crate::json_out::emit_json(&evidence.receipts)?;
@@ -668,32 +632,20 @@ fn audit_receipts_export(args: &ExportArgs) -> Result<()> {
 
 /// Verify a `.mvmev` archive and report the three results separately.
 fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
-    use mvm_hostd::audit::receipt_archive_verify::{CheckResult, CompletenessResult};
+    use mvm_client::audit::query::{CompletenessResult, ReceiptVerifyRequest, verify_receipts};
 
-    let bytes =
-        std::fs::read(archive).with_context(|| format!("reading archive {}", archive.display()))?;
-    let report = mvm_hostd::audit::receipt_archive_verify::verify_archive(&bytes)
-        .with_context(|| format!("verifying archive {}", archive.display()))?;
-
-    let word = |r: &CheckResult| match r {
-        CheckResult::Passed => ("ok".to_string(), None),
-        CheckResult::Failed(why) => ("FAILED".to_string(), Some(why.clone())),
-    };
-    let (integrity, integrity_why) = word(&report.integrity);
-    let (inclusion, inclusion_why) = word(&report.inclusion);
-    let (completeness, completeness_why) = match &report.completeness {
-        CompletenessResult::Derived => ("derived".to_string(), None),
-        CompletenessResult::Attested => ("attested".to_string(), None),
-        CompletenessResult::Failed(why) => ("FAILED".to_string(), Some(why.clone())),
-    };
+    let report = verify_receipts(&ReceiptVerifyRequest {
+        archive: archive.to_path_buf(),
+    })?;
+    let integrity = report.integrity.result.as_str();
+    let integrity_why = &report.integrity.detail;
+    let inclusion = report.inclusion.result.as_str();
+    let inclusion_why = &report.inclusion.detail;
+    let completeness = report.completeness.result.as_str();
+    let completeness_why = &report.completeness.detail;
 
     if json {
-        crate::json_out::emit_json(&serde_json::json!({
-            "integrity": { "result": integrity, "detail": integrity_why },
-            "inclusion": { "result": inclusion, "detail": inclusion_why },
-            "completeness": { "result": completeness, "detail": completeness_why },
-            "exit_code": report.exit_code(),
-        }))?;
+        crate::json_out::emit_json(&report)?;
     } else {
         eprintln!("  integrity     {integrity}");
         if let Some(w) = &integrity_why {
@@ -707,7 +659,7 @@ fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
         if let Some(w) = &completeness_why {
             eprintln!("                {w}");
         }
-        if matches!(report.completeness, CompletenessResult::Attested) {
+        if matches!(report.completeness.result, CompletenessResult::Attested) {
             // Saying "ok" here would report an assertion as a check, and info
             // would let the caveat vanish at the default verbosity.
             ui::notice(
@@ -718,7 +670,7 @@ fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
         }
     }
 
-    let code = report.exit_code();
+    let code = report.exit_code;
     if code != 0 {
         mvm_observability::exit(code);
     }
@@ -729,129 +681,35 @@ fn audit_receipts_verify(archive: &std::path::Path, json: bool) -> Result<()> {
 // auditor-side verify-cert
 // ─────────────────────────────────────────────────────────────────
 
-/// Axis-3 chain-cross-reference outcome per certificate.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum ChainMatch {
-    /// Certificate's fingerprint found in the chain. Cross-
-    /// referenced; auditor's strongest outcome.
-    Matched,
-    /// No matching chain entry. The operator emitted a cert
-    /// without an audit-chain anchor — suspicious.
-    Missing,
-    /// Chain has an entry for this tenant/workload but the
-    /// `cert_fingerprint` label differs — the operator swapped a
-    /// cert post-emission.
-    Mismatched,
-    /// `--chain` wasn't supplied; this axis was skipped.
-    Skipped,
-}
-
 fn verify_cert(
     cert: &str,
     pubkey_path: Option<&std::path::Path>,
     chain_path: Option<&std::path::Path>,
     json: bool,
 ) -> Result<()> {
-    use base64::Engine;
-    use mvm_runtime::vm::overlay::{
-        SignedDestructionReceipt, cert_fingerprint, verify_destruction_receipt,
-    };
-
-    // 1. Slurp the cert. `-` reads from stdin so an auditor can
-    //    `cat certs.json | mvmctl trust audit verify-cert -`.
-    let raw = if cert == "-" {
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+    use query::ChainMatch;
+    use std::io::Read;
+    let mut certificate = Vec::new();
+    if cert == "-" {
+        std::io::stdin()
+            .take(query::MAX_CERTIFICATE_BYTES as u64 + 1)
+            .read_to_end(&mut certificate)
             .context("reading certificate from stdin")?;
-        buf
     } else {
-        std::fs::read_to_string(cert).with_context(|| format!("reading {cert}"))?
-    };
-
-    // 2. Parse — accept both shapes (batch tools emit an array; the
-    //    Rust API + runbook snippet show single objects).
-    let certs: Vec<SignedDestructionReceipt> = if raw.trim_start().starts_with('[') {
-        serde_json::from_str(&raw).context("decoding certificate array")?
-    } else {
-        let one: SignedDestructionReceipt =
-            serde_json::from_str(&raw).context("decoding certificate")?;
-        vec![one]
-    };
-
-    // 3. Optional expected pubkey. The file is the base64 form
-    //    `~/.mvm/keys/host-signer.pub | base64` produces.
-    let expected_pubkey = match pubkey_path {
-        Some(p) => {
-            let raw = std::fs::read_to_string(p)
-                .with_context(|| format!("reading pubkey file {}", p.display()))?;
-            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(raw.trim().as_bytes())
-                .or_else(|_| {
-                    base64::engine::general_purpose::STANDARD.decode(raw.trim().as_bytes())
-                })
-                .with_context(|| format!("decoding base64 pubkey from {}", p.display()))?;
-            if bytes.len() != 32 {
-                anyhow::bail!(
-                    "pubkey file {} contains {} bytes; expected 32",
-                    p.display(),
-                    bytes.len()
-                );
-            }
-            let array: [u8; 32] = bytes.as_slice().try_into().unwrap();
-            Some(ed25519_dalek::VerifyingKey::from_bytes(&array).context("parsing pubkey")?)
-        }
-        None => None,
-    };
-
-    // 4. Verify each. Fail fast on the first refusal so the
-    //    operator sees a clear error per cert.
-    let mut verified: Vec<&mvm_runtime::vm::overlay::DestructionReceipt> =
-        Vec::with_capacity(certs.len());
-    for (i, signed) in certs.iter().enumerate() {
-        let receipt =
-            verify_destruction_receipt(signed, expected_pubkey.as_ref()).with_context(|| {
-                format!(
-                    "verifying certificate {} ({}/{})",
-                    i + 1,
-                    signed.receipt.tenant,
-                    signed.receipt.workload,
-                )
-            })?;
-        verified.push(receipt);
+        std::fs::File::open(cert)
+            .and_then(|file| {
+                file.take(query::MAX_CERTIFICATE_BYTES as u64 + 1)
+                    .read_to_end(&mut certificate)
+            })
+            .with_context(|| format!("reading {cert}"))?;
     }
-
-    // 5. Chain cross-reference (the third verification axis).
-    //    When `--chain` is supplied, build a fingerprint → entry
-    //    map from `lifecycle.tenant.destroyed` events and check
-    //    each cert.
-    let chain_index = match chain_path {
-        Some(p) => Some(load_chain_fingerprint_index(p)?),
-        None => None,
-    };
-    let chain_matches: Vec<ChainMatch> = certs
-        .iter()
-        .zip(verified.iter())
-        .map(|(signed, receipt)| match chain_index.as_ref() {
-            None => ChainMatch::Skipped,
-            Some(index) => {
-                let fp = cert_fingerprint(signed);
-                let key = (receipt.tenant.clone(), receipt.workload.clone());
-                match index.get(&key) {
-                    Some(chain_fp) if *chain_fp == fp => ChainMatch::Matched,
-                    Some(_) => ChainMatch::Mismatched,
-                    None => ChainMatch::Missing,
-                }
-            }
-        })
-        .collect();
-
-    // Fail if any chain check is Missing or Mismatched. Skipped
-    // is informational only — auditor opted not to check the
-    // chain axis.
-    let chain_failure = chain_matches
-        .iter()
-        .any(|m| matches!(m, ChainMatch::Missing | ChainMatch::Mismatched));
+    let report = query::verify_certificate(&query::CertificateRequest {
+        certificate,
+        pubkey: pubkey_path.map(std::path::Path::to_path_buf),
+        chain: chain_path.map(std::path::Path::to_path_buf),
+    })?;
+    let verified = &report.receipts;
+    let chain_matches = &report.chain_matches;
 
     // 6. Render. Human summary to stderr always; receipts JSON to
     //    stdout when --json.
@@ -874,20 +732,9 @@ fn verify_cert(
     if json {
         // Emit { receipts, chain_matches } so downstream tooling
         // can introspect both verdicts.
-        let output = serde_json::json!({
-            "receipts": verified,
-            "chain_matches": chain_matches,
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
     }
-    if chain_failure {
-        anyhow::bail!(
-            "chain cross-reference failed for one or more certificate(s); \
-             see the per-cert ✗ markers above. The cert's signature is \
-             valid but the audit chain does not corroborate it."
-        );
-    }
-    Ok(())
+    report.ensure_correlated()
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -896,18 +743,12 @@ fn verify_cert(
 
 /// Build, sign, and publish a Merkle root over the tenant's audit chain.
 fn audit_publish_root(tenant: &str) -> Result<()> {
-    let signer =
-        host_signer::load_or_init().context("loading host signer to publish audit root")?;
-    let emitter = AuditEmitter::new(signer.signing).context("opening host audit emitter")?;
-    let signed = emitter
-        .publish_root(tenant)
-        .with_context(|| format!("publishing Merkle root for tenant '{tenant}'"))?;
-    let path = mvm_core::config::audit_root_path(tenant);
+    let report = query::publish_root(tenant)?;
     ui::success(&format!(
         "published Merkle root for tenant '{tenant}': root {root} over {n} entries -> {path}",
-        root = signed.root_hash,
-        n = signed.tree_size,
-        path = path.display(),
+        root = report.root_hash,
+        n = report.tree_size,
+        path = report.path.display(),
     ));
     Ok(())
 }
@@ -915,36 +756,15 @@ fn audit_publish_root(tenant: &str) -> Result<()> {
 /// Build an inclusion proof for the selector-resolved leaf and print it
 /// (paired with the current signed root) as JSON, or a one-line summary.
 fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
-    use mvm_contract::merkle::build_inclusion_proof;
-
-    let signer =
-        host_signer::load_or_init().context("loading host signer to build inclusion proof")?;
-    let dir = default_audit_dir()?;
-    // Read the verified leaf set once; the selector resolves against exactly
-    // the leaves the proof is built over, so indices can't drift.
-    let leaves = mvm_hostd::audit::merkle::read_leaves(&dir, tenant, &signer.verifying)
-        .with_context(|| format!("reading the verified audit chain for tenant '{tenant}'"))?;
-    let index = resolve_selector(&leaves, selector)?;
-    let proof = build_inclusion_proof(&leaves, index)
-        .map_err(|e| anyhow::anyhow!("building inclusion proof for leaf {index}: {e}"))?;
-
-    // Pair the proof with the currently-published signed root, if any, so a
-    // downstream `verify-inclusion` has both halves of the membership check.
+    let report = query::prove(&query::ProofRequest {
+        tenant: tenant.to_string(),
+        selector: selector.to_string(),
+    })?;
+    let proof = &report.proof;
     let root_path = mvm_core::config::audit_root_path(tenant);
-    let signed_root: Option<SignedAuditRoot> = if root_path.exists() {
-        let raw = std::fs::read_to_string(&root_path)
-            .with_context(|| format!("reading signed root {}", root_path.display()))?;
-        Some(
-            serde_json::from_str(&raw)
-                .with_context(|| format!("decoding signed root {}", root_path.display()))?,
-        )
-    } else {
-        None
-    };
 
     if json {
-        let out = serde_json::json!({ "proof": proof, "signed_root": signed_root });
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         ui::info(&format!(
             "inclusion proof: leaf {idx} of {n} (root {root})",
@@ -952,7 +772,7 @@ fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
             n = proof.tree_size,
             root = proof.root,
         ));
-        if signed_root.is_none() {
+        if report.signed_root.is_none() {
             ui::warn(&format!(
                 "no published root at {}; run `mvmctl trust audit publish-root` first \
                  so `verify-inclusion` has a signed root to bind against.",
@@ -969,53 +789,9 @@ fn audit_prove(tenant: &str, selector: &str, json: bool) -> Result<()> {
 /// audit line. Every non-numeric interpretation is collected across all
 /// lines; a selector matching more than one line is refused as ambiguous so
 /// the resolution is fail-closed.
+#[cfg(test)]
 fn resolve_selector(leaves: &[String], selector: &str) -> Result<usize> {
-    use sha2::{Digest, Sha256};
-
-    // 1. numeric 0-based line index.
-    if let Ok(idx) = selector.parse::<usize>() {
-        if idx >= leaves.len() {
-            anyhow::bail!(
-                "line index {idx} out of range: the chain has {} entries",
-                leaves.len()
-            );
-        }
-        return Ok(idx);
-    }
-
-    // 2 & 3. a `sha256:<hex>` line hash and/or a plan_id. Collect every match.
-    let line_hash_want = selector
-        .strip_prefix("sha256:")
-        .map(str::to_ascii_lowercase);
-    let mut matches: Vec<usize> = Vec::new();
-    for (i, line) in leaves.iter().enumerate() {
-        let mut matched = false;
-        if let Some(want) = &line_hash_want {
-            let got = hex::encode(Sha256::digest(line.as_bytes()));
-            if &got == want {
-                matched = true;
-            }
-        }
-        if !matched
-            && let Ok(env) = serde_json::from_str::<SignedEnvelope>(line)
-            && env.entry.plan_id.0 == selector
-        {
-            matched = true;
-        }
-        if matched {
-            matches.push(i);
-        }
-    }
-
-    match matches.as_slice() {
-        [] => anyhow::bail!("selector '{selector}' matched no audit line in the chain"),
-        [only] => Ok(*only),
-        many => anyhow::bail!(
-            "selector '{selector}' is ambiguous: it matches {} lines (indices {many:?}); \
-             use a numeric line index or a `sha256:<hex>` line hash to disambiguate",
-            many.len()
-        ),
-    }
+    query::resolve_selector(leaves, selector)
 }
 
 /// Verify an inclusion proof against a host-signed root — the full
@@ -1027,41 +803,28 @@ fn audit_verify_inclusion(
     pubkey_path: Option<&std::path::Path>,
     tenant: &str,
 ) -> Result<()> {
-    // 1. load the inclusion proof (file or stdin).
-    let proof_raw = if proof_arg == "-" {
-        let mut buf = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+    use std::io::Read;
+    let mut proof = Vec::new();
+    if proof_arg == "-" {
+        std::io::stdin()
+            .take(query::MAX_PROOF_BYTES as u64 + 1)
+            .read_to_end(&mut proof)
             .context("reading inclusion proof from stdin")?;
-        buf
     } else {
-        std::fs::read_to_string(proof_arg)
-            .with_context(|| format!("reading inclusion proof {proof_arg}"))?
-    };
-    let proof: InclusionProof =
-        serde_json::from_str(&proof_raw).context("decoding inclusion-proof JSON")?;
-
-    // 2. load the signed root (default: ~/.mvm/audit/<tenant>.root.json).
-    let root_path = root_path
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| mvm_core::config::audit_root_path(tenant));
-    let root_raw = std::fs::read_to_string(&root_path)
-        .with_context(|| format!("reading signed root {}", root_path.display()))?;
-    let signed_root: SignedAuditRoot =
-        serde_json::from_str(&root_raw).context("decoding signed-root JSON")?;
-
-    // 3. load the trusted host verifying key (default: host-signer.pub).
-    let vk = match pubkey_path {
-        Some(p) => load_verifying_key(p)?,
-        None => {
-            host_signer::load_or_init()
-                .context("loading host signer public key")?
-                .verifying
-        }
-    };
-
-    // 4-7: the composition. Fail closed naming the failed check.
-    let message = run_verify_inclusion(&proof, &signed_root, &vk, tenant)?;
-    ui::success(&message);
+        std::fs::File::open(proof_arg)
+            .and_then(|file| {
+                file.take(query::MAX_PROOF_BYTES as u64 + 1)
+                    .read_to_end(&mut proof)
+            })
+            .with_context(|| format!("reading inclusion proof {proof_arg}"))?;
+    }
+    let report = query::verify_inclusion(&query::InclusionVerifyRequest {
+        proof,
+        root: root_path.map(std::path::Path::to_path_buf),
+        pubkey: pubkey_path.map(std::path::Path::to_path_buf),
+        tenant: tenant.to_string(),
+    })?;
+    ui::success(&report.message());
     Ok(())
 }
 
@@ -1080,63 +843,21 @@ fn audit_verify_inclusion(
 /// Only when all hold does it return the success message. A proof that
 /// self-verifies but whose embedded root differs from the host-signed root is
 /// rejected at step 4 — self-consistency is not membership.
+#[cfg(test)]
 fn run_verify_inclusion(
     proof: &InclusionProof,
     signed_root: &SignedAuditRoot,
     vk: &VerifyingKey,
     expected_tenant: &str,
 ) -> Result<String> {
-    verify_membership(proof, signed_root, vk, expected_tenant)?;
-    Ok(format!(
-        "verified: entry at index {idx} of {n} is in the host-signed log (root {root})",
-        idx = proof.leaf_index,
-        n = proof.tree_size,
-        root = signed_root.root_hash,
-    ))
+    Ok(query::verify_inclusion_membership(proof, signed_root, vk, expected_tenant)?.message())
 }
 
 /// Load a trusted Ed25519 verifying key from a file. Accepts the raw
 /// 32-byte form (`~/.mvm/keys/host-signer.pub`), 64-char hex, or base64.
+#[cfg(test)]
 pub(super) fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey> {
-    let raw =
-        std::fs::read(path).with_context(|| format!("reading pubkey file {}", path.display()))?;
-    // Raw 32-byte key half — the on-disk host-signer.pub shape.
-    if raw.len() == 32 {
-        let arr: [u8; 32] = raw.as_slice().try_into().expect("length checked");
-        return VerifyingKey::from_bytes(&arr)
-            .with_context(|| format!("parsing raw pubkey {}", path.display()));
-    }
-    // Otherwise the file is text: hex (64 chars) or base64.
-    let text = String::from_utf8(raw).with_context(|| {
-        format!(
-            "pubkey file {} is neither 32 raw bytes nor UTF-8 text",
-            path.display()
-        )
-    })?;
-    let text = text.trim();
-    let bytes = hex::decode(text)
-        .ok()
-        .filter(|b| b.len() == 32)
-        .or_else(|| {
-            use base64::Engine;
-            base64::engine::general_purpose::STANDARD
-                .decode(text)
-                .ok()
-                .or_else(|| {
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .decode(text)
-                        .ok()
-                })
-                .filter(|b| b.len() == 32)
-        })
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "pubkey file {} did not contain a 32-byte Ed25519 key (raw, hex, or base64)",
-                path.display()
-            )
-        })?;
-    let arr: [u8; 32] = bytes.as_slice().try_into().expect("length checked");
-    VerifyingKey::from_bytes(&arr).with_context(|| format!("parsing pubkey {}", path.display()))
+    query::load_verifying_key(path)
 }
 
 /// Read a chain file and return a map from
@@ -1144,44 +865,15 @@ pub(super) fn load_verifying_key(path: &std::path::Path) -> Result<VerifyingKey>
 /// `lifecycle.tenant.destroyed` entry. Lines we can't parse
 /// are skipped silently — the chain may contain entries from
 /// other event categories.
+#[cfg(test)]
 fn load_chain_fingerprint_index(
     chain_path: &std::path::Path,
 ) -> Result<std::collections::HashMap<(String, String), String>> {
-    use std::io::BufRead;
-    let file = std::fs::File::open(chain_path)
-        .with_context(|| format!("opening chain file {}", chain_path.display()))?;
-    let reader = std::io::BufReader::new(file);
-    let mut index = std::collections::HashMap::new();
-    for line in reader.lines() {
-        let line = line.with_context(|| format!("reading {}", chain_path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        // Each line is a `SignedEnvelope { entry, prev_hash,
-        // signature }`. We only need `entry.event` + `entry.labels`.
-        let Ok(envelope) = serde_json::from_str::<mvm_hostd::supervisor::SignedEnvelope>(&line)
-        else {
-            continue;
-        };
-        if envelope.entry.event != "lifecycle.tenant.destroyed" {
-            continue;
-        }
-        let labels = &envelope.entry.labels;
-        let (Some(tenant), Some(workload), Some(fingerprint)) = (
-            labels.get("tenant"),
-            labels.get("workload"),
-            labels.get("cert_fingerprint"),
-        ) else {
-            continue;
-        };
-        index.insert((tenant.clone(), workload.clone()), fingerprint.clone());
-    }
-    Ok(index)
+    query::load_chain_fingerprint_index(chain_path)
 }
 
 fn audit_tail_chain(tenant: &str, lines: usize, follow: bool) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let path = audit_path_for_tenant(&dir, tenant);
+    let path = query::chain_file(tenant)?;
     if !path.exists() {
         ui::info(&format!(
             "No audit chain found for tenant '{tenant}'. \
@@ -1257,20 +949,24 @@ fn print_chain_line(line: &str) {
 /// and a missing witness is a configuration state rather than a finding -- but
 /// a *divergence* is a finding, and it is printed as an error so an operator
 /// reading the output cannot miss it.
-fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::VerifyingKey) {
-    match mvm_hostd::audit::merkle::verify_root_history(dir, tenant, vk) {
-        Ok(r) if r.roots == 0 => ui::info(
+fn report_append_only(append_only: &query::AppendOnlyReport, witness: &query::WitnessReport) {
+    match append_only {
+        query::AppendOnlyReport::Verified { roots: 0, .. } => ui::info(
             "No published audit roots, so nothing attests the log was only appended to. \
              Roots are published at admission and exit.",
         ),
-        Ok(r) => ui::success(&format!(
-            "append-only: {} published root(s), {} transition(s) proven a prefix extension",
-            r.roots, r.transitions_checked
+        query::AppendOnlyReport::Verified {
+            roots,
+            transitions_checked,
+        } => ui::success(&format!(
+            "append-only: {roots} published root(s), {transitions_checked} transition(s) proven a prefix extension"
         )),
-        Err(e) => ui::error(&format!("append-only check failed: {e:#}")),
+        query::AppendOnlyReport::Failed { detail } => {
+            ui::error(&format!("append-only check failed: {detail}"))
+        }
     }
 
-    let Some(source) = mvm_hostd::audit::witness::configured_source() else {
+    if matches!(witness, query::WitnessReport::NotConfigured) {
         // Said out loud rather than passed over in silence: without an
         // off-host witness the roots above were all signed by this host and
         // stored beside the log they attest, which is no evidence against
@@ -1280,14 +976,14 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
              this host is undetectable from here.",
         );
         return;
-    };
-    match mvm_hostd::audit::witness::detect_divergence(dir, tenant, source.as_ref(), vk) {
-        Ok(r) if !r.is_clean() => {
+    }
+    match witness {
+        query::WitnessReport::Compared { diverged, .. } if !diverged.is_empty() => {
             ui::error(&format!(
                 "WITNESS DIVERGENCE: {} witnessed root(s) disagree with this host",
-                r.diverged.len()
+                diverged.len()
             ));
-            for d in &r.diverged {
+            for d in diverged {
                 ui::error(&format!(
                     "  tree_size {}: witness has {}, host has {}",
                     d.tree_size,
@@ -1296,14 +992,20 @@ fn report_append_only(dir: &std::path::Path, tenant: &str, vk: &ed25519_dalek::V
                 ));
             }
         }
-        Ok(r) if r.agreed == 0 => ui::info(
+        query::WitnessReport::Compared { agreed: 0, .. } => ui::info(
             "The configured witness holds no roots for this tenant yet; nothing was compared.",
         ),
-        Ok(r) => ui::success(&format!(
-            "witness agrees on {} root(s); {} not yet witnessed",
-            r.agreed, r.unwitnessed
+        query::WitnessReport::Compared {
+            agreed,
+            unwitnessed,
+            ..
+        } => ui::success(&format!(
+            "witness agrees on {agreed} root(s); {unwitnessed} not yet witnessed"
         )),
-        Err(e) => ui::error(&format!("witness comparison failed: {e:#}")),
+        query::WitnessReport::Failed { detail } => {
+            ui::error(&format!("witness comparison failed: {detail}"))
+        }
+        query::WitnessReport::NotConfigured => {}
     }
 }
 
@@ -1324,33 +1026,23 @@ fn asset_id(path: &std::path::Path) -> Result<()> {
 }
 
 fn audit_verify(tenant: &str) -> Result<()> {
-    let dir = default_audit_dir()?;
-
-    // Nothing to verify ⇒ return before touching the host signer, so a
-    // read-only verify on a pristine host never mints a signing keypair.
-    let discovered = mvm_client::audit::discover_source_ids(&dir, Some(tenant))
-        .context("enumerating audit sources")?;
-    if discovered.is_empty() {
-        ui::info(&format!(
-            "No audit chain found for tenant '{tenant}' under {}. Nothing to verify.",
-            dir.display()
-        ));
-        return Ok(());
-    }
-
-    // Both chain kinds are signed under the host key; load it once.
-    let signer =
-        host_signer::load_or_init().context("loading host signer to verify audit chain")?;
-
-    // The canonical verification seam: the same source discovery +
-    // verification the verified-audit UI reader uses, so the CLI and UI
-    // consumers can never disagree on what verifies.
-    let reader = LocalAuditReader::new(&dir, signer.verifying);
-    let outcome = reader
-        .verify_sources(Some(tenant))
-        .context("verifying audit sources")?;
-
-    for summary in &outcome.sources {
+    let (dir, sources, refusals, append_only, witness) = match query::verify_chain(tenant)? {
+        query::ChainVerification::Empty { directory } => {
+            ui::info(&format!(
+                "No audit chain found for tenant '{tenant}' under {}. Nothing to verify.",
+                directory.display()
+            ));
+            return Ok(());
+        }
+        query::ChainVerification::Checked {
+            directory,
+            sources,
+            refusals,
+            append_only,
+            witness,
+        } => (directory, sources, refusals, append_only, witness),
+    };
+    for summary in &sources {
         ui::success(&format!(
             "{} '{}' verifies clean: {} entries",
             source_kind_label(summary.source.kind),
@@ -1359,11 +1051,11 @@ fn audit_verify(tenant: &str) -> Result<()> {
         ));
     }
 
-    report_append_only(&dir, tenant, &signer.verifying);
+    report_append_only(&append_only, &witness);
 
     // Print a clear error AND propagate so the process exits nonzero.
     // `mvmctl trust audit verify` is meant for scripting.
-    if let Some(refusal) = outcome.refusals.first() {
+    if let Some(refusal) = refusals.first() {
         anyhow::bail!(
             "{} verify failed ({}): {}",
             source_kind_label(refusal.source.kind),
@@ -1380,56 +1072,36 @@ fn audit_verify(tenant: &str) -> Result<()> {
 /// reconstructed, and the entries it removes stop being independently
 /// verifiable forever — so the default is to say what would go and stop.
 fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let signer = host_signer::load_or_init().context("loading host signer to prune audit chain")?;
-
-    let verified = mvm_hostd::supervisor::verify_segment_set(&dir, tenant, &signer.verifying)
-        .with_context(|| {
-            format!(
-                "refusing to prune tenant '{tenant}': its chain does not verify. Pruning a \
-                 broken chain would delete the evidence of whatever broke it"
-            )
-        })?;
-
-    let floor = verified.pruned.map_or(1, |p| p.through + 1);
-    let doomed: Vec<_> = verified
-        .segments
-        .iter()
-        .filter(|s| !s.active && s.seq >= floor && s.seq <= through)
-        .collect();
-    if doomed.is_empty() {
-        ui::info(&format!(
+    let report = query::prune_chain(&query::PruneRequest {
+        tenant: tenant.to_string(),
+        through,
+        intent: if ack {
+            query::PruneIntent::AcknowledgeEvidenceRemoval
+        } else {
+            query::PruneIntent::Preview
+        },
+    })?;
+    match report {
+        query::PruneReport::Nothing { floor, through } => ui::info(&format!(
             "Nothing to prune for tenant '{tenant}': no retired segments in {floor}..={through}."
-        ));
-        return Ok(());
-    }
-    let entries: usize = doomed.iter().filter_map(|s| s.entries).sum();
-
-    if !ack {
-        ui::warn(&format!(
-            "Would remove {} segment(s) ({}..={}) and {entries} entries from tenant \
+        )),
+        query::PruneReport::Preview {
+            floor,
+            through,
+            segments,
+            entries,
+        } => ui::warn(&format!(
+            "Would remove {segments} segment(s) ({floor}..={through}) and {entries} entries from tenant \
              '{tenant}'.\nThose entries stop being independently verifiable — the surviving \
              chain will attest that they were removed, and how many, but never again what \
-             they said.\nRe-run with --ack to proceed.",
-            doomed.len(),
-            floor,
-            through
-        ));
-        return Ok(());
+             they said.\nRe-run with --ack to proceed."
+        )),
+        query::PruneReport::Pruned { through, entries } => ui::success(&format!(
+            "Pruned segments 1..={through} from tenant '{tenant}': {entries} entries removed and recorded in \
+             the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
+             deliberate gap."
+        )),
     }
-
-    let file_signer = mvm_hostd::supervisor::FileAuditSigner::open(signer.signing.clone(), &dir)
-        .context("opening the audit signer to record the prune")?;
-    let pruned = file_signer
-        .prune_through(&mvm_core::plan::TenantId(tenant.to_string()), through)
-        .context("pruning audit segments")?;
-
-    ui::success(&format!(
-        "Pruned segments 1..={} from tenant '{tenant}': {} entries removed and recorded in \
-         the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
-         deliberate gap.",
-        pruned.through, pruned.entries
-    ));
     Ok(())
 }
 
@@ -1449,7 +1121,7 @@ fn source_path(dir: &std::path::Path, source: &AuditSourceId) -> std::path::Path
             source.tenant,
             mvm_core::config::WORKLOAD_AUDIT_SUFFIX
         )),
-        _ => audit_path_for_tenant(dir, &source.tenant),
+        _ => dir.join(format!("{}.jsonl", source.tenant)),
     }
 }
 
@@ -2152,17 +1824,8 @@ mod merkle_verb_tests {
 // Decision-record cache queries
 // ─────────────────────────────────────────────────────────────────
 
-fn open_decision_store(tenant: &str) -> Result<DecisionStore> {
-    let dir = DecisionStore::default_dir().context("resolving decision store directory")?;
-    DecisionStore::open(&dir, tenant)
-        .with_context(|| format!("opening decision store for tenant '{tenant}'"))
-}
-
 fn decisions_list(tenant: &str, json: bool) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let records = store
-        .list()
-        .with_context(|| format!("listing decisions for tenant '{tenant}'"))?;
+    let records = query::list_decisions(tenant)?;
 
     if json {
         crate::json_out::emit_json(&records)?;
@@ -2195,13 +1858,10 @@ fn decisions_list(tenant: &str, json: bool) -> Result<()> {
 }
 
 fn decisions_show(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let id = DecisionId(decision_id.to_string());
-    let record = store
-        .get(&id)
-        .with_context(|| format!("reading decision '{decision_id}' for tenant '{tenant}'"))?;
-    let record = record
-        .with_context(|| format!("decision '{decision_id}' not found for tenant '{tenant}'"))?;
+    let record = query::get_decision(&DecisionRequest {
+        tenant: tenant.to_string(),
+        decision_id: decision_id.to_string(),
+    })?;
 
     if json {
         crate::json_out::emit_json(&record)?;
@@ -2219,10 +1879,13 @@ fn decisions_export(
     output: Option<&std::path::Path>,
     format: DecisionExportFormat,
 ) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let records = store
-        .list()
-        .with_context(|| format!("listing decisions for tenant '{tenant}'"))?;
+    let export = query::export_decisions(
+        tenant,
+        match format {
+            DecisionExportFormat::Json => query::DecisionExportFormat::Json,
+            DecisionExportFormat::Tibet => query::DecisionExportFormat::Tibet,
+        },
+    )?;
 
     let mut writer: Box<dyn Write> = match output {
         Some(path) => {
@@ -2233,58 +1896,47 @@ fn decisions_export(
         None => Box::new(std::io::stdout()),
     };
 
-    match format {
-        DecisionExportFormat::Json => {
-            serde_json::to_writer_pretty(&mut writer, &records)
-                .context("serializing decision records")?;
-        }
-        DecisionExportFormat::Tibet => {
-            let json = mvm_core::provenance::tibet::decision_records_to_tibet_json(&records);
-            writer
-                .write_all(json.as_bytes())
-                .context("writing TIBET decision export")?;
-        }
-    }
-    writeln!(writer).context("finalizing decision export")?;
+    let (newline, body) = export
+        .bytes
+        .split_last()
+        .context("finalizing decision export")?;
+    writer.write_all(body).context(match format {
+        DecisionExportFormat::Json => "serializing decision records",
+        DecisionExportFormat::Tibet => "writing TIBET decision export",
+    })?;
+    writer
+        .write_all(&[*newline])
+        .context("finalizing decision export")?;
 
     if output.is_none() {
         ui::success(&format!(
             "exported {n} decision record(s) for tenant '{tenant}'",
-            n = records.len()
+            n = export.records
         ));
     }
     Ok(())
 }
 
 fn decisions_trace(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let id = DecisionId(decision_id.to_string());
-    let chain = store.trace_decision_chain(&id).with_context(|| {
-        format!("tracing decision chain for '{decision_id}' in tenant '{tenant}'")
+    let chain = query::trace_decisions(&DecisionRequest {
+        tenant: tenant.to_string(),
+        decision_id: decision_id.to_string(),
     })?;
     emit_decision_records(&chain, json, "chain trace", tenant)
 }
 
 fn decisions_impact(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let id = DecisionId(decision_id.to_string());
-    let impact = store.analyze_decision_impact(&id).with_context(|| {
-        format!("analyzing impact of decision '{decision_id}' in tenant '{tenant}'")
+    let impact = query::impact_decisions(&DecisionRequest {
+        tenant: tenant.to_string(),
+        decision_id: decision_id.to_string(),
     })?;
     emit_decision_records(&impact, json, "impact analysis", tenant)
 }
 
 fn decisions_similar(tenant: &str, decision_id: &str, json: bool) -> Result<()> {
-    let store = open_decision_store(tenant)?;
-    let id = DecisionId(decision_id.to_string());
-    let seed = store
-        .get(&id)
-        .with_context(|| format!("reading seed decision '{decision_id}' in tenant '{tenant}'"))?
-        .with_context(|| {
-            format!("seed decision '{decision_id}' not found for tenant '{tenant}'")
-        })?;
-    let similar = store.find_similar_decisions(&seed).with_context(|| {
-        format!("finding similar decisions for '{decision_id}' in tenant '{tenant}'")
+    let similar = query::similar_decisions(&DecisionRequest {
+        tenant: tenant.to_string(),
+        decision_id: decision_id.to_string(),
     })?;
     emit_decision_records(&similar, json, "similar-decision query", tenant)
 }

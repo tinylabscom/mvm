@@ -1,17 +1,17 @@
 //! `trust audit sessions`, `trust audit show <session>`, and
 //! `trust audit verify <session>`: the per-session view of the chain-signed
-//! log. The logic lives in `mvm_hostd::audit::session`; this is rendering.
+//! log. The client owns verification and queries; this is rendering.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Serialize;
 
-use mvm_hostd::audit::session::{
-    EventFilter, LedgerCheck, SessionSummary, SessionVerification, TimeRange, Verdict,
-    list_sessions, resolve_session, session_events, verify_session_in_lines,
+use mvm_client::audit::sessions::{
+    EventFilter, LedgerCheck, MismatchReason, SealReason, SessionSummary, SessionVerification,
+    TimeRange, Verdict, VerifiedSessions,
 };
 
-use super::{default_audit_dir, host_signer, print_chain_line, ui};
+use super::{print_chain_line, ui};
 
 /// `trust audit verify [SESSION]`.
 #[derive(clap::Args, Debug, Clone)]
@@ -100,32 +100,14 @@ fn range(since: Option<DateTime<Utc>>, until: Option<DateTime<Utc>>) -> TimeRang
     TimeRange { since, until }
 }
 
-/// Whether `tenant` has any chain at all, checked without touching the host
-/// signer so a read on a pristine host never mints a keypair.
-fn has_chain(dir: &std::path::Path, tenant: &str) -> Result<bool> {
-    Ok(!mvm_client::audit::discover_source_ids(dir, Some(tenant))
-        .context("enumerating audit sources")?
-        .is_empty())
-}
-
 /// The tenant's chain lines, verified. Refuses a chain that does not verify:
 /// a listing is presented as fact, so it may only be drawn from a chain that
 /// is.
-fn verified_lines(tenant: &str) -> Result<Option<Vec<String>>> {
-    let dir = default_audit_dir()?;
-    if !has_chain(&dir, tenant)? {
-        return Ok(None);
-    }
-    let signer =
-        host_signer::load_or_init().context("loading host signer to read the audit chain")?;
-    mvm_hostd::audit::merkle::read_leaves(&dir, tenant, &signer.verifying)
-        .map(Some)
-        .with_context(|| {
-            format!(
-                "the audit chain for tenant '{tenant}' does not verify; run \
-                 `mvmctl trust audit verify --tenant {tenant}` for the reason"
-            )
-        })
+fn verified_lines(tenant: &str) -> Result<Option<VerifiedSessions>> {
+    mvm_client::audit::sessions::open_default(tenant)?
+        .map(|reader| reader.sessions(tenant))
+        .transpose()
+        .map(Option::flatten)
 }
 
 /// The `--json` shape of `trust audit sessions`.
@@ -153,7 +135,7 @@ pub(in crate::commands) fn audit_sessions(query: &SessionsArgs) -> Result<()> {
         ui::info(&format!("No audit chain for tenant '{tenant}'."));
         return Ok(());
     };
-    let (sessions, ledger) = list_sessions(&lines, range(query.since, query.until))?;
+    let (sessions, ledger) = lines.list(range(query.since, query.until))?;
     if query.json {
         return crate::json_out::emit_json(&SessionList {
             tenant,
@@ -215,11 +197,11 @@ fn session_state(session: &SessionSummary) -> String {
     }
 }
 
-fn reason_label(reason: mvm_hostd::audit::session::SealReason) -> &'static str {
+fn reason_label(reason: SealReason) -> &'static str {
     match reason {
-        mvm_hostd::audit::session::SealReason::Exited => "exited",
-        mvm_hostd::audit::session::SealReason::Failed => "failed",
-        mvm_hostd::audit::session::SealReason::Stopped => "stopped",
+        SealReason::Exited => "exited",
+        SealReason::Failed => "failed",
+        SealReason::Stopped => "stopped",
     }
 }
 
@@ -232,12 +214,12 @@ pub(in crate::commands) fn audit_show(query: &ShowArgs) -> Result<()> {
         ui::info(&format!("No audit chain for tenant '{tenant}'."));
         return Ok(());
     };
-    let plan_id = resolve_or_exact(&lines, &query.session)?;
+    let plan_id = lines.resolve(&query.session)?;
     let filter = EventFilter {
         kind: query.kind.clone(),
         range: range(query.since, query.until),
     };
-    let events = session_events(&lines, &plan_id, &filter)?;
+    let events = lines.events(&plan_id, &filter)?;
     if query.json {
         return crate::json_out::emit_json(&events);
     }
@@ -247,25 +229,13 @@ pub(in crate::commands) fn audit_show(query: &ShowArgs) -> Result<()> {
         ));
     }
     for event in &events {
-        print_chain_line(&lines[event.seq as usize]);
+        print_chain_line(
+            lines
+                .line(event.seq)
+                .context("verified event sequence is absent")?,
+        );
     }
     Ok(())
-}
-
-/// A session selector, or — for host-level entries that belong to no admitted
-/// session — an exact plan id that appears in the chain.
-fn resolve_or_exact(lines: &[String], selector: &str) -> Result<String> {
-    match resolve_session(lines, selector) {
-        Ok(plan_id) => Ok(plan_id),
-        Err(error) => {
-            let quoted = format!("\"plan_id\":\"{selector}\"");
-            if lines.iter().any(|line| line.contains(&quoted)) {
-                Ok(selector.to_string())
-            } else {
-                Err(error)
-            }
-        }
-    }
 }
 
 /// The `--json` shape of `trust audit verify <session>`.
@@ -283,23 +253,10 @@ pub(in crate::commands) fn audit_verify_session(
     session: &str,
     json: bool,
 ) -> Result<()> {
-    let dir = default_audit_dir()?;
-    let report = if has_chain(&dir, tenant)? {
-        let signer =
-            host_signer::load_or_init().context("loading host signer to verify the session")?;
-        // One walk from genesis serves both the selector and the verdict.
-        match mvm_hostd::audit::session::read_lines_from_genesis(&dir, tenant, &signer.verifying) {
-            Ok(lines) => {
-                let plan_id =
-                    resolve_or_exact(&lines, session).unwrap_or_else(|_| session.to_string());
-                verify_session_in_lines(&lines, &plan_id)
-            }
-            // The chain's reason is the session's: a seal inside a broken
-            // chain vouches for nothing.
-            Err((reason, detail)) => SessionVerification::chain_failure(session, reason, detail),
-        }
+    let report = if let Some(reader) = mvm_client::audit::sessions::open_default(tenant)? {
+        reader.verify_session(tenant, session)?
     } else {
-        let mut report = verify_session_absent(session);
+        let mut report = mvm_client::audit::sessions::absent(session)?;
         report.detail = Some(format!("no audit chain for tenant '{tenant}'"));
         report
     };
@@ -315,10 +272,6 @@ pub(in crate::commands) fn audit_verify_session(
         0 => Ok(()),
         code => mvm_observability::exit(code),
     }
-}
-
-fn verify_session_absent(session: &str) -> SessionVerification {
-    verify_session_in_lines(&[], session)
 }
 
 fn print_verdict(report: &SessionVerification) {
@@ -356,8 +309,8 @@ fn print_verdict(report: &SessionVerification) {
     }
 }
 
-fn reason_name(reason: mvm_hostd::audit::session::MismatchReason) -> &'static str {
-    use mvm_hostd::audit::session::MismatchReason as R;
+fn reason_name(reason: MismatchReason) -> &'static str {
+    use MismatchReason as R;
     match reason {
         R::ChainBreak => "chain break",
         R::Signature => "signature",
@@ -414,15 +367,29 @@ mod tests {
 
     #[test]
     fn an_absent_chain_reports_the_session_as_not_found() {
-        let report = verify_session_absent("sha256:ab");
+        let report = mvm_client::audit::sessions::absent("sha256:ab").unwrap();
         assert_eq!(report.verdict, Verdict::NotFound);
         assert_eq!(report.verdict.exit_code(), 3);
     }
 
     #[test]
+    fn client_verdict_renders_with_the_existing_flat_json_shape() {
+        let report = mvm_client::audit::sessions::absent("sha256:ab").unwrap();
+        let rendered = serde_json::to_value(VerifyReport {
+            tenant: "local",
+            report: &report,
+        })
+        .unwrap();
+        assert_eq!(rendered["tenant"], "local");
+        assert_eq!(rendered["plan_id"], "sha256:ab");
+        assert_eq!(rendered["verdict"], "NOT_FOUND");
+        assert!(rendered.get("report").is_none());
+    }
+
+    #[test]
     fn a_checkpoint_root_mismatch_has_a_distinct_operator_reason() {
         assert_eq!(
-            reason_name(mvm_hostd::audit::session::MismatchReason::SnapshotRootMismatch),
+            reason_name(MismatchReason::SnapshotRootMismatch),
             "checkpoint root mismatch"
         );
     }
@@ -430,7 +397,7 @@ mod tests {
     #[test]
     fn an_environment_mismatch_has_a_distinct_operator_reason() {
         assert_eq!(
-            reason_name(mvm_hostd::audit::session::MismatchReason::EnvironmentMismatch),
+            reason_name(MismatchReason::EnvironmentMismatch),
             "environment identity mismatch"
         );
     }

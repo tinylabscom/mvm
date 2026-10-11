@@ -73,21 +73,17 @@ impl ImageSetSource {
         Self {
             train,
             base_url,
-            download: curl,
+            download: crate::artifact_download::download,
         }
     }
 
-    /// Fetch through `download` instead of the default quiet `curl`, e.g. a
-    /// resumable transfer that reports progress on a terminal.
+    /// Use another in-process transport instead of the default HTTP transfer.
+    /// Signature and member verification remain authoritative.
     #[must_use]
     pub fn with_download(mut self, download: Download) -> Self {
         self.download = download;
         self
     }
-}
-
-fn curl(url: &str, dest: &Path) -> Result<()> {
-    crate::runtime_overlay::curl_download(url, dest).map_err(anyhow::Error::from)
 }
 
 /// Why one member artifact of a verified set could not be delivered.

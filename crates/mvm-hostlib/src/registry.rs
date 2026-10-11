@@ -202,6 +202,374 @@ fn manifest_info() -> SchemaAndDefs {
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
     MethodDef {
+        name: "agent_sessions.list",
+        key: "agent_sessions_list",
+        summary: "Lists durable local agent sessions.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::Empty>,
+        reply: array_of::<mvm_client::agent_sessions::SessionReport>,
+    },
+    MethodDef {
+        name: "agent_sessions.show",
+        key: "agent_sessions_show",
+        summary: "Reads a durable agent session.",
+        classification: Classification::DevOnly,
+        request: schema_of::<crate::agent_sessions::ShowRequest>,
+        reply: schema_of::<mvm_client::agent_sessions::SessionReport>,
+    },
+    MethodDef {
+        name: "agent_sessions.open",
+        key: "agent_sessions_open",
+        summary: "Records a durable agent session with explicit execution intent.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::agent_sessions::OpenRequest>,
+        >,
+        reply: schema_of::<mvm_client::agent_sessions::SessionReport>,
+    },
+    MethodDef {
+        name: "agent_sessions.park",
+        key: "agent_sessions_park",
+        summary: "Parks a durable agent session.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::agent_sessions::ParkRequest>,
+        >,
+        reply: schema_of::<mvm_client::agent_sessions::TransitionReport>,
+    },
+    MethodDef {
+        name: "agent_sessions.renew",
+        key: "agent_sessions_renew",
+        summary: "Renews a parked durable agent session.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::agent_sessions::RenewRequest>,
+        >,
+        reply: schema_of::<mvm_client::agent_sessions::TransitionReport>,
+    },
+    MethodDef {
+        name: "agent_sessions.resume",
+        key: "agent_sessions_resume",
+        summary: "Re-admits a durable agent session using the configured host signer.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::agent_sessions::ResumeRequest>,
+        >,
+        reply: schema_of::<mvm_client::agent_sessions::TransitionReport>,
+    },
+    MethodDef {
+        name: "checkpoints.list",
+        key: "checkpoints_list",
+        summary: "Lists the local checkpoint catalog.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::Empty>,
+        reply: array_of::<mvm_core::checkpoint::CheckpointMeta>,
+    },
+    MethodDef {
+        name: "checkpoints.info",
+        key: "checkpoints_info",
+        summary: "Reads checkpoint metadata.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::IdRequest>,
+        reply: schema_of::<mvm_core::checkpoint::CheckpointMeta>,
+    },
+    MethodDef {
+        name: "checkpoints.diff",
+        key: "checkpoints_diff",
+        summary: "Compares checkpoint manifests without decrypting content.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::DiffRequest>,
+        reply: schema_of::<mvm_client::checkpoint::CheckpointDiff>,
+    },
+    MethodDef {
+        name: "checkpoints.verify",
+        key: "checkpoints_verify",
+        summary: "Verifies checkpoint lineage against the signed audit chain.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::IdRequest>,
+        reply: schema_of::<mvm_client::checkpoint::wire::Empty>,
+    },
+    MethodDef {
+        name: "checkpoints.timeline",
+        key: "checkpoints_timeline",
+        summary: "Reads a checkpoint or image lineage timeline.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::TimelineRequest>,
+        reply: schema_of::<mvm_client::checkpoint::Timeline>,
+    },
+    MethodDef {
+        name: "checkpoints.remove",
+        key: "checkpoints_remove",
+        summary: "Removes an unpinned leaf checkpoint with explicit execution intent.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::checkpoint::wire::IdRequest>,
+        >,
+        reply: schema_of::<mvm_client::checkpoint::wire::Empty>,
+    },
+    MethodDef {
+        name: "checkpoints.capture",
+        key: "checkpoints_capture",
+        summary: "Captures machine state under its admitted key domain.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::checkpoint::CaptureRequest>,
+        >,
+        reply: schema_of::<mvm_core::checkpoint::CheckpointMeta>,
+    },
+    MethodDef {
+        name: "checkpoints.restore",
+        key: "checkpoints_restore",
+        summary: "Restores a full-machine checkpoint with tenant and lineage checks.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::checkpoint::RestoreRequest>,
+        >,
+        reply: schema_of::<mvm_client::checkpoint::RestoreReport>,
+    },
+    MethodDef {
+        name: "checkpoints.fork",
+        key: "checkpoints_fork",
+        summary: "Forks checkpoint state through client-owned admission and attenuation.",
+        classification: Classification::DevOnly,
+        request: schema_of::<
+            mvm_client::checkpoint::wire::Mutation<mvm_client::checkpoint::wire::ForkRequest>,
+        >,
+        reply: schema_of::<mvm_client::checkpoint::ForkReport>,
+    },
+    MethodDef {
+        name: "replay.run_session",
+        key: "replay_run_session",
+        summary: "Previews or executes verified session replay on a fresh admitted fork.",
+        classification: Classification::DevOnly,
+        request: schema_of::<mvm_client::checkpoint::wire::ReplayRequest>,
+        reply: schema_of::<mvm_client::replay::SessionReplayRunReport>,
+    },
+    MethodDef {
+        name: crate::workspace::REVIEW,
+        key: "workspace_review",
+        summary: "Recover interrupted work and review a registered workspace without approving changes.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::workspace_apply::WorkspaceRequest>,
+        reply: schema_of::<crate::workspace::ReviewReply>,
+    },
+    MethodDef {
+        name: crate::workspace::APPLY,
+        key: "workspace_apply",
+        summary: "Apply only a freshly revalidated fingerprint with explicit approval.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::workspace_apply::wire::ApplyRequest>,
+        reply: schema_of::<crate::workspace::ApplyReply>,
+    },
+    MethodDef {
+        name: crate::workspace::UNDO,
+        key: "workspace_undo",
+        summary: "Explicitly undo registered workspace history, reporting recoveries.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::workspace_apply::wire::HistoryRequest>,
+        reply: schema_of::<crate::workspace::HistoryReply>,
+    },
+    MethodDef {
+        name: crate::workspace::REDO,
+        key: "workspace_redo",
+        summary: "Explicitly redo registered workspace history, reporting recoveries.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::workspace_apply::wire::HistoryRequest>,
+        reply: schema_of::<crate::workspace::HistoryReply>,
+    },
+    MethodDef {
+        name: crate::artifact::INSPECT,
+        key: "artifact_inspect",
+        summary: "Inspect a published local artifact.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::artifact::ArtifactRequest>,
+        reply: schema_of::<mvm_client::artifact::report::ArtifactReport>,
+    },
+    MethodDef {
+        name: crate::artifact::VALIDATE,
+        key: "artifact_validate",
+        summary: "Validate a published local artifact.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::artifact::ArtifactRequest>,
+        reply: schema_of::<mvm_client::artifact::report::ValidationReport>,
+    },
+    MethodDef {
+        name: crate::artifact::CONFIGURE_FIRECRACKER,
+        key: "artifact_configure_firecracker",
+        summary: "Write a Firecracker configuration for a local artifact.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::artifact::ArtifactRequest>,
+        reply: schema_of::<mvm_client::artifact::report::BackendConfigReport>,
+    },
+    MethodDef {
+        name: crate::audit::LIST,
+        key: "audit_sessions_list",
+        summary: "List sessions only after verifying the configured tenant chain.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::audit::sessions::ListRequest>,
+        reply: schema_of::<mvm_client::audit::sessions::ListReport>,
+    },
+    MethodDef {
+        name: crate::audit::SHOW,
+        key: "audit_sessions_show",
+        summary: "Show verified session events without accepting trust-key overrides.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::audit::sessions::ShowRequest>,
+        reply: schema_of::<mvm_client::audit::sessions::ShowReport>,
+    },
+    MethodDef {
+        name: crate::audit::VERIFY,
+        key: "audit_sessions_verify",
+        summary: "Report session verification including absent and unsealed sessions.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::audit::sessions::VerifyRequest>,
+        reply: schema_of::<mvm_client::audit::sessions::SessionVerification>,
+    },
+    MethodDef {
+        name: crate::audit::POSTURE,
+        key: "posture_inspect",
+        summary: "Inspect security posture using only the configured host context.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::audit::PostureRequest>,
+        reply: schema_of::<mvm_client::audit::posture::PostureReport>,
+    },
+    MethodDef {
+        name: crate::volume::LIST,
+        key: "volume_list",
+        summary: "List managed volumes after lifecycle recovery.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::Empty>,
+        reply: array_of::<mvm_client::volume::VolumeRecord>,
+    },
+    MethodDef {
+        name: crate::volume::INSPECT,
+        key: "volume_inspect",
+        summary: "Inspect a managed volume without key material.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::NameRequest>,
+        reply: schema_of::<mvm_client::volume::VolumeRecord>,
+    },
+    MethodDef {
+        name: crate::volume::CREATE,
+        key: "volume_create",
+        summary: "Create a locked managed encrypted block volume.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::CreateRequest>,
+        reply: schema_of::<mvm_client::volume::VolumeRecord>,
+    },
+    MethodDef {
+        name: crate::volume::UNLOCK,
+        key: "volume_unlock",
+        summary: "Unlock a volume through the configured client key provider.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::NameRequest>,
+        reply: schema_of::<mvm_client::volume::VolumeRecord>,
+    },
+    MethodDef {
+        name: crate::volume::LOCK,
+        key: "volume_lock",
+        summary: "Seal a managed volume through its authoritative lifecycle.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::NameRequest>,
+        reply: schema_of::<mvm_client::volume::VolumeRecord>,
+    },
+    MethodDef {
+        name: crate::volume::MOUNT,
+        key: "volume_mount",
+        summary: "Register a read-only-by-default volume or encrypted host snapshot.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::MountRequest>,
+        reply: schema_of::<mvm_client::volume::AttachmentRecord>,
+    },
+    MethodDef {
+        name: crate::volume::DETACH,
+        key: "volume_detach",
+        summary: "Detach a registered volume.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::DetachRequest>,
+        reply: schema_of::<mvm_client::volume::AttachmentRecord>,
+    },
+    MethodDef {
+        name: crate::volume::ATTACHMENTS,
+        key: "volume_attachments",
+        summary: "List registered attachments for a machine.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::MachineRequest>,
+        reply: array_of::<mvm_client::volume::AttachmentRecord>,
+    },
+    MethodDef {
+        name: crate::volume::SNAPSHOT,
+        key: "volume_snapshot",
+        summary: "Snapshot a locked managed volume without exporting key material.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::SnapshotRequest>,
+        reply: schema_of::<mvm_client::volume::wire::Empty>,
+    },
+    MethodDef {
+        name: crate::volume::RESTORE,
+        key: "volume_restore",
+        summary: "Restore a locked managed volume from a verified local snapshot.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::volume::wire::SnapshotRequest>,
+        reply: schema_of::<mvm_client::volume::wire::Empty>,
+    },
+    MethodDef {
+        name: crate::manifest::REMOVE,
+        key: "manifest_remove",
+        summary: "Remove a local built slot, optionally deleting its source manifest.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::RemoveRequest>,
+        reply: schema_of::<mvm_client::manifest::RemoveReport>,
+    },
+    MethodDef {
+        name: crate::manifest::PRUNE,
+        key: "manifest_prune",
+        summary: "Preview or explicitly remove orphaned local manifest slots.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::PruneRequest>,
+        reply: schema_of::<mvm_client::manifest::PruneReport>,
+    },
+    MethodDef {
+        name: crate::manifest::EXPORT_OCI,
+        key: "manifest_export_oci",
+        summary: "Export an existing local OCI archive.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::manifest::ExportOciRequest>,
+        reply: schema_of::<mvm_client::manifest::ExportOciReport>,
+    },
+    MethodDef {
+        name: crate::storage::INFO,
+        key: "storage_info",
+        summary: "Inspect the host thin pool.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::storage::InfoRequest>,
+        reply: schema_of::<mvm_client::storage::InfoReport>,
+    },
+    MethodDef {
+        name: crate::storage::GC,
+        key: "storage_gc",
+        summary: "Preview or explicitly collect host thin-pool volumes.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::storage::GcRequest>,
+        reply: schema_of::<mvm_client::storage::GcReport>,
+    },
+    MethodDef {
+        name: crate::bundle::EXPORT,
+        key: "bundle_export",
+        summary: "Export registered artifacts signed by the host key.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::bundle::ExportRequest>,
+        reply: schema_of::<mvm_client::bundle::ExportReport>,
+    },
+    MethodDef {
+        name: crate::dispatch::MAINTENANCE_RECONCILE,
+        key: "maintenance_reconcile",
+        summary: "Preview host-local registry drift, or explicitly apply repairs.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<mvm_client::maintenance::ReconcileRequest>,
+        reply: schema_of::<mvm_client::maintenance::ReconcileReport>,
+    },
+    MethodDef {
         name: MANIFEST_INFO,
         key: "manifest_info",
         summary: "Inspect a built manifest slot and its optional snapshot.",
@@ -688,6 +1056,15 @@ mod tests {
             .chain(crate::guest::METHODS.iter())
             .chain(crate::launch::METHODS.iter())
             .chain(crate::manifest::METHODS.iter())
+            .chain(crate::storage::METHODS.iter())
+            .chain(crate::bundle::METHODS.iter())
+            .chain(crate::artifact::METHODS.iter())
+            .chain(crate::audit::METHODS.iter())
+            .chain(crate::volume::METHODS.iter())
+            .chain(crate::workspace::METHODS.iter())
+            .chain(crate::agent_sessions::METHODS.iter())
+            .chain(crate::checkpoints::METHODS.iter())
+            .chain(crate::replay::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
             .chain(crate::stream::LOG_METHODS.iter())
@@ -695,6 +1072,40 @@ mod tests {
             .collect();
         runtime.sort_unstable();
         assert_eq!(registry, runtime);
+    }
+
+    #[test]
+    fn host_local_requests_have_strict_schemas_and_safe_defaults() {
+        for method in REGISTRY.iter().filter(|method| {
+            crate::manifest::METHODS.contains(&method.name)
+                || crate::storage::METHODS.contains(&method.name)
+                || crate::bundle::METHODS.contains(&method.name)
+                || crate::artifact::METHODS.contains(&method.name)
+                || crate::audit::METHODS.contains(&method.name)
+                || crate::volume::METHODS.contains(&method.name)
+                || crate::workspace::METHODS.contains(&method.name)
+                || crate::agent_sessions::METHODS.contains(&method.name)
+                || crate::checkpoints::METHODS.contains(&method.name)
+                || crate::replay::METHODS.contains(&method.name)
+        }) {
+            assert_eq!(
+                (method.request)().root["additionalProperties"],
+                false,
+                "{}",
+                method.name
+            );
+        }
+        let prune = schema_of::<mvm_client::manifest::PruneRequest>();
+        assert_eq!(prune.root["properties"]["dry_run"]["default"], true);
+        let gc = schema_of::<mvm_client::storage::GcRequest>();
+        assert_eq!(gc.root["properties"]["apply"]["default"], false);
+        let mount = schema_of::<mvm_client::volume::wire::MountRequest>();
+        assert_eq!(mount.root["properties"]["access"]["default"], "read-only");
+        let apply = schema_of::<mvm_client::workspace_apply::wire::ApplyRequest>();
+        let required = apply.root["required"].as_array().unwrap();
+        assert!(required.contains(&serde_json::json!("expected_fingerprint")));
+        assert!(required.contains(&serde_json::json!("approved")));
+        assert!(apply.root["properties"].get("plan").is_none());
     }
 
     #[test]

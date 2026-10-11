@@ -78,15 +78,17 @@ fn run_persistent(
         );
     }
     let start = start_args_for_run(&args, &name);
-    let booted = mvm_client::launch::detached::persist_and_boot(
+    let booted = mvm_client::launch::detached::persist_for_start(
         mvm_client::launch::detached::DetachedBoot {
             name: &name,
             spec: &spec,
             action,
             secret_refs: secret_refs.as_deref(),
         },
-        || lifecycle::start_machine(start),
     )?;
+    if booted {
+        lifecycle::start_machine(start)?;
+    }
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
     }
@@ -368,7 +370,7 @@ fn warn_registered_volumes_are_not_attached(name: Option<&str>) {
     if records.is_empty() {
         return;
     }
-    mvm_runtime::base::ui::warn(&transient_volume_warning(name, records.len()));
+    crate::ui::warn(&transient_volume_warning(name, records.len()));
 }
 
 pub(super) fn transient_volume_warning(name: &str, count: usize) -> String {

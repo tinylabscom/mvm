@@ -64,17 +64,27 @@ use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub mod agent_sessions;
 mod approval;
+pub mod artifact;
+pub mod audit;
+pub mod bundle;
+pub mod checkpoints;
 pub mod dispatch;
 mod embedder;
 pub mod entrypoint;
 pub mod guest;
+mod host_local;
 pub mod launch;
 pub mod manifest;
 #[cfg(feature = "schema")]
 pub mod registry;
+pub mod replay;
 pub mod status;
+pub mod storage;
 pub mod stream;
+pub mod volume;
+pub mod workspace;
 
 use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_INTERNAL, Outcome};
 
@@ -92,8 +102,11 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// `machine.pause`, `machine.resume`, `machine.reconfigure`, and
 /// `machine.set_ttl`. 6 added `telemetry.status` and `telemetry.records`, the
 /// per-machine collector read seam. 7 added built-manifest inspection through
-/// `manifest.list`, `manifest.info`, and `manifest.verify`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 7;
+/// `manifest.list`, `manifest.info`, and `manifest.verify`. 8 adds explicit
+/// host-local maintenance, manifest mutation/export, storage, bundle export,
+/// artifacts, volumes, reviewed workspaces, audit sessions, posture, durable
+/// agent sessions, checkpoints and verified session replay operations.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 8;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -248,7 +261,9 @@ fn declared() -> Result<(), Outcome> {
             &e.to_string(),
             false,
         )
-    })
+    })?;
+    mvm_client::host_runtime::initialize();
+    Ok(())
 }
 
 impl Services for Local {
@@ -295,8 +310,35 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     let Ok(method) = std::str::from_utf8(method) else {
         return Outcome::invalid_input("method is not valid UTF-8");
     };
+    if artifact::METHODS.contains(&method) {
+        return artifact::dispatch(method, request);
+    }
+    if audit::METHODS.contains(&method) {
+        return audit::dispatch(method, request);
+    }
+    if volume::METHODS.contains(&method) {
+        return volume::dispatch(method, request);
+    }
+    if workspace::METHODS.contains(&method) {
+        return workspace::dispatch(method, request);
+    }
     if manifest::is_known(method) {
         return manifest::dispatch(method, request);
+    }
+    if storage::is_known(method) {
+        return storage::dispatch(method, request);
+    }
+    if agent_sessions::METHODS.contains(&method) {
+        return agent_sessions::dispatch(method, request);
+    }
+    if checkpoints::METHODS.contains(&method) {
+        return checkpoints::dispatch(method, request);
+    }
+    if replay::METHODS.contains(&method) {
+        return replay::dispatch(request);
+    }
+    if bundle::is_known(method) {
+        return bundle::dispatch(method, request);
     }
     if guest::is_known(method) {
         return match services.guest() {
@@ -525,7 +567,11 @@ mod tests {
 
     #[test]
     fn manifest_inspection_requires_negotiation_but_not_machine_services() {
-        for method in manifest::METHODS {
+        for method in manifest::METHODS
+            .iter()
+            .chain(storage::METHODS)
+            .chain(bundle::METHODS)
+        {
             let outcome = handle(false, method.as_bytes(), b"{}", &Untouched);
             assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
             let outcome = handle(true, method.as_bytes(), b"invalid json", &Untouched);

@@ -4,6 +4,10 @@ use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
+#[cfg(test)]
+use mvm_client::maintenance::cache::RETIRED_CACHE_ENTRIES;
+#[cfg(test)]
+use mvm_client::maintenance::cache::{FlowRetentionRequest, RetiredPruneRequest};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -110,6 +114,8 @@ pub(in crate::commands) enum CacheAction {
 struct CacheInfo {
     cache_dir: String,
     exists: bool,
+    #[serde(skip)]
+    builder_store_exists: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     disk_usage_bytes: Option<u64>,
     /// Per-top-level-entry footprint, largest first.
@@ -129,66 +135,34 @@ struct CacheDirEntry {
     retired: bool,
 }
 
-/// Structured output for `cache status --json`: one row per cached pack plus
-/// the host runtime pack's instant-launch verdict.
-#[derive(serde::Serialize)]
-struct CacheStatusReport {
-    packs: Vec<CacheStatusEntry>,
-    instant_launch_ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instant_launch_reason: Option<String>,
-}
-
-/// One row of the `cache status` table.
-#[derive(serde::Serialize)]
-struct CacheStatusEntry {
-    pack_hash: String,
-    kind: mvm_core::packs::PackKind,
-    arch: mvm_core::arch::GuestArch,
-    backends: Vec<mvm_core::packs::PackBackend>,
-    channel: String,
-    size_bytes: u64,
-    expires_at: chrono::DateTime<chrono::Utc>,
-    expired: bool,
-    signing_key_id: mvm_core::plan::bundle::KeyId,
-    revocation_channel: String,
-    last_used_unix: Option<i64>,
-}
-
 fn collect_cache_info() -> Result<CacheInfo> {
-    let cache_dir = mvm_core::config::mvm_cache_dir();
-    let path = std::path::Path::new(&cache_dir);
-    if !path.exists() {
+    let inventory = mvm_client::maintenance::cache::footprint::inspect();
+    let cache_dir = inventory.path.to_string_lossy().into_owned();
+    if !inventory.exists {
         return Ok(CacheInfo {
             cache_dir,
             exists: false,
+            builder_store_exists: false,
             disk_usage_bytes: None,
             entries: Vec::new(),
             detail_lines: Vec::new(),
         });
     }
-    let disk_usage_bytes = dir_size(path);
-    let entries = cache_dir_breakdown(path)
+    let entries = inventory
+        .entries
         .into_iter()
-        .map(|(name, bytes)| {
-            let retired = RETIRED_CACHE_ENTRIES.contains(&name.as_str());
-            CacheDirEntry {
-                name,
-                bytes,
-                retired,
-            }
+        .map(|entry| CacheDirEntry {
+            name: entry.name,
+            bytes: entry.bytes,
+            retired: entry.retired,
         })
         .collect();
-    let stage0_dir = mvm_build::stage0::stage0_cache_dir();
-    let blob_filenames: Vec<&str> = mvm_build::stage0::assets_for_host_arch()
-        .iter()
-        .map(|a| a.cache_filename)
-        .collect();
-    let detail_lines = stage0_cache_report(path, &stage0_dir, &blob_filenames);
+    let detail_lines = render_stage0_footprint(&inventory.stage0);
     Ok(CacheInfo {
         cache_dir,
         exists: true,
-        disk_usage_bytes: Some(disk_usage_bytes),
+        builder_store_exists: inventory.stage0.builder_bytes.is_some(),
+        disk_usage_bytes: inventory.bytes,
         entries,
         detail_lines,
     })
@@ -236,7 +210,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // damage only surfaces when the guest mounts the image, so `info`
             // can't cheaply detect it from the host; the failure path and
             // `doctor` carry the live diagnosis.
-            if std::path::Path::new(&cache_dir).join("builder-vm").is_dir() {
+            if info.builder_store_exists {
                 println!(
                     "If `mvmctl bootstrap`/`build` fails with a dangling-store or mount error, \
                      run `mvmctl cache repair`."
@@ -245,43 +219,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
         CacheAction::Status { json } => {
-            let packs = mvm_core::pack_cache::list_cached_packs()?;
-            let now = chrono::Utc::now();
-            let diagnosis = crate::commands::vm::runtime_pack::runtime_pack_diagnosis()?;
-            let reason = crate::commands::vm::runtime_pack::not_instant_reason(&diagnosis);
-
+            let report = mvm_client::maintenance::cache::status()?;
             if json {
-                let report = CacheStatusReport {
-                    packs: packs
-                        .iter()
-                        .map(|p| CacheStatusEntry {
-                            pack_hash: p.pack_hash.as_str().to_string(),
-                            kind: p.kind.clone(),
-                            arch: p.arch,
-                            backends: p.backends.clone(),
-                            channel: p.channel.clone(),
-                            size_bytes: p.size_bytes,
-                            expires_at: p.expires_at,
-                            expired: p.expires_at < now,
-                            signing_key_id: p.signing_key_id.clone(),
-                            revocation_channel: p.revocation_channel.clone(),
-                            last_used_unix: p.last_used_unix,
-                        })
-                        .collect(),
-                    instant_launch_ready: reason.is_none(),
-                    instant_launch_reason: reason,
-                };
                 crate::json_out::emit_json(&report)?;
                 return Ok(());
             }
 
-            if packs.is_empty() {
+            if report.packs.is_empty() {
                 ui::info("No packs cached.");
                 return Ok(());
             }
 
-            for p in &packs {
-                let expired = p.expires_at < now;
+            for p in &report.packs {
+                let expired = p.expired;
                 let backends = p
                     .backends
                     .iter()
@@ -299,7 +249,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     if expired { "EXPIRED" } else { "ok" },
                 );
             }
-            match &reason {
+            match &report.instant_launch_reason {
                 Some(r) => ui::info(&format!("Instant launch: unavailable — {r}")),
                 None => ui::info("Instant launch: ready"),
             }
@@ -311,28 +261,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             force,
             store_only,
         } => {
-            use super::super::env::builder_vm;
-
-            // Guard 1 — never yank the store from an in-flight bootstrap. A
-            // held Stage 0 lock means another build is mid-bootstrap.
-            // `--force` overrides (for a stale lock left by a crash).
-            if !force && builder_vm::stage0_bootstrap_in_flight() {
-                anyhow::bail!(
-                    "a Stage 0 builder bootstrap appears to be in progress (lock held at \
-                     {}/builder-vm/stage0.lock). Refusing to clear the builder store from under \
-                     a live build. Wait for it to finish, or pass --force if you are certain the \
-                     lock is stale (e.g. after a crash).",
-                    cache_dir,
-                );
-            }
-
-            let repair = if store_only {
-                mvm_build::builder_vm::clear_builder_store_image(dry_run)
-                    .map_err(|e| anyhow::anyhow!("clearing builder store image: {e}"))?
-            } else {
-                mvm_build::builder_vm::clear_builder_store(dry_run)
-                    .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?
-            };
+            let repair = mvm_client::maintenance::cache::repair(&repair_request(
+                dry_run, force, store_only,
+            ))?;
             if json {
                 crate::json_out::emit_json(&repair)?;
                 return Ok(());
@@ -349,12 +280,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     human_bytes(repair.bytes_freed)
                 ));
             } else {
-                mvm_core::audit_emit!(
-                    CachePrune,
-                    "op=builder_store_repair freed_bytes={} cache_dir={}",
-                    repair.bytes_freed,
-                    repair.path
-                );
                 ui::notice(&format!(
                     "Cleared builder store {} ({} freed). The next `mvmctl bootstrap` rebuilds it.",
                     repair.path,
@@ -371,473 +296,253 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             deep,
             stage0_store,
         } => {
-            // `--deep` is the "reclaim everything regenerable" sledgehammer; it
-            // subsumes the orphan-dir sweep.
-            let orphan_dirs = orphan_dirs || deep;
-            // Decided before anything is removed, so an explicit request that
-            // has to refuse leaves the cache untouched.
-            let stage0_store_action = stage0_store_reclaim_action(
-                stage0_store,
+            let request = prune_request(
+                dry_run,
+                orphan_builds,
+                no_reap_orphans,
+                orphan_dirs,
                 deep,
-                super::super::env::builder_vm::stage0_bootstrap_in_flight(),
+                stage0_store,
             );
-            if stage0_store_action == Stage0StoreReclaim::Refuse {
-                anyhow::bail!(
-                    "a Stage 0 bootstrap appears to be in progress (lock held at \
-                     {}/builder-vm/stage0.lock). Refusing to remove the Stage 0 store from \
-                     under it; run this again once the bootstrap finishes.",
-                    cache_dir,
-                );
-            }
-            // Reap orphaned per-VM helpers by default (liveness-aware: live VMs
-            // are spared). Done first so subsequent steps see a clean process
-            // list and so the sweeper can drop the per-VM cache dirs along with
-            // the helpers that were holding their sockets/PIDs.
-            if !no_reap_orphans {
-                match super::super::env::builder_vm::reap_orphaned_vm_helpers(dry_run) {
-                    Ok(o) => {
-                        if o.killed == 0 && o.removed_dirs == 0 {
-                            ui::info("No orphaned VM helpers.");
-                        } else if dry_run {
-                            ui::notice(&format!(
-                                "(dry-run) Would reap {} orphaned helper PID(s) and {} cache dir(s) ({}).",
-                                o.killed,
-                                o.removed_dirs,
-                                human_bytes(o.freed_bytes)
-                            ));
-                        } else {
-                            ui::notice(&format!(
-                                "Reaped {} orphaned helper PID(s) and {} cache dir(s), freed {}.",
-                                o.killed,
-                                o.removed_dirs,
-                                human_bytes(o.freed_bytes)
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        ui::warn(&format!("Orphan-helper reap failed: {e:#}"));
-                    }
-                }
-            }
-
-            // Optionally sweep orphaned builds first. Same logic as
-            // `mvmctl manifest prune --orphans` — bundled here so the
-            // user can do a single clean-everything pass without
-            // remembering both verbs.
-            if orphan_builds {
-                if dry_run {
-                    ui::info(
-                        "(dry-run) Would scan for orphaned builds — see `mvmctl manifest prune --orphans --dry-run` for details.",
-                    );
-                } else {
-                    match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
-                        Ok((count, _)) => {
-                            mvm_core::audit_emit!(SlotPrune, "source=cache_prune count={count}");
-                            if count > 0 {
-                                ui::success(&format!("Pruned {count} orphaned build(s)."));
-                            } else {
-                                ui::info("No orphaned builds.");
-                            }
-                        }
-                        Err(e) => {
-                            ui::warn(&format!("Orphan-build prune failed: {e}"));
-                        }
-                    }
-                }
-            }
-
-            let path = std::path::Path::new(&cache_dir);
-            if !path.exists() {
-                ui::info("Cache directory does not exist. Nothing to prune.");
-                if !dry_run {
-                    mvm_core::audit_emit!(CachePrune, "removed=0 freed_bytes=0 cache_dir=missing");
-                }
-                return Ok(());
-            }
-
-            // Prune: remove empty subdirectories and temp files
-            let mut removed = 0u64;
-            let mut freed = 0u64;
-
-            // Sweep orphaned Stage 0 staging dirs first.
-            // They live under `~/.mvm/cache/builder-vm/.<arch>.stage0-*`
-            // (or the legacy `<arch>-staging` shape) and are left
-            // behind by crashed builder VM bootstrap invocations. The sweep
-            // takes the Stage 0 advisory lock to avoid racing a live
-            // bootstrap; if the lock is held it skips silently and we
-            // proceed with the temp-file sweep.
-            match super::super::env::builder_vm::sweep_orphaned_stage0_staging_dirs(dry_run) {
-                Ok(super::super::env::builder_vm::Stage0SweepOutcome::Swept {
-                    removed: r,
-                    freed_bytes,
-                }) => {
-                    removed += r;
-                    freed += freed_bytes;
-                }
-                Ok(super::super::env::builder_vm::Stage0SweepOutcome::SkippedLockHeld) => {
-                    ui::info(
-                        "Stage 0 builder VM bootstrap appears to be running on this host; \
-                         skipping orphan staging cleanup.",
-                    );
-                }
-                Err(e) => {
-                    ui::warn(&format!("Stage 0 staging sweep failed: {e:#}"));
-                }
-            }
-
-            // Builder images the retired HVF patcher baked. Every builder now
-            // boots the image as built, with mvm's own binaries in the boot
-            // payload, so nothing reads these copies any more.
-            let retired = mvm_build::builder_vm::builder_vm_cache_dir().join(RETIRED_HVF_IMAGE_DIR);
-            match sweep_retired_hvf_builder_images(&retired, dry_run) {
-                Ok((r, bytes)) => {
-                    removed += r;
-                    freed += bytes;
-                }
-                Err(e) => ui::warn(&format!(
-                    "removing retired HVF builder images under {}: {e}",
-                    retired.display()
-                )),
-            }
-
-            // Flow-byte-log retention sweep. Per-tenant subdirs
-            // under `<audit>/flow-bytes/` hold opt-in payload records;
-            // remove files older than the default window. No tenant policy
-            // is in scope at prune time, so use the conservative default.
-            const FLOW_BYTE_LOG_MAX_AGE_DAYS: u32 = 7;
-            let flow_bytes_dir = mvm_core::config::mvm_audit_dir().join("flow-bytes");
-            if dry_run {
-                if flow_bytes_dir.exists() {
-                    ui::info("(dry-run) Would sweep expired flow-byte-log records.");
-                }
-            } else {
-                match mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(
-                    &flow_bytes_dir,
-                    FLOW_BYTE_LOG_MAX_AGE_DAYS,
-                ) {
-                    Ok(n) => removed += n,
-                    Err(e) => ui::warn(&format!("flow-byte-log sweep failed: {e}")),
-                }
-            }
-
-            // Reap stale supervisor standbys under `~/.mvm/pool/`.
-            // The TTL guards a fresh pool (only dead-pid or expired standbys go); a
-            // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
-            // dropped, so idle entitled processes never accumulate. Shares
-            // `STANDBY_POOL_TTL` with the launch-path reaper so both agree on "stale".
-            use mvm_runtime::standby_pool::STANDBY_POOL_TTL;
-            if dry_run {
-                if let Ok(pool) = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
-                    && let Ok(n) = pool.list().map(|v| v.len())
-                    && n > 0
-                {
-                    ui::info(&format!(
-                        "(dry-run) Would reap stale entries among {n} standby(s)."
-                    ));
-                }
-            } else {
-                match mvm_runtime::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
-                    pool.reap_stale(STANDBY_POOL_TTL, mvm_core::time::now_unix_secs())
-                }) {
-                    Ok(reaped) if !reaped.is_empty() => {
-                        removed += reaped.len() as u64;
-                        ui::info(&format!("Reaped {} stale standby(s).", reaped.len()));
-                    }
-                    Ok(_) => {}
-                    Err(e) => ui::warn(&format!("standby pool reap failed: {e}")),
-                }
-            }
-
-            // Untagged-checkpoint GC: tagged checkpoints are user-pinned; untagged
-            // ones follow cache retention, unless a still-resumable session names
-            // one as its resume point or a retained checkpoint restores through
-            // it. One corrupt meta.json makes list() fail, which logs a warning
-            // and skips the sweep — acceptable for a prune pass.
-            const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-            let ckpt_store = mvm_runtime::checkpoint::CheckpointStore::open();
-            if dry_run {
-                if !ckpt_store.list().unwrap_or_default().is_empty() {
-                    ui::info("(dry-run) Would sweep expired untagged checkpoints.");
-                }
-            } else {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let sessions = mvm_runtime::agent_session::AgentSessionStore::open();
-                match mvm_runtime::agent_session::pinned_checkpoints(&sessions) {
-                    Ok(pinned) => {
-                        match sweep_untagged_checkpoints(
-                            &ckpt_store,
-                            now,
-                            CHECKPOINT_MAX_AGE_SECS,
-                            &pinned,
-                        ) {
-                            Ok(n) => removed += n as u64,
-                            Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
-                        }
-                    }
-                    Err(e) => ui::warn(&format!(
-                        "checkpoint sweep skipped: could not determine session-pinned checkpoints: {e}"
-                    )),
-                }
-            }
-
-            // Checkpoint content GC, after the sweep so chunks only the swept
-            // checkpoints used are reclaimed in the same run: pool objects no
-            // checkpoint links, staging a dead capture left, and cached restore
-            // images whose checkpoint is gone.
-            match mvm_runtime::checkpoint::prune_unreferenced_content(&ckpt_store, dry_run) {
-                Ok(report) if !report.is_empty() => {
-                    ui::info(&checkpoint_content_prune_report(&report, dry_run));
-                    removed += report.entries();
-                    freed += report.bytes();
-                }
-                Ok(_) => {}
-                Err(e) => ui::warn(&format!("checkpoint content sweep failed: {e:#}")),
-            }
-
-            // Expired-pack sweep: an attested pack whose trust metadata expired
-            // is never instant-launch-eligible, so reclaiming it is always safe.
-            // Valid-but-unused (LRU) pack reclamation is a separate concern and
-            // is not swept here.
-            match mvm_core::pack_cache::prune_expired_packs(chrono::Utc::now(), dry_run) {
-                Ok(expired) => {
-                    if !expired.is_empty() {
-                        if dry_run {
-                            ui::info(&format!(
-                                "(dry-run) Would remove {} expired pack(s).",
-                                expired.len()
-                            ));
-                        } else {
-                            ui::info(&format!("Removed {} expired pack(s).", expired.len()));
-                            mvm_core::audit_emit!(
-                                CachePrune,
-                                "source=pack_cache_prune count={}",
-                                expired.len()
-                            );
-                        }
-                        removed += expired.len() as u64;
-                    }
-                }
-                Err(e) => ui::warn(&format!("expired-pack sweep failed: {e}")),
-            }
-
-            // Version-aware pack prune: reclaim non-active pack versions
-            // beyond the newest few per key, distinct from the expired-pack
-            // sweep above (which only removes packs whose trust metadata has
-            // lapsed). Keeps the active version plus the most recent
-            // runners-up so a rollback via `mvmctl pack activate` stays
-            // possible instead of every downloaded/built version
-            // accumulating forever.
-            match mvm_core::pack_cache::prune_versions(PACK_VERSION_KEEP_RECENT, dry_run) {
-                Ok(pruned) => {
-                    if !pruned.is_empty() {
-                        ui::info(&pack_version_prune_report(pruned.len(), dry_run));
-                        if !dry_run {
-                            mvm_core::audit_emit!(
-                                CachePrune,
-                                "source=pack_version_prune count={}",
-                                pruned.len()
-                            );
-                        }
-                        removed += pruned.len() as u64;
-                    }
-                }
-                Err(e) => ui::warn(&format!("pack version prune failed: {e}")),
-            }
-
-            for entry in walkdir(path)? {
-                let entry_path = entry.path();
-                // Remove temp files (mvm-lima-*, .tmp)
-                if let Some(name) = entry_path.file_name().and_then(|n| n.to_str())
-                    && (name.starts_with("mvm-lima-") || name.ends_with(".tmp"))
-                {
-                    let size = dir_size(&entry_path);
-                    if dry_run {
-                        println!(
-                            "Would remove: {} ({})",
-                            entry_path.display(),
-                            human_bytes(size)
-                        );
-                    } else {
-                        let _ = remove_cache_path(&entry_path);
-                    }
-                    removed += 1;
-                    freed += size;
-                }
-            }
-
-            // Leftovers from a subsystem mvm no longer has. Reported by
-            // default; removed only with `--orphan-dirs`/`--deep`.
-            let retired = classify_retired_entries(path);
-            if !retired.is_empty() {
-                if orphan_dirs {
-                    let (n, b) = reclaim_entries(&retired, "retired cache entry", dry_run);
-                    removed += n;
-                    freed += b;
-                } else {
-                    let total: u64 = retired.iter().map(|e| e.bytes).sum();
-                    ui::info(&format!(
-                        "{} retired cache entr{} ({} total) not removed — \
-                         re-run with `--orphan-dirs` to reclaim:",
-                        retired.len(),
-                        if retired.len() == 1 { "y" } else { "ies" },
-                        human_bytes(total),
-                    ));
-                    for e in &retired {
-                        ui::info(&format!(
-                            "  {} ({})",
-                            e.path.display(),
-                            human_bytes(e.bytes)
-                        ));
-                    }
-                }
-            }
-
-            // `--deep`: reclaim regenerable caches (Stage 0 blobs, the prebuilt
-            // default microVM image, pulled OCI layers). Opt-in: each costs a
-            // re-fetch/rebuild next time it's needed.
-            if deep {
-                let targets = regenerable_cache_targets(path);
-                if targets.is_empty() {
-                    ui::info("No regenerable caches to reclaim.");
-                } else {
-                    for (entry, label) in &targets {
-                        ui::info(&format!("  {label}"));
-                        let (n, b) = reclaim_entries(
-                            std::slice::from_ref(entry),
-                            "regenerable cache",
-                            dry_run,
-                        );
-                        removed += n;
-                        freed += b;
-                    }
-                }
-            }
-
-            match stage0_store_action {
-                Stage0StoreReclaim::Clear => {
-                    let repair = mvm_build::builder_vm::clear_stage0_store_image(dry_run)
-                        .map_err(|e| anyhow::anyhow!("removing the Stage 0 store image: {e}"))?;
-                    if repair.existed {
-                        ui::info(&format!(
-                            "  Stage 0 Nix store {} ({}; the next bootstrap starts cold)",
-                            repair.path,
-                            human_bytes(repair.bytes_freed)
-                        ));
-                        removed += 1;
-                        freed += repair.bytes_freed;
-                    }
-                }
-                Stage0StoreReclaim::SkipInFlight => {
-                    ui::warn("Skipping the Stage 0 store: a Stage 0 bootstrap is in progress.")
-                }
-                Stage0StoreReclaim::Keep | Stage0StoreReclaim::Refuse => {}
-            }
-
-            if removed == 0 {
-                ui::notice("Nothing to prune.");
-            } else if dry_run {
-                ui::notice(&format!(
-                    "Would remove {} items, freeing {}",
-                    removed,
-                    human_bytes(freed)
-                ));
-            } else {
-                ui::notice(&format!(
-                    "Pruned {} items, freed {}",
-                    removed,
-                    human_bytes(freed)
-                ));
-            }
-
-            // Make the persistent /nix store images' footprint
-            // visible at prune time. We don't boot a VM to GC on demand
-            // (out of scope); GC now runs automatically in-build past the
-            // cap. Report the sizes + the cap so the operator can see the
-            // bloat and understand the auto-reclaim behaviour.
-            for line in builder_store_gc_report(path) {
-                println!("{line}");
-            }
-            // Every state-changing CLI verb emits one audit record.
-            // We only mutate disk on the non-dry-run
-            // path; dry-run reads only and stays out of the log.
-            if !dry_run {
-                mvm_core::audit_emit!(CachePrune, "removed={removed} freed_bytes={freed}");
-            }
+            mvm_client::maintenance::cache::prune(&request, |event| {
+                render_prune_event(event, dry_run)
+            })?;
             Ok(())
         }
     }
 }
 
-/// What `prune` does with the Stage 0 Nix store image.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage0StoreReclaim {
-    /// Not asked for.
-    Keep,
-    /// Asked for and safe to remove.
-    Clear,
-    /// Named explicitly while a bootstrap holds it: fail the whole prune, so
-    /// the operator knows the one thing they asked for did not happen.
-    Refuse,
-    /// Swept up by `--deep` while a bootstrap holds it: leave it and say so,
-    /// rather than failing everything else `--deep` would reclaim.
-    SkipInFlight,
-}
-
-fn stage0_store_reclaim_action(
-    requested: bool,
+fn prune_request(
+    dry_run: bool,
+    orphan_builds: bool,
+    no_reap_orphans: bool,
+    orphan_dirs: bool,
     deep: bool,
-    bootstrap_in_flight: bool,
-) -> Stage0StoreReclaim {
-    match (requested, deep, bootstrap_in_flight) {
-        (false, false, _) => Stage0StoreReclaim::Keep,
-        (_, _, false) => Stage0StoreReclaim::Clear,
-        (true, _, true) => Stage0StoreReclaim::Refuse,
-        (false, true, true) => Stage0StoreReclaim::SkipInFlight,
+    stage0_store: bool,
+) -> mvm_client::maintenance::cache::CachePruneRequest {
+    mvm_client::maintenance::cache::CachePruneRequest {
+        apply: !dry_run,
+        orphan_builds,
+        no_reap_orphans,
+        orphan_dirs,
+        deep,
+        stage0_store,
     }
 }
 
-/// Top-level entries under `mvm_cache_dir()` that belonged to a subsystem mvm
-/// no longer has. `prune --orphan-dirs` removes these and nothing else.
-///
-/// This is deliberately a deny-list. The inverse — an allow-list of every
-/// live cache dir, deleting whatever is missing from it — has to be extended
-/// every time any subsystem anywhere in the workspace grows a cache, and the
-/// price of forgetting is that prune deletes a cache that is still in use.
-/// Naming the dead names instead inverts the failure: forgetting to retire a
-/// name leaks disk, which an operator can see and we can fix later.
-///
-/// CONTRACT: when you delete a subsystem, add the cache entry it owned here in
-/// the same change.
-const RETIRED_CACHE_ENTRIES: &[&str] = &[
-    // Stage 0's store mount point from the container-era bootstrap.
-    "docker-nix-store",
-    // Builder store mount point superseded by the persistent store image.
-    "builder-nix-store",
-];
+fn repair_request(
+    dry_run: bool,
+    force: bool,
+    store_only: bool,
+) -> mvm_client::maintenance::cache::RepairRequest {
+    use mvm_client::maintenance::cache::{RepairRequest, RepairScope};
+    RepairRequest {
+        apply: !dry_run,
+        force,
+        scope: if store_only {
+            RepairScope::StoreImage
+        } else {
+            RepairScope::BuilderStore
+        },
+    }
+}
 
-/// Regenerable caches reclaimed by `prune --deep`: expensive to refetch or
-/// rebuild, so never swept by the safe default. Each tuple is
-/// `(name, human label)`; the dir is `cache_root/<name>`.
-const REGENERABLE_CACHE_ENTRIES: &[(&str, &str)] = &[
-    (
-        "stage0",
-        "Stage 0 vendored blobs (re-fetched on next cold bootstrap)",
-    ),
-    (
-        "default-microvm",
-        "prebuilt default microVM image (rebuilt on next default-image use)",
-    ),
-    ("oci", "pulled OCI layers (re-pulled on next image pull)"),
-    (
-        "mount-images",
-        "content-addressed mount images (rebuilt on next mount use)",
-    ),
-];
+fn render_prune_event(event: mvm_client::maintenance::cache::CachePruneEvent, dry_run: bool) {
+    use mvm_client::maintenance::cache::CachePruneEvent as E;
+    match event {
+        E::Helpers {
+            killed,
+            removed_dirs,
+            freed_bytes,
+        } => {
+            if killed == 0 && removed_dirs == 0 {
+                ui::info("No orphaned VM helpers.");
+            } else if dry_run {
+                ui::notice(&format!(
+                    "(dry-run) Would reap {killed} orphaned helper PID(s) and {removed_dirs} cache dir(s) ({}).",
+                    human_bytes(freed_bytes)
+                ));
+            } else {
+                ui::notice(&format!(
+                    "Reaped {killed} orphaned helper PID(s) and {removed_dirs} cache dir(s), freed {}.",
+                    human_bytes(freed_bytes)
+                ));
+            }
+        }
+        E::OrphanBuilds(count) => {
+            if dry_run {
+                ui::info(&format!("(dry-run) Would prune {count} orphaned build(s)."));
+            } else if count > 0 {
+                ui::success(&format!("Pruned {count} orphaned build(s)."));
+            } else {
+                ui::info("No orphaned builds.");
+            }
+        }
+        E::Missing => ui::info("Cache directory does not exist. Nothing to prune."),
+        E::StagingSkipped => ui::info(
+            "Stage 0 builder VM bootstrap appears to be running on this host; skipping orphan staging cleanup.",
+        ),
+        E::StagingPreview(entry) => println!(
+            "Would remove orphan Stage 0 staging dir: {} ({} bytes)",
+            entry.path.display(),
+            entry.bytes
+        ),
+        E::RetiredHvfPreview { path, entries } => ui::info(&format!(
+            "(dry-run) Would remove {entries} retired HVF builder image(s) under {}.",
+            path.display()
+        )),
+        E::FlowPreview => ui::info("(dry-run) Would sweep expired flow-byte-log records."),
+        E::Standbys { inspected, removed } => {
+            if dry_run && inspected > 0 {
+                ui::info(&format!(
+                    "(dry-run) Would reap stale entries among {inspected} standby(s)."
+                ));
+            } else if removed > 0 {
+                ui::info(&format!("Reaped {removed} stale standby(s)."));
+            }
+        }
+        E::Checkpoints(report) => {
+            if dry_run {
+                if report.inspected > 0 {
+                    ui::info("(dry-run) Would sweep expired untagged checkpoints.");
+                }
+            } else {
+                for retained in &report.retained {
+                    if let Some(note) = retained_checkpoint_note(&retained.reason) {
+                        println!("Kept checkpoint: {} ({note})", retained.id);
+                    }
+                }
+                for id in &report.removed {
+                    println!("Removed checkpoint: {id} (untagged, aged out)");
+                }
+                if let Some(warning) = report.warning {
+                    ui::warn(&format!("checkpoint sweep failed: {warning}"));
+                }
+            }
+        }
+        E::Content(report) => {
+            if !report.is_empty() {
+                ui::info(&checkpoint_content_prune_report(&report, dry_run));
+            }
+        }
+        E::ExpiredPacks(count) => {
+            if count > 0 {
+                if dry_run {
+                    ui::info(&format!("(dry-run) Would remove {count} expired pack(s)."));
+                } else {
+                    ui::info(&format!("Removed {count} expired pack(s)."));
+                }
+            }
+        }
+        E::PackVersions(count) => {
+            if count > 0 {
+                ui::info(&pack_version_prune_report(count, dry_run));
+            }
+        }
+        E::TempPreview(entry) => println!(
+            "Would remove: {} ({})",
+            entry.path.display(),
+            human_bytes(entry.bytes)
+        ),
+        E::Retired { report, reclaim } => {
+            if !report.candidates.is_empty() {
+                if reclaim {
+                    let entries = if dry_run {
+                        &report.candidates
+                    } else {
+                        &report.removed
+                    };
+                    for entry in entries {
+                        println!(
+                            "{} retired cache entry: {} ({})",
+                            if dry_run { "Would remove" } else { "Removed" },
+                            entry.path.display(),
+                            human_bytes(entry.bytes)
+                        );
+                    }
+                } else {
+                    let total = report.candidates.iter().map(|e| e.bytes).sum();
+                    ui::info(&format!(
+                        "{} retired cache entr{} ({} total) not removed — re-run with `--orphan-dirs` to reclaim:",
+                        report.candidates.len(),
+                        if report.candidates.len() == 1 {
+                            "y"
+                        } else {
+                            "ies"
+                        },
+                        human_bytes(total)
+                    ));
+                    for entry in report.candidates {
+                        ui::info(&format!(
+                            "  {} ({})",
+                            entry.path.display(),
+                            human_bytes(entry.bytes)
+                        ));
+                    }
+                }
+            }
+        }
+        E::DeepEmpty => ui::info("No regenerable caches to reclaim."),
+        E::Deep {
+            entry,
+            label,
+            error,
+        } => {
+            ui::info(&format!("  {label}"));
+            if let Some(error) = error {
+                ui::warn(&format!(
+                    "could not remove {}: {error}",
+                    entry.path.display()
+                ));
+            } else {
+                println!(
+                    "{} regenerable cache: {} ({})",
+                    if dry_run { "Would remove" } else { "Removed" },
+                    entry.path.display(),
+                    human_bytes(entry.bytes)
+                );
+            }
+        }
+        E::Stage0Store(report) => {
+            if report.existed {
+                ui::info(&format!(
+                    "  Stage 0 Nix store {} ({}; the next bootstrap starts cold)",
+                    report.path,
+                    human_bytes(report.bytes_freed)
+                ));
+            }
+        }
+        E::Stage0StoreSkipped => {
+            ui::warn("Skipping the Stage 0 store: a Stage 0 bootstrap is in progress.")
+        }
+        E::Warning(warning) => ui::warn(&warning),
+        E::Summary(report) => {
+            if report.removed == 0 {
+                ui::notice("Nothing to prune.");
+            } else if dry_run {
+                ui::notice(&format!(
+                    "Would remove {} items, freeing {}",
+                    report.removed,
+                    human_bytes(report.freed_bytes)
+                ));
+            } else {
+                ui::notice(&format!(
+                    "Pruned {} items, freed {}",
+                    report.removed,
+                    human_bytes(report.freed_bytes)
+                ));
+            }
+        }
+        E::StoreFootprint(report) => {
+            for line in render_builder_store_gc_report(&report) {
+                println!("{line}");
+            }
+        }
+    }
+}
 
 /// A reclaimable cache entry: its path and real on-disk footprint.
+#[cfg(test)]
 struct CacheEntry {
     path: std::path::PathBuf,
     bytes: u64,
@@ -846,47 +551,14 @@ struct CacheEntry {
 /// Top-level entries under `cache_root` named in [`RETIRED_CACHE_ENTRIES`].
 /// Side-effect-free (stats only) so it's hermetically testable. Sorted by
 /// descending footprint so the biggest reclaim shows first.
+#[cfg(test)]
 fn classify_retired_entries(cache_root: &std::path::Path) -> Vec<CacheEntry> {
-    let Ok(entries) = std::fs::read_dir(cache_root) else {
-        return Vec::new();
-    };
-    let mut out: Vec<CacheEntry> = entries
-        .flatten()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|n| RETIRED_CACHE_ENTRIES.contains(&n))
-                .unwrap_or(false)
-        })
-        .map(|e| {
-            let path = e.path();
-            CacheEntry {
-                bytes: dir_size(&path),
-                path,
-            }
-        })
-        .collect();
-    out.sort_by_key(|e| std::cmp::Reverse(e.bytes));
-    out
-}
-
-/// Regenerable caches present under `cache_root`, in
-/// [`REGENERABLE_CACHE_ENTRIES`] order. Side-effect-free; only existing dirs
-/// are returned.
-fn regenerable_cache_targets(cache_root: &std::path::Path) -> Vec<(CacheEntry, &'static str)> {
-    REGENERABLE_CACHE_ENTRIES
-        .iter()
-        .filter_map(|(name, label)| {
-            let path = cache_root.join(name);
-            path.is_dir().then(|| {
-                (
-                    CacheEntry {
-                        bytes: dir_size(&path),
-                        path,
-                    },
-                    *label,
-                )
-            })
+    mvm_client::maintenance::cache::retired_entries_at(cache_root)
+        .expect("valid test cache")
+        .into_iter()
+        .map(|entry| CacheEntry {
+            path: entry.path,
+            bytes: entry.bytes,
         })
         .collect()
 }
@@ -894,51 +566,12 @@ fn regenerable_cache_targets(cache_root: &std::path::Path) -> Vec<(CacheEntry, &
 /// Per-top-level-entry on-disk breakdown of the cache root, sorted by
 /// descending real footprint (sparse images count allocated blocks, not their
 /// cap). Drives the `cache info` table. Side-effect-free.
+#[cfg(test)]
 fn cache_dir_breakdown(cache_root: &std::path::Path) -> Vec<(String, u64)> {
-    let Ok(entries) = std::fs::read_dir(cache_root) else {
-        return Vec::new();
-    };
-    let mut rows: Vec<(String, u64)> = entries
-        .flatten()
-        .map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            (name, dir_size(&e.path()))
-        })
-        .collect();
-    rows.sort_by_key(|(_, bytes)| std::cmp::Reverse(*bytes));
-    rows
-}
-
-/// Remove (or, under `dry_run`, just tally) a set of reclaimable entries.
-/// Returns `(count, bytes)` actually removed/would-remove. Each path is
-/// printed so the operator sees exactly what goes.
-fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u64) {
-    let mut removed = 0u64;
-    let mut freed = 0u64;
-    for e in entries {
-        if dry_run {
-            println!(
-                "Would remove {kind}: {} ({})",
-                e.path.display(),
-                human_bytes(e.bytes)
-            );
-        } else {
-            match remove_cache_path(&e.path) {
-                Ok(()) => println!(
-                    "Removed {kind}: {} ({})",
-                    e.path.display(),
-                    human_bytes(e.bytes)
-                ),
-                Err(err) => {
-                    ui::warn(&format!("could not remove {}: {err}", e.path.display()));
-                    continue;
-                }
-            }
-        }
-        removed += 1;
-        freed += e.bytes;
-    }
-    (removed, freed)
+    mvm_client::maintenance::cache::footprint::entries_at(cache_root)
+        .into_iter()
+        .map(|entry| (entry.name, entry.bytes))
+        .collect()
 }
 
 /// Remove every checkpoint nothing retains. A checkpoint is retained for its
@@ -948,6 +581,7 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
 /// nothing. Restoring walks the whole parent chain, so every ancestor of a
 /// retained checkpoint is retained too; only what lies outside that closure is
 /// removed. Returns the count removed.
+#[cfg(test)]
 pub(super) fn sweep_untagged_checkpoints(
     store: &mvm_runtime::checkpoint::CheckpointStore,
     now_unix: u64,
@@ -981,7 +615,7 @@ pub(super) fn sweep_untagged_checkpoints(
 /// One line summarizing the checkpoint content GC, split out so the wording is
 /// testable without a checkpoint store.
 fn checkpoint_content_prune_report(
-    report: &mvm_runtime::checkpoint::ContentPruneReport,
+    report: &mvm_client::maintenance::cache::retention::ContentPruneReport,
     dry_run: bool,
 ) -> String {
     let verb = if dry_run {
@@ -1001,6 +635,7 @@ fn checkpoint_content_prune_report(
 
 /// The note `cache prune` prints for a checkpoint it kept, or `None` for the
 /// reasons that need no explanation: a tag, or an age inside the cut.
+#[cfg(test)]
 fn kept_checkpoint_note(reason: &mvm_runtime::checkpoint::Retention) -> Option<String> {
     use mvm_runtime::checkpoint::Retention;
     match reason {
@@ -1014,13 +649,26 @@ fn kept_checkpoint_note(reason: &mvm_runtime::checkpoint::Retention) -> Option<S
     }
 }
 
+fn retained_checkpoint_note(
+    reason: &mvm_client::maintenance::cache::retention::RetainedBy,
+) -> Option<String> {
+    use mvm_client::maintenance::cache::retention::RetainedBy;
+    match reason {
+        RetainedBy::Tagged | RetainedBy::Young => None,
+        RetainedBy::SessionResumePoint => {
+            Some("pinned by a parked session's resume point".to_string())
+        }
+        RetainedBy::AncestorOf(descendant) => Some(format!(
+            "ancestor of retained checkpoint {descendant}, which restores through it"
+        )),
+    }
+}
+
 /// Number of non-active pack versions `mvmctl cache prune` keeps around per
 /// `(kind, arch, backend)` key, on top of whichever version is active. Kept as
 /// a named constant (not a literal at the call site) so the retention policy
 /// is documented in one place and a rollback via `mvmctl pack activate` stays
 /// possible for a little while after a newer version is promoted.
-const PACK_VERSION_KEEP_RECENT: usize = 2;
-
 /// User-facing summary line for the version-aware pack prune step, split out
 /// so the message format is unit-testable without exercising the pack cache.
 fn pack_version_prune_report(removed: usize, dry_run: bool) -> String {
@@ -1031,14 +679,9 @@ fn pack_version_prune_report(removed: usize, dry_run: bool) -> String {
     }
 }
 
-/// Whole-second age of a file from its mtime, or `None` if it can't be
-/// stat'd / is in the future.
-fn file_age_secs(path: &std::path::Path) -> Option<u64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    std::time::SystemTime::now()
-        .duration_since(modified)
-        .ok()
-        .map(|d| d.as_secs())
+#[cfg(test)]
+fn standby_request(dry_run: bool) -> mvm_client::maintenance::cache::standby::StandbyPruneRequest {
+    mvm_client::maintenance::cache::standby::StandbyPruneRequest { apply: !dry_run }
 }
 
 /// Build the `cache info` enrichment lines: vendored
@@ -1047,104 +690,72 @@ fn file_age_secs(path: &std::path::Path) -> Option<u64> {
 /// prefix. Path-injectable + side-effect-free (only stats + reads the
 /// fingerprint sidecar) so it's hermetically testable; never hashes the
 /// multi-GB rootfs (mtime + the cheap sidecar only).
+#[cfg(test)]
 fn stage0_cache_report(
     cache_root: &std::path::Path,
     stage0_dir: &std::path::Path,
     blob_filenames: &[&str],
 ) -> Vec<String> {
+    render_stage0_footprint(&mvm_client::maintenance::cache::footprint::stage0_at(
+        cache_root,
+        stage0_dir,
+        blob_filenames,
+    ))
+}
+
+fn render_stage0_footprint(
+    report: &mvm_client::maintenance::cache::footprint::Stage0Footprint,
+) -> Vec<String> {
     let mut lines = Vec::new();
 
-    if !blob_filenames.is_empty() {
+    if !report.blobs.is_empty() {
         lines.push("Vendored blobs (Stage 0):".to_string());
-        for fname in blob_filenames {
-            let p = stage0_dir.join(fname);
-            match std::fs::metadata(&p) {
-                Ok(m) => {
-                    let age = file_age_secs(&p)
+        for blob in &report.blobs {
+            let fname = &blob.name;
+            match &blob.file {
+                Some(file) => {
+                    let age = file
+                        .age_secs
                         .map(human_age_secs)
                         .unwrap_or_else(|| "?".to_string());
-                    lines.push(format!("  {fname}: {age} old ({})", human_bytes(m.len())));
+                    lines.push(format!(
+                        "  {fname}: {age} old ({})",
+                        human_bytes(file.logical_bytes)
+                    ));
                 }
-                Err(_) => lines.push(format!("  {fname}: (absent)")),
+                None => lines.push(format!("  {fname}: (absent)")),
             }
         }
     }
 
-    let builder = cache_root.join("builder-vm");
-    if builder.is_dir() {
+    if let Some(bytes) = report.builder_bytes {
         lines.push(format!(
             "Builder VM cache: {} ({} on disk)",
-            builder.display(),
-            human_bytes(dir_size(&builder))
+            report.builder_path.display(),
+            human_bytes(bytes)
         ));
-        // Persistent Nix store images are SPARSE — a large logical cap
-        // (DEFAULT_NIX_STORE_MIB, 64 GiB) over a small real footprint,
-        // GC'd in-VM when allocated blocks cross 20 GiB. Surface both so
-        // the cap never reads as real disk usage.
-        if let Ok(entries) = std::fs::read_dir(&builder) {
-            let mut imgs: Vec<std::path::PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| {
-                    p.is_file()
-                        && p.file_name()
-                            .map(|n| {
-                                let n = n.to_string_lossy();
-                                n.starts_with("nix-store-") && n.ends_with(".img")
-                            })
-                            .unwrap_or(false)
-                })
-                .collect();
-            imgs.sort();
-            for p in imgs {
-                if let Ok(m) = std::fs::metadata(&p) {
-                    let name = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    lines.push(format!(
-                        "  {name}: {} on disk / {} cap (sparse)",
-                        human_bytes(file_allocated_bytes(&m)),
-                        human_bytes(m.len())
-                    ));
-                }
-            }
+        for store in &report.stores {
+            lines.push(format!(
+                "  {}: {} on disk / {} cap (sparse)",
+                store.name,
+                human_bytes(store.allocated_bytes),
+                human_bytes(store.logical_bytes)
+            ));
         }
-        if let Ok(entries) = std::fs::read_dir(&builder) {
-            // Per-arch artifact dirs only — skip `vms/` (per-VM scratch)
-            // and dotfiles. Sorted for stable output.
-            let mut arch_dirs: Vec<std::path::PathBuf> = entries
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_dir())
-                .filter(|p| {
-                    let n = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    n != "vms" && !n.starts_with('.')
-                })
-                .collect();
-            arch_dirs.sort();
-            for p in arch_dirs {
-                let name = p
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let rootfs = p.join("rootfs.ext4");
-                if let Ok(m) = std::fs::metadata(&rootfs) {
-                    let age = file_age_secs(&rootfs)
-                        .map(human_age_secs)
-                        .unwrap_or_else(|| "?".to_string());
-                    lines.push(format!(
-                        "  {name}/rootfs.ext4: {age} old ({} on disk)",
-                        human_bytes(file_allocated_bytes(&m))
-                    ));
-                }
-                if let Ok(s) = std::fs::read_to_string(p.join(".mvm-source.sha256")) {
-                    let prefix: String = s.trim().chars().take(8).collect();
-                    lines.push(format!("  {name}/ last Stage 0 fingerprint: {prefix}"));
-                }
+        for artifact in &report.artifacts {
+            let name = &artifact.arch;
+            if let Some(rootfs) = &artifact.rootfs {
+                let age = rootfs
+                    .age_secs
+                    .map(human_age_secs)
+                    .unwrap_or_else(|| "?".to_string());
+                lines.push(format!(
+                    "  {name}/rootfs.ext4: {age} old ({} on disk)",
+                    human_bytes(rootfs.allocated_bytes)
+                ));
+            }
+            if let Some(prefix) = &artifact.source_fingerprint_prefix {
+                lines.push(format!("  {name}/ last Stage 0 fingerprint: {prefix}"));
             }
         }
     }
@@ -1155,199 +766,170 @@ fn stage0_cache_report(
 /// Report the builder VM's persistent `nix-store-*.img` footprints plus
 /// the in-build GC cap. Path-injectable + side-effect-free so it's
 /// hermetically testable. `len()` is the sparse *apparent* cap; allocated
-/// blocks (`st_blocks * 512`, via [`file_allocated_bytes`]) are the real
+/// blocks (`st_blocks * 512`) are the real
 /// footprint that grows unbounded without GC — so we surface both.
 ///
 /// We only *report* here: booting a builder VM to GC on demand is out of
 /// scope. GC runs automatically at the end of every in-VM build
 /// once the store crosses the cap.
+#[cfg(test)]
 fn builder_store_gc_report(cache_root: &std::path::Path) -> Vec<String> {
-    let builder = cache_root.join("builder-vm");
-    if !builder.is_dir() {
+    let report = mvm_client::maintenance::cache::footprint::stage0_at(cache_root, cache_root, &[]);
+    render_builder_store_gc_report(&report)
+}
+
+fn render_builder_store_gc_report(
+    report: &mvm_client::maintenance::cache::footprint::Stage0Footprint,
+) -> Vec<String> {
+    if report.stores.is_empty() {
         return Vec::new();
     }
-    let Ok(entries) = std::fs::read_dir(&builder) else {
-        return Vec::new();
-    };
-    let mut imgs: Vec<std::path::PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.file_name()
-                    .map(|n| {
-                        let n = n.to_string_lossy();
-                        n.starts_with("nix-store-") && n.ends_with(".img")
-                    })
-                    .unwrap_or(false)
-        })
-        .collect();
-    if imgs.is_empty() {
-        return Vec::new();
-    }
-    imgs.sort();
 
     let mut lines = vec!["Builder persistent /nix store images:".to_string()];
-    for p in imgs {
-        if let Ok(m) = std::fs::metadata(&p) {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            lines.push(format!(
-                "  {name}: {} on disk / {} cap (sparse)",
-                human_bytes(file_allocated_bytes(&m)),
-                human_bytes(m.len())
-            ));
-        }
+    for store in &report.stores {
+        lines.push(format!(
+            "  {}: {} on disk / {} cap (sparse)",
+            store.name,
+            human_bytes(store.allocated_bytes),
+            human_bytes(store.logical_bytes)
+        ));
     }
     // Surface the resolved cap (honours MVM_BUILDER_STORE_GC_GIB) and note
     // that GC is automatic — so the operator doesn't go hunting for a
     // `cache gc` verb that intentionally doesn't exist.
-    let cap_gib = mvm_build::builder_vm_runtime::builder_store_gc_cap_kib() / 1024 / 1024;
+    let cap_gib = report.auto_gc_cap_gib;
     lines.push(format!(
         "  auto-GC cap: {cap_gib} GiB used (override {}). \
          Past the cap, `nix-collect-garbage --delete-older-than 14d` runs \
          automatically at the end of each in-VM build (#630).",
-        mvm_build::builder_vm_runtime::MVM_BUILDER_STORE_GC_GIB_ENV,
+        report.auto_gc_override,
     ));
     lines
-}
-
-/// Real on-disk footprint of a file (allocated blocks), not its
-/// apparent length. The builder VM's persistent `nix-store-<arch>.img`
-/// is SPARSE: it advertises a large logical cap (`DEFAULT_NIX_STORE_MIB`,
-/// 64 GiB) but consumes only the blocks actually written. `len()` would
-/// report that cap as if it were real disk — which is exactly what makes
-/// an `ls -l` look alarming. Block count × 512 is the truth `du` shows.
-#[cfg(unix)]
-fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt as _;
-    meta.blocks().saturating_mul(512)
-}
-#[cfg(not(unix))]
-fn file_allocated_bytes(meta: &std::fs::Metadata) -> u64 {
-    meta.len()
-}
-
-/// Recursive on-disk footprint of a cache entry. One line, because every
-/// counter in this file must agree with `du` and with each other.
-/// Where the retired HVF patcher cached the builder images it baked, under the
-/// builder image cache.
-const RETIRED_HVF_IMAGE_DIR: &str = "hvf";
-
-/// Remove every image the retired HVF patcher cached under `root`, returning
-/// how many entries went and the bytes they held. A dry run removes nothing
-/// and reports what it would.
-fn sweep_retired_hvf_builder_images(
-    root: &std::path::Path,
-    dry_run: bool,
-) -> std::io::Result<(u64, u64)> {
-    if !root.is_dir() {
-        return Ok((0, 0));
-    }
-    let mut entries = 0u64;
-    for entry in std::fs::read_dir(root)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            entries += 1;
-        }
-    }
-    let bytes = dir_size(root);
-    if dry_run {
-        ui::info(&format!(
-            "(dry-run) Would remove {entries} retired HVF builder image(s) under {}.",
-            root.display()
-        ));
-        return Ok((0, 0));
-    }
-    std::fs::remove_dir_all(root)?;
-    Ok((entries, bytes))
-}
-
-fn dir_size(path: &std::path::Path) -> u64 {
-    mvm_core::disk_usage::tree_bytes(path)
-}
-
-/// Recursive directory walker that never descends through a symlink.
-///
-/// The temp-file sweep deletes what this yields, so following a link would
-/// let a `foo.tmp` symlink inside the cache reach files outside it.
-fn walkdir(path: &std::path::Path) -> Result<Vec<std::fs::DirEntry>> {
-    let mut entries = Vec::new();
-    if !path.is_dir() {
-        return Ok(entries);
-    }
-    let mut pending = vec![path.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            // `DirEntry::file_type` reports the link itself, not its target.
-            let descend = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if descend {
-                pending.push(entry.path());
-            }
-            entries.push(entry);
-        }
-    }
-    Ok(entries)
-}
-
-/// Remove a cache path, whatever kind of thing it is.
-///
-/// Decided from `symlink_metadata`: a symlink pointing at a directory must be
-/// unlinked, never `remove_dir_all`'d, or the sweep empties the target.
-fn remove_cache_path(path: &std::path::Path) -> std::io::Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if meta.is_dir() {
-        std::fs::remove_dir_all(path)
-    } else {
-        std::fs::remove_file(path)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_stage0_store_is_kept_unless_asked_for() {
-        assert_eq!(
-            stage0_store_reclaim_action(false, false, false),
-            Stage0StoreReclaim::Keep
-        );
-        assert_eq!(
-            stage0_store_reclaim_action(false, false, true),
-            Stage0StoreReclaim::Keep
-        );
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        args: Args,
     }
 
     #[test]
-    fn the_stage0_store_is_cleared_when_named_or_swept_by_deep() {
-        assert_eq!(
-            stage0_store_reclaim_action(true, false, false),
-            Stage0StoreReclaim::Clear
-        );
-        assert_eq!(
-            stage0_store_reclaim_action(false, true, false),
-            Stage0StoreReclaim::Clear
-        );
+    fn prune_cli_intent_preserves_default_apply_and_every_flag() {
+        use clap::Parser;
+        for (argv, apply) in [
+            (vec!["cache", "prune"], true),
+            (vec!["cache", "prune", "--dry-run"], false),
+            (
+                vec![
+                    "cache",
+                    "prune",
+                    "--dry-run",
+                    "--orphan-builds",
+                    "--no-reap-orphans",
+                    "--orphan-dirs",
+                    "--deep",
+                    "--stage0-store",
+                ],
+                false,
+            ),
+        ] {
+            let parsed = TestCli::try_parse_from(&argv).unwrap();
+            let CacheAction::Prune {
+                dry_run,
+                orphan_builds,
+                no_reap_orphans,
+                orphan_dirs,
+                deep,
+                stage0_store,
+            } = parsed.args.action
+            else {
+                panic!("prune");
+            };
+            let request = prune_request(
+                dry_run,
+                orphan_builds,
+                no_reap_orphans,
+                orphan_dirs,
+                deep,
+                stage0_store,
+            );
+            assert_eq!(request.apply, apply);
+            assert_eq!(request.orphan_builds, argv.contains(&"--orphan-builds"));
+            assert_eq!(request.no_reap_orphans, argv.contains(&"--no-reap-orphans"));
+            assert_eq!(request.orphan_dirs, argv.contains(&"--orphan-dirs"));
+            assert_eq!(request.deep, argv.contains(&"--deep"));
+            assert_eq!(request.stage0_store, argv.contains(&"--stage0-store"));
+        }
     }
 
     #[test]
-    fn a_running_bootstrap_refuses_an_explicit_request_and_is_skipped_by_deep() {
+    fn repair_cli_intent_is_independent_of_json_presentation() {
+        use clap::Parser;
+        use mvm_client::maintenance::cache::RepairScope;
+        for json in [false, true] {
+            for preview in [false, true] {
+                for narrow in [false, true] {
+                    let mut argv = vec!["cache", "repair", "--force"];
+                    if json {
+                        argv.push("--json");
+                    }
+                    if preview {
+                        argv.push("--dry-run");
+                    }
+                    if narrow {
+                        argv.push("--store-only");
+                    }
+                    let parsed = TestCli::try_parse_from(argv).unwrap();
+                    let CacheAction::Repair {
+                        dry_run,
+                        force,
+                        store_only,
+                        ..
+                    } = parsed.args.action
+                    else {
+                        panic!("repair");
+                    };
+                    let request = repair_request(dry_run, force, store_only);
+                    assert_eq!(request.apply, !preview);
+                    assert!(request.force);
+                    assert_eq!(
+                        request.scope,
+                        if narrow {
+                            RepairScope::StoreImage
+                        } else {
+                            RepairScope::BuilderStore
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn standby_cli_mapping_preserves_apply_default_and_dry_run() {
+        assert!(standby_request(false).apply);
+        assert!(!standby_request(true).apply);
+    }
+
+    #[test]
+    fn client_retention_reasons_preserve_cli_explanations() {
+        use mvm_client::maintenance::cache::retention::RetainedBy;
+        assert!(retained_checkpoint_note(&RetainedBy::Tagged).is_none());
+        assert!(retained_checkpoint_note(&RetainedBy::Young).is_none());
         assert_eq!(
-            stage0_store_reclaim_action(true, false, true),
-            Stage0StoreReclaim::Refuse
+            retained_checkpoint_note(&RetainedBy::SessionResumePoint).as_deref(),
+            Some("pinned by a parked session's resume point")
         );
         assert_eq!(
-            stage0_store_reclaim_action(true, true, true),
-            Stage0StoreReclaim::Refuse,
-            "naming it explicitly still refuses under --deep"
-        );
-        assert_eq!(
-            stage0_store_reclaim_action(false, true, true),
-            Stage0StoreReclaim::SkipInFlight
+            retained_checkpoint_note(&RetainedBy::AncestorOf(
+                mvm_core::checkpoint::CheckpointId::new("kept")
+            ))
+            .as_deref(),
+            Some("ancestor of retained checkpoint kept, which restores through it")
         );
     }
 
@@ -1455,7 +1037,7 @@ mod tests {
 
     #[test]
     fn checkpoint_content_prune_report_reflects_dry_run() {
-        let report = mvm_runtime::checkpoint::ContentPruneReport {
+        let report = mvm_client::maintenance::cache::retention::ContentPruneReport {
             abandoned_staging: 1,
             objects: 3,
             object_bytes: 3 * 1024 * 1024,
@@ -1733,25 +1315,31 @@ mod tests {
     }
     #[test]
     fn flow_byte_log_sweep_targets_audit_flow_bytes_dir() {
-        // The cache-prune wiring sweeps `<audit>/flow-bytes/`; assert that
-        // path contract (the supervisor writer must agree) and that the
-        // sweep helper removes an aged record while keeping a fresh one.
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let dir = mvm_core::config::mvm_audit_dir().join("flow-bytes");
         assert!(dir.ends_with("audit/flow-bytes"));
-
-        let root = tempfile::tempdir().unwrap();
-        let tenant = root.path().join("acme");
+        let tenant = dir.join("acme");
         std::fs::create_dir_all(&tenant).unwrap();
-        std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
-        // age = 0 (cutoff = now) removes the just-written file; large window keeps it.
-        let removed =
-            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 0).unwrap();
-        assert_eq!(removed, 1);
-        std::fs::write(tenant.join("vm.bin"), b"x").unwrap();
-        let kept =
-            mvm_hostd::supervisor::network::flow_byte_log::sweep_retention(root.path(), 3650)
+        let aged = tenant.join("old.bin");
+        std::fs::write(&aged, b"opaque").unwrap();
+        let file = std::fs::File::options().write(true).open(&aged).unwrap();
+        file.set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
+        std::fs::write(tenant.join("fresh.bin"), b"opaque").unwrap();
+        let preview =
+            mvm_client::maintenance::cache::prune_flow_bytes(&FlowRetentionRequest::default())
                 .unwrap();
-        assert_eq!(kept, 0);
+        assert_eq!(preview.candidates.len(), 1);
+        assert!(preview.removed.is_empty());
+        assert!(aged.exists());
+        let applied =
+            mvm_client::maintenance::cache::prune_flow_bytes(&FlowRetentionRequest { apply: true })
+                .unwrap();
+        assert_eq!(applied.removed.len(), 1);
+        assert!(!aged.exists());
+        assert!(tenant.join("fresh.bin").exists());
     }
 
     #[test]
@@ -1895,12 +1483,6 @@ mod tests {
                 "{live} is written by a current subsystem and must never be pruned"
             );
         }
-        for (name, _) in REGENERABLE_CACHE_ENTRIES {
-            assert!(
-                !RETIRED_CACHE_ENTRIES.contains(name),
-                "{name} is reclaimed by --deep and must not also be retired"
-            );
-        }
     }
 
     /// The sweep selects retired names only. A live cache dir that nothing in
@@ -1940,7 +1522,10 @@ mod tests {
     #[test]
     fn orphan_dir_sweep_removes_the_retired_entry_and_spares_live_caches() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        let cache = tmp.path().join("cache");
+        let root = cache.as_path();
         let live = [
             "guest-agent-build",
             "runtime-overlay-bins",
@@ -1959,11 +1544,11 @@ mod tests {
         std::fs::create_dir_all(root.join("docker-nix-store")).unwrap();
         std::fs::write(root.join("docker-nix-store/blob.bin"), vec![0u8; 4096]).unwrap();
 
-        let (removed, _) = reclaim_entries(
-            &classify_retired_entries(root),
-            "retired cache entry",
-            /* dry_run = */ false,
-        );
+        let removed =
+            mvm_client::maintenance::cache::prune_retired(&RetiredPruneRequest { apply: true })
+                .unwrap()
+                .removed
+                .len();
 
         assert_eq!(removed, 1, "only the retired entry is a candidate");
         assert!(
@@ -1976,48 +1561,6 @@ mod tests {
                 "{name} is a live cache and must survive the sweep"
             );
         }
-    }
-
-    /// `--deep` targets resolve only to regenerable dirs that actually exist.
-    #[test]
-    fn regenerable_targets_only_existing_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        std::fs::create_dir_all(root.join("stage0")).unwrap();
-        std::fs::write(root.join("stage0/blob"), vec![0u8; 4096]).unwrap();
-        std::fs::create_dir_all(root.join("oci")).unwrap();
-        // default-microvm absent → not a target.
-
-        let targets = regenerable_cache_targets(root);
-        let names: Vec<String> = targets
-            .iter()
-            .map(|(e, _)| e.path.file_name().unwrap().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["stage0", "oci"]);
-        assert!(targets[0].0.bytes >= 4096);
-    }
-
-    /// `reclaim_entries` removes on the live path, tallies without touching disk
-    /// under dry-run.
-    #[test]
-    fn reclaim_entries_dry_run_is_a_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let d = tmp.path().join("victim");
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("f"), vec![0u8; 2048]).unwrap();
-        let entries = vec![CacheEntry {
-            bytes: dir_size(&d),
-            path: d.clone(),
-        }];
-
-        let (n, b) = reclaim_entries(&entries, "test", /* dry_run = */ true);
-        assert_eq!(n, 1);
-        assert!(b >= 2048);
-        assert!(d.exists(), "dry-run must not remove anything");
-
-        let (n, _) = reclaim_entries(&entries, "test", /* dry_run = */ false);
-        assert_eq!(n, 1);
-        assert!(!d.exists(), "live run must remove the entry");
     }
 
     /// `cache info`'s breakdown is sorted largest-first and lists every
@@ -2034,88 +1577,6 @@ mod tests {
         let rows = cache_dir_breakdown(root);
         assert_eq!(rows[0].0, "ur-seed", "largest entry first");
         assert!(rows.iter().any(|(n, _)| n == "stage0"));
-    }
-
-    /// The reclaim estimate must be the disk a delete actually returns.
-    /// A materialized OCI rootfs is mostly symlinks: a walker that follows
-    /// them re-walks whole subtrees and charges a link its target's blocks,
-    /// which is how the dry run came to promise several times the disk that
-    /// exists.
-    #[cfg(unix)]
-    #[test]
-    fn prune_removes_the_retired_hvf_builder_images() {
-        let cache = tempfile::tempdir().unwrap();
-        let hvf = cache.path().join(RETIRED_HVF_IMAGE_DIR);
-        std::fs::create_dir_all(hvf.join("abc123")).unwrap();
-        std::fs::write(hvf.join("abc123/rootfs.ext4"), vec![0u8; 4096]).unwrap();
-        std::fs::create_dir_all(hvf.join("def456.partial")).unwrap();
-
-        assert_eq!(
-            sweep_retired_hvf_builder_images(&hvf, true).unwrap(),
-            (0, 0)
-        );
-        assert!(hvf.join("abc123").exists(), "a dry run removes nothing");
-
-        let (removed, freed) = sweep_retired_hvf_builder_images(&hvf, false).unwrap();
-        assert_eq!(removed, 2);
-        assert!(freed >= 4096, "{freed}");
-        assert!(!hvf.exists());
-        // Nothing left is not an error.
-        assert_eq!(
-            sweep_retired_hvf_builder_images(&hvf, false).unwrap(),
-            (0, 0)
-        );
-    }
-
-    #[test]
-    fn dir_size_does_not_inflate_a_tree_full_of_symlinks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = tmp.path();
-        let payload = root.join("layer");
-        std::fs::create_dir_all(payload.join("bin")).unwrap();
-        std::fs::write(payload.join("bin/busybox"), vec![0u8; 256 * 1024]).unwrap();
-
-        let real_bytes = dir_size(root);
-
-        // The links an unpacked image carries: applets pointing at one binary,
-        // and the `/usr/bin -> /bin` style directory alias beside them.
-        for applet in ["sh", "ls", "cat", "cp", "mv", "rm", "sed", "awk"] {
-            std::os::unix::fs::symlink(
-                payload.join("bin/busybox"),
-                payload.join("bin").join(applet),
-            )
-            .unwrap();
-        }
-        std::os::unix::fs::symlink(payload.join("bin"), root.join("usr-bin")).unwrap();
-
-        let with_links = dir_size(root);
-        assert!(
-            with_links < real_bytes + 256 * 1024,
-            "symlinks must not multiply the estimate: {real_bytes} bytes of \
-             payload measured {with_links} once linked"
-        );
-    }
-
-    /// The temp-file sweep deletes what the walker yields, so the walker must
-    /// not reach through a link into a tree the operator did not ask to prune.
-    #[cfg(unix)]
-    #[test]
-    fn walkdir_does_not_descend_through_a_symlinked_directory() {
-        let tmp = tempfile::tempdir().unwrap();
-        let outside = tmp.path().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("precious.tmp"), b"keep me").unwrap();
-
-        let cache = tmp.path().join("cache");
-        std::fs::create_dir_all(&cache).unwrap();
-        std::os::unix::fs::symlink(&outside, cache.join("link")).unwrap();
-
-        let reached: Vec<String> = walkdir(&cache)
-            .unwrap()
-            .iter()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(reached, vec!["link"], "the link is yielded, not followed");
     }
 
     /// The version-aware pack prune step reports what it removed (or would

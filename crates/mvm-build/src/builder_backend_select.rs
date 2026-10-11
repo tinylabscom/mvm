@@ -377,14 +377,35 @@ pub fn try_resolve_builder_backend(
 pub fn try_resolve_builder_backend_for(
     choice: BuilderBackendChoice,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
+    try_resolve_builder_backend_with_options(choice, BuilderFactoryOptions::default())
+}
+
+/// Optional presentation settings for builder construction. Existing callers
+/// keep the quiet default; no option changes the selected execution boundary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuilderFactoryOptions {
+    /// Stream the libkrun guest console. Other drivers retain their existing
+    /// console-log behavior.
+    pub verbose: bool,
+}
+
+/// Construct the selected builder with explicit console presentation options.
+pub fn try_resolve_builder_backend_with_options(
+    choice: BuilderBackendChoice,
+    options: BuilderFactoryOptions,
+) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
     match choice {
-        BuilderBackendChoice::Libkrun => Ok(Box::new(
-            LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()),
-        )),
+        BuilderBackendChoice::Libkrun => Ok(Box::new(libkrun_builder_with_options(options))),
         BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
         BuilderBackendChoice::WebLinux => Ok(Box::new(WebLinuxBuilderVm)),
         BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => driver_builder(choice),
     }
+}
+
+fn libkrun_builder_with_options(options: BuilderFactoryOptions) -> LibkrunBuilderVm {
+    LibkrunBuilderVm::default()
+        .with_closure_nar(closure_nar_for_host_arch())
+        .with_verbose(options.verbose)
 }
 
 /// Builder driver for the Stage 0 bootstrap.
@@ -782,6 +803,18 @@ mod tests {
                 reason: "the hvf builder does not serve dependency installs".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn factory_options_preserve_quiet_default() {
+        assert!(!BuilderFactoryOptions::default().verbose);
+    }
+
+    #[cfg(feature = "builder-libkrun")]
+    #[test]
+    fn factory_options_configure_libkrun_console() {
+        assert!(!libkrun_builder_with_options(BuilderFactoryOptions::default()).verbose);
+        assert!(libkrun_builder_with_options(BuilderFactoryOptions { verbose: true }).verbose);
     }
 
     /// "Nowhere yet" is not a reason to try somewhere else.

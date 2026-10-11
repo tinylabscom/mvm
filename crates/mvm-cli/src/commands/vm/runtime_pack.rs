@@ -131,137 +131,16 @@ pub(super) fn try_runtime_pack_image_source(_prod: bool) -> Option<ImageSource> 
     None
 }
 
-/// Diagnose the local runtime-pack cache for this host without booting or
-/// resolving an image source. Read-only, no side effects.
-#[cfg(feature = "manifest-verify")]
-pub(in crate::commands) fn runtime_pack_diagnosis() -> Result<mvm_core::pack_cache::PackDiagnosis> {
-    use anyhow::Context;
-    use mvm_core::pack_cache::diagnose_pack;
-    use mvm_core::packs::PackKind;
-
-    with_runtime_pack_ctx(|_, ctx| diagnose_pack(PackKind::Runtime, ctx))?
-        .context("diagnosing the local runtime pack cache")
-}
-
-#[cfg(not(feature = "manifest-verify"))]
-pub(in crate::commands) fn runtime_pack_diagnosis() -> Result<mvm_core::pack_cache::PackDiagnosis> {
-    Ok(mvm_core::pack_cache::PackDiagnosis::NoCompatiblePack)
-}
-
-/// Human-facing reason a runtime pack is not instant-launchable, or `None`
-/// when it is ready. Maps the verification failure to a precise cause.
-pub(in crate::commands) fn not_instant_reason(
-    d: &mvm_core::pack_cache::PackDiagnosis,
-) -> Option<String> {
-    use mvm_core::pack_cache::PackDiagnosis;
-    use mvm_core::packs::PackVerifyError;
-
-    match d {
-        PackDiagnosis::Ready { .. } => None,
-        PackDiagnosis::NoCompatiblePack => {
-            Some("no verified runtime pack is cached for this host".to_string())
-        }
-        PackDiagnosis::Rejected { reason, .. } => Some(match reason {
-            PackVerifyError::IncompatibleArchitecture { got, expected } => {
-                format!("cached runtime pack was built for {got} but this host is {expected}")
-            }
-            PackVerifyError::IncompatibleBackend { backend } => {
-                format!("cached runtime pack does not support this host's backend ({backend})")
-            }
-            PackVerifyError::MissingHostCapability(capability) => format!(
-                "cached runtime pack requires host capability {capability}, which is unavailable"
-            ),
-            PackVerifyError::ExpiredTrustMetadata { expired_at }
-            | PackVerifyError::ExpiredSignature { expired_at, .. } => {
-                format!("cached runtime pack signature expired at {expired_at}")
-            }
-            PackVerifyError::Revoked { reason, .. } => {
-                format!("cached runtime pack signer is revoked: {reason}")
-            }
-            PackVerifyError::UnknownSigningKey { .. } => {
-                "cached runtime pack is signed by an untrusted key".to_string()
-            }
-            PackVerifyError::ChannelNotAllowed(channel) => {
-                format!("cached runtime pack channel {channel:?} is not allowed by local policy")
-            }
-            PackVerifyError::PolicyHashMismatch { .. } => {
-                "cached runtime pack was built for a different local policy".to_string()
-            }
-            PackVerifyError::MutableOciReference { .. } => {
-                "cached runtime pack references a mutable OCI tag, which is not instant-eligible"
-                    .to_string()
-            }
-            PackVerifyError::FileHashMismatch { .. }
-            | PackVerifyError::PackHashMismatch { .. }
-            | PackVerifyError::FileSizeMismatch { .. }
-            | PackVerifyError::UnsafeFilePath(_)
-            | PackVerifyError::DuplicateFile(_) => {
-                "cached runtime pack failed integrity verification (tampered or corrupt)"
-                    .to_string()
-            }
-            other => format!("cached runtime pack failed verification: {other}"),
-        }),
-    }
-}
+pub(in crate::commands) use mvm_client::maintenance::cache::{
+    not_instant_reason, runtime_pack_diagnosis,
+};
 
 /// Trust construction shared by the fail-closed `--runtime-pack` resolver and
 /// the fail-open auto-prefer accelerator, so the two never drift apart on
 /// which packs a stock binary accepts.
 #[cfg(feature = "manifest-verify")]
 mod trust {
-    use std::collections::BTreeSet;
-
-    use anyhow::{Context, Result};
-    use mvm_core::config::mvm_keys_dir;
-    use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
-    use mvm_core::packs::{
-        HostCapability, KeylessTrust, LocalPackPolicy, PackBackend, host_pack_policy_hash,
-    };
-    use mvm_core::release_trust;
-
-    /// Owned trust inputs a runtime pack resolution verifies against: the
-    /// local policy the host's arch/backend/capabilities select, and the
-    /// on-disk + compiled-in keyless trust roots a pack's cosign identity
-    /// must match. `PackVerifyCtx` borrows from these, so callers build one
-    /// instance per resolution and construct their own ctx from it.
-    pub(super) struct RuntimePackTrustInputs {
-        pub(super) policy: LocalPackPolicy,
-        pub(super) keyless: KeylessTrust,
-        pub(super) trust: PackTrustConfig,
-    }
-
-    impl RuntimePackTrustInputs {
-        pub(super) fn load() -> Result<Self> {
-            let arch = mvm_core::arch::GuestArch::host();
-            let trust = load_pack_trust_config(&mvm_keys_dir().join("pack-trust.json"))
-                .context("loading pack trust config for runtime pack resolution")?
-                .unwrap_or_default();
-
-            // Same trust root a runtime pack from the project's own release
-            // pipeline carries: the operator's on-disk publishers unioned with
-            // the compiled-in release channels, so a stock binary accepts its
-            // own release packs with no operator config required. Mirrors the
-            // attested builder-pack acceleration path's policy construction.
-            let mut policy = LocalPackPolicy {
-                host_arch: arch,
-                backend: PackBackend::Hvf,
-                host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
-                policy_hash: host_pack_policy_hash(arch),
-                allowed_channels: trust.allowed_channels(),
-                now: chrono::Utc::now(),
-            };
-            policy
-                .allowed_channels
-                .extend(release_trust::release_channels());
-            let keyless = release_trust::release_keyless_trust(env!("CARGO_PKG_VERSION"));
-
-            Ok(Self {
-                policy,
-                keyless,
-                trust,
-            })
-        }
-    }
+    pub(super) use mvm_client::maintenance::cache::RuntimePackTrustInputs;
 }
 
 /// Pure mapping from a verified runtime pack dir to the `ImageSource` the

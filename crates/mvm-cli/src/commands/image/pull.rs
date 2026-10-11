@@ -1,76 +1,77 @@
-//! `mvmctl image pull` — fetch + verify an OCI image into the cache.
+//! `mvmctl image pull`: explicit acquisition through the image service.
 
 use std::path::Path;
 
 use anyhow::Result;
+use mvm_client::image_admin::{PrepareImageRequest, TransferProgress, prepare_image_with_progress};
 
 use crate::ui;
 
 pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()> {
-    match super::source::ImageSource::classify(&reference)? {
-        super::source::ImageSource::Registry(_) => {}
-        source => {
-            mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
-            let resolved = match source {
-                super::source::ImageSource::OciArchive(path) => {
-                    super::ingest::ingest_local_archive(cache_root, &path, &reference, prod)?
-                }
-                super::source::ImageSource::Stdin => {
-                    super::ingest::ingest_stdin_archive(cache_root, &reference, prod)?
-                }
-                super::source::ImageSource::RootfsDir(path) => {
-                    super::ingest::ingest_rootfs_dir(cache_root, &path, &reference, prod)?
-                }
-                super::source::ImageSource::Registry(_) => unreachable!(),
-            };
-            super::pull_core::publish_local_preparation(cache_root, &reference, &resolved)?;
-            let provenance = &resolved.provenance;
-            mvm_core::audit_emit!(
-                ImageFetch,
-                "source=image_pull reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source=local",
-                resolved.reference,
-                resolved.resolved_digest,
-                prod,
-                provenance.layer_digests.len(),
-                provenance.trust_policy,
-                provenance.verification_status,
-            );
-            ui::success(&format!(
-                "Prepared {} -> {}",
-                resolved.reference, resolved.resolved_digest
-            ));
-            ui::info(&format!("Rootfs: {}", resolved.rootfs_path.display()));
-            return Ok(());
+    let phase = ui::activity::start(format!("Preparing {reference}"));
+    let progress = TransferProgress::default();
+    let tracked = progress.clone();
+    phase.track(move || {
+        let (received, total) = tracked.snapshot();
+        if total == 0 {
+            "verifying and preparing image artifacts".to_owned()
+        } else {
+            pull_progress_detail(received, total)
         }
-    }
-
-    // Materialization may spawn a builder VM (see `resolve_or_pull_run_image`);
-    // sweep any helper processes a prior builder run orphaned before adding
-    // another.
-    crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_on_startup();
-
-    let (image, trust, auth_source) = super::pull_image_with_trust(cache_root, &reference, prod)?;
-    let provenance = image.provenance("image_pull", &reference, &trust);
-    mvm_core::audit_emit!(
-        ImageFetch,
-        "source=image_pull reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
-        image.reference,
-        image.resolved_digest,
-        prod,
-        provenance.layer_digests.len(),
-        provenance.trust_policy,
-        provenance.verification_status,
-        auth_source
-    );
+    });
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let report = prepare_image_with_progress(
+        &PrepareImageRequest {
+            cache_root: cache_root.to_owned(),
+            reference,
+            prod,
+        },
+        Some(&mut input),
+        &progress,
+    )?;
+    phase.finish();
     ui::success(&format!(
-        "Pulled {} -> {}",
-        image.reference, image.resolved_digest
+        "{} {} -> {}",
+        if report.local { "Prepared" } else { "Pulled" },
+        report.reference,
+        report.resolved_digest
     ));
-    if let Some(rootfs_path) = image.rootfs_path {
-        ui::info(&format!(
-            "Rootfs: {}",
-            cache_root.join(rootfs_path).display()
-        ));
-    }
+    ui::info(&format!("Rootfs: {}", report.rootfs_path.display()));
     Ok(())
+}
+
+/// `12.3 MiB of 45.6 MiB (27%)` — the pull line's detail while layers stream.
+fn pull_progress_detail(received: u64, total: u64) -> String {
+    use mvm_core::domain::pool::format_bytes;
+    if total == 0 {
+        return format_bytes(received);
+    }
+    let received = received.min(total);
+    let percent = received.saturating_mul(100) / total;
+    format!(
+        "{} of {} ({percent}%)",
+        format_bytes(received),
+        format_bytes(total)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pull_progress_reads_as_bytes_of_total_with_a_percentage() {
+        assert_eq!(
+            pull_progress_detail(12 * 1024 * 1024, 48 * 1024 * 1024),
+            "12.0 MiB of 48.0 MiB (25%)"
+        );
+        // A retry or a cache-hit catch-up can overshoot; never show >100%.
+        assert_eq!(
+            pull_progress_detail(50 * 1024 * 1024, 48 * 1024 * 1024),
+            "48.0 MiB of 48.0 MiB (100%)"
+        );
+        // A manifest that declared no sizes still shows what arrived.
+        assert_eq!(pull_progress_detail(2048, 0), "2.0 KiB");
+    }
 }

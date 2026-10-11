@@ -14,6 +14,7 @@ pub mod console_capture;
 pub mod drive_file;
 pub mod egress_bridge;
 pub mod egress_shared;
+pub mod encryption;
 pub mod fc_kernel;
 pub mod flowmux_identity;
 pub mod gpu_endpoint_spawn;

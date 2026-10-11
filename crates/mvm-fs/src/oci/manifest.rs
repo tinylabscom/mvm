@@ -165,6 +165,12 @@ impl OciManifestFetcher {
         &self.client
     }
 
+    /// Share the image transport, credentials, and redeemed tokens with
+    /// repository-local artifact discovery.
+    pub fn registry_client(&self) -> &RegistryClient {
+        &self.client
+    }
+
     /// Fetch a platform-specific Linux image manifest.
     ///
     /// If `reference` resolves directly to an image manifest, this

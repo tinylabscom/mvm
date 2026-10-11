@@ -24,8 +24,8 @@ use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
 };
 use super::Cli;
-use super::host_signer::{host_signer_id, load_or_init};
 use crate::ui;
+use mvm_client::audit::host_keypair::{host_signer_id, load_or_init};
 
 pub(in crate::commands) mod detect;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
@@ -668,7 +668,7 @@ pub(in crate::commands) fn run_secure_started(
     let admit_bundle_posture = args
         .manifest
         .as_deref()
-        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_posture)
+        .map(mvm_client::admission::bundle_posture::installed_bundle_posture)
         .transpose()?
         .flatten();
     // The audit substrate carries no emitter, so stash the AdmissionContext here
@@ -701,7 +701,7 @@ pub(in crate::commands) fn run_secure_started(
             bundle_archive,
         } = inputs;
         denials_for_admit.arm(vm_name);
-        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let ledger = mvm_client::admission::InMemoryNonceLedger::default();
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
@@ -759,7 +759,7 @@ pub(in crate::commands) fn run_secure_started(
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
-            super::plan_persist::write_plan(vm_name, c.admitted.plan())
+            mvm_client::audit::plan_persist::write_plan(vm_name, c.admitted.plan())
                 .context("persisting admitted plan for the transient run")?;
         }
         let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
@@ -895,30 +895,7 @@ pub(in crate::commands) fn run_secure_started(
     )
 }
 
-struct TransientMounts {
-    dir_shares: Vec<crate::commands::DirShareSpec>,
-    disk_volumes: Vec<mvm_core::vm_backend::VmVolume>,
-}
-
-fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
-    let mut dir_shares = Vec::new();
-    let mut disk_volumes = Vec::new();
-    for raw in specs {
-        let parsed = super::shared::parse_volume_spec(raw)?;
-        match parsed {
-            super::shared::VolumeSpec::DirShare { .. } => {
-                dir_shares.push(crate::commands::parse_dir_share_spec(raw)?);
-            }
-            super::shared::VolumeSpec::Disk { .. } => {
-                disk_volumes.push(super::shared::vm_volume_from_spec_validated(&parsed)?);
-            }
-        }
-    }
-    Ok(TransientMounts {
-        dir_shares,
-        disk_volumes,
-    })
-}
+use mvm_client::mounts::parse_transient_mounts;
 
 /// The boot-time admission hook plus the plumbing needed to chain-audit the
 /// run after it resolves: the cell the hook fills with the `AdmissionContext`
@@ -1362,8 +1339,7 @@ impl ReceiptInput {
             }
         };
 
-        mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(backend)?;
-        let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
+        let selected_backend = mvm_client::local::selectable_backend_for_hypervisor(backend)?;
         let boots_oci = crate::exec::boots_oci_image(args.image_naming(None))?;
         crate::exec::validate_image_egress_backend(&selected_backend, boots_oci, &policy)?;
         let mut env_keys =

@@ -32,10 +32,18 @@
 //! the live `<tenant>.jsonl` would present the newest slice as the history,
 //! which is the silent narrowing rotation must not introduce.
 
+pub mod command;
 mod event;
 pub mod follow;
 mod normalize;
+pub mod posture;
+pub mod query;
 mod sanitize;
+pub mod sessions;
+
+// Chain-signed write and custody primitives are owned by `mvm_hostd`; the
+// client re-exports them so frontends never name a crate below the client.
+pub use mvm_hostd::audit::{emitter, host_keypair, plan_persist};
 
 pub use event::{
     AuditCursor, AuditEventId, AuditEventKind, AuditReadRequest, AuditReadRequestBuilder,

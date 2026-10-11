@@ -8,6 +8,88 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
 
+class AccessMode(Enum):
+    read_only = 'read-only'
+    read_write = 'read-write'
+
+
+class AgentProfile1(Enum):
+    sealed_prod = 'sealed-prod'
+
+
+class AgentProfile2(Enum):
+    dev = 'dev'
+
+
+class AgentProfile3(Enum):
+    builder = 'builder'
+
+
+AgentProfile = Union[AgentProfile1, AgentProfile2, AgentProfile3]
+
+
+AgentSessionId = str
+
+
+@dataclass
+class AgentSessionsListRequest:
+    pass
+
+
+@dataclass
+class AgentSessionsShowRequest:
+    session_id: str
+
+
+@dataclass
+class AppliedReport:
+    apply_id: str
+    changes: int
+    merkle_root: str
+    snapshot_root: str
+
+
+ApprovalHead = str
+
+
+@dataclass
+class ArtifactConfigureFirecrackerReply:
+    backend: str
+    path: str
+
+
+@dataclass
+class ArtifactConfigureFirecrackerRequest:
+    id: str
+
+
+@dataclass
+class ArtifactInspectRequest:
+    id: str
+
+
+@dataclass
+class ArtifactValidateRequest:
+    id: str
+
+
+class AttachmentSource1(Enum):
+    managed_catalog = 'managed-catalog'
+
+
+class AttachmentSource2(Enum):
+    ad_hoc_host = 'ad-hoc-host'
+
+
+AttachmentSource = Union[AttachmentSource1, AttachmentSource2]
+
+
+@dataclass
+class AuditSessionsVerifyRequest:
+    selector: str
+    tenant: Optional[str] = 'local'
+
+
 @dataclass
 class BackendCapabilitiesReply:
     pass
@@ -58,6 +140,103 @@ BackpressureReason = Union[
 ]
 
 
+class BlobStatus(Enum):
+    unchanged = 'unchanged'
+    changed = 'changed'
+    added_in_b = 'added_in_b'
+    removed_from_b = 'removed_from_b'
+
+
+@dataclass
+class BundleExportReply:
+    key_id: str
+    path: str
+    size_bytes: int
+
+
+CallerCommitmentItem = int
+
+
+CallerCommitment = List[CallerCommitmentItem]
+
+
+class ChangeAction(Enum):
+    write_file = 'write_file'
+    write_symlink = 'write_symlink'
+    remove = 'remove'
+
+
+@dataclass
+class ChangeSummary:
+    action: ChangeAction
+    path: str
+
+
+class CheckpointClass1(Enum):
+    fs_quick = 'fs_quick'
+
+
+class CheckpointClass2(Enum):
+    vm_full = 'vm_full'
+
+
+CheckpointClass = Union[CheckpointClass1, CheckpointClass2]
+
+
+CheckpointDigest = str
+
+
+CheckpointId = str
+
+
+CheckpointKeyDomain = str
+
+
+@dataclass
+class CheckpointsDiffRequest:
+    a: str
+    b: str
+
+
+@dataclass
+class CheckpointsInfoRequest:
+    id: str
+
+
+@dataclass
+class CheckpointsListRequest:
+    pass
+
+
+@dataclass
+class CheckpointsRemoveReply:
+    pass
+
+
+@dataclass
+class CheckpointsRestoreReply:
+    action: str
+    id: CheckpointId
+    schema_version: int
+    vm_name: str
+
+
+@dataclass
+class CheckpointsVerifyReply:
+    pass
+
+
+@dataclass
+class CheckpointsVerifyRequest:
+    id: str
+
+
+@dataclass
+class ContentBlob:
+    name: str
+    sha256: str
+
+
 class CopyDirection1(Enum):
     host_to_guest = 'host_to_guest'
 
@@ -69,10 +248,68 @@ class CopyDirection2(Enum):
 CopyDirection = Union[CopyDirection1, CopyDirection2]
 
 
+class Unit(Enum):
+    share = 'share'
+
+
+@dataclass
+class CpuGrant1:
+    millicores: int
+    unit: Unit
+
+
+class Unit1(Enum):
+    fuel = 'fuel'
+
+
+@dataclass
+class CpuGrant2:
+    instructions: int
+    unit: Unit1
+
+
+CpuGrant = Union[CpuGrant1, CpuGrant2]
+
+
+@dataclass
+class DisplayClipboardGrant:
+    max_paste_bytes: int
+
+
+@dataclass
+class DriveGrant:
+    max_bytes_in: int
+    max_bytes_out: int
+    program_id: str
+    ttl: int
+    workspace_roots: List[str]
+
+
 @dataclass
 class EgressTarget:
     host: str
     port: int
+
+
+class EncryptionState1(Enum):
+    host_backed = 'host-backed'
+
+
+class EncryptionState2(Enum):
+    locked = 'locked'
+
+
+class EncryptionState3(Enum):
+    unlocked = 'unlocked'
+
+
+class EncryptionState4(Enum):
+    recovering = 'recovering'
+
+
+EncryptionState = Union[
+    EncryptionState1, EncryptionState2, EncryptionState3, EncryptionState4
+]
 
 
 @dataclass
@@ -83,6 +320,25 @@ class EntrypointCallRequest:
     memory_mib: Optional[int] = None
     timeout_secs: Optional[int] = None
     workload: Optional[str] = None
+
+
+@dataclass
+class ExportPosture:
+    profile: AgentProfile
+    allow_egress: Optional[bool] = False
+    allow_unauthenticated: Optional[bool] = False
+    allow_volumes: Optional[bool] = False
+
+
+@dataclass
+class ForkRequest:
+    boot: bool
+    hypervisor: str
+    id: str
+    tenant: str
+    cpus: Optional[int] = None
+    memory: Optional[str] = None
+    new_id: Optional[str] = None
 
 
 class FsEntryKind(Enum):
@@ -281,6 +537,28 @@ class GuestProcWaitRequest:
     timeout_secs: Optional[int] = None
 
 
+@dataclass
+class HostPort:
+    host: str
+    port: int
+
+
+@dataclass
+class HostSnapshotRecord:
+    fingerprint: str
+    source_path: str
+
+
+@dataclass
+class HumanCredentialGrant:
+    destinations: List[HostPort]
+
+
+@dataclass
+class IdRequest:
+    id: str
+
+
 class InstanceReadiness1(Enum):
     launch_accepted = 'launch_accepted'
 
@@ -341,6 +619,33 @@ InstanceReadiness = Union[
     InstanceReadiness7,
     InstanceReadiness8,
 ]
+
+
+@dataclass
+class KernelReport:
+    format: str
+    hash: str
+    path: str
+    version: Optional[str] = None
+
+
+@dataclass
+class LedgerCheck:
+    intact: bool
+    seals: int
+    detail: Optional[str] = None
+
+
+class LineageKind(Enum):
+    checkpoint = 'checkpoint'
+    image = 'image'
+
+
+class LineageRelation(Enum):
+    b_child_of_a = 'b_child_of_a'
+    a_child_of_b = 'a_child_of_b'
+    same = 'same'
+    unrelated = 'unrelated'
 
 
 @dataclass
@@ -517,6 +822,34 @@ class MachineStopRequest:
 
 
 @dataclass
+class MaintenanceReconcileReply:
+    dead_process_reaped: List[str]
+    errors: List[str]
+    live: List[str]
+    orphan_state_reaped: List[str]
+    stale_record_dropped: List[str]
+    unadmitted_resume_stopped: List[str]
+
+
+@dataclass
+class MaintenanceReconcileRequest:
+    apply: Optional[bool] = False
+
+
+@dataclass
+class ManifestExportOciReply:
+    path: str
+    size_bytes: int
+    slot_hash: str
+
+
+@dataclass
+class ManifestExportOciRequest:
+    out: str
+    template: str
+
+
+@dataclass
 class ManifestInfoReply:
     persisted: Dict[str, Any]
     slot_hash: str
@@ -548,6 +881,26 @@ class ManifestListRequest:
 
 
 @dataclass
+class ManifestPruneRequest:
+    dry_run: Optional[bool] = True
+    orphans: Optional[bool] = False
+
+
+@dataclass
+class ManifestRemoveReply:
+    manifest_file_deleted: bool
+    manifest_path: str
+    slot_hash: str
+
+
+@dataclass
+class ManifestRemoveRequest:
+    force: Optional[bool] = False
+    manifest_file: Optional[bool] = False
+    path: Optional[str] = None
+
+
+@dataclass
 class ManifestVerifyReply:
     manifest_path: str
     slot_hash: str
@@ -560,10 +913,90 @@ class ManifestVerifyRequest:
     revision: Optional[str] = None
 
 
+class MismatchReason(Enum):
+    chain_break = 'chain_break'
+    signature = 'signature'
+    malformed = 'malformed'
+    truncated_tail = 'truncated_tail'
+    count_mismatch = 'count_mismatch'
+    sequence_mismatch = 'sequence_mismatch'
+    root_mismatch = 'root_mismatch'
+    environment_mismatch = 'environment_mismatch'
+    snapshot_root_mismatch = 'snapshot_root_mismatch'
+    head_mismatch = 'head_mismatch'
+    ledger_break = 'ledger_break'
+    malformed_seal = 'malformed_seal'
+    io = 'io'
+
+
+class MutationIntent(Enum):
+    execute = 'execute'
+
+
+@dataclass
+class OpenRequest:
+    members: List[str]
+    session_id: str
+    resume_point: Optional[str] = None
+
+
+class ParkReason(Enum):
+    approval_wait = 'approval_wait'
+    idle = 'idle'
+    host_shutdown = 'host_shutdown'
+    operator = 'operator'
+    retention_demotion = 'retention_demotion'
+
+
+@dataclass
+class ParkRequest:
+    journal_cursor: int
+    reason: str
+    session_id: str
+    approval_head: Optional[str] = None
+    expected_generation: Optional[int] = None
+    retain_for: Optional[str] = None
+
+
+@dataclass
+class PlanSummary:
+    changes: List[ChangeSummary]
+    refused_protected: List[List[str]]
+    refused_unappliable: List[List[str]]
+    skipped_excluded: List[str]
+
+
+@dataclass
+class PoolStats:
+    capacity_bytes: int
+    used_bytes: int
+    volume_count: int
+
+
 @dataclass
 class PortMapping:
     guest: int
     host: int
+
+
+@dataclass
+class PostureInspectRequest:
+    pass
+
+
+class PostureStatus1(Enum):
+    ok = 'ok'
+
+
+class PostureStatus2(Enum):
+    warn = 'warn'
+
+
+class PostureStatus3(Enum):
+    fail = 'fail'
+
+
+PostureStatus = Union[PostureStatus1, PostureStatus2, PostureStatus3]
 
 
 class ProcState1(Enum):
@@ -588,10 +1021,153 @@ ProcState = Union[ProcState1, ProcState2, ProcState3, ProcState4]
 
 
 @dataclass
+class ProvenanceReport:
+    flake_ref: Optional[str] = None
+    lock_hash: Optional[str] = None
+
+
+@dataclass
+class PruneCandidate:
+    reason: str
+    slot_hash: str
+
+
+class Kind(Enum):
+    interrupted = 'interrupted'
+
+
+@dataclass
+class RecoveryReport1:
+    apply_id: str
+    kind: Kind
+
+
+class Kind2(Enum):
+    unaudited = 'unaudited'
+
+
+@dataclass
+class RecoveryReport2:
+    apply_id: str
+    kind: Kind2
+
+
+RecoveryReport = Union[RecoveryReport1, RecoveryReport2]
+
+
+@dataclass
+class RelationReport:
+    apply_id: str
+    merkle_root: str
+    target_id: str
+
+
+@dataclass
 class RemoteErrorReply:
     error_id: str
     kind: str
     message: str
+
+
+@dataclass
+class RenewRequest:
+    extend_for: str
+    session_id: str
+    expected_deadline: Optional[int] = None
+    expected_generation: Optional[int] = None
+
+
+class Residency(Enum):
+    active = 'active'
+    hibernated = 'hibernated'
+    closed = 'closed'
+
+
+@dataclass
+class RestoreRequest:
+    id: CheckpointId
+    tenant: str
+
+
+@dataclass
+class ResumeRequest:
+    backend: str
+    boot: bool
+    cpus: int
+    image: str
+    image_sha256: str
+    mem_mib: int
+    session_id: str
+    approval_head: Optional[str] = None
+    expected_generation: Optional[int] = None
+    kernel: Optional[str] = None
+    kernel_sha256: Optional[str] = None
+
+
+class State(Enum):
+    alive = 'alive'
+
+
+@dataclass
+class RetentionStatus1:
+    remaining_secs: int
+    state: State
+    until_unix: int
+
+
+class State1(Enum):
+    expired = 'expired'
+
+
+@dataclass
+class RetentionStatus2:
+    expired_for_secs: int
+    state: State1
+    until_unix: int
+
+
+RetentionStatus = Union[RetentionStatus1, RetentionStatus2]
+
+
+class Status(Enum):
+    unchanged = 'unchanged'
+
+
+@dataclass
+class ReviewSummary1:
+    status: Status
+
+
+class Status1(Enum):
+    refused = 'refused'
+
+
+@dataclass
+class ReviewSummary2:
+    plan: PlanSummary
+    status: Status1
+
+
+class Status2(Enum):
+    ready = 'ready'
+
+
+@dataclass
+class ReviewSummary3:
+    fingerprint: str
+    plan: PlanSummary
+    status: Status2
+
+
+ReviewSummary = Union[ReviewSummary1, ReviewSummary2, ReviewSummary3]
+
+
+@dataclass
+class RootfsReport:
+    format: str
+    hash: str
+    path: str
+    size: int
 
 
 class RunEntrypointError1(Enum):
@@ -654,11 +1230,55 @@ class RunMode2(Enum):
 RunMode = Union[RunMode1, RunMode2]
 
 
+class SealReason(Enum):
+    exited = 'exited'
+    failed = 'failed'
+    stopped = 'stopped'
+
+
+@dataclass
+class SessionBinding:
+    approval_head: ApprovalHead
+    generation: int
+    journal_cursor: int
+    session_id: AgentSessionId
+    replay_input_digest: Optional[str] = None
+
+
 @dataclass
 class SessionCallRequest:
     payload_b64: str
     session_id: str
     timeout_secs: Optional[int] = None
+
+
+@dataclass
+class SessionEntry:
+    event: str
+    image_name: str
+    image_sha256: str
+    plan_id: str
+    plan_version: int
+    tenant: str
+    timestamp: str
+    bundle_id: Optional[str] = None
+    bundle_version: Optional[int] = None
+    caller_commitment: Optional[CallerCommitment] = None
+    labels: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
+class SessionEnvelope:
+    entry: SessionEntry
+    prev_hash: str
+    signature: str
+    canonical: Optional[str] = None
+
+
+@dataclass
+class SessionEvent:
+    envelope: SessionEnvelope
+    seq: int
 
 
 @dataclass
@@ -678,6 +1298,62 @@ class SessionInfoReply:
 @dataclass
 class SessionInfoRequest:
     session_id: str
+
+
+@dataclass
+class SessionReplayInput:
+    artifact_digest: str
+    journal_cursor: int
+
+
+NonzeroExit = int
+
+
+@dataclass
+class SessionReplayReport:
+    applied: int
+    duplicates: int
+    last_cursor: int
+    nonzero_exits: List[List[Union[NonzeroExit, int]]]
+
+
+@dataclass
+class SessionReplayRequest:
+    session_id: str
+    as_name: Optional[str] = None
+    from_: Optional[str] = None
+
+
+@dataclass
+class SessionReplaySummary:
+    checkpoint: CheckpointId
+    checkpoint_cursor: int
+    generation: int
+    inputs: List[SessionReplayInput]
+    restored_name: str
+    session_id: str
+
+
+@dataclass
+class SessionSeal:
+    chain_head: str
+    ended_at: str
+    event_count: int
+    first_entry: str
+    first_seq: int
+    head_seq: int
+    last_entry: str
+    last_seq: int
+    prev_seal: str
+    reason: SealReason
+    session_root: str
+    started_at: str
+    compute_environment: Optional[str] = None
+    error_class: Optional[str] = None
+    exit_code: Optional[str] = None
+    image_sha256: Optional[str] = None
+    kernel_sha256: Optional[str] = None
+    snapshot_root: Optional[str] = None
 
 
 @dataclass
@@ -703,6 +1379,44 @@ class SessionStopReply:
 @dataclass
 class SessionStopRequest:
     session_id: str
+
+
+@dataclass
+class SessionSummary:
+    ended_at: str
+    event_count: int
+    image_name: str
+    plan_id: str
+    sealed: bool
+    started_at: str
+    seal: Optional[SessionSeal] = None
+    seal_seq: Optional[int] = None
+
+
+@dataclass
+class StorageGcReply:
+    applied: bool
+    candidates: List[str]
+    removed: List[str]
+    pool_unavailable: Optional[str] = None
+
+
+@dataclass
+class StorageGcRequest:
+    apply: Optional[bool] = False
+    keep_prefix: Optional[List[str]] = field(default_factory=lambda: [])
+    mock: Optional[bool] = False
+
+
+@dataclass
+class StorageInfoRequest:
+    mock: Optional[bool] = False
+
+
+class StorageTier(Enum):
+    resident = 'resident'
+    parked = 'parked'
+    cold = 'cold'
 
 
 class StreamName1(Enum):
@@ -748,42 +1462,340 @@ class TelemetryStatusRequest:
     id: str
 
 
-class Kind(Enum):
+@dataclass
+class TimeRange:
+    since: Optional[str] = None
+    until: Optional[str] = None
+
+
+@dataclass
+class TimelineNode:
+    created_unix: int
+    digest: str
+    label: str
+    verified: bool
+    error: Optional[str] = None
+    id: Optional[str] = None
+    parent: Optional[str] = None
+
+
+class Transition(Enum):
+    park = 'park'
+    resume = 'resume'
+    renew = 'renew'
+
+
+@dataclass
+class TransitionIdentity:
+    kind: Transition
+    observed_generation: int
+    session_id: str
+    inputs: Optional[Dict[str, Optional[str]]] = None
+    observed: Optional[Dict[str, Optional[str]]] = None
+
+
+@dataclass
+class ValidationCheck:
+    detail: str
+    name: str
+    ok: bool
+
+
+@dataclass
+class ValidationReport:
+    checks: List[ValidationCheck]
+    ok: bool
+
+
+class Verdict(Enum):
+    VERIFIED = 'VERIFIED'
+    MISMATCH = 'MISMATCH'
+    UNSEALED = 'UNSEALED'
+    NOT_FOUND = 'NOT_FOUND'
+
+
+@dataclass
+class VolumeAttachmentsReplyItem:
+    access: AccessMode
+    attached_at: str
+    guest_path: str
+    host_path: str
+    owner: str
+    source: AttachmentSource
+    volume: str
+    host_snapshot: Optional[HostSnapshotRecord] = None
+
+
+VolumeAttachmentsReply = List[VolumeAttachmentsReplyItem]
+
+
+@dataclass
+class VolumeAttachmentsRequest:
+    vm: str
+
+
+@dataclass
+class VolumeCreateRequest:
+    capacity_mib: int
+    name: str
+    root: Optional[str] = None
+
+
+@dataclass
+class VolumeDetachReply:
+    access: AccessMode
+    attached_at: str
+    guest_path: str
+    host_path: str
+    owner: str
+    source: AttachmentSource
+    volume: str
+    host_snapshot: Optional[HostSnapshotRecord] = None
+
+
+@dataclass
+class VolumeDetachRequest:
+    guest_path: str
+    vm: str
+
+
+@dataclass
+class VolumeInspectRequest:
+    name: str
+
+
+@dataclass
+class VolumeListRequest:
+    pass
+
+
+@dataclass
+class VolumeLockRequest:
+    name: str
+
+
+@dataclass
+class VolumeMountReply:
+    access: AccessMode
+    attached_at: str
+    guest_path: str
+    host_path: str
+    owner: str
+    source: AttachmentSource
+    volume: str
+    host_snapshot: Optional[HostSnapshotRecord] = None
+
+
+@dataclass
+class VolumeMountRequest:
+    guest_path: str
+    vm: str
+    volume: str
+    access: Optional[AccessMode] = AccessMode.read_only
+    host: Optional[str] = None
+
+
+@dataclass
+class VolumeRestoreReply:
+    pass
+
+
+@dataclass
+class VolumeRestoreRequest:
+    name: str
+    snapshot: str
+
+
+@dataclass
+class VolumeSnapshotReply:
+    pass
+
+
+@dataclass
+class VolumeSnapshotRequest:
+    name: str
+    snapshot: str
+
+
+class Kind3(Enum):
+    managed_block = 'managed-block'
+
+
+@dataclass
+class VolumeSourceKind1:
+    capacity_mib: int
+    kind: Kind3
+
+
+class Kind4(Enum):
+    managed_directory = 'managed-directory'
+
+
+@dataclass
+class VolumeSourceKind2:
+    kind: Kind4
+
+
+class Kind5(Enum):
+    ad_hoc_host_directory = 'ad-hoc-host-directory'
+
+
+@dataclass
+class VolumeSourceKind3:
+    kind: Kind5
+
+
+VolumeSourceKind = Union[VolumeSourceKind1, VolumeSourceKind2, VolumeSourceKind3]
+
+
+@dataclass
+class VolumeStats:
+    name: str
+    used_bytes: int
+    virtual_size_bytes: int
+
+
+@dataclass
+class VolumeUnlockReply:
+    created_at: str
+    encryption: EncryptionState
+    name: str
+    source: VolumeSourceKind
+    attached_to: Optional[str] = None
+    host_artifact: Optional[str] = None
+
+
+@dataclass
+class VolumeUnlockRequest:
+    name: str
+
+
+class Kind6(Enum):
     exited = 'exited'
 
 
 @dataclass
 class WaitOutcome1:
     code: int
-    kind: Kind
+    kind: Kind6
 
 
-class Kind2(Enum):
+class Kind7(Enum):
     killed = 'killed'
 
 
 @dataclass
 class WaitOutcome2:
-    kind: Kind2
+    kind: Kind7
     signal: int
 
 
-class Kind3(Enum):
+class Kind8(Enum):
     timed_out = 'timed_out'
 
 
 @dataclass
 class WaitOutcome3:
-    kind: Kind3
+    kind: Kind8
 
 
 WaitOutcome = Union[WaitOutcome1, WaitOutcome2, WaitOutcome3]
+
+
+class Kind9(Enum):
+    unbounded = 'unbounded'
+
+
+@dataclass
+class WallClockGrant1:
+    kind: Kind9
+
+
+class Kind10(Enum):
+    secs = 'secs'
+
+
+@dataclass
+class WallClockGrant2:
+    kind: Kind10
+    secs: int
+
+
+WallClockGrant = Union[WallClockGrant1, WallClockGrant2]
+
+
+@dataclass
+class Workspace:
+    baseline_key: str
+    guest_path: str
+    image: str
+    source_dir: str
+    volume: str
+
+
+@dataclass
+class WorkspaceApplyReply:
+    applied: AppliedReport
+    recoveries: List[RecoveryReport]
+
+
+@dataclass
+class WorkspaceRedoReply:
+    recoveries: List[RecoveryReport]
+    relation: Optional[RelationReport] = None
+
+
+@dataclass
+class WorkspaceRequest:
+    vm: str
+    exclude: Optional[List[str]] = field(default_factory=lambda: [])
+    protected_paths: Optional[List[str]] = field(default_factory=lambda: [])
+    volume: Optional[str] = None
+
+
+@dataclass
+class WorkspaceReviewReply:
+    recoveries: List[RecoveryReport]
+    review: ReviewSummary
+    workspace: Workspace
+
+
+@dataclass
+class WorkspaceReviewRequest:
+    vm: str
+    exclude: Optional[List[str]] = field(default_factory=lambda: [])
+    protected_paths: Optional[List[str]] = field(default_factory=lambda: [])
+    volume: Optional[str] = None
+
+
+@dataclass
+class WorkspaceUndoReply:
+    recoveries: List[RecoveryReport]
+    relation: Optional[RelationReport] = None
+
+
+@dataclass
+class WorkspaceUndoRequest:
+    approved: bool
+    workspace: WorkspaceRequest
+
+
+@dataclass
+class ArtifactConfigureFirecracker:
+    reply: ArtifactConfigureFirecrackerReply
+    request: ArtifactConfigureFirecrackerRequest
 
 
 @dataclass
 class BackendCapabilities:
     reply: BackendCapabilitiesReply
     request: BackendCapabilitiesRequest
+
+
+@dataclass
+class CheckpointsVerify:
+    reply: CheckpointsVerifyReply
+    request: CheckpointsVerifyRequest
 
 
 @dataclass
@@ -919,6 +1931,18 @@ class MachineStop:
 
 
 @dataclass
+class MaintenanceReconcile:
+    reply: MaintenanceReconcileReply
+    request: MaintenanceReconcileRequest
+
+
+@dataclass
+class ManifestExportOci:
+    reply: ManifestExportOciReply
+    request: ManifestExportOciRequest
+
+
+@dataclass
 class ManifestInfo:
     reply: ManifestInfoReply
     request: ManifestInfoRequest
@@ -928,6 +1952,12 @@ class ManifestInfo:
 class ManifestList:
     reply: ManifestListReply
     request: ManifestListRequest
+
+
+@dataclass
+class ManifestRemove:
+    reply: ManifestRemoveReply
+    request: ManifestRemoveRequest
 
 
 @dataclass
@@ -955,6 +1985,12 @@ class SessionStop:
 
 
 @dataclass
+class StorageGc:
+    reply: StorageGcReply
+    request: StorageGcRequest
+
+
+@dataclass
 class TelemetryRecords:
     reply: TelemetryRecordsReply
     request: TelemetryRecordsRequest
@@ -967,9 +2003,219 @@ class TelemetryStatus:
 
 
 @dataclass
+class VolumeAttachments:
+    reply: VolumeAttachmentsReply
+    request: VolumeAttachmentsRequest
+
+
+@dataclass
+class VolumeDetach:
+    reply: VolumeDetachReply
+    request: VolumeDetachRequest
+
+
+@dataclass
+class VolumeMount:
+    reply: VolumeMountReply
+    request: VolumeMountRequest
+
+
+@dataclass
+class VolumeRestore:
+    reply: VolumeRestoreReply
+    request: VolumeRestoreRequest
+
+
+@dataclass
+class VolumeSnapshot:
+    reply: VolumeSnapshotReply
+    request: VolumeSnapshotRequest
+
+
+@dataclass
+class VolumeUnlock:
+    reply: VolumeUnlockReply
+    request: VolumeUnlockRequest
+
+
+@dataclass
+class WorkspaceReview:
+    reply: WorkspaceReviewReply
+    request: WorkspaceReviewRequest
+
+
+@dataclass
+class WorkspaceUndo:
+    reply: WorkspaceUndoReply
+    request: WorkspaceUndoRequest
+
+
+@dataclass
 class AgentErrorReply:
     kind: RunEntrypointError
     message: str
+
+
+@dataclass
+class AgentSessionsOpenRequest:
+    intent: MutationIntent
+    request: OpenRequest
+
+
+@dataclass
+class AgentSessionsParkRequest:
+    intent: MutationIntent
+    request: ParkRequest
+
+
+@dataclass
+class AgentSessionsRenewRequest:
+    intent: MutationIntent
+    request: RenewRequest
+
+
+@dataclass
+class AgentSessionsResumeRequest:
+    intent: MutationIntent
+    request: ResumeRequest
+
+
+@dataclass
+class ArtifactInspectReply:
+    arch: str
+    artifact_id: str
+    backend: str
+    build_id: str
+    builder_version: str
+    kernel: KernelReport
+    rootfs: RootfsReport
+    timestamp_unix: int
+    config_path: Optional[str] = None
+    provenance: Optional[ProvenanceReport] = None
+    tenant_id: Optional[str] = None
+    validation: Optional[ValidationReport] = None
+
+
+@dataclass
+class ArtifactValidateReply:
+    checks: List[ValidationCheck]
+    ok: bool
+
+
+@dataclass
+class AuditSessionsListReply:
+    sessions: List[SessionSummary]
+    ledger: Optional[LedgerCheck] = None
+
+
+@dataclass
+class AuditSessionsListRequest:
+    range: Optional[TimeRange] = field(
+        default_factory=lambda: {'since': None, 'until': None}
+    )
+    tenant: Optional[str] = 'local'
+
+
+@dataclass
+class AuditSessionsShowReply:
+    events: List[SessionEvent]
+    plan_id: str
+
+
+@dataclass
+class BlobDelta:
+    name: str
+    status: BlobStatus
+    sha_a: Optional[str] = None
+    sha_b: Optional[str] = None
+
+
+@dataclass
+class BundleExportRequest:
+    out: str
+    template: str
+    cmdline: Optional[str] = None
+    label: Optional[str] = None
+    posture: Optional[ExportPosture] = None
+
+
+@dataclass
+class CaptureRequest:
+    class_: CheckpointClass
+    name: str
+    tag: Optional[str] = None
+
+
+@dataclass
+class CheckpointsCaptureRequest:
+    intent: MutationIntent
+    request: CaptureRequest
+
+
+@dataclass
+class CheckpointsDiffReply:
+    a_id: CheckpointId
+    b_id: CheckpointId
+    blobs: List[BlobDelta]
+    class_a: CheckpointClass
+    class_b: CheckpointClass
+    created_unix_a: int
+    created_unix_b: int
+    lineage: LineageRelation
+    supervisor_config_digest_same: bool
+    vm_name_a: str
+    vm_name_b: str
+    tag_a: Optional[str] = None
+    tag_b: Optional[str] = None
+
+
+@dataclass
+class CheckpointsForkRequest:
+    intent: MutationIntent
+    request: ForkRequest
+
+
+@dataclass
+class CheckpointsRemoveRequest:
+    intent: MutationIntent
+    request: IdRequest
+
+
+@dataclass
+class CheckpointsRestoreRequest:
+    intent: MutationIntent
+    request: RestoreRequest
+
+
+@dataclass
+class CheckpointsTimelineReply:
+    action: str
+    ancestors: List[TimelineNode]
+    children: List[TimelineNode]
+    kind: str
+    node: TimelineNode
+    schema_version: int
+    target: str
+    verified: bool
+    lineage_broken: Optional[str] = None
+
+
+@dataclass
+class CheckpointsTimelineRequest:
+    target: str
+    kind: Optional[LineageKind] = None
+
+
+@dataclass
+class DisplayInputGrant:
+    attended: Optional[bool] = None
+    clipboard: Optional[DisplayClipboardGrant] = None
+    human_credential: Optional[HumanCredentialGrant] = None
+
+
+@dataclass
+class EgressGrant:
+    allow: List[HostPort]
 
 
 @dataclass
@@ -983,10 +2229,27 @@ class EntrypointCallReply:
 
 
 @dataclass
+class EventFilter:
+    kind: Optional[str] = None
+    range: Optional[TimeRange] = field(
+        default_factory=lambda: {'since': None, 'until': None}
+    )
+
+
+@dataclass
 class FsEntry:
     kind: FsEntryKind
     name: str
     size: int
+
+
+@dataclass
+class Grants:
+    cpu: Optional[CpuGrant] = None
+    display_input: Optional[DisplayInputGrant] = None
+    drive: Optional[DriveGrant] = None
+    egress: Optional[EgressGrant] = None
+    wall_clock: Optional[WallClockGrant] = None
 
 
 @dataclass
@@ -1190,6 +2453,53 @@ class MachineState:
 
 
 @dataclass
+class ManifestPruneReply:
+    candidates: List[PruneCandidate]
+    dry_run: bool
+    removed: List[str]
+    removed_count: int
+
+
+@dataclass
+class PostureCheck:
+    detail: str
+    name: str
+    status: PostureStatus
+
+
+@dataclass
+class PostureInspectReply:
+    checks: List[PostureCheck]
+
+
+@dataclass
+class RecordedTransition:
+    digest: str
+    identity: TransitionIdentity
+    admitted_plan_id: Optional[str] = None
+
+
+@dataclass
+class ReplayRunSessionReply:
+    summary: SessionReplaySummary
+    execution: Optional[SessionReplayReport] = None
+
+
+@dataclass
+class ReplayRunSessionRequest:
+    selection: SessionReplayRequest
+    tenant: str
+    timeout_secs: int
+    dry_run: Optional[bool] = True
+
+
+@dataclass
+class SealCheck:
+    seal: SessionSeal
+    seq: int
+
+
+@dataclass
 class SessionCallReply:
     exit_code: int
     output_truncated: bool
@@ -1200,9 +2510,141 @@ class SessionCallReply:
 
 
 @dataclass
+class SessionReport:
+    created_unix: int
+    generation: int
+    journal_cursor: int
+    members: List[str]
+    session_id: str
+    state: Residency
+    updated_unix: int
+    approval_head: Optional[str] = None
+    last_transition: Optional[RecordedTransition] = None
+    parent_checkpoint: Optional[str] = None
+    park_reason: Optional[ParkReason] = None
+    retain_until_unix: Optional[int] = None
+    retention: Optional[RetentionStatus] = None
+    storage_tier: Optional[StorageTier] = None
+
+
+@dataclass
+class StorageInfoReply:
+    available: bool
+    pool: str
+    volume_stats: List[VolumeStats]
+    volumes: List[str]
+    reason: Optional[str] = None
+    stats: Optional[PoolStats] = None
+
+
+@dataclass
 class StreamEvent:
     data_b64: str
     stream: StreamName
+
+
+@dataclass
+class VolumeCreateReply:
+    created_at: str
+    encryption: EncryptionState
+    name: str
+    source: VolumeSourceKind
+    attached_to: Optional[str] = None
+    host_artifact: Optional[str] = None
+
+
+@dataclass
+class VolumeInspectReply:
+    created_at: str
+    encryption: EncryptionState
+    name: str
+    source: VolumeSourceKind
+    attached_to: Optional[str] = None
+    host_artifact: Optional[str] = None
+
+
+@dataclass
+class VolumeListReplyItem:
+    created_at: str
+    encryption: EncryptionState
+    name: str
+    source: VolumeSourceKind
+    attached_to: Optional[str] = None
+    host_artifact: Optional[str] = None
+
+
+VolumeListReply = List[VolumeListReplyItem]
+
+
+@dataclass
+class VolumeLockReply:
+    created_at: str
+    encryption: EncryptionState
+    name: str
+    source: VolumeSourceKind
+    attached_to: Optional[str] = None
+    host_artifact: Optional[str] = None
+
+
+@dataclass
+class WorkspaceApplyRequest:
+    approved: bool
+    expected_fingerprint: str
+    workspace: WorkspaceRequest
+
+
+@dataclass
+class WorkspaceRedoRequest:
+    approved: bool
+    workspace: WorkspaceRequest
+
+
+@dataclass
+class ArtifactInspect:
+    reply: ArtifactInspectReply
+    request: ArtifactInspectRequest
+
+
+@dataclass
+class ArtifactValidate:
+    reply: ArtifactValidateReply
+    request: ArtifactValidateRequest
+
+
+@dataclass
+class AuditSessionsList:
+    reply: AuditSessionsListReply
+    request: AuditSessionsListRequest
+
+
+@dataclass
+class BundleExport:
+    reply: BundleExportReply
+    request: BundleExportRequest
+
+
+@dataclass
+class CheckpointsDiff:
+    reply: CheckpointsDiffReply
+    request: CheckpointsDiffRequest
+
+
+@dataclass
+class CheckpointsRemove:
+    reply: CheckpointsRemoveReply
+    request: CheckpointsRemoveRequest
+
+
+@dataclass
+class CheckpointsRestore:
+    reply: CheckpointsRestoreReply
+    request: CheckpointsRestoreRequest
+
+
+@dataclass
+class CheckpointsTimeline:
+    reply: CheckpointsTimelineReply
+    request: CheckpointsTimelineRequest
 
 
 @dataclass
@@ -1272,9 +2714,269 @@ class MachineStart:
 
 
 @dataclass
+class ManifestPrune:
+    reply: ManifestPruneReply
+    request: ManifestPruneRequest
+
+
+@dataclass
+class PostureInspect:
+    reply: PostureInspectReply
+    request: PostureInspectRequest
+
+
+@dataclass
+class ReplayRunSession:
+    reply: ReplayRunSessionReply
+    request: ReplayRunSessionRequest
+
+
+@dataclass
 class SessionCall:
     reply: SessionCallReply
     request: SessionCallRequest
+
+
+@dataclass
+class StorageInfo:
+    reply: StorageInfoReply
+    request: StorageInfoRequest
+
+
+@dataclass
+class VolumeCreate:
+    reply: VolumeCreateReply
+    request: VolumeCreateRequest
+
+
+@dataclass
+class VolumeInspect:
+    reply: VolumeInspectReply
+    request: VolumeInspectRequest
+
+
+@dataclass
+class VolumeList:
+    reply: VolumeListReply
+    request: VolumeListRequest
+
+
+@dataclass
+class VolumeLock:
+    reply: VolumeLockReply
+    request: VolumeLockRequest
+
+
+@dataclass
+class WorkspaceApply:
+    reply: WorkspaceApplyReply
+    request: WorkspaceApplyRequest
+
+
+@dataclass
+class WorkspaceRedo:
+    reply: WorkspaceRedoReply
+    request: WorkspaceRedoRequest
+
+
+@dataclass
+class AgentSessionsListReplyItem:
+    created_unix: int
+    generation: int
+    journal_cursor: int
+    members: List[str]
+    session_id: str
+    state: Residency
+    updated_unix: int
+    approval_head: Optional[str] = None
+    last_transition: Optional[RecordedTransition] = None
+    parent_checkpoint: Optional[str] = None
+    park_reason: Optional[ParkReason] = None
+    retain_until_unix: Optional[int] = None
+    retention: Optional[RetentionStatus] = None
+    storage_tier: Optional[StorageTier] = None
+
+
+AgentSessionsListReply = List[AgentSessionsListReplyItem]
+
+
+@dataclass
+class AgentSessionsOpenReply:
+    created_unix: int
+    generation: int
+    journal_cursor: int
+    members: List[str]
+    session_id: str
+    state: Residency
+    updated_unix: int
+    approval_head: Optional[str] = None
+    last_transition: Optional[RecordedTransition] = None
+    parent_checkpoint: Optional[str] = None
+    park_reason: Optional[ParkReason] = None
+    retain_until_unix: Optional[int] = None
+    retention: Optional[RetentionStatus] = None
+    storage_tier: Optional[StorageTier] = None
+
+
+@dataclass
+class AgentSessionsParkReply:
+    replayed: bool
+    session: SessionReport
+    transition: Transition
+    admitted_plan_id: Optional[str] = None
+    booted_sandbox: Optional[str] = None
+    warnings: Optional[List[str]] = None
+
+
+@dataclass
+class AgentSessionsRenewReply:
+    replayed: bool
+    session: SessionReport
+    transition: Transition
+    admitted_plan_id: Optional[str] = None
+    booted_sandbox: Optional[str] = None
+    warnings: Optional[List[str]] = None
+
+
+@dataclass
+class AgentSessionsResumeReply:
+    replayed: bool
+    session: SessionReport
+    transition: Transition
+    admitted_plan_id: Optional[str] = None
+    booted_sandbox: Optional[str] = None
+    warnings: Optional[List[str]] = None
+
+
+@dataclass
+class AgentSessionsShowReply:
+    created_unix: int
+    generation: int
+    journal_cursor: int
+    members: List[str]
+    session_id: str
+    state: Residency
+    updated_unix: int
+    approval_head: Optional[str] = None
+    last_transition: Optional[RecordedTransition] = None
+    parent_checkpoint: Optional[str] = None
+    park_reason: Optional[ParkReason] = None
+    retain_until_unix: Optional[int] = None
+    retention: Optional[RetentionStatus] = None
+    storage_tier: Optional[StorageTier] = None
+
+
+@dataclass
+class AuditSessionsShowRequest:
+    selector: str
+    filter: Optional[EventFilter] = field(
+        default_factory=lambda: {'kind': None, 'range': {'since': None, 'until': None}}
+    )
+    tenant: Optional[str] = 'local'
+
+
+@dataclass
+class AuditSessionsVerifyReply:
+    event_count: int
+    late_entries: int
+    plan_id: str
+    seals: List[SealCheck]
+    verdict: Verdict
+    detail: Optional[str] = None
+    reason: Optional[MismatchReason] = None
+
+
+@dataclass
+class CheckpointMeta:
+    class_: CheckpointClass
+    content: List[ContentBlob]
+    created_unix: int
+    id: CheckpointId
+    meta_digest: CheckpointDigest
+    supervisor_config_digest: str
+    vm_name: str
+    audit_ref: Optional[str] = None
+    grants: Optional[Grants] = None
+    key_domain: Optional[CheckpointKeyDomain] = None
+    machine_input_cursor: Optional[int] = None
+    parent: Optional[CheckpointDigest] = None
+    runtime_overlay_version: Optional[str] = None
+    session: Optional[SessionBinding] = None
+    snapshot_id: Optional[str] = None
+    tag: Optional[str] = None
+
+
+@dataclass
+class CheckpointsCaptureReply:
+    class_: CheckpointClass
+    content: List[ContentBlob]
+    created_unix: int
+    id: CheckpointId
+    meta_digest: CheckpointDigest
+    supervisor_config_digest: str
+    vm_name: str
+    audit_ref: Optional[str] = None
+    grants: Optional[Grants] = None
+    key_domain: Optional[CheckpointKeyDomain] = None
+    machine_input_cursor: Optional[int] = None
+    parent: Optional[CheckpointDigest] = None
+    runtime_overlay_version: Optional[str] = None
+    session: Optional[SessionBinding] = None
+    snapshot_id: Optional[str] = None
+    tag: Optional[str] = None
+
+
+@dataclass
+class CheckpointsForkReply:
+    action: str
+    booted: bool
+    checkpoint: CheckpointMeta
+    child_vm_name: str
+    parent_id: CheckpointId
+    schema_version: int
+
+
+@dataclass
+class CheckpointsInfoReply:
+    class_: CheckpointClass
+    content: List[ContentBlob]
+    created_unix: int
+    id: CheckpointId
+    meta_digest: CheckpointDigest
+    supervisor_config_digest: str
+    vm_name: str
+    audit_ref: Optional[str] = None
+    grants: Optional[Grants] = None
+    key_domain: Optional[CheckpointKeyDomain] = None
+    machine_input_cursor: Optional[int] = None
+    parent: Optional[CheckpointDigest] = None
+    runtime_overlay_version: Optional[str] = None
+    session: Optional[SessionBinding] = None
+    snapshot_id: Optional[str] = None
+    tag: Optional[str] = None
+
+
+@dataclass
+class CheckpointsListReplyItem:
+    class_: CheckpointClass
+    content: List[ContentBlob]
+    created_unix: int
+    id: CheckpointId
+    meta_digest: CheckpointDigest
+    supervisor_config_digest: str
+    vm_name: str
+    audit_ref: Optional[str] = None
+    grants: Optional[Grants] = None
+    key_domain: Optional[CheckpointKeyDomain] = None
+    machine_input_cursor: Optional[int] = None
+    parent: Optional[CheckpointDigest] = None
+    runtime_overlay_version: Optional[str] = None
+    session: Optional[SessionBinding] = None
+    snapshot_id: Optional[str] = None
+    tag: Optional[str] = None
+
+
+CheckpointsListReply = List[CheckpointsListReplyItem]
 
 
 @dataclass
@@ -1300,6 +3002,78 @@ class MachineRunReply:
 
 
 @dataclass
+class AgentSessionsList:
+    reply: AgentSessionsListReply
+    request: AgentSessionsListRequest
+
+
+@dataclass
+class AgentSessionsOpen:
+    reply: AgentSessionsOpenReply
+    request: AgentSessionsOpenRequest
+
+
+@dataclass
+class AgentSessionsPark:
+    reply: AgentSessionsParkReply
+    request: AgentSessionsParkRequest
+
+
+@dataclass
+class AgentSessionsRenew:
+    reply: AgentSessionsRenewReply
+    request: AgentSessionsRenewRequest
+
+
+@dataclass
+class AgentSessionsResume:
+    reply: AgentSessionsResumeReply
+    request: AgentSessionsResumeRequest
+
+
+@dataclass
+class AgentSessionsShow:
+    reply: AgentSessionsShowReply
+    request: AgentSessionsShowRequest
+
+
+@dataclass
+class AuditSessionsShow:
+    reply: AuditSessionsShowReply
+    request: AuditSessionsShowRequest
+
+
+@dataclass
+class AuditSessionsVerify:
+    reply: AuditSessionsVerifyReply
+    request: AuditSessionsVerifyRequest
+
+
+@dataclass
+class CheckpointsCapture:
+    reply: CheckpointsCaptureReply
+    request: CheckpointsCaptureRequest
+
+
+@dataclass
+class CheckpointsFork:
+    reply: CheckpointsForkReply
+    request: CheckpointsForkRequest
+
+
+@dataclass
+class CheckpointsInfo:
+    reply: CheckpointsInfoReply
+    request: CheckpointsInfoRequest
+
+
+@dataclass
+class CheckpointsList:
+    reply: CheckpointsListReply
+    request: CheckpointsListRequest
+
+
+@dataclass
 class GuestProcStreamNext:
     reply: GuestProcStreamNextReply
     request: GuestProcStreamNextRequest
@@ -1319,7 +3093,29 @@ class MachineRun:
 
 @dataclass
 class HostAbi:
+    agent_sessions_list: AgentSessionsList
+    agent_sessions_open: AgentSessionsOpen
+    agent_sessions_park: AgentSessionsPark
+    agent_sessions_renew: AgentSessionsRenew
+    agent_sessions_resume: AgentSessionsResume
+    agent_sessions_show: AgentSessionsShow
+    artifact_configure_firecracker: ArtifactConfigureFirecracker
+    artifact_inspect: ArtifactInspect
+    artifact_validate: ArtifactValidate
+    audit_sessions_list: AuditSessionsList
+    audit_sessions_show: AuditSessionsShow
+    audit_sessions_verify: AuditSessionsVerify
     backend_capabilities: BackendCapabilities
+    bundle_export: BundleExport
+    checkpoints_capture: CheckpointsCapture
+    checkpoints_diff: CheckpointsDiff
+    checkpoints_fork: CheckpointsFork
+    checkpoints_info: CheckpointsInfo
+    checkpoints_list: CheckpointsList
+    checkpoints_remove: CheckpointsRemove
+    checkpoints_restore: CheckpointsRestore
+    checkpoints_timeline: CheckpointsTimeline
+    checkpoints_verify: CheckpointsVerify
     entrypoint_call: EntrypointCall
     guest_cp: GuestCp
     guest_fs_list: GuestFsList
@@ -1356,12 +3152,34 @@ class HostAbi:
     machine_set_ttl: MachineSetTtl
     machine_start: MachineStart
     machine_stop: MachineStop
+    maintenance_reconcile: MaintenanceReconcile
+    manifest_export_oci: ManifestExportOci
     manifest_info: ManifestInfo
     manifest_list: ManifestList
+    manifest_prune: ManifestPrune
+    manifest_remove: ManifestRemove
     manifest_verify: ManifestVerify
+    posture_inspect: PostureInspect
+    replay_run_session: ReplayRunSession
     session_call: SessionCall
     session_info: SessionInfo
     session_start: SessionStart
     session_stop: SessionStop
+    storage_gc: StorageGc
+    storage_info: StorageInfo
     telemetry_records: TelemetryRecords
     telemetry_status: TelemetryStatus
+    volume_attachments: VolumeAttachments
+    volume_create: VolumeCreate
+    volume_detach: VolumeDetach
+    volume_inspect: VolumeInspect
+    volume_list: VolumeList
+    volume_lock: VolumeLock
+    volume_mount: VolumeMount
+    volume_restore: VolumeRestore
+    volume_snapshot: VolumeSnapshot
+    volume_unlock: VolumeUnlock
+    workspace_apply: WorkspaceApply
+    workspace_redo: WorkspaceRedo
+    workspace_review: WorkspaceReview
+    workspace_undo: WorkspaceUndo

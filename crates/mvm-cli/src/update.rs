@@ -9,9 +9,6 @@ use mvm_core::release_version::{ReleaseVersion, VersionSyntax};
 use mvm_runtime::shell::run_host;
 
 const GITHUB_REPO: &str = "tinylabscom/mvm";
-const SOURCE_HELPER_RELEASE: &str = "source-builds";
-const SOURCE_HELPER_BASE_URL_ENV: &str = "MVM_SOURCE_HELPER_BASE_URL";
-const SOURCE_HELPER_COMMIT_MARKER: &str = ".mvm-host-helpers-source-commit";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-hvf-supervisor",
     "mvm-libkrun-supervisor",
@@ -132,28 +129,6 @@ pub(crate) fn boot_image_release() -> Result<(String, String)> {
         format!("image set tag {tag:?} is not of the form `image-set/v<semver>`")
     })?;
     Ok((tag.to_string(), version.to_string()))
-}
-
-/// Asset and checksum-manifest names for a kernel variant in the image set.
-///
-/// The image set publishes each kernel *inside* the image it belongs to, so a
-/// variant maps to the image that carries it: the workload kernel is the
-/// default tenant's, the builder kernel the builder VM's. mvm-images builds
-/// both from one shared kernel definition, so the mapping is a rename, not a
-/// substitution.
-fn boot_image_kernel_assets(arch: &str, variant: &str) -> Result<(String, String)> {
-    let image = match variant {
-        "workload" => "default-microvm",
-        "builder" => "builder-vm",
-        other => anyhow::bail!(
-            "unknown kernel variant {other:?}: the boot image publishes only the \
-             workload (default-microvm) and builder (builder-vm) kernels"
-        ),
-    };
-    Ok((
-        format!("{image}-vmlinux-{arch}"),
-        format!("{image}-{arch}-checksums-sha256.txt"),
-    ))
 }
 
 /// Parse a hex-encoded SHA256 digest from a `checksums-sha256.txt` entry.
@@ -287,66 +262,11 @@ fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
 /// this build. The root digest, exact publisher identity, compatibility and
 /// member digest are all established before the staged file is published.
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
-    let (asset, _) = boot_image_kernel_assets(arch, variant)?;
-    let arch = arch.parse::<mvm_core::arch::GuestArch>()?;
-    let role = match variant {
-        "workload" => mvm_core::image_set::ImageSetRole::WorkloadKernel(
-            mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
-        ),
-        "builder" => mvm_core::image_set::ImageSetRole::BuilderVm,
-        other => bail!("unknown kernel variant {other:?}"),
-    };
-
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating kernel cache dir {}", parent.display()))?;
-    }
-
-    let parent = dest
-        .parent()
-        .with_context(|| format!("kernel destination has no parent: {}", dest.display()))?;
-    let download = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| {
-            format!(
-                "creating kernel download staging file in {}",
-                parent.display()
-            )
-        })?
-        .into_temp_path();
-    let image_set = crate::commands::env::artifact_verify::acquire_image_set()?;
-    let artifact =
-        image_set.artifact(role, mvm_core::image_set::MemberTarget::Arch(arch), &asset)?;
-    let tag = mvm_core::image_set::image_train_lock()
-        .image_set
-        .release_tag
-        .as_str();
-    let sp = ui::spinner(&format!("Downloading {asset} ({tag})..."));
-    let dl = image_set.fetch_artifact(artifact, &download);
+    let sp = ui::spinner(&format!("Downloading {variant} kernel ({arch})..."));
+    let dl = mvm_client::builder_images::acquisition::download_kernel(arch, variant, dest);
     sp.finish_and_clear();
-    dl.with_context(|| format!("download {asset} from the locked image set"))?;
-    ui::success(&format!("Verified {asset}."));
-    publish_downloaded_kernel(download, dest)?;
-    Ok(())
-}
-
-/// Record the fetched kernel's digest beside it so the *read* path can check
-/// it later.
-///
-/// The checksum-manifest comparison above happens once, at fetch. Nothing
-/// re-derived it afterwards, so a kernel that rotted, was truncated, or was
-/// replaced on disk was served on the strength of its filename. The staged
-/// download is renamed into place only after checksum verification, and a
-/// sidecar failure evicts it rather than leaving an unservable cache entry.
-fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Result<()> {
-    download
-        .persist(dest)
-        .map_err(|error| error.error)
-        .with_context(|| format!("publishing downloaded kernel to {}", dest.display()))?;
-    if let Err(error) = mvm_build::kernel_fetch::record_kernel_digest(dest) {
-        let _ = std::fs::remove_file(dest);
-        let _ = std::fs::remove_file(mvm_build::kernel_fetch::kernel_digest_sidecar(dest));
-        return Err(error).context("recording downloaded kernel digest");
-    }
+    dl?;
+    ui::success(&format!("Verified {variant} kernel."));
     Ok(())
 }
 
@@ -660,169 +580,26 @@ fn install_release_host_binaries(
 
 /// Install the signed release's host helpers beside a source-built `mvmctl`
 /// without replacing the CLI itself.
-pub(crate) fn prepare_release_host_binaries() -> Result<()> {
-    let current_exe = std::env::current_exe().context("resolve the running mvmctl")?;
-    let install_dir = current_exe
+pub(crate) fn host_helper_install_target()
+-> Result<mvm_client::builder_images::host_helpers::InstallTarget> {
+    use mvm_client::builder_images::host_helpers::{InstallTarget, SourceBuild};
+    let executable = std::env::current_exe().context("resolve the running mvmctl")?;
+    let directory = executable
         .parent()
-        .context("the running mvmctl has no parent directory")?;
-    anyhow::ensure!(
-        is_writable(install_dir),
-        "cannot install published host helpers beside {}",
-        current_exe.display()
-    );
-    let target = detect_target()?;
-    let tmp = tempfile::tempdir().context("create host-helper download directory")?;
-    if let Some(commit) = source_helper_commit()? {
-        return prepare_source_host_binaries(&commit, target, install_dir, tmp.path());
-    }
-    let tag = format!("v{}", current_version());
-    download_release(&tag, target, tmp.path())?;
-    let archive_name = format!("mvmctl-{target}.tar.gz");
-    let archive_path = tmp.path().join(&archive_name);
-    verify_signature(&tag, &archive_name, &archive_path)?;
-    let output = run_host(
-        "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp.path()
-                .to_str()
-                .expect("temporary path must be valid UTF-8"),
-        ],
-    )?;
-    anyhow::ensure!(output.status.success(), "failed to extract host helpers");
-    let extracted = tmp.path().join(format!("mvmctl-{target}"));
-    install_release_host_binaries(&extracted, install_dir, false)?;
-    sign_installed_binaries(cfg!(target_os = "macos"), || {
-        let targets = mvm_runtime::codesign::collect_sign_targets();
-        mvm_runtime::codesign::sign_targets(&targets)
-    })?;
-    Ok(())
-}
-
-pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
-    let Some(commit) = source_helper_commit()? else {
-        return Ok(true);
-    };
-    let current_exe = std::env::current_exe().context("resolve the running mvmctl")?;
-    let install_dir = current_exe
-        .parent()
-        .context("the running mvmctl has no parent directory")?;
-    Ok(source_helper_marker_matches(install_dir, &commit))
-}
-
-fn source_helper_commit() -> Result<Option<String>> {
-    if mvm_build::artifact_acquisition::compiled_channel()
-        == mvm_build::artifact_acquisition::DistributionChannel::Release
-    {
-        return Ok(None);
-    }
-    let commit = env!("MVM_SOURCE_COMMIT");
-    let dirty = env!("MVM_SOURCE_DIRTY");
-    validate_source_helper_identity(commit, dirty).map(Some)
-}
-
-fn validate_source_helper_identity(commit: &str, dirty: &str) -> Result<String> {
-    anyhow::ensure!(
-        dirty == "false",
-        "this mvmctl was built from a dirty or unidentified checkout, so no exact remote helper \
-         bundle can match it; \
-         explicitly compile local helpers with \
-         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
-    );
-    anyhow::ensure!(
-        commit.len() == 40
-            && commit
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "the source build metadata has no valid commit; explicitly compile local helpers with \
-         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
-    );
-    Ok(commit.to_string())
-}
-
-fn prepare_source_host_binaries(
-    commit: &str,
-    target: &str,
-    install_dir: &Path,
-    tmp_dir: &Path,
-) -> Result<()> {
-    let archive_name = format!("mvm-host-helpers-{commit}-{target}.tar.gz");
-    let base_url = std::env::var(SOURCE_HELPER_BASE_URL_ENV).unwrap_or_else(|_| {
-        format!(
-            "{}/{GITHUB_REPO}/releases/download/{SOURCE_HELPER_RELEASE}",
-            github_download_base()
-        )
-    });
-    let archive_path = tmp_dir.join(&archive_name);
-    download_release_asset(&format!("{base_url}/{archive_name}"), &archive_path).with_context(
-        || {
-            format!(
-                "no published host helpers match source commit {commit}; wait for the main-branch \
-                 source-helper workflow or explicitly compile local helpers with \
-                 `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
-            )
-        },
-    )?;
-    mvm_build::release_signature::verify_release_archive_signature(
-        &mvm_build::release_signature::ReleaseSignatureRequest {
-            base_url: &base_url,
-            asset: &archive_name,
-            archive_path: &archive_path,
-            version: commit,
-            train: mvm_build::release_signature::ReleaseTrain::SourceHelpers,
-        },
-    )
-    .context("verify the source helper bundle")?;
-    let output = run_host(
-        "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp_dir
-                .to_str()
-                .expect("temporary path must be valid UTF-8"),
-        ],
-    )?;
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to extract source host helpers"
-    );
-    let extracted = tmp_dir.join(format!("mvm-host-helpers-{commit}-{target}"));
-    validate_source_helper_bundle(&extracted, commit)?;
-    install_release_host_binaries(&extracted, install_dir, false)?;
-    sign_installed_binaries(cfg!(target_os = "macos"), || {
-        let targets = mvm_runtime::codesign::collect_sign_targets();
-        mvm_runtime::codesign::sign_targets(&targets)
-    })?;
-    mvm_core::util::atomic_io::atomic_write_durable(
-        &install_dir.join(SOURCE_HELPER_COMMIT_MARKER),
-        format!("{commit}\n").as_bytes(),
-    )
-    .context("record installed source-helper commit")?;
-    Ok(())
-}
-
-fn source_helper_marker_matches(install_dir: &Path, expected_commit: &str) -> bool {
-    std::fs::read_to_string(install_dir.join(SOURCE_HELPER_COMMIT_MARKER))
-        .is_ok_and(|recorded| recorded.trim() == expected_commit)
-}
-
-fn validate_source_helper_bundle(extracted: &Path, expected_commit: &str) -> Result<()> {
-    let recorded = std::fs::read_to_string(extracted.join("SOURCE_COMMIT"))
-        .context("source helper bundle has no SOURCE_COMMIT")?;
-    anyhow::ensure!(
-        recorded.trim() == expected_commit,
-        "source helper bundle records commit {}, expected {expected_commit}",
-        recorded.trim()
-    );
-    Ok(())
+        .context("the running mvmctl has no parent directory")?
+        .to_owned();
+    let source = (mvm_build::artifact_acquisition::compiled_channel()
+        != mvm_build::artifact_acquisition::DistributionChannel::Release)
+        .then(|| SourceBuild {
+            commit: env!("MVM_SOURCE_COMMIT").to_owned(),
+            dirty: env!("MVM_SOURCE_DIRTY") != "false",
+        });
+    Ok(InstallTarget {
+        directory,
+        frontend_executable: Some(executable),
+        version: current_version().to_owned(),
+        source,
+    })
 }
 
 /// Apply the macOS entitlements immediately after replacing a release binary
@@ -838,8 +615,11 @@ fn sign_installed_binaries(
 
     let failed: Vec<String> = signer()
         .iter()
-        .filter(|report| !report.entitlements_present)
-        .map(|report| report.path.display().to_string())
+        .filter(|report| !report.entitlements_present || report.error.is_some())
+        .map(|report| match &report.error {
+            Some(error) => format!("{}: {error}", report.path.display()),
+            None => report.path.display().to_string(),
+        })
         .collect();
     if failed.is_empty() {
         Ok(())
@@ -1171,47 +951,7 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        UpdateAction, decide_update, source_helper_marker_matches, validate_source_helper_bundle,
-        validate_source_helper_identity,
-    };
-
-    #[test]
-    fn source_helper_identity_requires_a_clean_full_commit() {
-        let commit = "a".repeat(40);
-        assert_eq!(
-            validate_source_helper_identity(&commit, "false").unwrap(),
-            commit
-        );
-        assert!(validate_source_helper_identity(&commit, "true").is_err());
-        assert!(validate_source_helper_identity("abc", "false").is_err());
-        assert!(validate_source_helper_identity(&"A".repeat(40), "false").is_err());
-    }
-
-    #[test]
-    fn source_helper_bundle_must_record_the_requested_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let commit = "a".repeat(40);
-        assert!(validate_source_helper_bundle(tmp.path(), &commit).is_err());
-
-        std::fs::write(tmp.path().join("SOURCE_COMMIT"), format!("{commit}\n")).unwrap();
-        validate_source_helper_bundle(tmp.path(), &commit).unwrap();
-        assert!(validate_source_helper_bundle(tmp.path(), &"b".repeat(40)).is_err());
-    }
-
-    #[test]
-    fn installed_source_helper_marker_must_match_the_cli_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let commit = "a".repeat(40);
-        assert!(!source_helper_marker_matches(tmp.path(), &commit));
-        std::fs::write(
-            tmp.path().join(super::SOURCE_HELPER_COMMIT_MARKER),
-            format!("{commit}\n"),
-        )
-        .unwrap();
-        assert!(source_helper_marker_matches(tmp.path(), &commit));
-        assert!(!source_helper_marker_matches(tmp.path(), &"b".repeat(40)));
-    }
+    use super::{UpdateAction, decide_update};
 
     /// The bug, stated as the behaviour: an rc user's latest is the stable
     /// release, because the rc is published as a prerelease and deliberately is
@@ -1296,33 +1036,6 @@ mod tests {
                 .any(|i| i.ends_with(&format!("refs/tags/image-set/v{version}"))),
             "identity must bind the published tag: {identities:?}"
         );
-    }
-
-    /// The two release trains name the same kernel differently; this is the
-    /// rename, and getting it wrong would fetch the *other* kernel.
-    #[test]
-    fn kernel_variants_map_to_their_published_image_assets() {
-        assert_eq!(
-            boot_image_kernel_assets("aarch64", "workload").unwrap(),
-            (
-                "default-microvm-vmlinux-aarch64".to_string(),
-                "default-microvm-aarch64-checksums-sha256.txt".to_string()
-            )
-        );
-        assert_eq!(
-            boot_image_kernel_assets("x86_64", "builder").unwrap(),
-            (
-                "builder-vm-vmlinux-x86_64".to_string(),
-                "builder-vm-x86_64-checksums-sha256.txt".to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn an_unknown_kernel_variant_is_refused_rather_than_guessed() {
-        let err = boot_image_kernel_assets("aarch64", "initramfs")
-            .expect_err("only workload and builder kernels are published");
-        assert!(format!("{err}").contains("unknown kernel variant"), "{err}");
     }
 
     use super::*;
@@ -1526,6 +1239,7 @@ mod tests {
             path: path.into(),
             applied: true,
             entitlements_present,
+            error: None,
         };
         sign_installed_binaries(true, || vec![report("mvmctl", true)])
             .expect("a signed macOS install is accepted");
@@ -1537,6 +1251,10 @@ mod tests {
         .to_string();
         assert!(error.contains("mvm-hvf-supervisor"), "{error}");
         assert!(!error.contains("mvmctl"), "{error}");
+
+        let mut failed = report("mvmctl", true);
+        failed.error = Some("native verification refused".into());
+        assert!(sign_installed_binaries(true, || vec![failed]).is_err());
     }
 
     // --- signature verification ---
@@ -1722,26 +1440,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn downloaded_kernel_publish_replaces_atomically_and_records_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("vmlinux");
-        std::fs::write(&dest, b"old kernel").unwrap();
-        let mut download = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
-        download.write_all(b"new verified kernel").unwrap();
-        download.flush().unwrap();
-
-        publish_downloaded_kernel(download.into_temp_path(), &dest).unwrap();
-
-        assert_eq!(std::fs::read(&dest).unwrap(), b"new verified kernel");
-        let recorded =
-            std::fs::read_to_string(mvm_build::kernel_fetch::kernel_digest_sidecar(&dest)).unwrap();
-        assert_eq!(
-            recorded.trim(),
-            mvm_fs::overlay::compute_file_sha256(&dest).unwrap()
-        );
-    }
-
     /// The two 404s are different problems and must not read the same. A
     /// missing release means "this build was never released, compile"; a
     /// missing asset means "this release ships no kernels". Sending a
@@ -1879,7 +1577,8 @@ mod tests {
 
     #[test]
     fn download_kernel_refuses_a_manifest_digest_that_does_not_match() {
-        let (asset, _) = boot_image_kernel_assets("aarch64", "workload").expect("known assets");
+        // The workload kernel publishes as the default-microvm image's vmlinux.
+        let asset = "default-microvm-vmlinux-aarch64";
         let server = loopback_release_server(1, move |line| {
             assert!(
                 line.contains("/image-set.json"),
@@ -1891,7 +1590,7 @@ mod tests {
         env.set("MVM_UPDATE_DOWNLOAD_URL", &server);
 
         let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join("out").join(&asset);
+        let dest = tmp.path().join("out").join(asset);
         let error = download_kernel("aarch64", "workload", &dest)
             .expect_err("a mismatched manifest digest must refuse the kernel")
             .to_string();

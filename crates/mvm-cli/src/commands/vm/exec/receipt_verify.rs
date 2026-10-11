@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
-use super::super::host_signer::PUBLIC_FILENAME;
 use super::{SignedRunReceipt, sha256_hex};
+use mvm_client::audit::host_keypair::PUBLIC_FILENAME;
 
 pub(super) fn verify_run_receipt(
     path: &Path,
@@ -56,11 +56,11 @@ pub(super) fn verify_run_receipt(
 fn load_receipt_pubkey(path: Option<&Path>) -> Result<VerifyingKey> {
     let path = match path {
         Some(path) => path.to_path_buf(),
-        None => super::super::host_signer::default_keys_dir()?.join(PUBLIC_FILENAME),
+        None => mvm_client::audit::host_keypair::default_keys_dir()?.join(PUBLIC_FILENAME),
     };
     let bytes = std::fs::read(&path)
         .with_context(|| format!("reading trusted receipt public key {}", path.display()))?;
-    let key: [u8; super::super::host_signer::KEY_BYTES] = bytes
+    let key: [u8; mvm_client::audit::host_keypair::KEY_BYTES] = bytes
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("{} must contain exactly 32 bytes", path.display()))?;

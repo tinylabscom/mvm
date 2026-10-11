@@ -6,16 +6,18 @@
 //! host library calls, so a session started from a language SDK and one
 //! started here are admitted, audited and torn down identically. What stays
 //! here is the terminal surface: argument checks phrased as flags, rendering,
-//! and the dev-only verbs (`exec`, `run-code`, `console`) no library caller
-//! is offered.
+//! and exit-code mapping. Development calls share the client's session gates.
 
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
-use mvm_client::entrypoint::verb_audit::audit_verb_refusal;
+#[cfg(test)]
+use mvm_client::entrypoint::session::require_dev_mode;
+use mvm_client::entrypoint::session::{DevSessionCompletion, DevSessionOutput};
 use mvm_client::entrypoint::{EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource};
-use mvm_core::audit::{LocalAuditKind, emit as audit_emit};
-use mvm_core::session::{self, MAX_IDLE_TIMEOUT_SECS, SessionId, SessionState};
+#[cfg(test)]
+use mvm_core::session;
+use mvm_core::session::{MAX_IDLE_TIMEOUT_SECS, SessionId, SessionState};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -254,7 +256,7 @@ pub(in crate::commands) fn reap_expired_sessions(verbose: bool) -> Vec<SessionId
 }
 
 fn cmd_ls(args: LsArgs) -> Result<()> {
-    let sessions = session::list_sessions().context("listing sessions")?;
+    let sessions = mvm_client::entrypoint::session::list_sessions()?;
     if args.json {
         // JSON mode is for machine consumers; warning text on stderr
         // is fine to keep but no per-record `stale` field is wired
@@ -448,8 +450,7 @@ fn cmd_set_timeout(args: SetTimeoutArgs) -> Result<()> {
 
 fn cmd_attach(args: AttachArgs) -> Result<()> {
     let resolved_id: String = if args.continue_latest {
-        let rec = mvm_core::session::most_recent_running_on_disk()?
-            .ok_or_else(|| anyhow::anyhow!("no running session to --continue"))?;
+        let rec = mvm_client::entrypoint::session::latest_running_session()?;
         rec.id.into_string()
     } else if let Some(id) = args.resume.or(args.session_id) {
         id
@@ -483,204 +484,66 @@ fn cmd_attach(args: AttachArgs) -> Result<()> {
 }
 
 fn cmd_exec(args: ExecArgs) -> Result<()> {
-    let (id, record) = require_running_session(&args.session_id)?;
-    require_dev_mode(&id, &record, "exec")?;
-
-    if args.argv.is_empty() {
-        bail!("exec requires at least one argv element after `--`");
-    }
-    // Audit-log the dispatch BEFORE we run user-supplied argv so the
-    // log line lands even if the call hangs / panics. We deliberately
-    // don't include the argv content in `detail` — it can carry user-
-    // typed secrets (auth tokens, env-shaped flags). The `vm_name`
-    // + `session=<id>` correlation is enough to attribute access.
-    audit_emit(
-        LocalAuditKind::SessionExec,
-        Some(&record.vm_name),
-        Some(&format!("session={id}")),
-    );
-    // Rebuild the shell command from argv. Shell-quote each element so
-    // an embedded space or quote in user-provided args doesn't get
-    // re-tokenized by bash.
-    let cmd_line = args
-        .argv
-        .iter()
-        .map(|a| shell_quote(a))
-        .collect::<Vec<_>>()
-        .join(" ");
-    run_in_session(&id, &record, cmd_line, args.timeout).inspect_err(|e| {
-        audit_verb_refusal(&record.vm_name, e);
-    })
+    use std::io::Write;
+    // Preserve exec's captured, lossy-text presentation; run-code below is streaming.
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let completion = mvm_client::entrypoint::session::exec_session(
+        &args.session_id,
+        args.argv,
+        args.timeout,
+        |event| match event {
+            DevSessionOutput::Stdout(chunk) => stdout.extend_from_slice(chunk),
+            DevSessionOutput::Stderr(chunk) => stderr.extend_from_slice(chunk),
+        },
+    )?;
+    let _ = std::io::stdout().write_all(String::from_utf8_lossy(&stdout).as_bytes());
+    let _ = std::io::stderr().write_all(String::from_utf8_lossy(&stderr).as_bytes());
+    finish_dev_call(completion, args.timeout)
 }
 
 fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
-    let (id, record) = require_running_session(&args.session_id)?;
-    require_dev_mode(&id, &record, "run-code")?;
-
-    // Audit BEFORE dispatch — same rationale as cmd_exec. Code body
-    // is omitted from `detail` for the same secrecy reason.
-    audit_emit(
-        LocalAuditKind::SessionRunCode,
-        Some(&record.vm_name),
-        Some(&format!("session={id}")),
-    );
-    // Dispatch via the dev-only `RunCode` vsock verb. The agent
-    // reads `/etc/mvm/wrapper.json` to learn the wrapper's language
-    // and spawns the matching interpreter (`python3 -c` /
-    // `node -e`).
-    //
-    // v1 is stateless — each call gets a fresh interpreter, so
-    // `from foo import bar` in call 1 isn't visible in call 2. v2
-    // routes through the warm-process pool's wrapper for stateful
-    // eval; the wire shape stays identical.
-    dispatch_run_code(&id, &record, args.code, args.timeout).inspect_err(|e| {
-        audit_verb_refusal(&record.vm_name, e);
-    })
-}
-
-/// Send a `RunCode` request to the session's guest agent and stream
-/// the result. Mirrors `run_in_session`'s I/O shape but goes through
-/// the structured `RunCode` verb rather than a shell-quote of the
-/// code body. The agent's `/etc/mvm/wrapper.json`-based dispatch
-/// picks the right interpreter; if the wrapper's language is unknown or the
-/// runtime gate refuses the request, the response surfaces the refusal
-/// directly.
-fn dispatch_run_code(
-    id: &SessionId,
-    record: &mvm_core::session::SessionRecord,
-    code: String,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
     use std::io::Write;
-
-    if !crate::exec::wait_for_agent(&record.vm_name, 30) {
-        bail!("guest agent did not become reachable within 30s");
-    }
-
-    let transport = mvm_runtime::vsock_transport::for_vm(&record.vm_name)
-        .with_context(|| format!("Picking transport for guest agent on {:?}", record.vm_name))?;
-    let mut stream = transport
-        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-        .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
-    let request_code = code.clone();
-    let req = mvm_agentd::vsock::GuestRequest::RunCode { code, timeout_secs };
-    // Inbound vsock RPC audit.
-    super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
-    let terminal = mvm_agentd::vsock::send_run_code_streaming(
-        &mut stream,
-        &request_code,
-        timeout_secs,
+    let completion = mvm_client::entrypoint::session::run_session_code(
+        &args.session_id,
+        args.code,
+        args.timeout,
         |event| match event {
-            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
+            DevSessionOutput::Stdout(chunk) => {
                 let mut so = std::io::stdout();
                 let _ = so.write_all(chunk);
                 let _ = so.flush();
             }
-            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
+            DevSessionOutput::Stderr(chunk) => {
                 let mut se = std::io::stderr();
                 let _ = se.write_all(chunk);
                 let _ = se.flush();
             }
-            _ => {}
         },
     )?;
-    let exit_code = match terminal {
-        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
-        mvm_agentd::vsock::ExecEvent::TimedOut => {
-            eprintln!("{}", crate::exec::timeout_exit_message(timeout_secs));
-            crate::exec::EXEC_TIMEOUT_EXIT_CODE
-        }
-        other => bail!("unexpected terminal exec event: {other:?}"),
-    };
+    finish_dev_call(completion, args.timeout)
+}
 
-    if let Err(e) = session::update_session(id, |r| {
-        r.invoke_count = r.invoke_count.saturating_add(1);
-        r.last_invoke_at = Some(rfc3339_now());
-        Ok(())
-    }) {
-        tracing::warn!(err = %e, "failed to bump session invoke counter");
+fn dev_call_exit_code(completion: DevSessionCompletion) -> i32 {
+    match completion {
+        DevSessionCompletion::Exited(code) => code,
+        DevSessionCompletion::TimedOut => crate::exec::EXEC_TIMEOUT_EXIT_CODE,
     }
+}
 
+fn finish_dev_call(completion: DevSessionCompletion, timeout_secs: Option<u64>) -> Result<()> {
+    if completion == DevSessionCompletion::TimedOut {
+        eprintln!("{}", crate::exec::timeout_exit_message(timeout_secs));
+    }
+    let exit_code = dev_call_exit_code(completion);
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
     Ok(())
 }
 
-fn require_dev_mode(
-    id: &SessionId,
-    record: &mvm_core::session::SessionRecord,
-    verb: &str,
-) -> Result<()> {
-    use mvm_core::session::SessionMode;
-    if record.mode == SessionMode::Prod {
-        bail!(
-            "session {id} is mode=prod; '{verb}' is dev-only. \
-             Start the session with mode=dev to allow ad-hoc execution."
-        );
-    }
-    Ok(())
-}
-
-/// Dispatch a shell command into an already-running session VM via
-/// the existing `Exec` vsock verb. Streams stdout/stderr to mvmctl's
-/// own streams; exits non-zero with the wrapper's exit code on failure.
-///
-/// Note: `Exec` is DevOnly on the guest side (gated by the runtime profile
-/// and signed grant). This verb is itself gated by `require_dev_mode` above;
-/// the underlying call still enforces the same policy and surfaces any typed
-/// refusal to the user.
-fn run_in_session(
-    id: &SessionId,
-    record: &mvm_core::session::SessionRecord,
-    command: String,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
-    use std::io::Write;
-
-    let vm = crate::exec::SessionVm {
-        vm_name: record.vm_name.clone(),
-    };
-    let output = crate::exec::dispatch_in_session(&vm, command, timeout_secs)
-        .with_context(|| format!("dispatching command into session {id}"))?;
-
-    let _ = std::io::stdout().write_all(output.stdout.as_bytes());
-    let _ = std::io::stderr().write_all(output.stderr.as_bytes());
-
-    if let Err(e) = session::update_session(id, |r| {
-        r.invoke_count = r.invoke_count.saturating_add(1);
-        r.last_invoke_at = Some(rfc3339_now());
-        Ok(())
-    }) {
-        tracing::warn!(err = %e, "failed to bump session invoke counter");
-    }
-
-    if output.exit_code != 0 {
-        mvm_observability::exit(output.exit_code);
-    }
-    Ok(())
-}
-
-/// Single-quote `s` so bash sees it as one literal token. Doubles up
-/// embedded `'` as `'\''` (close-quote, escaped-quote, re-open).
-fn shell_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-fn rfc3339_now() -> String {
-    use chrono::SecondsFormat;
-    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
-}
+#[cfg(test)]
+use crate::exec::shell_quote;
 
 /// Boot a session VM and register a session record, but **don't** dispatch
 /// anything into it. The session id is printed on stdout for SDK / shell
@@ -763,35 +626,13 @@ fn cmd_reap(cli: &Cli, _args: ReapArgs) -> Result<()> {
 /// Open an interactive PTY shell into a dev-mode session. Refused on
 /// prod sessions.
 fn cmd_console(args: ConsoleArgs) -> Result<()> {
-    let (id, record) = require_running_session(&args.session_id)?;
-    require_dev_mode(&id, &record, "console")?;
-
-    // Bump last_invoke_at so observers see the activity. Done before
-    // we hand off to the PTY relay because the relay blocks until the
-    // user exits — we don't want the session to look idle while the
-    // user is actively shelling around in it.
-    if let Err(e) = session::update_session(&id, |r| {
-        r.last_invoke_at = Some(rfc3339_now());
-        Ok(())
-    }) {
-        tracing::warn!(err = %e, "failed to update session last_invoke_at");
-    }
+    let record = mvm_client::entrypoint::session::prepare_console_session(&args.session_id)?;
+    let id = &record.id;
 
     ui::info(&format!(
         "session console: attaching to session {id} (vm {})",
         record.vm_name
     ));
-    audit_emit(
-        LocalAuditKind::SessionConsoleOpen,
-        Some(&record.vm_name),
-        Some(&format!("session={id}")),
-    );
-    // The underlying `console_interactive` already emits
-    // `ConsoleSessionStart` / `ConsoleSessionEnd` audit events for the
-    // PTY lifecycle — this `SessionConsoleOpen` event is the
-    // session-id correlation: the PTY events alone don't tell a
-    // forensics consumer which `mvmctl session` invocation opened
-    // them, but `vm_name` is shared so a join recovers the chain.
     super::console::console_interactive(
         &record.vm_name,
         super::console::ConsoleSessionOptions::default(),
@@ -828,6 +669,38 @@ mod tests {
         let mut env = TestEnv::new();
         env.set("MVM_HOME", temp.path());
         RuntimeDirGuard { _temp: temp, env }
+    }
+
+    #[test]
+    fn dev_call_exit_mapping_preserves_guest_and_timeout_status() {
+        assert_eq!(dev_call_exit_code(DevSessionCompletion::Exited(0)), 0);
+        assert_eq!(dev_call_exit_code(DevSessionCompletion::Exited(17)), 17);
+        assert_eq!(
+            dev_call_exit_code(DevSessionCompletion::TimedOut),
+            crate::exec::EXEC_TIMEOUT_EXIT_CODE
+        );
+    }
+
+    #[test]
+    fn exec_on_prod_is_refused_by_the_client_before_connecting() {
+        let _guard = isolated_runtime_dir();
+        let record =
+            session::SessionRecord::new_running("no-exec", "wl", session::SessionMode::Prod);
+        session::write_session(&record).expect("record");
+        let error = cmd_exec(ExecArgs {
+            session_id: record.id.to_string(),
+            argv: vec!["true".into()],
+            timeout: None,
+        })
+        .expect_err("prod refused");
+        assert!(error.to_string().contains("mode=prod"));
+        assert_eq!(
+            session::read_session(&record.id)
+                .expect("read")
+                .expect("record")
+                .invoke_count,
+            0
+        );
     }
 
     #[test]

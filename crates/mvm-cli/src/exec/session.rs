@@ -16,77 +16,11 @@ pub fn dispatch_in_session(
     code: String,
     timeout_secs: Option<u64>,
 ) -> Result<ExecOutput> {
-    if !wait_for_agent(&vm.vm_name, 30) {
-        anyhow::bail!("guest agent did not become reachable within 30s");
-    }
-    // Reuse build_guest_wrapper by constructing a minimal ExecRequest
-    // with no directory shares (sessions do not attach host directories). The wrapper
-    // emits `set -e\n<env exports>\n<argv>\n`.
-    let req = ExecRequest {
-        name: None,
-        warm_pool_size: 0,
-        image: ImageSource::Template(String::new()),
-        cpus: 0,
-        memory_mib: 0,
-        mem_initial_mib: None,
-        dir_shares: vec![],
-        disk_volumes: vec![],
-        env: vec![],
-        assets: Vec::new(),
-        target: ExecTarget::Inline {
-            argv: vec!["bash".to_string(), "-c".to_string(), code],
-        },
-        timeout_secs,
-        pty: false,
-        gpu: false,
-        gpu_device: None,
-        // Wrapper-string construction only — the session VM is already
-        // running, so this never reaches a backend boot.
-        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        stdin: Vec::new(),
-        healthcheck: None,
-        hypervisor: None,
-        sdk_host_services: Vec::new(),
-        declared_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
-    };
-    let wrapper = build_guest_wrapper(&req);
-    let transport = vsock_transport::for_vm(&vm.vm_name)?;
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-    // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
-    // this function migrated from send_request to send_exec_streaming.
-    let verb = "exec";
-    mvm_core::audit_emit!(
-        NetworkPolicyAllow,
-        vm: &vm.vm_name,
-        "scope=rpc,direction=in,kind=vsock,verb={verb}",
-        verb = verb,
-    );
-
-    let mut out = Vec::<u8>::new();
-    let mut err = Vec::<u8>::new();
-    let terminal = mvm_agentd::vsock::send_exec_streaming(
-        &mut stream,
-        &wrapper,
-        None,
-        timeout_secs,
-        |event| match event {
-            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
-            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
-            _ => {}
-        },
-    )?;
-    let exit_code = match terminal {
-        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
-        mvm_agentd::vsock::ExecEvent::TimedOut => {
-            err.extend_from_slice(format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes());
-            EXEC_TIMEOUT_EXIT_CODE
-        }
-        other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
-    };
+    let output = mvm_client::execution::dispatch_in_session(vm, code, timeout_secs)?;
     Ok(ExecOutput {
-        exit_code,
-        stdout: String::from_utf8_lossy(&out).into_owned(),
-        stderr: String::from_utf8_lossy(&err).into_owned(),
+        exit_code: output.exit_code,
+        stdout: output.stdout,
+        stderr: output.stderr,
         phase_timing: None,
     })
 }

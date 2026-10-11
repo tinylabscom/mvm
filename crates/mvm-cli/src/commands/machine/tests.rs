@@ -4214,7 +4214,8 @@ fn machine_start_leases_a_writable_registered_volume_under_the_spec_profile() {
     for profile in ["standard", "dev", "permissive"] {
         let mut spec = spec_fixture("web");
         spec.profile = profile.to_string();
-        let prepared = super::lifecycle::CliStartHost::for_spec(&spec, false)
+        let prepared = super::lifecycle::prepared_start_host(&spec, false)
+            .unwrap()
             .prepare_volumes("web", &[])
             .unwrap_or_else(|e| panic!("{profile}: {e:#}"));
         assert_eq!(prepared.volumes.len(), 1, "{profile}");
@@ -4228,7 +4229,8 @@ fn machine_start_leases_a_writable_registered_volume_under_the_spec_profile() {
     ] {
         let mut spec = spec_fixture("web");
         spec.profile = profile.to_string();
-        let message = match super::lifecycle::CliStartHost::for_spec(&spec, false)
+        let message = match super::lifecycle::prepared_start_host(&spec, false)
+            .unwrap()
             .prepare_volumes("web", &[])
         {
             Ok(_) => panic!("{profile} must refuse a writable registered volume"),

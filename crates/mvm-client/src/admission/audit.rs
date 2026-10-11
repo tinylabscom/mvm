@@ -114,6 +114,7 @@ pub fn emit_policy_audit_invalid(
 mod policy_audit_admission_tests {
     use super::*;
     use mvm_core::plan::SynthesisInput;
+    use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
     use std::io::Write;
 
@@ -129,6 +130,11 @@ mod policy_audit_admission_tests {
 
     #[test]
     fn admission_audits_a_validated_bundle_without_claiming_all_controls_are_live() {
+        // Admission reads host policy and creates a default config even with
+        // explicit signer/audit paths. Isolate it before any admission work.
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         // Manually stage a bundle whose tenant matches the synthesized
         // plan's tenant. We can't trivially make the synthesizer emit
         // `<tenant>:<workload>` refs (synthesis hard-codes
@@ -253,6 +259,9 @@ chain_signing = true
     #[test]
     fn admission_uses_bundle_audit_file_destination() {
         use mvm_core::plan::PolicyRef;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -375,6 +384,9 @@ stream_destinations = ["file://{}"]
     #[test]
     fn admission_audits_rejected_unsigned_policy_audit() {
         use mvm_core::plan::PolicyRef;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -487,6 +499,9 @@ chain_signing = false
         // disk must fail admission with a typed `policy-bundle-not-found`
         // error and emit `plan.failed` with that class.
         use mvm_core::plan::PolicyRef;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -577,6 +592,9 @@ chain_signing = false
         // `error_class=policy-egress-invalid` rather than silently
         // booting with the inspector still enforced.
         use mvm_core::plan::PolicyRef;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();
@@ -688,6 +706,9 @@ disabled_inspectors = ["ssrf_guarrd"]
         // `policy-l4-spec-invalid`. Same hermetic shape as the
         // missing-bundle test.
         use mvm_core::plan::PolicyRef;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let policy_dir = tempfile::tempdir().unwrap();

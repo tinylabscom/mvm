@@ -312,18 +312,14 @@ pub fn load_index(cache_root: &Path) -> PackIndex {
     serde_json::from_slice(&bytes).unwrap_or_default()
 }
 
-/// Persist the pack index. Writes to a `.tmp` sibling and `rename`s it onto
-/// the final path so a reader never observes a partially-written file.
+/// Persist the pack index through an exclusively created temporary file and
+/// rename it onto the final path. A predictable `.tmp` sibling could be a
+/// symlink or hardlink to unrelated host bytes and must never be opened.
 pub fn save_index(cache_root: &Path, index: &PackIndex) -> Result<(), PackCacheError> {
     let path = index_path(cache_root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io_at(parent))?;
-    }
-    let tmp_path = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(index).map_err(PackManifestError::Json)?;
-    std::fs::write(&tmp_path, bytes).map_err(io_at(&tmp_path))?;
-    std::fs::rename(&tmp_path, &path).map_err(io_at(&path))?;
-    Ok(())
+    crate::atomic_io::atomic_write(&path, &bytes)
+        .map_err(|error| io_at(&path)(std::io::Error::other(error)))
 }
 
 /// Verify one candidate promoted-pack dir against the requested
@@ -882,6 +878,31 @@ fn harden_dir(dir: &Path) -> Result<(), PackCacheError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn index_writer_does_not_open_preexisting_staging_links() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"precious").unwrap();
+        for hardlink in [false, true] {
+            let cache = root.path().join(if hardlink { "hard" } else { "symbolic" });
+            std::fs::create_dir_all(cache.join("packs")).unwrap();
+            let staging = cache.join("packs/index.json.tmp");
+            if hardlink {
+                std::fs::hard_link(&outside, &staging).unwrap();
+            } else {
+                std::os::unix::fs::symlink(&outside, &staging).unwrap();
+            }
+            super::save_index(&cache, &super::PackIndex::default()).unwrap();
+            assert_eq!(std::fs::read(&outside).unwrap(), b"precious");
+            assert_eq!(std::fs::read(&staging).unwrap(), b"precious");
+            let written: super::PackIndex =
+                serde_json::from_slice(&std::fs::read(cache.join("packs/index.json")).unwrap())
+                    .unwrap();
+            assert_eq!(written, super::PackIndex::default());
+        }
+    }
+
     use std::collections::{BTreeMap, BTreeSet, HashMap};
     use std::fs;
 

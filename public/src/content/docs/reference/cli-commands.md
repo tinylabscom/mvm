@@ -135,6 +135,14 @@ startup.
 | `mvmctl env update --skip-verify`                 | Skip release signature verification                                                                                                                                                                                                                           |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
 
+`mvmctl env sign` repairs the role-specific macOS signatures on the resolved
+VM launch targets. `--json` selects the report format, not a preview or a
+different success policy: failed signing exits nonzero in either format.
+Each row reports `applied: true` only after successful signing and verification;
+failed rows carry an `error` and are not described as already signed.
+On other platforms the command reports that signing is unsupported and does
+not modify executables.
+
 ## Building
 
 `mvmctl build compile app.py --mvm-revision 4e65b221744885e536ec91a3f2948cdc508dcb49`
@@ -176,6 +184,20 @@ refused before any output is written.
 To reclaim disk without losing anything unrecoverable, `--nuclear --keep-identity`
 is the command. `mvmctl env uninstall --purge` also removes `~/.mvm`, but it
 removes the installed `mvmctl` and its host binaries too.
+
+### Prepared kernels for checkpoint forks and kernel-less launches
+
+HVF/Firecracker kernel fallback and selected-checkout `--kernel-pin` resolve
+verified prepared kernels without building. With `MVM_IMAGES_DIR` selected,
+first run `mvmctl build image-set default-tenant --attr default`, using the
+same `MVM_IMAGES_DIR` and `MVM_HOME` as the launch. A missing or invalid pair
+entry fails rather than switching to a published or unpaired kernel.
+
+Prepare source runtime artifacts explicitly with
+`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`. Forks retain the
+parent's runtime-version pin; preparation does not permit substituting another
+version. Without a selected checkout, the existing standalone `--kernel-pin`
+published-download behavior is unchanged.
 
 ## Manifests
 
@@ -229,6 +251,27 @@ An omitted inspection or verification path uses the same cwd discovery as
 the CLI. Verification takes `revision` and `check_signature` keyword arguments
 in Python, or `revision` and `checkSignature` in the TypeScript options object.
 The signature option is forwarded to the shared refusal, never ignored.
+
+ABI 1.8 also exposes registry/storage mutations and exports in-process:
+
+| Host-library method | Python / TypeScript SDK | Options and defaults |
+| --- | --- | --- |
+| `manifest.remove` | `mvm.manifest.remove(path)` / `manifest.remove(path, options)` | `force=false`, `manifest_file=false` (TS `manifestFile`); no interactive prompt; omitted path uses cwd discovery |
+| `manifest.prune` | `mvm.manifest.prune(...)` / `manifest.prune(options)` | Explicit `orphans=true` required; `dry_run=true` (TS `dryRun`) previews by default, unlike the CLI's default apply |
+| `manifest.export_oci` | `mvm.manifest.export_oci(template, out)` / `manifest.exportOci(template, out)` | Copies an existing registered OCI archive to the host output path |
+| `storage.info` | `mvm.storage.info(...)` / `storage.info(options)` | `mock=false`; unavailable pools are represented in the report |
+| `storage.gc` | `mvm.storage.gc(...)` / `storage.gc(options)` | `apply=false`, `mock=false`, `keep_prefix=[]` (TS `keepPrefix`); prefixes retain matching volumes |
+| `bundle.export` | `mvm.bundle.export(template, out, ...)` / `bundle.export(template, out, options)` | Optional `label`, host `cmdline` file path and `posture`; uses the host signer |
+
+Python options are keyword arguments. Bundle `posture` uses wire-shaped
+`profile`, `allow_egress`, `allow_volumes`, and `allow_unauthenticated` fields
+in both languages; allow flags default false. Supplied posture fields reach
+the client's strict validation. No signing key or runtime driver is accepted.
+These are privileged host-local operations under the embedding process's
+permissions, not guest RPCs. Reports are returned intact: removal identifies
+the slot/source and source deletion, prune/GC distinguish candidates from
+actual removals, OCI export returns slot/path/size, and bundle export returns
+path/size/key ID. SDK errors preserve the client cause chain.
 
 | Command                                             | Description                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
@@ -528,6 +571,15 @@ allowed_registries = ["ghcr.io"]
 certificate_identity = "https://github.com/acme/app/.github/workflows/release.yml@refs/heads/main"
 certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
 ```
+
+Explicit preparation records a host-signed receipt binding the canonical
+requested reference, the selected platform manifest digest, and the verification
+policy. Prepared launch checks this evidence offline; editing a cache entry to
+name another index digest does not authorize that request. Older receipts remain
+usable only for a direct manifest reference they already bind. An older receipt
+that cannot prove the requested index or tag is refused with preparation guidance:
+run `mvmctl image pull` again with `--prod` and the requested digest-pinned
+reference. Launch never refreshes the receipt or downloads missing evidence.
 
 Private registry pulls use explicit mvm bearer-token environment variables only.
 For a single registry, set `MVM_OCI_BEARER_TOKEN_<HOST>` where `<HOST>` is the
@@ -1543,6 +1595,24 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache prune --stage0-store`  | Remove only the Stage 0 Nix store image, keeping the builder image it produced. The next bootstrap starts cold. Refuses while a bootstrap is running                                                                                              |
 | `mvmctl cache repair`                | Clear a degraded builder VM store so the next build cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running builder VM first                                                                                       |
 | `mvmctl cache repair --force`        | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash)                                                                                                                                   |
+
+## Registry Reconciliation
+
+`mvmctl reconcile` repairs drift between registered machines and runtime state.
+Use `--dry-run` to preview without repairing it, and `--json` for the structured
+report. The CLI's existing apply-by-default behavior is unchanged.
+
+The operation is shared through `mvm_client::maintenance::reconcile` and the
+host-library method `maintenance.reconcile`. Python exposes
+`mvm.maintenance.reconcile(apply=False)`; TypeScript exposes
+`maintenance.reconcile({ apply: false })`. These programmatic calls default to
+preview: applying repairs requires an explicit `true`.
+
+The report retains live machines, the categories of drift found or repaired,
+and non-fatal `errors`. An error in registry bookkeeping does not prevent the
+foreground command from running. Applying preserves lifecycle locking,
+unadmitted-resume handling, and audit emission. This is host-local maintenance,
+not a guest command or a remote-gateway operation.
 
 ## Workload Authoring and Inspection
 

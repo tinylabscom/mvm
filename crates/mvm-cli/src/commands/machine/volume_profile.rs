@@ -25,26 +25,10 @@ pub(super) fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<Stri
 
 /// Why a persistent machine refuses a host-directory volume.
 ///
-/// There is no live host-directory share on a persistent machine: a directory
-/// reaches a guest only as an ext4 snapshot, and a persistent machine takes
-/// one only when it is registered with `machine volume mount`. The spec-time
-/// gate and the boot-time check both word their refusal here, so what
-/// `machine create` says and what `machine start` says cannot drift.
-///
-/// The registration command needs an absolute `--host`, so a relative
-/// directory is rendered absolute against the working directory it was named
-/// from.
+/// The wording lives in [`mvm_client::mounts::persistent_dir_share_refusal`]
+/// so the spec-time gate and the boot-time check cannot drift.
 pub(super) fn persistent_dir_share_refusal(host_dir: &str, guest_mount: &str) -> String {
-    let host = std::path::absolute(host_dir)
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|_| host_dir.to_string());
-    format!(
-        "persistent machine volume '{host_dir}' -> '{guest_mount}' cannot be attached: a \
-         persistent machine cannot attach a live host directory. Use a disk image \
-         (`HOST.img:/GUEST:SIZE[:rw]`), or snapshot the directory and register it with \
-         `mvmctl machine volume mount <machine> --volume <name> --host {host} \
-         --guest {guest_mount} [--rw]`"
-    )
+    mvm_client::mounts::persistent_dir_share_refusal(host_dir, guest_mount)
 }
 
 /// Refuse any volume a persistent machine cannot take under `profile`.

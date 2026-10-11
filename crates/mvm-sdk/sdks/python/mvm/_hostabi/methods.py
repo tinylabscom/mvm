@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 7
+ABI_MINOR: Final = 8
 
 
 class Classification(str, Enum):
@@ -28,6 +28,193 @@ class Method:
     key: str
     classification: Classification
     summary: str
+
+
+#: Lists durable local agent sessions.
+AGENT_SESSIONS_LIST: Final = "agent_sessions.list"
+
+
+#: Reads a durable agent session.
+AGENT_SESSIONS_SHOW: Final = "agent_sessions.show"
+
+
+#: Records a durable agent session with explicit execution intent.
+AGENT_SESSIONS_OPEN: Final = "agent_sessions.open"
+
+
+#: Parks a durable agent session.
+AGENT_SESSIONS_PARK: Final = "agent_sessions.park"
+
+
+#: Renews a parked durable agent session.
+AGENT_SESSIONS_RENEW: Final = "agent_sessions.renew"
+
+
+#: Re-admits a durable agent session using the configured host
+#: signer.
+AGENT_SESSIONS_RESUME: Final = "agent_sessions.resume"
+
+
+#: Lists the local checkpoint catalog.
+CHECKPOINTS_LIST: Final = "checkpoints.list"
+
+
+#: Reads checkpoint metadata.
+CHECKPOINTS_INFO: Final = "checkpoints.info"
+
+
+#: Compares checkpoint manifests without decrypting content.
+CHECKPOINTS_DIFF: Final = "checkpoints.diff"
+
+
+#: Verifies checkpoint lineage against the signed audit chain.
+CHECKPOINTS_VERIFY: Final = "checkpoints.verify"
+
+
+#: Reads a checkpoint or image lineage timeline.
+CHECKPOINTS_TIMELINE: Final = "checkpoints.timeline"
+
+
+#: Removes an unpinned leaf checkpoint with explicit execution
+#: intent.
+CHECKPOINTS_REMOVE: Final = "checkpoints.remove"
+
+
+#: Captures machine state under its admitted key domain.
+CHECKPOINTS_CAPTURE: Final = "checkpoints.capture"
+
+
+#: Restores a full-machine checkpoint with tenant and lineage checks.
+CHECKPOINTS_RESTORE: Final = "checkpoints.restore"
+
+
+#: Forks checkpoint state through client-owned admission and
+#: attenuation.
+CHECKPOINTS_FORK: Final = "checkpoints.fork"
+
+
+#: Previews or executes verified session replay on a fresh admitted
+#: fork.
+REPLAY_RUN_SESSION: Final = "replay.run_session"
+
+
+#: Recover interrupted work and review a registered workspace without
+#: approving changes.
+WORKSPACE_REVIEW: Final = "workspace.review"
+
+
+#: Apply only a freshly revalidated fingerprint with explicit
+#: approval.
+WORKSPACE_APPLY: Final = "workspace.apply"
+
+
+#: Explicitly undo registered workspace history, reporting
+#: recoveries.
+WORKSPACE_UNDO: Final = "workspace.undo"
+
+
+#: Explicitly redo registered workspace history, reporting
+#: recoveries.
+WORKSPACE_REDO: Final = "workspace.redo"
+
+
+#: Inspect a published local artifact.
+ARTIFACT_INSPECT: Final = "artifact.inspect"
+
+
+#: Validate a published local artifact.
+ARTIFACT_VALIDATE: Final = "artifact.validate"
+
+
+#: Write a Firecracker configuration for a local artifact.
+ARTIFACT_CONFIGURE_FIRECRACKER: Final = "artifact.configure_firecracker"
+
+
+#: List sessions only after verifying the configured tenant chain.
+AUDIT_SESSIONS_LIST: Final = "audit.sessions.list"
+
+
+#: Show verified session events without accepting trust-key
+#: overrides.
+AUDIT_SESSIONS_SHOW: Final = "audit.sessions.show"
+
+
+#: Report session verification including absent and unsealed
+#: sessions.
+AUDIT_SESSIONS_VERIFY: Final = "audit.sessions.verify"
+
+
+#: Inspect security posture using only the configured host context.
+POSTURE_INSPECT: Final = "posture.inspect"
+
+
+#: List managed volumes after lifecycle recovery.
+VOLUME_LIST: Final = "volume.list"
+
+
+#: Inspect a managed volume without key material.
+VOLUME_INSPECT: Final = "volume.inspect"
+
+
+#: Create a locked managed encrypted block volume.
+VOLUME_CREATE: Final = "volume.create"
+
+
+#: Unlock a volume through the configured client key provider.
+VOLUME_UNLOCK: Final = "volume.unlock"
+
+
+#: Seal a managed volume through its authoritative lifecycle.
+VOLUME_LOCK: Final = "volume.lock"
+
+
+#: Register a read-only-by-default volume or encrypted host snapshot.
+VOLUME_MOUNT: Final = "volume.mount"
+
+
+#: Detach a registered volume.
+VOLUME_DETACH: Final = "volume.detach"
+
+
+#: List registered attachments for a machine.
+VOLUME_ATTACHMENTS: Final = "volume.attachments"
+
+
+#: Snapshot a locked managed volume without exporting key material.
+VOLUME_SNAPSHOT: Final = "volume.snapshot"
+
+
+#: Restore a locked managed volume from a verified local snapshot.
+VOLUME_RESTORE: Final = "volume.restore"
+
+
+#: Remove a local built slot, optionally deleting its source
+#: manifest.
+MANIFEST_REMOVE: Final = "manifest.remove"
+
+
+#: Preview or explicitly remove orphaned local manifest slots.
+MANIFEST_PRUNE: Final = "manifest.prune"
+
+
+#: Export an existing local OCI archive.
+MANIFEST_EXPORT_OCI: Final = "manifest.export_oci"
+
+
+#: Inspect the host thin pool.
+STORAGE_INFO: Final = "storage.info"
+
+
+#: Preview or explicitly collect host thin-pool volumes.
+STORAGE_GC: Final = "storage.gc"
+
+
+#: Export registered artifacts signed by the host key.
+BUNDLE_EXPORT: Final = "bundle.export"
+
+
+#: Preview host-local registry drift, or explicitly apply repairs.
+MAINTENANCE_RECONCILE: Final = "maintenance.reconcile"
 
 
 #: Inspect a built manifest slot and its optional snapshot.
@@ -223,6 +410,50 @@ TELEMETRY_STATUS: Final = "telemetry.status"
 
 
 METHODS: dict[str, Method] = {
+    "agent_sessions.list": Method(key="agent_sessions_list", classification=Classification.DEV_ONLY, summary="Lists durable local agent sessions."),
+    "agent_sessions.show": Method(key="agent_sessions_show", classification=Classification.DEV_ONLY, summary="Reads a durable agent session."),
+    "agent_sessions.open": Method(key="agent_sessions_open", classification=Classification.DEV_ONLY, summary="Records a durable agent session with explicit execution intent."),
+    "agent_sessions.park": Method(key="agent_sessions_park", classification=Classification.DEV_ONLY, summary="Parks a durable agent session."),
+    "agent_sessions.renew": Method(key="agent_sessions_renew", classification=Classification.DEV_ONLY, summary="Renews a parked durable agent session."),
+    "agent_sessions.resume": Method(key="agent_sessions_resume", classification=Classification.DEV_ONLY, summary="Re-admits a durable agent session using the configured host signer."),
+    "checkpoints.list": Method(key="checkpoints_list", classification=Classification.DEV_ONLY, summary="Lists the local checkpoint catalog."),
+    "checkpoints.info": Method(key="checkpoints_info", classification=Classification.DEV_ONLY, summary="Reads checkpoint metadata."),
+    "checkpoints.diff": Method(key="checkpoints_diff", classification=Classification.DEV_ONLY, summary="Compares checkpoint manifests without decrypting content."),
+    "checkpoints.verify": Method(key="checkpoints_verify", classification=Classification.DEV_ONLY, summary="Verifies checkpoint lineage against the signed audit chain."),
+    "checkpoints.timeline": Method(key="checkpoints_timeline", classification=Classification.DEV_ONLY, summary="Reads a checkpoint or image lineage timeline."),
+    "checkpoints.remove": Method(key="checkpoints_remove", classification=Classification.DEV_ONLY, summary="Removes an unpinned leaf checkpoint with explicit execution intent."),
+    "checkpoints.capture": Method(key="checkpoints_capture", classification=Classification.DEV_ONLY, summary="Captures machine state under its admitted key domain."),
+    "checkpoints.restore": Method(key="checkpoints_restore", classification=Classification.DEV_ONLY, summary="Restores a full-machine checkpoint with tenant and lineage checks."),
+    "checkpoints.fork": Method(key="checkpoints_fork", classification=Classification.DEV_ONLY, summary="Forks checkpoint state through client-owned admission and attenuation."),
+    "replay.run_session": Method(key="replay_run_session", classification=Classification.DEV_ONLY, summary="Previews or executes verified session replay on a fresh admitted fork."),
+    "workspace.review": Method(key="workspace_review", classification=Classification.PROD_SAFE, summary="Recover interrupted work and review a registered workspace without approving changes."),
+    "workspace.apply": Method(key="workspace_apply", classification=Classification.PROD_SAFE, summary="Apply only a freshly revalidated fingerprint with explicit approval."),
+    "workspace.undo": Method(key="workspace_undo", classification=Classification.PROD_SAFE, summary="Explicitly undo registered workspace history, reporting recoveries."),
+    "workspace.redo": Method(key="workspace_redo", classification=Classification.PROD_SAFE, summary="Explicitly redo registered workspace history, reporting recoveries."),
+    "artifact.inspect": Method(key="artifact_inspect", classification=Classification.PROD_SAFE, summary="Inspect a published local artifact."),
+    "artifact.validate": Method(key="artifact_validate", classification=Classification.PROD_SAFE, summary="Validate a published local artifact."),
+    "artifact.configure_firecracker": Method(key="artifact_configure_firecracker", classification=Classification.PROD_SAFE, summary="Write a Firecracker configuration for a local artifact."),
+    "audit.sessions.list": Method(key="audit_sessions_list", classification=Classification.PROD_SAFE, summary="List sessions only after verifying the configured tenant chain."),
+    "audit.sessions.show": Method(key="audit_sessions_show", classification=Classification.PROD_SAFE, summary="Show verified session events without accepting trust-key overrides."),
+    "audit.sessions.verify": Method(key="audit_sessions_verify", classification=Classification.PROD_SAFE, summary="Report session verification including absent and unsealed sessions."),
+    "posture.inspect": Method(key="posture_inspect", classification=Classification.PROD_SAFE, summary="Inspect security posture using only the configured host context."),
+    "volume.list": Method(key="volume_list", classification=Classification.PROD_SAFE, summary="List managed volumes after lifecycle recovery."),
+    "volume.inspect": Method(key="volume_inspect", classification=Classification.PROD_SAFE, summary="Inspect a managed volume without key material."),
+    "volume.create": Method(key="volume_create", classification=Classification.PROD_SAFE, summary="Create a locked managed encrypted block volume."),
+    "volume.unlock": Method(key="volume_unlock", classification=Classification.PROD_SAFE, summary="Unlock a volume through the configured client key provider."),
+    "volume.lock": Method(key="volume_lock", classification=Classification.PROD_SAFE, summary="Seal a managed volume through its authoritative lifecycle."),
+    "volume.mount": Method(key="volume_mount", classification=Classification.PROD_SAFE, summary="Register a read-only-by-default volume or encrypted host snapshot."),
+    "volume.detach": Method(key="volume_detach", classification=Classification.PROD_SAFE, summary="Detach a registered volume."),
+    "volume.attachments": Method(key="volume_attachments", classification=Classification.PROD_SAFE, summary="List registered attachments for a machine."),
+    "volume.snapshot": Method(key="volume_snapshot", classification=Classification.PROD_SAFE, summary="Snapshot a locked managed volume without exporting key material."),
+    "volume.restore": Method(key="volume_restore", classification=Classification.PROD_SAFE, summary="Restore a locked managed volume from a verified local snapshot."),
+    "manifest.remove": Method(key="manifest_remove", classification=Classification.PROD_SAFE, summary="Remove a local built slot, optionally deleting its source manifest."),
+    "manifest.prune": Method(key="manifest_prune", classification=Classification.PROD_SAFE, summary="Preview or explicitly remove orphaned local manifest slots."),
+    "manifest.export_oci": Method(key="manifest_export_oci", classification=Classification.PROD_SAFE, summary="Export an existing local OCI archive."),
+    "storage.info": Method(key="storage_info", classification=Classification.PROD_SAFE, summary="Inspect the host thin pool."),
+    "storage.gc": Method(key="storage_gc", classification=Classification.PROD_SAFE, summary="Preview or explicitly collect host thin-pool volumes."),
+    "bundle.export": Method(key="bundle_export", classification=Classification.PROD_SAFE, summary="Export registered artifacts signed by the host key."),
+    "maintenance.reconcile": Method(key="maintenance_reconcile", classification=Classification.PROD_SAFE, summary="Preview host-local registry drift, or explicitly apply repairs."),
     "manifest.info": Method(key="manifest_info", classification=Classification.PROD_SAFE, summary="Inspect a built manifest slot and its optional snapshot."),
     "manifest.list": Method(key="manifest_list", classification=Classification.PROD_SAFE, summary="List built manifest slots with orphan and tag-intersection filters."),
     "manifest.verify": Method(key="manifest_verify", classification=Classification.PROD_SAFE, summary="Verify built manifest artifact checksums; signature verification is refused."),
@@ -272,6 +503,50 @@ METHODS: dict[str, Method] = {
 }
 
 __all__ = [
+    "AGENT_SESSIONS_LIST",
+    "AGENT_SESSIONS_SHOW",
+    "AGENT_SESSIONS_OPEN",
+    "AGENT_SESSIONS_PARK",
+    "AGENT_SESSIONS_RENEW",
+    "AGENT_SESSIONS_RESUME",
+    "CHECKPOINTS_LIST",
+    "CHECKPOINTS_INFO",
+    "CHECKPOINTS_DIFF",
+    "CHECKPOINTS_VERIFY",
+    "CHECKPOINTS_TIMELINE",
+    "CHECKPOINTS_REMOVE",
+    "CHECKPOINTS_CAPTURE",
+    "CHECKPOINTS_RESTORE",
+    "CHECKPOINTS_FORK",
+    "REPLAY_RUN_SESSION",
+    "WORKSPACE_REVIEW",
+    "WORKSPACE_APPLY",
+    "WORKSPACE_UNDO",
+    "WORKSPACE_REDO",
+    "ARTIFACT_INSPECT",
+    "ARTIFACT_VALIDATE",
+    "ARTIFACT_CONFIGURE_FIRECRACKER",
+    "AUDIT_SESSIONS_LIST",
+    "AUDIT_SESSIONS_SHOW",
+    "AUDIT_SESSIONS_VERIFY",
+    "POSTURE_INSPECT",
+    "VOLUME_LIST",
+    "VOLUME_INSPECT",
+    "VOLUME_CREATE",
+    "VOLUME_UNLOCK",
+    "VOLUME_LOCK",
+    "VOLUME_MOUNT",
+    "VOLUME_DETACH",
+    "VOLUME_ATTACHMENTS",
+    "VOLUME_SNAPSHOT",
+    "VOLUME_RESTORE",
+    "MANIFEST_REMOVE",
+    "MANIFEST_PRUNE",
+    "MANIFEST_EXPORT_OCI",
+    "STORAGE_INFO",
+    "STORAGE_GC",
+    "BUNDLE_EXPORT",
+    "MAINTENANCE_RECONCILE",
     "MANIFEST_INFO",
     "MANIFEST_LIST",
     "MANIFEST_VERIFY",

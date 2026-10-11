@@ -25,6 +25,196 @@ use super::call::{AGENT_WAIT_SECS, EntrypointVm, boot_entrypoint_vm, bump_invoke
 use super::dispatch::{CallObserver, CallOutcome, DispatchStdin, EntrypointDispatch, dispatch};
 use crate::launch::runtime_source::PairArtifactSource;
 
+/// Output from an ad-hoc development-session call, independent of its wire protocol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevSessionOutput {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+/// A reported guest outcome. Transport and policy failures remain errors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevSessionCompletion {
+    Exited(i32),
+    TimedOut,
+}
+
+/// Require the development surface without weakening the running/creator gates.
+pub fn require_dev_mode(id: &SessionId, record: &SessionRecord, verb: &str) -> Result<()> {
+    if record.mode == SessionMode::Prod {
+        bail!(
+            "session {id} is mode=prod; '{verb}' is dev-only. \
+             Start the session with mode=dev to allow ad-hoc execution."
+        );
+    }
+    Ok(())
+}
+
+/// Dispatch literal argv into a development session. Arguments never become shell syntax.
+pub fn exec_session(
+    raw_id: &str,
+    argv: Vec<String>,
+    timeout_secs: Option<u64>,
+    mut on_output: impl FnMut(&DevSessionOutput),
+) -> Result<DevSessionCompletion> {
+    dev_session_call(raw_id, "exec", LocalAuditKind::SessionExec, |record| {
+        anyhow::ensure!(
+            !argv.is_empty(),
+            "exec requires at least one argv element after `--`"
+        );
+        let command = session_exec_wrapper(&argv);
+        dispatch_dev_call(record, &mut on_output, |stream, output| {
+            crate::guest::emit_vsock_rpc_audit(
+                &record.vm_name,
+                &mvm_agentd::vsock::GuestRequest::Exec {
+                    command: String::new(),
+                    stdin: None,
+                    timeout_secs,
+                },
+            );
+            mvm_agentd::vsock::send_exec_streaming(stream, &command, None, timeout_secs, output)
+        })
+        .with_context(|| format!("dispatching command into session {}", record.id))
+    })
+}
+
+/// Evaluate code through the guest's language-aware development verb.
+pub fn run_session_code(
+    raw_id: &str,
+    code: String,
+    timeout_secs: Option<u64>,
+    mut on_output: impl FnMut(&DevSessionOutput),
+) -> Result<DevSessionCompletion> {
+    dev_session_call(
+        raw_id,
+        "run-code",
+        LocalAuditKind::SessionRunCode,
+        |record| {
+            dispatch_dev_call(record, &mut on_output, |stream, output| {
+                crate::guest::emit_vsock_rpc_audit(
+                    &record.vm_name,
+                    &mvm_agentd::vsock::GuestRequest::RunCode {
+                        code: String::new(),
+                        timeout_secs,
+                    },
+                );
+                mvm_agentd::vsock::send_run_code_streaming(stream, &code, timeout_secs, output)
+            })
+        },
+    )
+}
+
+fn dev_session_call(
+    raw_id: &str,
+    verb: &str,
+    audit: LocalAuditKind,
+    dispatch: impl FnOnce(&SessionRecord) -> Result<DevSessionCompletion>,
+) -> Result<DevSessionCompletion> {
+    let id = parse_id(raw_id)?;
+    let lock = call_lock(&id);
+    let _turn = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    // Read under the call lock; a caller cannot supply stale or fabricated metadata.
+    let (_, record) = require_running_session(raw_id)?;
+    require_dev_mode(&id, &record, verb)?;
+    audit_emit(audit, Some(&record.vm_name), Some(&format!("session={id}")));
+    let completion = dispatch(&record).inspect_err(|error| {
+        super::verb_audit::audit_verb_refusal(&record.vm_name, error);
+    })?;
+    // Nonzero exits and timeouts are invocations; refusals and transport errors are not.
+    bump_invoke_count(&id);
+    Ok(completion)
+}
+
+fn dispatch_dev_call(
+    record: &SessionRecord,
+    on_output: &mut dyn FnMut(&DevSessionOutput),
+    send: impl FnOnce(
+        &mut std::os::unix::net::UnixStream,
+        &mut dyn FnMut(&mvm_agentd::vsock::ExecEvent),
+    ) -> Result<mvm_agentd::vsock::ExecEvent>,
+) -> Result<DevSessionCompletion> {
+    if !crate::readiness::wait_for_guest_agent(&record.vm_name, 30) {
+        bail!("guest agent did not become reachable within 30s");
+    }
+    let transport = mvm_runtime::vsock_transport::for_vm(&record.vm_name)
+        .with_context(|| format!("Picking transport for guest agent on {:?}", record.vm_name))?;
+    let mut stream = transport
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+        .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
+    let terminal = send(&mut stream, &mut |event| {
+        if let Some(output) = dev_output(event) {
+            on_output(&output);
+        }
+    })?;
+    dev_completion(terminal)
+}
+
+fn dev_output(event: &mvm_agentd::vsock::ExecEvent) -> Option<DevSessionOutput> {
+    match event {
+        mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
+            Some(DevSessionOutput::Stdout(chunk.clone()))
+        }
+        mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
+            Some(DevSessionOutput::Stderr(chunk.clone()))
+        }
+        mvm_agentd::vsock::ExecEvent::Exit { .. } | mvm_agentd::vsock::ExecEvent::TimedOut => None,
+    }
+}
+
+fn dev_completion(terminal: mvm_agentd::vsock::ExecEvent) -> Result<DevSessionCompletion> {
+    match terminal {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => Ok(DevSessionCompletion::Exited(code)),
+        mvm_agentd::vsock::ExecEvent::TimedOut => Ok(DevSessionCompletion::TimedOut),
+        other => bail!("unexpected terminal exec event: {other:?}"),
+    }
+}
+
+fn session_exec_wrapper(argv: &[String]) -> String {
+    use mvm_vmm::host::shell::shell_quote;
+    let command = argv
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "set -e\nexport PATH={}:\"$PATH\"\nexec 'bash' '-c' {}\n",
+        shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+        shell_quote(&command),
+    )
+}
+
+/// Resolve and record ordinary-session console activity before entering a blocking relay.
+/// Both session policy and VM accessibility are checked before recording activity.
+pub fn prepare_console_session(raw_id: &str) -> Result<SessionRecord> {
+    let (id, record) = require_running_session(raw_id)?;
+    require_dev_mode(&id, &record, "console")?;
+    crate::console::enforce_accessible_gate(&record.vm_name, false)?;
+    if let Err(error) = session::update_session(&id, |record| {
+        record.last_invoke_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        Ok(())
+    }) {
+        tracing::warn!(err = %error, "failed to update session last_invoke_at");
+    }
+    audit_emit(
+        LocalAuditKind::SessionConsoleOpen,
+        Some(&record.vm_name),
+        Some(&format!("session={id}")),
+    );
+    Ok(record)
+}
+
+/// List ordinary sessions without exposing the on-disk registry to consumers.
+pub fn list_sessions() -> Result<Vec<SessionRecord>> {
+    session::list_sessions().context("listing sessions")
+}
+
+/// Select the most recently active running session for a continuation.
+pub fn latest_running_session() -> Result<SessionRecord> {
+    session::most_recent_running_on_disk()?
+        .ok_or_else(|| anyhow::anyhow!("no running session to --continue"))
+}
+
 /// A session to start: the VM it boots, and the record it is kept under.
 pub struct SessionStart<'a> {
     /// What the session's VM boots from and under.
@@ -491,6 +681,224 @@ mod tests {
         let record = SessionRecord::new_running(vm, "wl", mode);
         session::write_session(&record).expect("write");
         record
+    }
+
+    #[test]
+    fn dev_wire_adapter_preserves_binary_channels_and_requires_a_terminal() {
+        use mvm_agentd::vsock::ExecEvent;
+        let bytes = vec![0, 255, b'\n'];
+        for event in [
+            ExecEvent::Stdout {
+                chunk: bytes.clone(),
+            },
+            ExecEvent::Stderr {
+                chunk: bytes.clone(),
+            },
+        ] {
+            let expected = match &event {
+                ExecEvent::Stdout { chunk } => DevSessionOutput::Stdout(chunk.clone()),
+                ExecEvent::Stderr { chunk } => DevSessionOutput::Stderr(chunk.clone()),
+                _ => unreachable!(),
+            };
+            assert_eq!(dev_output(&event), Some(expected));
+            assert!(dev_completion(event).is_err());
+        }
+        assert_eq!(dev_output(&ExecEvent::Exit { code: 9 }), None);
+        assert_eq!(dev_output(&ExecEvent::TimedOut), None);
+        assert_eq!(
+            dev_completion(ExecEvent::Exit { code: 9 }).expect("exit"),
+            DevSessionCompletion::Exited(9)
+        );
+        assert_eq!(
+            dev_completion(ExecEvent::TimedOut).expect("timeout"),
+            DevSessionCompletion::TimedOut
+        );
+    }
+
+    #[test]
+    fn dev_completions_count_nonzero_exits_and_timeouts_but_not_transport_errors() {
+        let _home = isolated();
+        let record = running("dev-counter", SessionMode::Dev);
+        for (index, completion) in [
+            DevSessionCompletion::Exited(0),
+            DevSessionCompletion::Exited(7),
+            DevSessionCompletion::TimedOut,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let got = dev_session_call(
+                record.id.as_str(),
+                "exec",
+                LocalAuditKind::SessionExec,
+                |current| {
+                    assert_eq!(current.vm_name, record.vm_name);
+                    Ok(completion)
+                },
+            )
+            .expect("reported outcome");
+            assert_eq!(got, completion);
+            let updated = session_info(record.id.as_str()).expect("record");
+            assert_eq!(updated.invoke_count, index as u64 + 1);
+            assert!(updated.last_invoke_at.is_some());
+        }
+        dev_session_call(
+            record.id.as_str(),
+            "run-code",
+            LocalAuditKind::SessionRunCode,
+            |_| bail!("transport failed"),
+        )
+        .expect_err("transport error");
+        assert_eq!(
+            session_info(record.id.as_str())
+                .expect("record")
+                .invoke_count,
+            3
+        );
+    }
+
+    #[test]
+    fn dev_session_gates_refuse_before_dispatch() {
+        let _home = isolated();
+        let record = running("prod-no-exec", SessionMode::Prod);
+        let err = dev_session_call(
+            record.id.as_str(),
+            "exec",
+            LocalAuditKind::SessionExec,
+            |_| panic!("prod must not dispatch"),
+        )
+        .expect_err("prod refused");
+        assert!(err.to_string().contains("mode=prod"));
+        session::update_session(&record.id, |record| {
+            record.mode = SessionMode::Dev;
+            record.state = SessionState::Killed;
+            Ok(())
+        })
+        .expect("update");
+        let err = dev_session_call(
+            record.id.as_str(),
+            "run-code",
+            LocalAuditKind::SessionRunCode,
+            |_| panic!("killed must not dispatch"),
+        )
+        .expect_err("killed refused");
+        assert!(err.to_string().contains("not running"));
+        assert_eq!(
+            session_info(record.id.as_str())
+                .expect("record")
+                .invoke_count,
+            0
+        );
+    }
+
+    #[test]
+    fn development_calls_enforce_the_creator_gate() {
+        let (mut env, _home) = isolated();
+        let mut record = running("dev-other-creator", SessionMode::Dev);
+        record.creator_pid = std::process::id().wrapping_add(1);
+        session::write_session(&record).expect("write");
+        env.set(session::STRICT_CREATOR_PID_ENV, "1");
+        dev_session_call(
+            record.id.as_str(),
+            "exec",
+            LocalAuditKind::SessionExec,
+            |_| panic!("creator mismatch must not dispatch"),
+        )
+        .expect_err("creator gate");
+        assert_eq!(
+            session_info(record.id.as_str())
+                .expect("record")
+                .invoke_count,
+            0
+        );
+    }
+
+    #[test]
+    fn empty_exec_is_refused_without_connecting() {
+        let _home = isolated();
+        let record = running("dev-empty", SessionMode::Dev);
+        let err = exec_session(record.id.as_str(), Vec::new(), None, |_| {
+            panic!("no output")
+        })
+        .expect_err("empty argv");
+        assert!(err.to_string().contains("at least one argv"));
+        assert_eq!(
+            session_info(record.id.as_str())
+                .expect("record")
+                .invoke_count,
+            0
+        );
+    }
+
+    #[test]
+    fn console_preparation_touches_without_counting_an_invocation() {
+        let _home = isolated();
+        let record = running("dev-console", SessionMode::Dev);
+        prepare_console_session(record.id.as_str()).expect("dev console");
+        let updated = session_info(record.id.as_str()).expect("record");
+        assert!(updated.last_invoke_at.is_some());
+        assert_eq!(updated.invoke_count, 0);
+        let prod = running("prod-console", SessionMode::Prod);
+        prepare_console_session(prod.id.as_str()).expect_err("prod console refused");
+        assert!(
+            session_info(prod.id.as_str())
+                .expect("record")
+                .last_invoke_at
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn sealed_console_refusal_does_not_touch_session_activity() {
+        let _home = isolated();
+        let record = running("sealed-dev-console", SessionMode::Dev);
+        mvm_runtime::vm::runtime_meta::write(
+            &record.vm_name,
+            &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
+                accessible: false,
+                rootfs_path: None,
+                runtime_overlay_version: None,
+                observability_target: None,
+            },
+        )
+        .expect("sealed metadata");
+        let error = prepare_console_session(record.id.as_str()).expect_err("sealed console");
+        assert!(error.to_string().contains("sealed image"));
+        let unchanged = session_info(record.id.as_str()).expect("record");
+        assert_eq!(unchanged.last_invoke_at, record.last_invoke_at);
+        assert_eq!(unchanged.invoke_count, 0);
+    }
+
+    #[test]
+    fn session_exec_retains_mediated_path_and_literal_argv() {
+        use mvm_vmm::host::shell::shell_quote;
+        let args = vec!["printf".into(), "it's $HOME; $(exit 1)".into()];
+        let wrapper = session_exec_wrapper(&args);
+        assert_eq!(
+            wrapper,
+            format!(
+                "set -e\nexport PATH={}:\"$PATH\"\nexec 'bash' '-c' {}\n",
+                shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
+                shell_quote("'printf' 'it'\\''s $HOME; $(exit 1)'"),
+            )
+        );
+    }
+
+    #[test]
+    fn latest_and_list_select_only_running_for_continuation() {
+        let _home = isolated();
+        assert!(latest_running_session().is_err());
+        let record = running("continue-dev", SessionMode::Dev);
+        assert_eq!(latest_running_session().expect("running").id, record.id);
+        assert_eq!(list_sessions().expect("list").len(), 1);
+        session::update_session(&record.id, |record| {
+            record.state = SessionState::Killed;
+            Ok(())
+        })
+        .expect("update");
+        assert!(latest_running_session().is_err());
+        assert_eq!(list_sessions().expect("list").len(), 1);
     }
 
     #[test]

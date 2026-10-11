@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::shared::{self, VolumeSpec};
 #[cfg(test)]
-use crate::commands::vm::host_signer;
+use mvm_client::audit::host_keypair as host_signer;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct MachineStartReceiptInput {
@@ -176,15 +176,11 @@ pub(super) fn machine_start_receipt_input(
     spec: &MachineSpec,
     backend: &str,
 ) -> Result<MachineStartReceiptInput> {
-    let network_policy = shared::resolve_run_network_policy(spec.net, None, &spec.allow_host, &[])?
-        .with_ai(spec.ai.clone())
-        .with_routes(spec.routes.clone());
-    crate::exec::validate_image_egress_backend_name(
+    let network_policy = mvm_client::launch::machine_start::preflight_machine_spec(
+        spec,
         backend,
         shared::launch_uses_oci_image(spec.image.as_deref(), spec.manifest.as_deref())?,
-        &network_policy,
     )?;
-    let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volumes = machine_start_volume_policy(spec)?;
     Ok(MachineStartReceiptInput {
         machine_name: spec.name.clone(),

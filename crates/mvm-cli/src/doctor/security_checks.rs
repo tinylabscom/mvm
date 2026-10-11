@@ -343,27 +343,11 @@ pub(super) fn security_host_fde_check() -> Check {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostFdeStatus {
-    pub(crate) enabled: bool,
-    pub(crate) info: String,
-}
-
-impl HostFdeStatus {
-    fn enabled(info: impl Into<String>) -> Self {
-        Self {
-            enabled: true,
-            info: info.into(),
-        }
-    }
-
-    fn not_enabled(info: impl Into<String>) -> Self {
-        Self {
-            enabled: false,
-            info: info.into(),
-        }
-    }
-}
+pub(crate) use mvm_vmm::host::encryption::HostFdeStatus;
+#[cfg(test)]
+use mvm_vmm::host::encryption::{
+    parse_linux_volume_backing_types, parse_macos_diskutil_encryption_status,
+};
 
 /// Enforce encrypted backing for a LocalBackend volume mount.
 ///
@@ -373,107 +357,7 @@ impl HostFdeStatus {
 /// the point where mvm would otherwise expose sensitive local data without the
 /// documented at-rest guarantee.
 pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -> Result<()> {
-    let status = detect_host_path_encryption_status(path);
-    if status.enabled {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "LocalBackend volume mounts require the mounted host directory to live \
-         on encrypted backing storage. {}",
-        status.info
-    )
-}
-
-/// The device node of the volume containing `path`, e.g. `/dev/disk3s5`.
-///
-/// `diskutil info` takes a device or a volume, **not an arbitrary directory**:
-/// `diskutil info /Users/auser` exits 1 with "Could not find disk". Every
-/// caller of the probe passes a directory, so without this resolution the
-/// macOS arm could never succeed — and it reported the tool as unavailable
-/// when the tool had run perfectly and simply rejected its argument.
-#[cfg(target_os = "macos")]
-fn macos_containing_device(path: &std::path::Path) -> Option<String> {
-    use std::os::unix::ffi::OsStrExt;
-
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    // SAFETY: `c_path` is a valid NUL-terminated string for the duration of the
-    // call, and `buf` is a correctly-sized zeroed `statfs` the kernel fills in.
-    let mut buf: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut buf) } != 0 {
-        return None;
-    }
-    // SAFETY: on success the kernel leaves `f_mntfromname` NUL-terminated.
-    let device = unsafe { std::ffi::CStr::from_ptr(buf.f_mntfromname.as_ptr()) };
-    device
-        .to_str()
-        .ok()
-        .map(str::to_string)
-        .filter(|d| !d.is_empty())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn macos_containing_device(_path: &std::path::Path) -> Option<String> {
-    None
-}
-
-pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> HostFdeStatus {
-    let plat = platform::current();
-    if matches!(plat, Platform::MacOS) {
-        // Ask about the volume that holds the directory, not the directory.
-        // Falling back to the path itself keeps the old behaviour when the
-        // resolution fails rather than refusing outright.
-        let target = macos_containing_device(path).unwrap_or_else(|| path.display().to_string());
-        match mvm_core::env_hygiene::helper_command("diskutil")
-            .arg("info")
-            .arg(&target)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                parse_macos_diskutil_encryption_status(path, &stdout)
-            }
-            // Ran, but rejected the argument. Distinct from "could not run it",
-            // and conflating the two is what made this look environmental.
-            Ok(out) => HostFdeStatus::not_enabled(format!(
-                "diskutil could not report on {target} (for {}): {}",
-                path.display(),
-                String::from_utf8_lossy(&out.stderr).trim(),
-            )),
-            Err(e) => HostFdeStatus::not_enabled(format!(
-                "could not run diskutil to check {}: {e}",
-                path.display()
-            )),
-        }
-    } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
-        match mvm_core::env_hygiene::helper_command("findmnt")
-            .args(["-no", "SOURCE", "-T"])
-            .arg(path)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                match mvm_core::env_hygiene::helper_command("lsblk")
-                    .args(["-no", "TYPE", &dev])
-                    .output()
-                {
-                    Ok(types) if types.status.success() => {
-                        let s = String::from_utf8_lossy(&types.stdout);
-                        parse_linux_volume_backing_types(path, &dev, &s)
-                    }
-                    _ => HostFdeStatus::not_enabled(format!(
-                        "could not inspect block-device type chain for {} ({dev})",
-                        path.display()
-                    )),
-                }
-            }
-            _ => HostFdeStatus::not_enabled(format!(
-                "could not determine backing device for {} (findmnt unavailable)",
-                path.display()
-            )),
-        }
-    } else {
-        HostFdeStatus::not_enabled("unsupported platform for encrypted-volume detection")
-    }
+    mvm_client::volume::require_host_path_encrypted(path)
 }
 
 /// Best-effort detection of host full-disk encryption.
@@ -550,50 +434,6 @@ fn parse_linux_block_types(dev: &str, types: &str) -> HostFdeStatus {
              on root before storing sensitive data in LocalBackend volumes"
         ))
     }
-}
-
-fn parse_linux_volume_backing_types(
-    path: &std::path::Path,
-    dev: &str,
-    types: &str,
-) -> HostFdeStatus {
-    if types.lines().any(|l| l.trim() == "crypt") {
-        HostFdeStatus::enabled(format!(
-            "{} is backed by {dev}, which sits on a dm-crypt/LUKS mapping",
-            path.display()
-        ))
-    } else {
-        HostFdeStatus::not_enabled(format!(
-            "{} is backed by {dev}, which does NOT appear to sit on a \
-             dm-crypt/LUKS mapping",
-            path.display()
-        ))
-    }
-}
-
-fn parse_macos_diskutil_encryption_status(
-    path: &std::path::Path,
-    diskutil_output: &str,
-) -> HostFdeStatus {
-    for line in diskutil_output.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let key = key.trim();
-        let value = value.trim().to_ascii_lowercase();
-        let encrypted = value.starts_with("yes") || value.starts_with("encrypted");
-        if matches!(key, "FileVault" | "Encrypted") && encrypted {
-            return HostFdeStatus::enabled(format!(
-                "{} is on a macOS volume reported as encrypted ({key}: {})",
-                path.display(),
-                value
-            ));
-        }
-    }
-    HostFdeStatus::not_enabled(format!(
-        "{} is not on a macOS volume reported as encrypted by diskutil",
-        path.display()
-    ))
 }
 
 /// The mvm root (`mvm_home`) should be mode 0700 — it is the single
@@ -1580,33 +1420,6 @@ mod tests {
             status.info.contains("does NOT appear"),
             "expected encrypted-backing refusal, got: {}",
             status.info
-        );
-    }
-
-    /// The bug this guards: `diskutil info` takes a device or a volume, not a
-    /// directory. Every caller passes a directory, so before this resolution
-    /// the probe reported "diskutil unavailable" on every macOS host — for a
-    /// tool that ran fine and rejected its argument. `mvmctl machine volume
-    /// mount` refused every directory as a result.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_directory_resolves_to_the_device_of_its_containing_volume() {
-        // A plain directory that is not itself a mount point is the shape that
-        // failed; `/` is the shape that happened to work and hid it.
-        let device = macos_containing_device(std::path::Path::new("/System/Volumes/Data"))
-            .expect("a real directory resolves to a device");
-        assert!(
-            device.starts_with("/dev/"),
-            "expected a device node, got {device}"
-        );
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn an_unresolvable_path_yields_no_device_rather_than_a_wrong_one() {
-        assert_eq!(
-            macos_containing_device(std::path::Path::new("/no/such/path/anywhere")),
-            None
         );
     }
 

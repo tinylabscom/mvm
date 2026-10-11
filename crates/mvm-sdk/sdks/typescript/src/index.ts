@@ -178,8 +178,18 @@ export {
 } from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";
 
-// Host-side built-manifest inspection; the host library loads only on use.
+// Host-side operations; the host library loads only on use.
+export * as maintenance from "./maintenance.js";
 export * as manifest from "./manifest.js";
+export * as storage from "./storage.js";
+export * as bundle from "./bundle.js";
+export * as artifact from "./artifact.js";
+export * as posture from "./posture.js";
+export * as volumes from "./volumes.js";
+export * as workspaces from "./workspaces.js";
+export * as agentSessions from "./agent-sessions.js";
+export * as checkpoints from "./checkpoints.js";
+export * as replay from "./replay.js";
 
 // In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
 // Namespaces, so `import * as mvm; mvm.audit.emit(...)` works inside a booted

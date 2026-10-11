@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 
+use crate::entrypoint::ShownChunk;
 use ed25519_dalek::SigningKey;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta};
 use mvm_core::plan::VerbId;
 use mvm_hostd::audit::emitter::AuditEmitter;
-use mvm_hostd::stream::ShownChunk;
 
 use super::*;
 use crate::entrypoint::dispatch::{CallOutcome, CallTerminal};

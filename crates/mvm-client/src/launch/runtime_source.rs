@@ -20,6 +20,35 @@ use crate::launch::runtime_overlay::{
 };
 use mvm_runtime::ui;
 
+/// Resolve a fork's boot files without acquisition, preserving its parent's
+/// runtime version and the selected Linux image checkout.
+pub fn prepare_fork_boot_artifacts(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    hypervisor: &str,
+    expected_runtime_version: Option<&str>,
+) -> Result<()> {
+    use crate::builder_images::prepared;
+    let checkout = prepared::selected_local_checkout()?;
+    let sibling = std::path::Path::new(&start_config.rootfs_path).with_file_name("vmlinux");
+    start_config.kernel_path = Some(prepared::resolve_workload_kernel_with(
+        &sibling.to_string_lossy(),
+        hypervisor,
+        || Ok(checkout.clone()),
+    )?);
+    let mut resolve = prepared::resolve_pair;
+    let mut pair = checkout.as_ref().map(|checkout| PairArtifactSource {
+        checkout,
+        build: &mut resolve,
+    });
+    attach_runtime_overlay_if_cached_version(
+        start_config,
+        hypervisor,
+        expected_runtime_version,
+        pair.as_mut(),
+    )?;
+    attach_universal_initramfs_if_cached(start_config, hypervisor)
+}
+
 /// Report where this launch's guest binaries come from.
 ///
 /// There is one answer now — the runtime overlay — so this reports whether the
@@ -167,6 +196,9 @@ pub fn attach_runtime_overlay_if_cached_version(
         return Ok(());
     }
     let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
+    if let Some(source) = pair.as_ref() {
+        source.checkout.reverify()?;
+    }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host();
     // Selecting a local image checkout changes only Linux-layer image targets.
@@ -182,6 +214,11 @@ pub fn attach_runtime_overlay_if_cached_version(
         mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
     if attach_runtime_overlay(start_config, hypervisor, &resolver, arch).is_ok() {
         return Ok(());
+    }
+    if pair.is_some() {
+        anyhow::bail!(
+            "runtime overlay {version} for the selected checkout is not prepared; run `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap` first"
+        );
     }
     // The published overlay is a member of the image set this build pins, and
     // is filed under that set's root rather than this CLI's version.
@@ -1199,6 +1236,53 @@ mod runtime_overlay_attach_tests {
             sc.runtime_overlay_verity_path.as_deref(),
             Some(expected_layout.sidecar.to_str().expect("utf-8 verity path"))
         );
+    }
+
+    #[test]
+    fn fork_preparation_rejects_wrong_runtime_pin_without_acquisition() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        env.set("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:1");
+        seed_cache(
+            &dir.path().join("cache"),
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
+        );
+        let kernel = dir.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let mut start = VmStartConfig {
+            rootfs_path: dir.path().join("rootfs.ext4").display().to_string(),
+            ..Default::default()
+        };
+        let error = prepare_fork_boot_artifacts(&mut start, "hvf", Some("0.0.0-missing"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0.0.0-missing"), "{error}");
+        assert!(start.runtime_overlay_path.is_none());
+        assert_eq!(start.kernel_path.as_deref(), kernel.to_str());
+    }
+
+    #[test]
+    fn fork_preparation_cold_kernel_cache_refuses_before_overlay_attachment() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(dir.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+        let mut start = VmStartConfig {
+            rootfs_path: dir.path().join("rootfs.ext4").display().to_string(),
+            ..Default::default()
+        };
+        let error = prepare_fork_boot_artifacts(&mut start, "firecracker", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("mvmctl kernel build --which workload"),
+            "{error}"
+        );
+        assert!(start.kernel_path.is_none());
+        assert!(start.runtime_overlay_path.is_none());
     }
 
     #[test]

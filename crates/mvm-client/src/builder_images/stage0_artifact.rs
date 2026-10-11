@@ -1,0 +1,269 @@
+use anyhow::{Context, Result};
+
+#[derive(Debug)]
+pub(super) struct Stage0ArtifactBuild<'a> {
+    workspace_root: &'a std::path::Path,
+    staging_dir: &'a std::path::Path,
+    build_attr: &'a str,
+    output_mode: &'a str,
+    config_attr: Option<&'a str>,
+    /// The in-guest flake ref base (`MVM_STAGE0_FLAKE`), without the trailing
+    /// `.<arch>-linux.<attr>` segment: the flake staged at `/work`. Required,
+    /// because the guest has no image flake of its own to fall back on.
+    flake_base: &'a str,
+    verbose: bool,
+}
+
+#[derive(Debug)]
+pub(super) struct Stage0ArtifactBuildBuilder<'a> {
+    workspace_root: &'a std::path::Path,
+    staging_dir: &'a std::path::Path,
+    build_attr: Option<&'a str>,
+    output_mode: Option<&'a str>,
+    config_attr: Option<&'a str>,
+    flake_base: Option<&'a str>,
+    verbose: bool,
+}
+
+impl<'a> Stage0ArtifactBuild<'a> {
+    pub(super) fn builder(
+        workspace_root: &'a std::path::Path,
+        staging_dir: &'a std::path::Path,
+    ) -> Stage0ArtifactBuildBuilder<'a> {
+        Stage0ArtifactBuildBuilder {
+            workspace_root,
+            staging_dir,
+            build_attr: None,
+            output_mode: None,
+            config_attr: None,
+            flake_base: None,
+            verbose: false,
+        }
+    }
+
+    pub(super) fn run(&self) -> Result<()> {
+        let host_bin_dir = mvm_build::builder_boot::registered_host_bin_dir()?
+            .context("Stage 0 requires a registered verified boot payload source")?;
+        let stage0_init = std::fs::read(host_bin_dir.join("stage0-init"))
+            .context("reading verified Stage 0 init")?;
+        let stage0_assets = mvm_build::stage0::assets_for_host_arch();
+        let vendor_reports = mvm_build::stage0::prepare_assets(stage0_assets)
+            .context("preparing Stage 0 bootstrap assets (nix-tarball seed)")?;
+        for report in &vendor_reports {
+            mvm_core::policy::audit::emit(
+                mvm_core::policy::audit::LocalAuditKind::VendorBlobFetched,
+                None,
+                Some(&report.audit_detail()),
+            );
+        }
+
+        let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
+        mvm_build::stage0::materialize_root_dir(&root_dir, &stage0_init)
+            .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
+
+        std::fs::write(
+            self.staging_dir.join("stage0-build.conf"),
+            self.render_conf(),
+        )
+        .with_context(|| {
+            format!(
+                "writing stage0-build.conf in {}",
+                self.staging_dir.display()
+            )
+        })?;
+
+        use mvm_build::builder_backend_select as bbs;
+        crate::host_runtime::initialize();
+        let selected = bbs::resolve_choice(None);
+        let explicit = bbs::resolve_env_override().is_some();
+        bbs::run_with_builder_fallback(selected, explicit, |choice| {
+            bbs::resolve_stage0_backend_for_choice(choice, self.verbose).run_stage0(
+                &root_dir,
+                "/init",
+                self.workspace_root,
+                self.staging_dir,
+                &host_bin_dir,
+            )
+        })
+        .map_err(|error| anyhow::anyhow!("Stage 0 artifact build: {error}"))
+    }
+
+    fn render_conf(&self) -> String {
+        let mut conf = format!(
+            "MVM_STAGE0_BUILD_ATTR={}\nMVM_STAGE0_OUTPUT_MODE={}\n",
+            self.build_attr, self.output_mode
+        );
+        if let Some(config_attr) = self.config_attr {
+            conf.push_str(&format!("MVM_STAGE0_CONFIG_ATTR={config_attr}\n"));
+        }
+        conf.push_str(&format!("MVM_STAGE0_FLAKE={}\n", self.flake_base));
+        conf
+    }
+}
+
+impl<'a> Stage0ArtifactBuildBuilder<'a> {
+    pub(super) fn build_attr(mut self, build_attr: &'a str) -> Self {
+        self.build_attr = Some(build_attr);
+        self
+    }
+
+    pub(super) fn output_mode(mut self, output_mode: &'a str) -> Self {
+        self.output_mode = Some(output_mode);
+        self
+    }
+
+    pub(super) fn config_attr(mut self, config_attr: &'a str) -> Self {
+        self.config_attr = Some(config_attr);
+        self
+    }
+
+    pub(super) fn flake_base(mut self, flake_base: &'a str) -> Self {
+        self.flake_base = Some(flake_base);
+        self
+    }
+
+    pub(super) fn verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    pub(super) fn build(self) -> Result<Stage0ArtifactBuild<'a>> {
+        let build_attr = self
+            .build_attr
+            .ok_or_else(|| anyhow::anyhow!("Stage 0 build attribute is required"))?;
+        let output_mode = self
+            .output_mode
+            .ok_or_else(|| anyhow::anyhow!("Stage 0 output mode is required"))?;
+        for (label, value) in [
+            ("build attribute", build_attr),
+            ("output mode", output_mode),
+        ] {
+            if !valid_conf_token(value) {
+                anyhow::bail!("Stage 0 {label} contains invalid characters: {value:?}");
+            }
+        }
+        if let Some(config_attr) = self.config_attr
+            && !valid_conf_token(config_attr)
+        {
+            anyhow::bail!("Stage 0 config attribute contains invalid characters: {config_attr:?}");
+        }
+        let flake_base = self
+            .flake_base
+            .ok_or_else(|| anyhow::anyhow!("Stage 0 flake base is required"))?;
+        if !valid_flake_base(flake_base) {
+            anyhow::bail!("Stage 0 flake base contains invalid characters: {flake_base:?}");
+        }
+        Ok(Stage0ArtifactBuild {
+            workspace_root: self.workspace_root,
+            staging_dir: self.staging_dir,
+            build_attr,
+            output_mode,
+            config_attr: self.config_attr,
+            flake_base,
+            verbose: self.verbose,
+        })
+    }
+}
+
+/// A flake base carries URL punctuation (`path:/work#packages`), so the
+/// attr-token alphabet does not fit. The conf is line-based on the guest;
+/// the only hard requirement is that the value stays one line with no
+/// control characters, and that it names a `#packages` fragment the guest
+/// appends `.<arch>-linux.<attr>` to.
+fn valid_flake_base(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains('\n')
+        && !value.contains('\r')
+        && value.chars().all(|c| !c.is_control())
+}
+
+fn valid_conf_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_carries_flake_base_into_conf() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let build = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("datapath-vmlinux")
+            .output_mode("kernel")
+            .config_attr("datapath-configfile")
+            .flake_base("path:/work#packages")
+            .build()
+            .expect("flake base builds");
+        let conf = build.render_conf();
+        assert!(
+            conf.contains("MVM_STAGE0_FLAKE=path:/work#packages\n"),
+            "{conf}"
+        );
+        assert!(
+            conf.contains("MVM_STAGE0_BUILD_ATTR=datapath-vmlinux\n"),
+            "{conf}"
+        );
+    }
+
+    #[test]
+    fn builder_rejects_flake_base_injection() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let error = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("datapath-vmlinux")
+            .output_mode("kernel")
+            .flake_base("path:/work#packages\nMVM_STAGE0_OUTPUT_MODE=image")
+            .build()
+            .expect_err("a newline must not enter stage0-build.conf");
+        assert!(error.to_string().contains("invalid characters"), "{error}");
+    }
+
+    #[test]
+    fn builder_requires_a_flake_base() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let error = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("workload-vmlinux")
+            .output_mode("kernel")
+            .build()
+            .expect_err("the guest has no flake of its own to fall back on");
+        assert!(error.to_string().contains("flake base"), "{error}");
+    }
+
+    #[test]
+    fn builder_rejects_config_injection() {
+        let root = std::path::Path::new("/work");
+        let out = std::path::Path::new("/out");
+        let error = Stage0ArtifactBuild::builder(root, out)
+            .build_attr("workload-vmlinux\nMVM_STAGE0_OUTPUT_MODE=image")
+            .output_mode("kernel")
+            .flake_base("path:/work#packages")
+            .build()
+            .expect_err("a newline must not enter stage0-build.conf");
+        assert!(error.to_string().contains("invalid characters"), "{error}");
+    }
+
+    #[test]
+    fn builder_renders_the_requested_artifact_contract() {
+        let build = Stage0ArtifactBuild::builder(
+            std::path::Path::new("/work"),
+            std::path::Path::new("/out"),
+        )
+        .build_attr("workload-vmlinux")
+        .output_mode("kernel")
+        .flake_base("path:/work#packages")
+        .verbose(true)
+        .build()
+        .expect("valid request");
+        assert_eq!(
+            build.render_conf(),
+            "MVM_STAGE0_BUILD_ATTR=workload-vmlinux\nMVM_STAGE0_OUTPUT_MODE=kernel\n\
+             MVM_STAGE0_FLAKE=path:/work#packages\n"
+        );
+    }
+}

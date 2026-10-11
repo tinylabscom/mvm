@@ -1,11 +1,10 @@
 //! `mvmctl manifest rm` — remove a slot from the local registry.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
+use mvm_client::manifest::{self, RemoveRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 
@@ -23,45 +22,40 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let manifest_path = match args.path.as_deref() {
-        Some(p) => resolve_manifest_config_path(std::path::Path::new(p))?,
-        None => {
-            let cwd = std::env::current_dir().context("Failed to read cwd")?;
-            mvm_core::manifest::discover_manifest_from_dir(&cwd)?
-                .ok_or_else(|| anyhow::anyhow!(
-                    "No manifest found from cwd. Pass a path explicitly or `--force` if removing an orphaned slot by hash."
-                ))?
-        }
-    };
-
-    let canonical = std::fs::canonicalize(&manifest_path).with_context(|| {
-        format!(
-            "Failed to canonicalize manifest path {}",
-            manifest_path.display()
-        )
+    let report = manifest::remove(&RemoveRequest {
+        path: args.path,
+        force: args.force,
+        manifest_file: args.manifest_file,
     })?;
-    let slot_hash = canonical_key_for_path(&canonical)?;
-    tmpl::template_delete_slot(&slot_hash, args.force)?;
-
-    let manifest_file_deleted = args.manifest_file && canonical.exists();
-    if manifest_file_deleted {
-        std::fs::remove_file(&canonical)
-            .with_context(|| format!("Failed to delete manifest file {}", canonical.display()))?;
+    if report.manifest_file_deleted {
         println!(
             "Removed slot {} and manifest file {}",
-            slot_hash,
-            canonical.display()
+            report.slot_hash,
+            report.manifest_path.display()
         );
     } else {
-        println!("Removed slot {}", slot_hash);
+        println!("Removed slot {}", report.slot_hash);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        args: Args,
     }
 
-    mvm_core::audit_emit!(
-        SlotRemove,
-        vm: slot_hash.clone(),
-        "manifest_path={} manifest_file_deleted={manifest_file_deleted}",
-        canonical.display(),
-    );
-
-    Ok(())
+    #[test]
+    fn source_deletion_and_force_remain_separate_opt_ins() {
+        let args = Harness::parse_from(["rm", "project"]).args;
+        assert!(!args.force && !args.manifest_file);
+        let args = Harness::parse_from(["rm", "project", "--force", "--manifest-file"]).args;
+        assert!(args.force && args.manifest_file);
+        assert_eq!(args.path.as_deref(), Some("project"));
+    }
 }

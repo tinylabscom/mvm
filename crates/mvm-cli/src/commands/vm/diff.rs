@@ -252,11 +252,6 @@ pub(in crate::commands) fn workspace_changes_text(workspace: &Workspace) -> Resu
     Ok(Some(text))
 }
 
-/// Ask the running guest to flush its writes before its volume image is read.
-pub(in crate::commands) fn flush_guest(name: &str) -> Result<()> {
-    mvm_client::guest::sync_filesystems(name)
-}
-
 fn terminal_width() -> usize {
     // SAFETY: TIOCGWINSZ on stdout writes only into the zeroed struct.
     unsafe {

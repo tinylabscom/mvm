@@ -2,7 +2,6 @@
 
 pub(super) use mvm_client::admission::agent_verbs;
 pub(super) mod artifact;
-pub(super) mod audit_chain;
 pub(in crate::commands) mod checkpoint;
 pub(crate) mod console;
 pub(super) mod cp;
@@ -21,15 +20,12 @@ pub(super) mod fs;
 pub(super) mod group;
 pub(in crate::commands) mod host_notices;
 mod host_services;
-pub(super) mod host_signer;
 pub(crate) mod invoke;
 pub(crate) mod launch_sample;
 pub(super) mod logs;
-pub(super) mod managed_secrets;
 mod outputs;
 pub(super) mod pause;
 pub(crate) mod phase_timing;
-pub(super) mod plan_persist;
 pub(in crate::commands) mod prepare;
 pub(super) mod proc;
 pub(super) mod prompt;

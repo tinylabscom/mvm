@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 7;
+export const ABI_MINOR = 8;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -17,6 +17,171 @@ export interface HostAbiMethod {
   classification: Classification;
   summary: string;
 }
+
+/** Lists durable local agent sessions. */
+export const AGENT_SESSIONS_LIST = "agent_sessions.list";
+
+/** Reads a durable agent session. */
+export const AGENT_SESSIONS_SHOW = "agent_sessions.show";
+
+/** Records a durable agent session with explicit execution intent. */
+export const AGENT_SESSIONS_OPEN = "agent_sessions.open";
+
+/** Parks a durable agent session. */
+export const AGENT_SESSIONS_PARK = "agent_sessions.park";
+
+/** Renews a parked durable agent session. */
+export const AGENT_SESSIONS_RENEW = "agent_sessions.renew";
+
+/**
+ * Re-admits a durable agent session using the configured host
+ * signer.
+ */
+export const AGENT_SESSIONS_RESUME = "agent_sessions.resume";
+
+/** Lists the local checkpoint catalog. */
+export const CHECKPOINTS_LIST = "checkpoints.list";
+
+/** Reads checkpoint metadata. */
+export const CHECKPOINTS_INFO = "checkpoints.info";
+
+/** Compares checkpoint manifests without decrypting content. */
+export const CHECKPOINTS_DIFF = "checkpoints.diff";
+
+/** Verifies checkpoint lineage against the signed audit chain. */
+export const CHECKPOINTS_VERIFY = "checkpoints.verify";
+
+/** Reads a checkpoint or image lineage timeline. */
+export const CHECKPOINTS_TIMELINE = "checkpoints.timeline";
+
+/**
+ * Removes an unpinned leaf checkpoint with explicit execution
+ * intent.
+ */
+export const CHECKPOINTS_REMOVE = "checkpoints.remove";
+
+/** Captures machine state under its admitted key domain. */
+export const CHECKPOINTS_CAPTURE = "checkpoints.capture";
+
+/** Restores a full-machine checkpoint with tenant and lineage checks. */
+export const CHECKPOINTS_RESTORE = "checkpoints.restore";
+
+/**
+ * Forks checkpoint state through client-owned admission and
+ * attenuation.
+ */
+export const CHECKPOINTS_FORK = "checkpoints.fork";
+
+/**
+ * Previews or executes verified session replay on a fresh admitted
+ * fork.
+ */
+export const REPLAY_RUN_SESSION = "replay.run_session";
+
+/**
+ * Recover interrupted work and review a registered workspace without
+ * approving changes.
+ */
+export const WORKSPACE_REVIEW = "workspace.review";
+
+/**
+ * Apply only a freshly revalidated fingerprint with explicit
+ * approval.
+ */
+export const WORKSPACE_APPLY = "workspace.apply";
+
+/**
+ * Explicitly undo registered workspace history, reporting
+ * recoveries.
+ */
+export const WORKSPACE_UNDO = "workspace.undo";
+
+/**
+ * Explicitly redo registered workspace history, reporting
+ * recoveries.
+ */
+export const WORKSPACE_REDO = "workspace.redo";
+
+/** Inspect a published local artifact. */
+export const ARTIFACT_INSPECT = "artifact.inspect";
+
+/** Validate a published local artifact. */
+export const ARTIFACT_VALIDATE = "artifact.validate";
+
+/** Write a Firecracker configuration for a local artifact. */
+export const ARTIFACT_CONFIGURE_FIRECRACKER = "artifact.configure_firecracker";
+
+/** List sessions only after verifying the configured tenant chain. */
+export const AUDIT_SESSIONS_LIST = "audit.sessions.list";
+
+/**
+ * Show verified session events without accepting trust-key
+ * overrides.
+ */
+export const AUDIT_SESSIONS_SHOW = "audit.sessions.show";
+
+/**
+ * Report session verification including absent and unsealed
+ * sessions.
+ */
+export const AUDIT_SESSIONS_VERIFY = "audit.sessions.verify";
+
+/** Inspect security posture using only the configured host context. */
+export const POSTURE_INSPECT = "posture.inspect";
+
+/** List managed volumes after lifecycle recovery. */
+export const VOLUME_LIST = "volume.list";
+
+/** Inspect a managed volume without key material. */
+export const VOLUME_INSPECT = "volume.inspect";
+
+/** Create a locked managed encrypted block volume. */
+export const VOLUME_CREATE = "volume.create";
+
+/** Unlock a volume through the configured client key provider. */
+export const VOLUME_UNLOCK = "volume.unlock";
+
+/** Seal a managed volume through its authoritative lifecycle. */
+export const VOLUME_LOCK = "volume.lock";
+
+/** Register a read-only-by-default volume or encrypted host snapshot. */
+export const VOLUME_MOUNT = "volume.mount";
+
+/** Detach a registered volume. */
+export const VOLUME_DETACH = "volume.detach";
+
+/** List registered attachments for a machine. */
+export const VOLUME_ATTACHMENTS = "volume.attachments";
+
+/** Snapshot a locked managed volume without exporting key material. */
+export const VOLUME_SNAPSHOT = "volume.snapshot";
+
+/** Restore a locked managed volume from a verified local snapshot. */
+export const VOLUME_RESTORE = "volume.restore";
+
+/**
+ * Remove a local built slot, optionally deleting its source
+ * manifest.
+ */
+export const MANIFEST_REMOVE = "manifest.remove";
+
+/** Preview or explicitly remove orphaned local manifest slots. */
+export const MANIFEST_PRUNE = "manifest.prune";
+
+/** Export an existing local OCI archive. */
+export const MANIFEST_EXPORT_OCI = "manifest.export_oci";
+
+/** Inspect the host thin pool. */
+export const STORAGE_INFO = "storage.info";
+
+/** Preview or explicitly collect host thin-pool volumes. */
+export const STORAGE_GC = "storage.gc";
+
+/** Export registered artifacts signed by the host key. */
+export const BUNDLE_EXPORT = "bundle.export";
+
+/** Preview host-local registry drift, or explicitly apply repairs. */
+export const MAINTENANCE_RECONCILE = "maintenance.reconcile";
 
 /** Inspect a built manifest slot and its optional snapshot. */
 export const MANIFEST_INFO = "manifest.info";
@@ -181,6 +346,50 @@ export const TELEMETRY_RECORDS = "telemetry.records";
 export const TELEMETRY_STATUS = "telemetry.status";
 
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
+  "agent_sessions.list": { key: "agent_sessions_list", classification: "dev_only", summary: "Lists durable local agent sessions." },
+  "agent_sessions.show": { key: "agent_sessions_show", classification: "dev_only", summary: "Reads a durable agent session." },
+  "agent_sessions.open": { key: "agent_sessions_open", classification: "dev_only", summary: "Records a durable agent session with explicit execution intent." },
+  "agent_sessions.park": { key: "agent_sessions_park", classification: "dev_only", summary: "Parks a durable agent session." },
+  "agent_sessions.renew": { key: "agent_sessions_renew", classification: "dev_only", summary: "Renews a parked durable agent session." },
+  "agent_sessions.resume": { key: "agent_sessions_resume", classification: "dev_only", summary: "Re-admits a durable agent session using the configured host signer." },
+  "checkpoints.list": { key: "checkpoints_list", classification: "dev_only", summary: "Lists the local checkpoint catalog." },
+  "checkpoints.info": { key: "checkpoints_info", classification: "dev_only", summary: "Reads checkpoint metadata." },
+  "checkpoints.diff": { key: "checkpoints_diff", classification: "dev_only", summary: "Compares checkpoint manifests without decrypting content." },
+  "checkpoints.verify": { key: "checkpoints_verify", classification: "dev_only", summary: "Verifies checkpoint lineage against the signed audit chain." },
+  "checkpoints.timeline": { key: "checkpoints_timeline", classification: "dev_only", summary: "Reads a checkpoint or image lineage timeline." },
+  "checkpoints.remove": { key: "checkpoints_remove", classification: "dev_only", summary: "Removes an unpinned leaf checkpoint with explicit execution intent." },
+  "checkpoints.capture": { key: "checkpoints_capture", classification: "dev_only", summary: "Captures machine state under its admitted key domain." },
+  "checkpoints.restore": { key: "checkpoints_restore", classification: "dev_only", summary: "Restores a full-machine checkpoint with tenant and lineage checks." },
+  "checkpoints.fork": { key: "checkpoints_fork", classification: "dev_only", summary: "Forks checkpoint state through client-owned admission and attenuation." },
+  "replay.run_session": { key: "replay_run_session", classification: "dev_only", summary: "Previews or executes verified session replay on a fresh admitted fork." },
+  "workspace.review": { key: "workspace_review", classification: "prod_safe", summary: "Recover interrupted work and review a registered workspace without approving changes." },
+  "workspace.apply": { key: "workspace_apply", classification: "prod_safe", summary: "Apply only a freshly revalidated fingerprint with explicit approval." },
+  "workspace.undo": { key: "workspace_undo", classification: "prod_safe", summary: "Explicitly undo registered workspace history, reporting recoveries." },
+  "workspace.redo": { key: "workspace_redo", classification: "prod_safe", summary: "Explicitly redo registered workspace history, reporting recoveries." },
+  "artifact.inspect": { key: "artifact_inspect", classification: "prod_safe", summary: "Inspect a published local artifact." },
+  "artifact.validate": { key: "artifact_validate", classification: "prod_safe", summary: "Validate a published local artifact." },
+  "artifact.configure_firecracker": { key: "artifact_configure_firecracker", classification: "prod_safe", summary: "Write a Firecracker configuration for a local artifact." },
+  "audit.sessions.list": { key: "audit_sessions_list", classification: "prod_safe", summary: "List sessions only after verifying the configured tenant chain." },
+  "audit.sessions.show": { key: "audit_sessions_show", classification: "prod_safe", summary: "Show verified session events without accepting trust-key overrides." },
+  "audit.sessions.verify": { key: "audit_sessions_verify", classification: "prod_safe", summary: "Report session verification including absent and unsealed sessions." },
+  "posture.inspect": { key: "posture_inspect", classification: "prod_safe", summary: "Inspect security posture using only the configured host context." },
+  "volume.list": { key: "volume_list", classification: "prod_safe", summary: "List managed volumes after lifecycle recovery." },
+  "volume.inspect": { key: "volume_inspect", classification: "prod_safe", summary: "Inspect a managed volume without key material." },
+  "volume.create": { key: "volume_create", classification: "prod_safe", summary: "Create a locked managed encrypted block volume." },
+  "volume.unlock": { key: "volume_unlock", classification: "prod_safe", summary: "Unlock a volume through the configured client key provider." },
+  "volume.lock": { key: "volume_lock", classification: "prod_safe", summary: "Seal a managed volume through its authoritative lifecycle." },
+  "volume.mount": { key: "volume_mount", classification: "prod_safe", summary: "Register a read-only-by-default volume or encrypted host snapshot." },
+  "volume.detach": { key: "volume_detach", classification: "prod_safe", summary: "Detach a registered volume." },
+  "volume.attachments": { key: "volume_attachments", classification: "prod_safe", summary: "List registered attachments for a machine." },
+  "volume.snapshot": { key: "volume_snapshot", classification: "prod_safe", summary: "Snapshot a locked managed volume without exporting key material." },
+  "volume.restore": { key: "volume_restore", classification: "prod_safe", summary: "Restore a locked managed volume from a verified local snapshot." },
+  "manifest.remove": { key: "manifest_remove", classification: "prod_safe", summary: "Remove a local built slot, optionally deleting its source manifest." },
+  "manifest.prune": { key: "manifest_prune", classification: "prod_safe", summary: "Preview or explicitly remove orphaned local manifest slots." },
+  "manifest.export_oci": { key: "manifest_export_oci", classification: "prod_safe", summary: "Export an existing local OCI archive." },
+  "storage.info": { key: "storage_info", classification: "prod_safe", summary: "Inspect the host thin pool." },
+  "storage.gc": { key: "storage_gc", classification: "prod_safe", summary: "Preview or explicitly collect host thin-pool volumes." },
+  "bundle.export": { key: "bundle_export", classification: "prod_safe", summary: "Export registered artifacts signed by the host key." },
+  "maintenance.reconcile": { key: "maintenance_reconcile", classification: "prod_safe", summary: "Preview host-local registry drift, or explicitly apply repairs." },
   "manifest.info": { key: "manifest_info", classification: "prod_safe", summary: "Inspect a built manifest slot and its optional snapshot." },
   "manifest.list": { key: "manifest_list", classification: "prod_safe", summary: "List built manifest slots with orphan and tag-intersection filters." },
   "manifest.verify": { key: "manifest_verify", classification: "prod_safe", summary: "Verify built manifest artifact checksums; signature verification is refused." },
