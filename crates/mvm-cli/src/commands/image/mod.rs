@@ -2,51 +2,34 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
-
-// Kept here (rather than folded into a submodule's own imports) so the
-// unmoved `trust` sibling's `use super::*;` glob keeps resolving these
-// without touching its call sites.
-use mvm_fs::oci::{ImageReference, RegistryAuthConfig};
 
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-mod base_image;
 pub(crate) mod boot;
 mod build_layer;
 mod cache;
 pub(in crate::commands) mod dev;
-mod ingest;
 mod inspect;
 mod ls;
-mod materialize;
-mod oci_types;
 mod pull;
-mod pull_core;
-mod recent;
-mod revocations;
 mod rm;
-mod source;
-mod trust;
-mod trust_policy;
 
 // Re-exports preserve two frozen call-site shapes without editing them: the
 // sibling verb modules' `super::<name>` calls, and
 // `crate::commands::vm::exec`'s `super::super::image::<name>` reach-in.
-use cache::{inspect_image, list_rows, remove_image, render_inspect, render_list};
-use oci_types::CosignIdentity;
-use pull_core::pull_image_with_trust;
-pub(in crate::commands) use pull_core::resolve_or_pull_run_image;
-pub(in crate::commands) use pull_core::{
+use cache::{render_inspect, render_list};
+#[cfg(test)]
+pub(in crate::commands) use mvm_client::image_admin::registry_auth_from_lookup;
+pub(in crate::commands) use mvm_client::image_admin::resolve_or_pull_run_image;
+pub(in crate::commands) use mvm_client::image_admin::{OciRegistryAuthDecision, registry_auth_for};
+pub(in crate::commands) use mvm_client::image_admin::{
     ensure_prod_digest_pin, ensure_prod_registry_allowed, require_prod_digest_pin,
 };
-pub(in crate::commands) use recent::recent_image_references;
-#[cfg(test)]
-pub(in crate::commands) use trust::registry_auth_from_lookup;
-pub(in crate::commands) use trust::{OciRegistryAuthDecision, registry_auth_for};
+use mvm_client::image_admin::{inspect_image, list_rows, remove_image};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -142,5 +125,5 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
 }
 
 pub(in crate::commands) fn oci_cache_root() -> PathBuf {
-    mvm_core::config::oci_cache_dir()
+    mvm_client::image_admin::oci_cache_root()
 }

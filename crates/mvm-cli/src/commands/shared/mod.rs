@@ -30,8 +30,8 @@ pub(super) use mvm_client::admission::run_network::{
 };
 pub(super) use mvm_client::launch::machine_start::resolve_effective_hypervisor;
 pub(crate) use parse::AssetSpec;
+pub(crate) use parse::DirShareSpec;
 pub(crate) use parse::materialize_disk_volume;
-pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
     VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, parse_asset_spec, parse_volume_spec,
     validate_volume_spec, vm_volume_from_spec_validated,

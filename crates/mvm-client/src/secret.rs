@@ -38,6 +38,7 @@
 //! outside the binding allow-list, and cross-scope references.
 
 pub mod audit;
+pub mod definition;
 pub mod input;
 pub mod oauth_login;
 pub mod refs;
@@ -53,6 +54,7 @@ use mvm_hostd::keyholder::{BindingStore, FileBindingStore};
 use serde::Serialize;
 
 pub use audit::SecretAudit;
+pub use definition::SecretDefinitionInput;
 pub use input::SecretValueInput;
 pub use mvm_contract::ir::{AuthType, Sigv4Params};
 pub use mvm_core::crypto::secret_binding::SecretApproval;
@@ -133,7 +135,7 @@ pub struct OAuthLoginOutcome {
 
 /// Whether a [`SecretService::put`] created a new secret or replaced an
 /// existing value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PutOutcome {
     Created,
     Replaced,
@@ -1347,17 +1349,13 @@ mod tests {
     // ── OAuth consent ─────────────────────────────────────────────────
 
     fn oauth_bound(f: &Fixture, client_secret: Option<&str>) {
-        let set = mvm_hostd::keyholder::oauth::awaiting_consent_token_set(client_secret);
-        f.service
-            .put(
-                "local",
-                "oauth-secret",
-                SecretValueInput::new(serde_json::to_string(&set).unwrap()),
-            )
-            .unwrap();
         let mut meta = bearer_fixture_meta();
         meta.oauth = Some(oauth_meta());
-        f.service.bind("local", "oauth-secret", meta).unwrap();
+        let mut input = SecretDefinitionInput::new(meta).awaiting_consent();
+        if let Some(secret) = client_secret {
+            input = input.with_client_secret(SecretValueInput::new(secret.into()));
+        }
+        f.service.define("local", "oauth-secret", input).unwrap();
     }
 
     fn stored_value(f: &Fixture) -> String {
@@ -1504,6 +1502,102 @@ mod tests {
         assert!(log.contains("\"outcome\":\"err\""), "got: {log}");
         assert!(!log.contains("the-client-secret"), "got: {log}");
         assert!(!format!("{err} {err:?}").contains("the-client-secret"));
+    }
+
+    #[test]
+    fn definition_validates_binding_before_creating_or_replacing_value() {
+        let f = fixture();
+        for exists in [false, true] {
+            if exists {
+                oauth_bound(&f, Some("original-private"));
+            }
+            let before = exists.then(|| stored_value(&f));
+            let mut meta = bearer_fixture_meta();
+            meta.allowed_hosts.clear();
+            let error = f
+                .service
+                .define(
+                    "local",
+                    "oauth-secret",
+                    SecretDefinitionInput::new(meta)
+                        .with_value(SecretValueInput::new("replacement-private".into())),
+                )
+                .unwrap_err();
+            assert!(matches!(error, SecretServiceError::InvalidBinding { .. }));
+            assert_eq!(
+                f.service.secret_exists("local", "oauth-secret").unwrap(),
+                exists
+            );
+            if let Some(before) = before {
+                assert_eq!(stored_value(&f), before);
+            }
+            assert!(!audit_text(&f).contains("replacement-private"));
+        }
+    }
+
+    #[test]
+    fn definition_rejects_conflicting_sources_without_mutation() {
+        let f = fixture();
+        for case in 0..4 {
+            let mut meta = bearer_fixture_meta();
+            meta.oauth = Some(oauth_meta());
+            let mut input = SecretDefinitionInput::new(meta);
+            input = match case {
+                0 => input
+                    .awaiting_consent()
+                    .with_value(SecretValueInput::new("discarded-private".into())),
+                1 => input.with_source("env://SHOULD_NEVER_BE_READ".parse().unwrap()),
+                2 => input
+                    .with_client_secret(SecretValueInput::new("client-private".into()))
+                    .with_value(SecretValueInput::new("discarded-private".into())),
+                _ => {
+                    let mut bad = bearer_fixture_meta();
+                    let mut oauth = oauth_meta();
+                    oauth.token_url = "http://example.com/token".into();
+                    bad.oauth = Some(oauth);
+                    SecretDefinitionInput::new(bad).awaiting_consent()
+                }
+            };
+            assert!(f.service.define("local", "oauth-secret", input).is_err());
+            assert!(!f.service.secret_exists("local", "oauth-secret").unwrap());
+            assert!(
+                f.service
+                    .bindings
+                    .get("local", "oauth-secret")
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let log = audit_text(&f);
+        assert!(!log.contains("client-private"));
+        assert!(!log.contains("discarded-private"));
+    }
+
+    #[test]
+    fn definition_stores_initial_oauth_state_and_returns_only_outcome() {
+        let f = fixture();
+        let mut meta = bearer_fixture_meta();
+        meta.oauth = Some(oauth_meta());
+        let outcome = f
+            .service
+            .define(
+                "local",
+                "oauth-secret",
+                SecretDefinitionInput::new(meta)
+                    .with_client_secret(SecretValueInput::new("client-private".into())),
+            )
+            .unwrap();
+        assert_eq!(outcome, PutOutcome::Created);
+        assert_eq!(serde_json::to_value(outcome).unwrap(), "Created");
+        let tokens: serde_json::Value = serde_json::from_str(&stored_value(&f)).unwrap();
+        assert_eq!(tokens["client_secret"], "client-private");
+        let metadata =
+            serde_json::to_string(&f.service.metadata("local", "oauth-secret").unwrap()).unwrap();
+        assert!(!metadata.contains("client-private"));
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"create\""));
+        assert!(log.contains("\"action\":\"bind\""));
+        assert!(!log.contains("client-private"));
     }
 
     // ── No-leak invariants across error surfaces ──────────────────────

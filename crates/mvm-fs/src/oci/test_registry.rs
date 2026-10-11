@@ -44,6 +44,8 @@ struct State {
     required_token: Option<String>,
     blob_redirects: HashMap<String, String>,
     requests: Vec<RecordedRequest>,
+    get_responses: HashMap<String, Response>,
+    post_responses: HashMap<String, Response>,
 }
 
 /// A running registry. Dropping it stops the server.
@@ -173,6 +175,35 @@ impl MemoryRegistry {
         self.lock().required_token = Some(token.to_string());
     }
 
+    /// Serve an explicit GET response after the normal authentication check.
+    /// Targets include the query string so pagination can be exercised.
+    pub fn respond_to_get(&self, target: &str, status: u16, body: &[u8], headers: &[(&str, &str)]) {
+        let mut response = Response::new(status).body(body.to_vec());
+        for (name, value) in headers {
+            response = response.header(name, *value);
+        }
+        self.lock()
+            .get_responses
+            .insert(target.to_string(), response);
+    }
+
+    /// Serve an explicit POST response after the normal authentication check.
+    pub fn respond_to_post(&self, target: &str, status: u16, body: &[u8]) {
+        self.lock().post_responses.insert(
+            target.to_string(),
+            Response::new(status).body(body.to_vec()),
+        );
+    }
+
+    /// Drip a body one byte per interval to exercise a caller's total deadline.
+    pub fn respond_to_get_slowly(&self, target: &str, body: &[u8], interval: std::time::Duration) {
+        let mut response = Response::new(200).body(body.to_vec());
+        response.byte_interval = Some(interval);
+        self.lock()
+            .get_responses
+            .insert(target.to_string(), response);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().expect("test registry state")
     }
@@ -197,11 +228,13 @@ struct Request {
     body: Vec<u8>,
 }
 
+#[derive(Clone)]
 struct Response {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
     head_only: bool,
+    byte_interval: Option<std::time::Duration>,
 }
 
 impl Response {
@@ -211,6 +244,7 @@ impl Response {
             headers: Vec::new(),
             body: Vec::new(),
             head_only: false,
+            byte_interval: None,
         }
     }
 
@@ -277,6 +311,16 @@ fn route(
     let Some(rest) = path.strip_prefix("/v2/") else {
         return Response::new(404);
     };
+    if request.method == "GET" {
+        if let Some(response) = state.get_responses.get(&request.target) {
+            return response.clone();
+        }
+    }
+    if request.method == "POST" {
+        if let Some(response) = state.post_responses.get(&request.target) {
+            return response.clone();
+        }
+    }
     if let Some((repository, id)) = rest.split_once("/blobs/uploads/") {
         return upload(&mut state, request, repository, id, query, addr, upload_ids);
     }
@@ -459,6 +503,16 @@ fn write_response(stream: &mut TcpStream, response: &Response) -> std::io::Resul
         out.extend_from_slice(format!("Content-Length: {}\r\n", response.body.len()).as_bytes());
     }
     out.extend_from_slice(b"Connection: close\r\n\r\n");
+    if let Some(interval) = response.byte_interval {
+        stream.write_all(&out)?;
+        for byte in &response.body {
+            stream.write_all(&[*byte])?;
+            stream.flush()?;
+            // This delay is the simulated network behavior, not a readiness poll.
+            std::thread::sleep(interval);
+        }
+        return Ok(());
+    }
     if !response.head_only {
         out.extend_from_slice(&response.body);
     }

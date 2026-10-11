@@ -373,9 +373,9 @@ pub fn backend_name_for(hypervisor: Option<&str>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entrypoint::ShownChunk;
     use mvm_core::session::SessionState;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_hostd::stream::ShownChunk;
 
     #[derive(Default)]
     struct NamingObserver {

@@ -8,8 +8,8 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
+use mvm_client::maintenance::{self, ReconcileRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::reconcile::{self, ConvergeOpts};
 
 use super::Cli;
 use crate::ui;
@@ -25,10 +25,16 @@ pub(in crate::commands) struct Args {
     pub json: bool,
 }
 
+impl Args {
+    fn request(&self) -> ReconcileRequest {
+        ReconcileRequest {
+            apply: !self.dry_run,
+        }
+    }
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let report = reconcile::converge(&ConvergeOpts {
-        dry_run: args.dry_run,
-    });
+    let report = maintenance::reconcile(&args.request());
 
     if args.json {
         crate::json_out::emit_json(&report)?;
@@ -85,4 +91,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn cli_keeps_apply_default_and_explicit_dry_run() {
+        let args = Command::try_parse_from(["reconcile"]).unwrap().args;
+        assert!(args.request().apply);
+        assert!(!args.json);
+        let args = Command::try_parse_from(["reconcile", "--dry-run", "--json"])
+            .unwrap()
+            .args;
+        assert!(!args.request().apply);
+        assert!(args.json);
+    }
 }

@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use mvm_client::entrypoint::ShownChunk;
 use mvm_client::entrypoint::dispatch::{
     CallObserver, CallOutcome, CallStdin, CallTerminal, RecordedDivergence, error_label,
     one_shot_payload,
@@ -25,7 +26,6 @@ use mvm_client::entrypoint::{
     CallLifecycle, EntrypointAdmission, EntrypointVm, SessionVmName, WorkloadSource,
 };
 pub(crate) use mvm_client::entrypoint::{DispatchStdin, EntrypointDispatch};
-use mvm_hostd::stream::ShownChunk;
 
 use super::denial_review::{ReviewOffer, ReviewSource};
 use crate::ui;
@@ -502,19 +502,10 @@ pub(in crate::commands) fn prompt_machine(
 /// # Errors
 /// The fork does not grant prompts, or a delivery or its audit entry failed.
 pub(in crate::commands) fn replay_prompts(
-    vm_name: &str,
-    plan: &mvm_runtime::agent_session::replay::ReplayPlan,
-    inputs: &mvm_runtime::agent_session::replay_input::ReplayInputStore,
-    timeout_secs: u64,
-) -> Result<mvm_client::agent_prompt::replay::ReplayedPrompts> {
+    request: &mvm_client::replay::SessionReplayRunRequest,
+) -> Result<mvm_client::replay::SessionReplayRunReport> {
     let mut out = CallOutput::inherited();
-    let replayed = mvm_client::agent_prompt::replay::replay_onto(
-        vm_name,
-        plan,
-        inputs,
-        timeout_secs,
-        &mut out,
-    );
+    let replayed = mvm_client::replay::ReplayService::open().run_session(request, &mut out);
     flush_inherited();
     replayed
 }
@@ -1209,7 +1200,7 @@ mod streaming_tests {
             let mut sinks = buffers(&mut out, &mut err);
             sinks
                 .divergence
-                .note(&mvm_hostd::stream::RecordedCopy::Identical);
+                .note(&mvm_client::entrypoint::RecordedCopy::Identical);
             sinks.report("quiet-vm", true);
         }
         assert!(out.is_empty(), "{}", String::from_utf8_lossy(&out));

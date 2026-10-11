@@ -16,10 +16,9 @@ use clap::Args;
 use mvm_client::approval_broker::display_safe;
 use mvm_client::workspace_apply::{
     Applied, ApplyPlan, ExitApply, ExitApplyRequest, ExitOutcome, ExitSettlement, FileOp, OpAction,
-    Recovered, Review, ReviewRequest, SignedWorkspaceAudit, WorkspaceApplier, WorkspaceTarget,
-    apply_command, apply_store_root, is_affirmative, review,
+    Recovered, RegisteredWorkspace, Review, ReviewRequest, SignedWorkspaceAudit, WorkspaceRequest,
+    WorkspaceTarget, apply_command, apply_store_root, is_affirmative,
 };
-use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
 use super::workspace::Workspace;
@@ -54,7 +53,7 @@ pub(in crate::commands) struct ApplyArgs {
     /// Apply without prompting (required without a terminal).
     #[arg(long)]
     pub yes: bool,
-    /// Plan and report without staging or writing anything.
+    /// Report without starting a new apply; recover interrupted applies first.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -84,30 +83,32 @@ pub(in crate::commands) fn run_apply(
     args: ApplyArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
-    validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    let selected = select_workspace(&args.name, args.volume.as_deref())?;
-    let audit = SignedWorkspaceAudit::new();
-    let applier = open_applier(&args.name, &selected, &audit)?;
-    flush_running_guest(&args.name)?;
-    let pending =
-        match review_workspace(&args.name, &selected, &args.exclude, &args.protected_path)? {
-            Review::Refused(plan) => {
-                report_refusals(&plan);
-                bail!("refusing the apply");
-            }
-            Review::Unchanged => {
-                crate::ui::notice("no changes to apply");
-                return Ok(());
-            }
-            Review::Ready(pending) => pending,
-        };
-    crate::ui::info(&plan_summary(&selected, pending.plan()));
+    let (session, recovered) = RegisteredWorkspace::open(WorkspaceRequest {
+        vm: args.name,
+        volume: args.volume,
+        exclude: args.exclude,
+        protected_paths: args.protected_path,
+    })?;
+    report_recovered(recovered);
+    let selected = session.workspace();
+    let pending = match session.review()? {
+        Review::Refused(plan) => {
+            report_refusals(&plan);
+            bail!("refusing the apply");
+        }
+        Review::Unchanged => {
+            crate::ui::notice("no changes to apply");
+            return Ok(());
+        }
+        Review::Ready(pending) => pending,
+    };
+    crate::ui::info(&plan_summary(selected, pending.plan()));
 
     if args.dry_run {
         for op in &pending.plan().ops {
             println!("  {}", op_summary(op));
         }
-        crate::ui::notice("dry run: nothing staged, nothing written");
+        crate::ui::notice("dry run: no new apply staged or written");
         return Ok(());
     }
 
@@ -116,7 +117,7 @@ pub(in crate::commands) fn run_apply(
         crate::ui::notice("not applied");
         return Ok(());
     }
-    report_applied(&applier.apply(pending)?);
+    report_applied(&session.apply(*pending, true)?);
     Ok(())
 }
 
@@ -125,11 +126,14 @@ pub(in crate::commands) fn run_undo(
     args: UndoArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
-    validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    let selected = select_workspace(&args.name, args.volume.as_deref())?;
-    let audit = SignedWorkspaceAudit::new();
-    let applier = open_applier(&args.name, &selected, &audit)?;
-    match applier.undo()? {
+    let (session, recovered) = RegisteredWorkspace::open(WorkspaceRequest {
+        vm: args.name,
+        volume: args.volume,
+        exclude: Vec::new(),
+        protected_paths: Vec::new(),
+    })?;
+    report_recovered(recovered);
+    match session.undo()? {
         Some(applied) => crate::ui::success(&format!("undid apply {}", applied.target_id)),
         None => crate::ui::notice("nothing to undo"),
     }
@@ -141,11 +145,14 @@ pub(in crate::commands) fn run_redo(
     args: RedoArgs,
     _cfg: &MvmConfig,
 ) -> Result<()> {
-    validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    let selected = select_workspace(&args.name, args.volume.as_deref())?;
-    let audit = SignedWorkspaceAudit::new();
-    let applier = open_applier(&args.name, &selected, &audit)?;
-    match applier.redo()? {
+    let (session, recovered) = RegisteredWorkspace::open(WorkspaceRequest {
+        vm: args.name,
+        volume: args.volume,
+        exclude: Vec::new(),
+        protected_paths: Vec::new(),
+    })?;
+    report_recovered(recovered);
+    match session.redo()? {
         Some(applied) => crate::ui::success(&format!("redid apply {}", applied.target_id)),
         None => crate::ui::notice("nothing to redo"),
     }
@@ -227,31 +234,9 @@ fn offer_workspace(
     Ok(())
 }
 
-/// Plan `selected` against its baseline and the guest's current image.
-fn review_workspace(
-    vm: &str,
-    selected: &Workspace,
-    exclude: &[String],
-    protected_paths: &[String],
-) -> Result<Review> {
-    let baseline = workspace::baseline_image(selected)?;
-    review(
-        target(vm, selected),
-        &ReviewRequest {
-            baseline_image: &baseline,
-            live_image: &selected.image,
-            exclude,
-            protected_paths,
-        },
-    )
-}
-
 /// The guest's writes reach the disk before anything is planned from it.
 fn flush_running_guest(vm: &str) -> Result<()> {
-    if mvm_runtime::checkpoint::vm_is_running(vm) {
-        diff::flush_guest(vm)?;
-    }
-    Ok(())
+    mvm_client::workspace_apply::flush_running_guest(vm)
 }
 
 fn target<'a>(vm: &'a str, selected: &'a Workspace) -> WorkspaceTarget<'a> {
@@ -260,17 +245,6 @@ fn target<'a>(vm: &'a str, selected: &'a Workspace) -> WorkspaceTarget<'a> {
         volume: &selected.volume,
         source_dir: &selected.source_dir,
     }
-}
-
-/// The store for one workspace, with interrupted work settled and reported.
-fn open_applier<'a>(
-    vm: &'a str,
-    selected: &'a Workspace,
-    audit: &'a SignedWorkspaceAudit,
-) -> Result<WorkspaceApplier<'a>> {
-    let (applier, recovered) = WorkspaceApplier::open(target(vm, selected), audit)?;
-    report_recovered(recovered);
-    Ok(applier)
 }
 
 fn report_recovered(recovered: Vec<Recovered>) {
@@ -325,32 +299,6 @@ fn terminal_safe(text: &str) -> String {
 }
 
 /// The workspace to act on: the machine's only one, or the `--volume` pick.
-fn select_workspace(vm: &str, volume: Option<&str>) -> Result<Workspace> {
-    let all = workspace::workspaces_of(vm)?;
-    if all.is_empty() {
-        bail!(
-            "machine {vm:?} has no workspace volume; attach a host directory read-write with \
-             `mvmctl machine volume mount {vm} --volume NAME --host DIR --guest PATH --rw`"
-        );
-    }
-    match volume {
-        Some(name) => all
-            .into_iter()
-            .find(|w| w.volume == name)
-            .with_context(|| format!("machine {vm:?} has no workspace volume {name:?}")),
-        None => {
-            if all.len() > 1 {
-                let names: Vec<&str> = all.iter().map(|w| w.volume.as_str()).collect();
-                bail!(
-                    "machine {vm:?} has several workspace volumes ({}); pass --volume",
-                    names.join(", ")
-                )
-            }
-            Ok(all.into_iter().next().expect("one workspace"))
-        }
-    }
-}
-
 fn plan_summary(selected: &Workspace, plan: &ApplyPlan) -> String {
     summary_line(&selected.source_dir, plan)
 }
@@ -404,7 +352,7 @@ fn op_summary(op: &FileOp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{confirm_apply, ensure_apply_authorized, terminal_safe};
+    use super::{ApplyArgs, confirm_apply, ensure_apply_authorized, terminal_safe};
     use crate::approval::tty::Terminal;
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
@@ -452,6 +400,23 @@ mod tests {
     #[test]
     fn yes_authorizes_without_a_terminal() {
         assert!(ensure_apply_authorized(true, false).is_ok());
+    }
+
+    #[test]
+    fn dry_run_does_not_authorize_apply_and_discloses_recovery() {
+        let mut command = <ApplyArgs as clap::Args>::augment_args(clap::Command::new("apply"));
+        assert!(
+            command
+                .render_long_help()
+                .to_string()
+                .contains("recover interrupted applies first")
+        );
+        let matches = command
+            .try_get_matches_from(["apply", "vm", "--dry-run"])
+            .unwrap();
+        let args = <ApplyArgs as clap::FromArgMatches>::from_arg_matches(&matches).unwrap();
+        assert!(args.dry_run);
+        assert!(!args.yes);
     }
 
     #[test]

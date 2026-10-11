@@ -20,26 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use mvm_contract::ir::Workload;
-use mvm_sdk::runtime::{
-    CompiledRecording, Divergence, RuntimeRecording, compile_recording, recording_sha256_hex,
-    verify_recording_digest,
-};
-
-/// Hard cap on recording bytes read from disk — guards the JSON parser
-/// against a multi-GiB file before serde ever runs. Far above any
-/// legitimate recording (ops are capped downstream).
-const MAX_RECORDING_BYTES: u64 = 64 * 1024 * 1024;
-
-/// A recording loaded from disk: the lowered workload, the divergence
-/// findings the admission path gates on, the content digest captured
-/// at read time, and any raw-secret findings from the host-side scan.
-pub(in crate::commands) struct LoadedRecording {
-    pub workload: Workload,
-    pub findings: Vec<Divergence>,
-    pub digest_hex: String,
-    pub secret_findings: Vec<crate::commands::build::trace_secret_scan::SecretFinding>,
-}
+pub(in crate::commands) use mvm_client::sdk_plan::LoadedRecording;
+use mvm_client::sdk_plan::{MAX_RECORDING_BYTES, load_recording_bytes};
 
 /// Languages the auto-exec path supports.
 #[derive(Debug, Clone, Copy)]
@@ -166,26 +148,26 @@ pub(in crate::commands) fn load_recording(
     }
     let bytes = std::fs::read(path)
         .with_context(|| format!("reading runtime recording from {}", path.display()))?;
-    let digest_hex = recording_sha256_hex(&bytes);
-    if let Some(expected) = expected_sha256 {
-        verify_recording_digest(&bytes, expected)
-            .map_err(|e| anyhow::anyhow!("{e}"))
-            .with_context(|| format!("digest verification failed for {}", path.display()))?;
-    }
-    let recording: RuntimeRecording = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing runtime recording JSON from {}", path.display()))?;
-    let secret_findings = crate::commands::build::trace_secret_scan::scan_recording_for_secrets(
-        &recording,
-        &mvm_hostd::supervisor::secrets_scanner::SecretsScanner::with_default_rules(),
-    );
-    let CompiledRecording { workload, findings } = compile_recording(&recording)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .with_context(|| format!("lowering runtime recording from {}", path.display()))?;
-    Ok(LoadedRecording {
-        workload,
-        findings,
-        digest_hex,
-        secret_findings,
+    load_recording_bytes(&bytes, expected_sha256).map_err(|error| {
+        use mvm_client::sdk_plan::PlanError;
+        match error {
+            PlanError::Digest(message) => anyhow::anyhow!(message)
+                .context(format!("digest verification failed for {}", path.display())),
+            PlanError::Parse(source) => anyhow::Error::new(source).context(format!(
+                "parsing runtime recording JSON from {}",
+                path.display()
+            )),
+            PlanError::Lower(message) => anyhow::anyhow!(message).context(format!(
+                "lowering runtime recording from {}",
+                path.display()
+            )),
+            other @ (PlanError::TooLarge { .. }
+            | PlanError::EmbeddedSecrets { .. }
+            | PlanError::Unacknowledged { .. }
+            | PlanError::NoApps
+            | PlanError::Synthesis { .. }) => anyhow::Error::new(other)
+                .context(format!("loading runtime recording from {}", path.display())),
+        }
     })
 }
 
@@ -264,6 +246,27 @@ fn env_override(name: &str) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn file_recording_uses_client_lowering_and_digest_gate() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let bytes = br#"{"workload_id":"cli-shape","create":{"template":"minimal"},"ops":[{"kind":"command_start","argv":["true"],"env":{}}]}"#;
+        std::fs::write(file.path(), bytes).unwrap();
+        let expected = mvm_client::sdk_plan::load_recording_bytes(bytes, None).unwrap();
+        let actual = load_recording(file.path(), Some(&expected.digest_hex)).unwrap();
+        assert_eq!(actual.digest_hex, expected.digest_hex);
+        assert_eq!(actual.workload, expected.workload);
+        let error = load_recording(file.path(), Some(&"0".repeat(64))).unwrap_err();
+        assert!(format!("{error:#}").contains("digest verification failed"));
+    }
+
+    #[test]
+    fn file_recording_rejects_oversized_input_before_reading() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(MAX_RECORDING_BYTES + 1).unwrap();
+        let error = load_recording(file.path(), None).unwrap_err();
+        assert!(error.to_string().contains("byte cap"));
+    }
 
     /// Restore-on-drop guard for `MVM_TSX`, built on the shared `TestEnv`
     /// (serializes env-mutating tests and restores the prior value on drop),

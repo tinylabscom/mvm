@@ -203,7 +203,7 @@ impl ApplyStore {
         let id = uuid::Uuid::new_v4().to_string();
         let mut ops = Vec::with_capacity(plan.ops.len());
         for op in plan.ops {
-            ops.push(self.stage_op(op, source_dir, live)?);
+            ops.push(self.stage_op(op, source_dir, live, relation.is_some())?);
         }
         let mut manifest = Manifest {
             id: id.clone(),
@@ -675,16 +675,21 @@ impl ApplyStore {
         op: FileOp,
         source_dir: &Path,
         live: &dyn crate::tree_diff::TreeSource,
+        stored_post: bool,
     ) -> Result<ManifestOp, ApplyError> {
         let (pre, pre_kind) = self.stage_pre(&op, source_dir)?;
+        if !stored_post {
+            Self::verify_reviewed_image(&op.pre, &pre, &op.path)?;
+        }
         let (action, post) = match (&op.action, op.post) {
             (OpAction::Remove, _) => (ManifestAction::Remove, None),
             (OpAction::WriteFile, Some(image)) => {
-                let image = self.stage_post_file(image, live, &op.path)?;
+                let image = self.stage_post_file(image, live, &op.path, stored_post)?;
                 (ManifestAction::WriteFile, Some(image))
             }
             (OpAction::WriteSymlink { target }, Some(image)) => {
-                let (image, target) = self.stage_post_symlink(image, target)?;
+                let (image, target) =
+                    self.stage_post_symlink(image, target, &op.path, stored_post)?;
                 (ManifestAction::WriteSymlink { target }, Some(image))
             }
             (_, None) => {
@@ -744,23 +749,29 @@ impl ApplyStore {
     }
 
     /// A fresh apply's post-image: stream the workspace file into the blob
-    /// store. An undo/redo post-image already names its blob: verify it
-    /// exists and agrees on size, never re-copy.
+    /// store and validate any review digest against the ingested bytes.
+    /// Only an undo/redo relation names an already persisted blob.
     fn stage_post_file(
         &self,
         image: OpImage,
         live: &dyn crate::tree_diff::TreeSource,
         path: &str,
+        stored_post: bool,
     ) -> Result<OpImage, ApplyError> {
-        match image.sha256.clone() {
-            Some(sha) => {
+        match (stored_post, image.sha256.clone()) {
+            (true, Some(sha)) => {
                 self.verify_blob(&sha, image.size)?;
                 Ok(image)
             }
-            None => {
+            (true, None) => Err(ApplyError::Corrupt(format!(
+                "{path}: missing stored post digest"
+            ))),
+            (false, _) => {
                 let mut sink = self.hashing_blob_sink()?;
                 live.copy_file_to(path, &mut sink)?;
-                self.finish_streaming_blob(sink, path)
+                let stored = self.finish_streaming_blob(sink, path)?;
+                Self::verify_reviewed_image(&image, &stored, path)?;
+                Ok(stored)
             }
         }
     }
@@ -769,20 +780,41 @@ impl ApplyStore {
         &self,
         image: OpImage,
         target: &str,
+        path: &str,
+        stored_post: bool,
     ) -> Result<(OpImage, String), ApplyError> {
-        match image.sha256.clone() {
-            Some(sha) => {
+        match (stored_post, image.sha256.clone()) {
+            (true, Some(sha)) => {
                 self.verify_blob(&sha, image.size)?;
                 // The target string lives in the blob; the manifest action
                 // carries it for the record and for symlink writes.
                 let stored = fs::read_to_string(self.blob_path(&sha))?;
                 Ok((image, stored))
             }
-            None => {
+            (true, None) => Err(ApplyError::Corrupt(format!(
+                "{path}: missing stored post digest"
+            ))),
+            (false, _) => {
                 let stored = self.store_bytes(target.as_bytes())?;
+                Self::verify_reviewed_image(&image, &stored, path)?;
                 Ok((stored, target.to_string()))
             }
         }
+    }
+
+    fn verify_reviewed_image(
+        expected: &OpImage,
+        stored: &OpImage,
+        path: &str,
+    ) -> Result<(), ApplyError> {
+        if expected.sha256.is_some()
+            && (expected.sha256 != stored.sha256 || expected.size != stored.size)
+        {
+            return Err(ApplyError::Corrupt(format!(
+                "{path}: content changed since review"
+            )));
+        }
+        Ok(())
     }
 
     /// Open a temp blob plus a hasher; the caller streams into the sink,

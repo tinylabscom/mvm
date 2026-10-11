@@ -32,6 +32,20 @@ pub const SKIP_COSIGN_VERIFY_ENV: &str = "MVM_SKIP_COSIGN_VERIFY";
 /// Suffix the release attaches beside each signed archive.
 const BUNDLE_SUFFIX: &str = ".bundle";
 
+/// Published CLI checksum bytes and their real keyless signature, for offline
+/// cross-crate trust-boundary tests. This payload is not an image-set manifest.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixture {
+    pub const VERSION: &str = "0.18.0-rc.1";
+    pub const ASSET: &str = "builder-vm-aarch64-checksums-sha256.txt";
+    pub const PAYLOAD: &[u8] = include_bytes!(
+        "../tests/fixtures/release-signature/v0.18.0-rc.1/builder-vm-aarch64-checksums-sha256.txt"
+    );
+    pub const BUNDLE: &[u8] = include_bytes!(
+        "../tests/fixtures/release-signature/v0.18.0-rc.1/builder-vm-aarch64-checksums-sha256.txt.bundle"
+    );
+}
+
 /// Name of the signature bundle published beside `asset`.
 ///
 /// One definition, so the release workflow's asset list and the downloader's
@@ -122,7 +136,7 @@ pub fn verify_release_archive_signature(
 fn fetch_bundle(request: &ReleaseSignatureRequest<'_>) -> Result<Vec<u8>, RuntimeOverlayError> {
     let url = format!("{}/{}", request.base_url, bundle_asset_name(request.asset));
     let tmp = tempfile::NamedTempFile::new()?;
-    crate::runtime_overlay::curl_download(&url, tmp.path()).map_err(|_| {
+    crate::runtime_overlay::download_artifact(&url, tmp.path()).map_err(|_| {
         RuntimeOverlayError::SignatureMissing {
             asset: request.asset.to_string(),
             bundle_url: url.clone(),
@@ -325,8 +339,7 @@ mod tests {
     mod cli_signed_fixture {
         use super::*;
 
-        const VERSION: &str = "0.18.0-rc.1";
-        const ASSET: &str = "builder-vm-aarch64-checksums-sha256.txt";
+        use super::super::fixture::{ASSET, VERSION};
 
         fn verify(train: ReleaseTrain, version: &str) -> Result<(), RuntimeOverlayError> {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -48,7 +48,7 @@ pub mod warm_artifact_source {
 }
 
 pub(in crate::commands) use build::ir_input::load_ir_json_workload;
-pub(crate) use shared::{DirShareSpec, parse_dir_share_spec};
+pub(crate) use shared::DirShareSpec;
 pub(crate) use vm::exec::RunProfile;
 
 #[cfg(test)]
@@ -408,8 +408,6 @@ fn run_command() -> Result<()> {
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
-    register_builder_image_acquirer();
-    register_stream_plane();
     // Bound for the rest of the command so queued trace spans are flushed as
     // it returns. A verb that ends early goes through `mvm_observability::exit`,
     // which flushes the same export first.
@@ -417,10 +415,6 @@ fn run_command() -> Result<()> {
 
     if let Some(result) = cli.command.try_run_early() {
         return result;
-    }
-
-    if cli.command.emits_machine_readable_stdout() {
-        mvm_runtime::ui::set_chrome_to_stderr(true);
     }
 
     install_signal_handler();
@@ -786,9 +780,12 @@ fn declare_embedded_host_binaries() {
 fn register_inhouse_builder() {
     // `mvm-build` constructs the libkrun, QEMU and WebLinux builders itself but
     // cannot name the HVF and Firecracker drivers, which live a layer up.
-    // `mvm-runtime` owns those constructors and their Stage 0; a library caller
-    // registers the same ones before it builds.
-    mvm_runtime::builder_runner::register_driver_backed_builders();
+    // The client registers those constructors and the shared output-stream plane
+    // for both command and embedding frontends.
+    mvm_client::host_runtime::initialize();
+    mvm_client::builder_images::host_helpers::register_install_target(
+        crate::update::host_helper_install_target,
+    );
 
     // Stage 0's bootstrap kernel is pinned in source and verified in
     // `mvm-build`; this crate supplies only the transport. It has to be curl:
@@ -807,22 +804,12 @@ fn register_inhouse_builder() {
     ));
 }
 
-/// Give the workload runner a real per-VM output-stream plane.
-///
-/// Unconditional and before any command runs, because the hook it registers
-/// is what makes a workload's output followable at all: registering it per
-/// command, or only for the commands that obviously start VMs, would leave
-/// whichever path was missed silently falling back to an unchained console
-/// tail. `mvm-runtime` cannot reach `mvm-hostd` (dependency direction), so the
-/// CLI bridges the gap here — the same shape as
-/// [`register_inhouse_builder`] above.
-fn register_stream_plane() {
-    mvm_hostd::stream::install_host_console_streamer();
-}
-
 fn configure_runtime_logging(cli: &Cli) -> logging::ObservabilityGuard {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
-    mvm_runtime::ui::set_verbose(verbose);
+    mvm_client::host_runtime::configure_output(mvm_client::host_runtime::OutputPolicy {
+        verbose,
+        machine_readable_stdout: cli.command.emits_machine_readable_stdout(),
+    });
     if cli.verbose > 0 {
         set_cli_env(mvm_build::guest_agent_build::GUEST_BUILD_VERBOSE_ENV, "1");
     }
@@ -877,7 +864,7 @@ fn termination_handler(
             "\n{}",
             interrupt_cleanup_message(stage0_active)
         );
-        let ran = mvm_runtime::interrupt_cleanup::run_all();
+        let ran = mvm_client::host_runtime::run_interrupt_cleanups();
         if !ran.is_empty() {
             // A cleanup that could not settle its work (an unkillable VMM, a
             // failed registry write) leaves only this line behind.
@@ -913,8 +900,9 @@ fn maybe_converge_on_entry(command: &Commands) {
     if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
         return;
     }
-    let _ =
-        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
+    let _ = mvm_client::maintenance::reconcile(&mvm_client::maintenance::ReconcileRequest {
+        apply: true,
+    });
 }
 
 #[cfg(test)]

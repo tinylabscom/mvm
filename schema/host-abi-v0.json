@@ -2,6 +2,14 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AccessMode": {
+      "description": "How a guest sees an attachment: read-only (the default everywhere) or read-write (an explicit opt-in gated on the admitted profile).",
+      "enum": [
+        "read-only",
+        "read-write"
+      ],
+      "type": "string"
+    },
     "AgentErrorReply": {
       "description": "Why the guest agent (or, for a killed session, the host) ended the call rather than the workload exiting.",
       "properties": {
@@ -16,6 +24,931 @@
         "kind",
         "message"
       ],
+      "type": "object"
+    },
+    "AgentProfile": {
+      "description": "Profile baked into an mvm guest image. Determines the set of vsock verbs the guest agent's dispatcher will accept; dev-only verbs (`Exec`, `ConsoleOpen`, `ProcStart`, `RunCode`, filesystem RPC, port forwarding) are rejected pre-handler when the image declares `SealedProd`.\n\n**Source of truth.** The profile is declared by the image config — `/etc/mvm/security.json` on a sealed-prod image lives on a dm-verity rootfs, so the value cannot be widened at runtime: any modification breaks the verity hash and the kernel panics in `mvm-verity-init` before userspace. The loader treats absence of the policy file as an unprovisioned dev image (`SecurityPolicy::dev_defaults`).\n\n**Builder uses a different protocol.** `mvm-builder-agent`'s wire type is `HostVmRequest`, not `GuestRequest`; the `Builder` profile is reserved for any future `GuestRequest` variant that only makes sense during a build. No current variant is `BuilderOnly`, so the value is wire-stable but unused for the tenant agent today.",
+      "oneOf": [
+        {
+          "description": "Hardened production guest. Only production-safe verbs pass the dispatcher gate.",
+          "enum": [
+            "sealed-prod"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Development guest. Adds shell exec, process RPC, filesystem RPC, console, port forwarding, and `RunCode`.",
+          "enum": [
+            "dev"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Builder-VM agent. Reserved for `BuilderOnly`-classified verbs when the builder protocol moves to `GuestRequest`; today the builder agent speaks `HostVmRequest` exclusively.",
+          "enum": [
+            "builder"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AgentSessionId": {
+      "description": "Stable public agent-session identifier.",
+      "type": "string"
+    },
+    "AgentSessionsListReply": {
+      "items": {
+        "description": "Stable, owned view of a stored session, including retention at observation.",
+        "properties": {
+          "approval_head": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_unix": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "generation": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "journal_cursor": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "last_transition": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/RecordedTransition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "parent_checkpoint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "park_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/ParkReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "retain_until_unix": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "retention": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/RetentionStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/definitions/Residency"
+          },
+          "storage_tier": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/StorageTier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updated_unix": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "created_unix",
+          "generation",
+          "journal_cursor",
+          "members",
+          "session_id",
+          "state",
+          "updated_unix"
+        ],
+        "title": "SessionReport",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "AgentSessionsListRequest": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "AgentSessionsOpenReply": {
+      "description": "Stable, owned view of a stored session, including retention at observation.",
+      "properties": {
+        "approval_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "last_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecordedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "parent_checkpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "park_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ParkReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retain_until_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RetentionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/Residency"
+        },
+        "storage_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StorageTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "created_unix",
+        "generation",
+        "journal_cursor",
+        "members",
+        "session_id",
+        "state",
+        "updated_unix"
+      ],
+      "title": "SessionReport",
+      "type": "object"
+    },
+    "AgentSessionsOpenRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/OpenRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_OpenRequest",
+      "type": "object"
+    },
+    "AgentSessionsParkReply": {
+      "properties": {
+        "admitted_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "booted_sandbox": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "session": {
+          "$ref": "#/definitions/SessionReport"
+        },
+        "transition": {
+          "$ref": "#/definitions/Transition"
+        },
+        "warnings": {
+          "description": "Audit failures after a durable mutation do not imply the mutation failed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "replayed",
+        "session",
+        "transition"
+      ],
+      "title": "TransitionReport",
+      "type": "object"
+    },
+    "AgentSessionsParkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/ParkRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_ParkRequest",
+      "type": "object"
+    },
+    "AgentSessionsRenewReply": {
+      "properties": {
+        "admitted_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "booted_sandbox": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "session": {
+          "$ref": "#/definitions/SessionReport"
+        },
+        "transition": {
+          "$ref": "#/definitions/Transition"
+        },
+        "warnings": {
+          "description": "Audit failures after a durable mutation do not imply the mutation failed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "replayed",
+        "session",
+        "transition"
+      ],
+      "title": "TransitionReport",
+      "type": "object"
+    },
+    "AgentSessionsRenewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/RenewRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_RenewRequest",
+      "type": "object"
+    },
+    "AgentSessionsResumeReply": {
+      "properties": {
+        "admitted_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "booted_sandbox": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": "boolean"
+        },
+        "session": {
+          "$ref": "#/definitions/SessionReport"
+        },
+        "transition": {
+          "$ref": "#/definitions/Transition"
+        },
+        "warnings": {
+          "description": "Audit failures after a durable mutation do not imply the mutation failed.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "replayed",
+        "session",
+        "transition"
+      ],
+      "title": "TransitionReport",
+      "type": "object"
+    },
+    "AgentSessionsResumeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/ResumeRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_ResumeRequest",
+      "type": "object"
+    },
+    "AgentSessionsShowReply": {
+      "description": "Stable, owned view of a stored session, including retention at observation.",
+      "properties": {
+        "approval_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "last_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecordedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "parent_checkpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "park_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ParkReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retain_until_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RetentionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/Residency"
+        },
+        "storage_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StorageTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "created_unix",
+        "generation",
+        "journal_cursor",
+        "members",
+        "session_id",
+        "state",
+        "updated_unix"
+      ],
+      "title": "SessionReport",
+      "type": "object"
+    },
+    "AgentSessionsShowRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "ShowRequest",
+      "type": "object"
+    },
+    "AppliedReport": {
+      "properties": {
+        "apply_id": {
+          "type": "string"
+        },
+        "changes": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "merkle_root": {
+          "type": "string"
+        },
+        "snapshot_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "apply_id",
+        "changes",
+        "merkle_root",
+        "snapshot_root"
+      ],
+      "type": "object"
+    },
+    "ApprovalHead": {
+      "description": "The approval-ledger head a [`SessionBinding`] was admitted under.\n\nShares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both are heads of a hash chain — but an approval-ledger head is deliberately not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the shape is shared with no conversion: so the boundary between unrelated hash-chain heads is a type-system property, not a string check. Without this newtype, `approval_head: CheckpointDigest` would let an approval head be assigned wherever a checkpoint content-address is expected (or the reverse) with the compiler saying nothing — and because `SessionBinding` sits inside `CheckpointMeta`'s digest input, whichever encoding shipped first would freeze into every sealed record's `meta_digest`.",
+      "type": "string"
+    },
+    "ArtifactConfigureFirecrackerReply": {
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "path"
+      ],
+      "title": "BackendConfigReport",
+      "type": "object"
+    },
+    "ArtifactConfigureFirecrackerRequest": {
+      "additionalProperties": false,
+      "description": "An exact artifact ID or an unambiguous prefix, never a filesystem path.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ArtifactRequest",
+      "type": "object"
+    },
+    "ArtifactInspectReply": {
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "artifact_id": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "build_id": {
+          "type": "string"
+        },
+        "builder_version": {
+          "type": "string"
+        },
+        "config_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "$ref": "#/definitions/KernelReport"
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProvenanceReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rootfs": {
+          "$ref": "#/definitions/RootfsReport"
+        },
+        "tenant_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timestamp_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ValidationReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "arch",
+        "artifact_id",
+        "backend",
+        "build_id",
+        "builder_version",
+        "kernel",
+        "rootfs",
+        "timestamp_unix"
+      ],
+      "title": "ArtifactReport",
+      "type": "object"
+    },
+    "ArtifactInspectRequest": {
+      "additionalProperties": false,
+      "description": "An exact artifact ID or an unambiguous prefix, never a filesystem path.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ArtifactRequest",
+      "type": "object"
+    },
+    "ArtifactValidateReply": {
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/definitions/ValidationCheck"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checks",
+        "ok"
+      ],
+      "title": "ValidationReport",
+      "type": "object"
+    },
+    "ArtifactValidateRequest": {
+      "additionalProperties": false,
+      "description": "An exact artifact ID or an unambiguous prefix, never a filesystem path.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ArtifactRequest",
+      "type": "object"
+    },
+    "AttachmentSource": {
+      "description": "Origin of a registered attachment's host path.",
+      "oneOf": [
+        {
+          "description": "The path must keep matching an encrypted local-catalog entry.",
+          "enum": [
+            "managed-catalog"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Operator-supplied host directory; host encryption is rechecked immediately before every launch.",
+          "enum": [
+            "ad-hoc-host"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "AuditSessionsListReply": {
+      "properties": {
+        "ledger": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LedgerCheck"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "None means no chain exists, not a verified empty ledger."
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/definitions/SessionSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sessions"
+      ],
+      "title": "ListReport",
+      "type": "object"
+    },
+    "AuditSessionsListRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "range": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeRange"
+            }
+          ],
+          "default": {
+            "since": null,
+            "until": null
+          }
+        },
+        "tenant": {
+          "default": "local",
+          "type": "string"
+        }
+      },
+      "title": "ListRequest",
+      "type": "object"
+    },
+    "AuditSessionsShowReply": {
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/definitions/SessionEvent"
+          },
+          "type": "array"
+        },
+        "plan_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events",
+        "plan_id"
+      ],
+      "title": "ShowReport",
+      "type": "object"
+    },
+    "AuditSessionsShowRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EventFilter"
+            }
+          ],
+          "default": {
+            "kind": null,
+            "range": {
+              "since": null,
+              "until": null
+            }
+          }
+        },
+        "selector": {
+          "type": "string"
+        },
+        "tenant": {
+          "default": "local",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector"
+      ],
+      "title": "ShowRequest",
+      "type": "object"
+    },
+    "AuditSessionsVerifyReply": {
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_count": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "late_entries": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MismatchReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seals": {
+          "items": {
+            "$ref": "#/definitions/SealCheck"
+          },
+          "type": "array"
+        },
+        "verdict": {
+          "$ref": "#/definitions/Verdict"
+        }
+      },
+      "required": [
+        "event_count",
+        "late_entries",
+        "plan_id",
+        "seals",
+        "verdict"
+      ],
+      "title": "SessionVerification",
+      "type": "object"
+    },
+    "AuditSessionsVerifyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "selector": {
+          "type": "string"
+        },
+        "tenant": {
+          "default": "local",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selector"
+      ],
+      "title": "VerifyRequest",
       "type": "object"
     },
     "BackendCapabilitiesReply": {
@@ -93,6 +1026,1052 @@
         }
       ]
     },
+    "BlobDelta": {
+      "description": "A manifest delta; no checkpoint contents are decrypted to compute it.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sha_a": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha_b": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/BlobStatus"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "BlobStatus": {
+      "description": "How a content blob changed between two checkpoint manifests.",
+      "enum": [
+        "unchanged",
+        "changed",
+        "added_in_b",
+        "removed_from_b"
+      ],
+      "type": "string"
+    },
+    "BundleExportReply": {
+      "properties": {
+        "key_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key_id",
+        "path",
+        "size_bytes"
+      ],
+      "title": "ExportReport",
+      "type": "object"
+    },
+    "BundleExportRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "cmdline": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "out": {
+          "type": "string"
+        },
+        "posture": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExportPosture"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "out",
+        "template"
+      ],
+      "title": "ExportRequest",
+      "type": "object"
+    },
+    "CallerCommitment": {
+      "description": "Opaque caller-supplied 32-byte commitment bound into an execution plan.\n\nMVM validates only the byte width and canonical wire encoding. The caller and external verifier define what the bytes commit to; MVM does not assign a hash algorithm or interpret their semantics.",
+      "items": {
+        "format": "uint8",
+        "minimum": 0.0,
+        "type": "integer"
+      },
+      "maxItems": 32,
+      "minItems": 32,
+      "type": "array"
+    },
+    "CaptureRequest": {
+      "additionalProperties": false,
+      "description": "Capture the current machine state without exposing stores, drivers, or keys.",
+      "properties": {
+        "class": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "name": {
+          "type": "string"
+        },
+        "tag": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "class",
+        "name"
+      ],
+      "type": "object"
+    },
+    "ChangeAction": {
+      "enum": [
+        "write_file",
+        "write_symlink",
+        "remove"
+      ],
+      "type": "string"
+    },
+    "ChangeSummary": {
+      "properties": {
+        "action": {
+          "$ref": "#/definitions/ChangeAction"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "path"
+      ],
+      "type": "object"
+    },
+    "CheckpointClass": {
+      "description": "The capture mechanism behind a checkpoint. Only `FsQuick` is currently implemented; `VmFull` is reserved so the memory-state path can slot into the same model without a new surface.",
+      "oneOf": [
+        {
+          "description": "Copy-on-write clone of a quiesced rootfs (filesystem state only).",
+          "enum": [
+            "fs_quick"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full machine memory state via the supervisor save/restore path.",
+          "enum": [
+            "vm_full"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "CheckpointDigest": {
+      "description": "Content-address of a [`CheckpointMeta`]: `sha256(serde_json(load-bearing fields))` rendered `sha256:<64 lowercase hex>`. A child hash-links to its parent by this digest, so editing an ancestor's sealed record is detectable from any descendant — the recomputed ancestor digest no longer matches the child's link.\n\nThis is a content-address, not a signature and not an exact-byte blob digest. It shares the `sha256:<64-hex>` wire shape with several unrelated ids (OCI manifest/layer digests, blob shas, workload addresses) precisely so the boundary between them is a type-system property, not a string check: there is no `From`/`Into`/`Deref` to or from any of them (nor to [`CheckpointId`]), so handing one where another is expected does not compile.",
+      "type": "string"
+    },
+    "CheckpointId": {
+      "description": "Stable identifier for a checkpoint (also its on-disk directory name under `config::checkpoints_dir()`).",
+      "type": "string"
+    },
+    "CheckpointKeyDomain": {
+      "description": "Isolation boundary for checkpoint chunk deduplication.\n\nThe wire form is either `host` or `tenant:<name>`. The field is sealed into [`CheckpointMeta::meta_digest`], so changing the domain after capture makes lineage verification fail. Storage code hashes this value before using it as a directory name; tenant-controlled text never becomes a path component.",
+      "type": "string"
+    },
+    "CheckpointMeta": {
+      "additionalProperties": false,
+      "description": "On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).\n\n`parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.\n\n`audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.",
+      "properties": {
+        "audit_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "class": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "content": {
+          "items": {
+            "$ref": "#/definitions/ContentBlob"
+          },
+          "type": "array"
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "grants": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Grants"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child."
+        },
+        "id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "key_domain": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointKeyDomain"
+            }
+          ],
+          "description": "Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape."
+        },
+        "machine_input_cursor": {
+          "description": "Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "meta_digest": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            }
+          ],
+          "description": "Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_overlay_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest."
+        },
+        "snapshot_id": {
+          "description": "Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supervisor_config_digest": {
+          "type": "string"
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "content",
+        "created_unix",
+        "id",
+        "meta_digest",
+        "supervisor_config_digest",
+        "vm_name"
+      ],
+      "type": "object"
+    },
+    "CheckpointsCaptureReply": {
+      "additionalProperties": false,
+      "description": "On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).\n\n`parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.\n\n`audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.",
+      "properties": {
+        "audit_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "class": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "content": {
+          "items": {
+            "$ref": "#/definitions/ContentBlob"
+          },
+          "type": "array"
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "grants": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Grants"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child."
+        },
+        "id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "key_domain": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointKeyDomain"
+            }
+          ],
+          "description": "Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape."
+        },
+        "machine_input_cursor": {
+          "description": "Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "meta_digest": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            }
+          ],
+          "description": "Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_overlay_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest."
+        },
+        "snapshot_id": {
+          "description": "Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supervisor_config_digest": {
+          "type": "string"
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "content",
+        "created_unix",
+        "id",
+        "meta_digest",
+        "supervisor_config_digest",
+        "vm_name"
+      ],
+      "title": "CheckpointMeta",
+      "type": "object"
+    },
+    "CheckpointsCaptureRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/CaptureRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_CaptureRequest",
+      "type": "object"
+    },
+    "CheckpointsDiffReply": {
+      "description": "Stable metadata comparison result, preserving the command JSON shape.",
+      "properties": {
+        "a_id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "b_id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "blobs": {
+          "items": {
+            "$ref": "#/definitions/BlobDelta"
+          },
+          "type": "array"
+        },
+        "class_a": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "class_b": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "created_unix_a": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "created_unix_b": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lineage": {
+          "$ref": "#/definitions/LineageRelation"
+        },
+        "supervisor_config_digest_same": {
+          "type": "boolean"
+        },
+        "tag_a": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag_b": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm_name_a": {
+          "type": "string"
+        },
+        "vm_name_b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "a_id",
+        "b_id",
+        "blobs",
+        "class_a",
+        "class_b",
+        "created_unix_a",
+        "created_unix_b",
+        "lineage",
+        "supervisor_config_digest_same",
+        "vm_name_a",
+        "vm_name_b"
+      ],
+      "title": "CheckpointDiff",
+      "type": "object"
+    },
+    "CheckpointsDiffRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "a": {
+          "type": "string"
+        },
+        "b": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "a",
+        "b"
+      ],
+      "title": "DiffRequest",
+      "type": "object"
+    },
+    "CheckpointsForkReply": {
+      "description": "A completed fork. The checkpoint is the child's sealed lineage record.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "booted": {
+          "type": "boolean"
+        },
+        "checkpoint": {
+          "$ref": "#/definitions/CheckpointMeta"
+        },
+        "child_vm_name": {
+          "type": "string"
+        },
+        "parent_id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "action",
+        "booted",
+        "checkpoint",
+        "child_vm_name",
+        "parent_id",
+        "schema_version"
+      ],
+      "title": "ForkReport",
+      "type": "object"
+    },
+    "CheckpointsForkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/ForkRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_ForkRequest",
+      "type": "object"
+    },
+    "CheckpointsInfoReply": {
+      "additionalProperties": false,
+      "description": "On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).\n\n`parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.\n\n`audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.",
+      "properties": {
+        "audit_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "class": {
+          "$ref": "#/definitions/CheckpointClass"
+        },
+        "content": {
+          "items": {
+            "$ref": "#/definitions/ContentBlob"
+          },
+          "type": "array"
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "grants": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Grants"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child."
+        },
+        "id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "key_domain": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointKeyDomain"
+            }
+          ],
+          "description": "Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape."
+        },
+        "machine_input_cursor": {
+          "description": "Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "meta_digest": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            }
+          ],
+          "description": "Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record."
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CheckpointDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "runtime_overlay_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionBinding"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest."
+        },
+        "snapshot_id": {
+          "description": "Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supervisor_config_digest": {
+          "type": "string"
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "content",
+        "created_unix",
+        "id",
+        "meta_digest",
+        "supervisor_config_digest",
+        "vm_name"
+      ],
+      "title": "CheckpointMeta",
+      "type": "object"
+    },
+    "CheckpointsInfoRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "IdRequest",
+      "type": "object"
+    },
+    "CheckpointsListReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).\n\n`parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.\n\n`audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.",
+        "properties": {
+          "audit_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "class": {
+            "$ref": "#/definitions/CheckpointClass"
+          },
+          "content": {
+            "items": {
+              "$ref": "#/definitions/ContentBlob"
+            },
+            "type": "array"
+          },
+          "created_unix": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "grants": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/Grants"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child."
+          },
+          "id": {
+            "$ref": "#/definitions/CheckpointId"
+          },
+          "key_domain": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointKeyDomain"
+              }
+            ],
+            "description": "Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape."
+          },
+          "machine_input_cursor": {
+            "description": "Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.",
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "meta_digest": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointDigest"
+              }
+            ],
+            "description": "Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record."
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/CheckpointDigest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_overlay_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/SessionBinding"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest."
+          },
+          "snapshot_id": {
+            "description": "Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "supervisor_config_digest": {
+            "type": "string"
+          },
+          "tag": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vm_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "class",
+          "content",
+          "created_unix",
+          "id",
+          "meta_digest",
+          "supervisor_config_digest",
+          "vm_name"
+        ],
+        "title": "CheckpointMeta",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "CheckpointsListRequest": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "CheckpointsRemoveReply": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "CheckpointsRemoveRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/IdRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_IdRequest",
+      "type": "object"
+    },
+    "CheckpointsRestoreReply": {
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "schema_version": {
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "action",
+        "id",
+        "schema_version",
+        "vm_name"
+      ],
+      "title": "RestoreReport",
+      "type": "object"
+    },
+    "CheckpointsRestoreRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "intent": {
+          "$ref": "#/definitions/MutationIntent"
+        },
+        "request": {
+          "$ref": "#/definitions/RestoreRequest"
+        }
+      },
+      "required": [
+        "intent",
+        "request"
+      ],
+      "title": "Mutation_for_RestoreRequest",
+      "type": "object"
+    },
+    "CheckpointsTimelineReply": {
+      "description": "A rendered lineage: ancestors (genesis → the target's parent), the target, and its immediate children. Common shape for both the checkpoint and image DAGs; per-store presentation feeds this one struct.",
+      "properties": {
+        "action": {
+          "type": "string"
+        },
+        "ancestors": {
+          "description": "Ancestors ordered genesis → the target's immediate parent (excludes the target itself).",
+          "items": {
+            "$ref": "#/definitions/TimelineNode"
+          },
+          "type": "array"
+        },
+        "children": {
+          "description": "The target's immediate children — forward is a tree, so this may fork.",
+          "items": {
+            "$ref": "#/definitions/TimelineNode"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "description": "`\"checkpoint\"` or `\"image\"`.",
+          "type": "string"
+        },
+        "lineage_broken": {
+          "description": "A structural break that stopped the ancestry walk before genesis (a dangling parent hash-link or a would-be cycle), if any.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "node": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimelineNode"
+            }
+          ],
+          "description": "The target node."
+        },
+        "schema_version": {
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "target": {
+          "description": "What identifies the target: a checkpoint id, or an image node digest.",
+          "type": "string"
+        },
+        "verified": {
+          "description": "Overall verdict: every rendered hop verified AND the ancestry reached genesis with no structural break. Surfaced, never enforced.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "action",
+        "ancestors",
+        "children",
+        "kind",
+        "node",
+        "schema_version",
+        "target",
+        "verified"
+      ],
+      "title": "Timeline",
+      "type": "object"
+    },
+    "CheckpointsTimelineRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LineageKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "title": "TimelineRequest",
+      "type": "object"
+    },
+    "CheckpointsVerifyReply": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "CheckpointsVerifyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "IdRequest",
+      "type": "object"
+    },
+    "ContentBlob": {
+      "additionalProperties": false,
+      "description": "One named artifact inside a checkpoint's `content/` dir, with its hash.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "sha256"
+      ],
+      "type": "object"
+    },
     "CopyDirection": {
       "description": "Which way `guest.cp` moves the file.",
       "oneOf": [
@@ -112,6 +2091,159 @@
         }
       ]
     },
+    "CpuGrant": {
+      "description": "CPU bound. The two variants are different units, not different precisions, and no conversion between them is offered: a share is a fraction of host wall-clock CPU, fuel is a count of executed instructions.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "Thousandths of one host core. 1500 = 1.5 cores. Integer because the value lands in a signed, content-addressed payload and float canonicalization is not stable across serializers.",
+          "properties": {
+            "millicores": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "unit": {
+              "enum": [
+                "share"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "millicores",
+            "unit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A deterministic executed-instruction budget. Reproducible across hosts in a way no share-based bound is.",
+          "properties": {
+            "instructions": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "unit": {
+              "enum": [
+                "fuel"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "instructions",
+            "unit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DisplayClipboardGrant": {
+      "additionalProperties": false,
+      "description": "Host-to-guest paste authority.",
+      "properties": {
+        "max_paste_bytes": {
+          "description": "Largest paste, in UTF-8 bytes. Admission refuses a value above [`MAX_CLIPBOARD_PASTE_BYTES`].",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_paste_bytes"
+      ],
+      "type": "object"
+    },
+    "DisplayInputGrant": {
+      "additionalProperties": false,
+      "description": "Authority to send display input events to a workload.",
+      "properties": {
+        "attended": {
+          "description": "A human attends this run. Required before a sealed workload accepts display input, and reported by `doctor` and `machine ls`.",
+          "type": "boolean"
+        },
+        "clipboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DisplayClipboardGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host-to-guest paste. Absent means no paste event is accepted."
+        },
+        "human_credential": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HumanCredentialGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A human will enter a credential through the display during this run."
+        }
+      },
+      "type": "object"
+    },
+    "DriveGrant": {
+      "additionalProperties": false,
+      "description": "The bounded authority to drive one plan-selected program and its workspace.",
+      "properties": {
+        "max_bytes_in": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "max_bytes_out": {
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "program_id": {
+          "type": "string"
+        },
+        "ttl": {
+          "description": "Lifetime of one opened drive session, in seconds.",
+          "format": "uint32",
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "workspace_roots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "max_bytes_in",
+        "max_bytes_out",
+        "program_id",
+        "ttl",
+        "workspace_roots"
+      ],
+      "type": "object"
+    },
+    "EgressGrant": {
+      "additionalProperties": false,
+      "description": "Outbound destinations. An empty `allow` is \"no egress\" and is distinct from an absent `EgressGrant`, which is also deny-all — both are closed, so the distinction never opens anything.",
+      "properties": {
+        "allow": {
+          "items": {
+            "$ref": "#/definitions/HostPort"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "allow"
+      ],
+      "type": "object"
+    },
     "EgressTarget": {
       "additionalProperties": false,
       "description": "One outbound destination the workload may reach. Each one lands in the signed plan's egress grant, which is what the host egress gate reads.",
@@ -130,6 +2262,39 @@
         "port"
       ],
       "type": "object"
+    },
+    "EncryptionState": {
+      "description": "Lifecycle position of a volume's encryption, collapsed to what a presentation surface needs. Transitional catalog states surface as [`EncryptionState::Recovering`]; the recovery pass drives them back to a terminal state before any new lifecycle operation proceeds.",
+      "oneOf": [
+        {
+          "description": "At-rest encryption comes from the host filesystem or block device.",
+          "enum": [
+            "host-backed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Sealed: only the authenticated ciphertext archive exists on disk.",
+          "enum": [
+            "locked"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Explicitly unlocked: the plaintext attachment artifact is materialized.",
+          "enum": [
+            "unlocked"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An interrupted lifecycle transition awaiting crash recovery.",
+          "enum": [
+            "recovering"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "EntrypointCallReply": {
       "description": "The reply to `entrypoint.call` and `session.call`.",
@@ -239,6 +2404,98 @@
       "title": "EntrypointCallRequest",
       "type": "object"
     },
+    "EventFilter": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "range": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/TimeRange"
+            }
+          ],
+          "default": {
+            "since": null,
+            "until": null
+          }
+        }
+      },
+      "type": "object"
+    },
+    "ExportPosture": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_egress": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allow_unauthenticated": {
+          "default": false,
+          "type": "boolean"
+        },
+        "allow_volumes": {
+          "default": false,
+          "type": "boolean"
+        },
+        "profile": {
+          "$ref": "#/definitions/AgentProfile"
+        }
+      },
+      "required": [
+        "profile"
+      ],
+      "type": "object"
+    },
+    "ForkRequest": {
+      "additionalProperties": false,
+      "description": "Ordinary forks cannot replace secret bindings or opt out of attenuation.",
+      "properties": {
+        "boot": {
+          "type": "boolean"
+        },
+        "cpus": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hypervisor": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tenant": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "boot",
+        "hypervisor",
+        "id",
+        "tenant"
+      ],
+      "type": "object"
+    },
     "FsEntry": {
       "additionalProperties": false,
       "description": "One entry in an `FsList` response.",
@@ -278,6 +2535,64 @@
         "other"
       ],
       "type": "string"
+    },
+    "Grants": {
+      "additionalProperties": false,
+      "description": "A workload's permission set. Every field is optional: absent means \"unspecified\", which each dimension resolves differently — an absent `egress` is deny-all, an absent `cpu` is uncapped.",
+      "properties": {
+        "cpu": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CpuGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "display_input": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DisplayInputGrant"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host-to-guest display input. Viewing is the separate `host.display.view.v1` service token; this grants the input direction only. Absent means no input path exists."
+        },
+        "drive": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/DriveGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EgressGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wall_clock": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WallClockGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
     },
     "GuestCpReply": {
       "title": "Empty",
@@ -935,6 +3250,70 @@
       "title": "WaitRequest",
       "type": "object"
     },
+    "HostPort": {
+      "description": "A host:port pair for network allowlist rules.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
+    "HostSnapshotRecord": {
+      "additionalProperties": false,
+      "description": "Source identity retained for an ad-hoc host directory snapshot.",
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "source_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "source_path"
+      ],
+      "type": "object"
+    },
+    "HumanCredentialGrant": {
+      "additionalProperties": false,
+      "description": "The signed statement that a human credential will be typed into the guest.\n\nThe credential itself never appears anywhere in the plan or the audit chain. What the plan records is where the resulting session may be used.",
+      "properties": {
+        "destinations": {
+          "description": "The only destinations this run may reach. Never empty: a credential with nowhere to be used needs no display input.",
+          "items": {
+            "$ref": "#/definitions/HostPort"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "destinations"
+      ],
+      "type": "object"
+    },
+    "IdRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
     "InstanceReadiness": {
       "description": "Finer-grained \"is this VM usable?\" state, composed alongside the coarse [`InstanceStatus`] lifecycle.\n\n`InstanceStatus::Running` means the backend accepted the VM and it has not stopped. `InstanceReadiness` explains *whether* it is actually usable: did the agent answer? Are integration probes green? Is a streaming operation currently throttled?\n\nReadiness transitions are independent of lifecycle transitions — they do not gate or require `InstanceStatus` to move.",
       "oneOf": [
@@ -1050,6 +3429,72 @@
           "type": "string"
         }
       ]
+    },
+    "KernelReport": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "format",
+        "hash",
+        "path"
+      ],
+      "type": "object"
+    },
+    "LedgerCheck": {
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "intact": {
+          "type": "boolean"
+        },
+        "seals": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "intact",
+        "seals"
+      ],
+      "type": "object"
+    },
+    "LineageKind": {
+      "description": "Which lineage DAG a `sha256:<hex>` digest refers to. Only used to resolve the rare cross-store collision where one digest names both a checkpoint and an image node.",
+      "enum": [
+        "checkpoint",
+        "image"
+      ],
+      "type": "string"
+    },
+    "LineageRelation": {
+      "description": "Direct content-addressed relationship between two checkpoint records.",
+      "enum": [
+        "b_child_of_a",
+        "a_child_of_b",
+        "same",
+        "unrelated"
+      ],
+      "type": "string"
     },
     "MachineCreateReply": {
       "additionalProperties": false,
@@ -2708,6 +5153,108 @@
       "title": "StopRequest",
       "type": "object"
     },
+    "MaintenanceReconcileReply": {
+      "description": "Observed drift and non-fatal errors, with the CLI's established JSON shape.",
+      "properties": {
+        "dead_process_reaped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "errors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "live": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "orphan_state_reaped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "stale_record_dropped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "unadmitted_resume_stopped": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "dead_process_reaped",
+        "errors",
+        "live",
+        "orphan_state_reaped",
+        "stale_record_dropped",
+        "unadmitted_resume_stopped"
+      ],
+      "title": "ReconcileReport",
+      "type": "object"
+    },
+    "MaintenanceReconcileRequest": {
+      "additionalProperties": false,
+      "description": "Preview drift unless the caller explicitly authorizes applying repairs.",
+      "properties": {
+        "apply": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "ReconcileRequest",
+      "type": "object"
+    },
+    "ManifestExportOciReply": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "slot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "size_bytes",
+        "slot_hash"
+      ],
+      "title": "ExportOciReport",
+      "type": "object"
+    },
+    "ManifestExportOciRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "out": {
+          "type": "string"
+        },
+        "template": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "out",
+        "template"
+      ],
+      "title": "ExportOciRequest",
+      "type": "object"
+    },
     "ManifestInfoReply": {
       "additionalProperties": false,
       "properties": {
@@ -2808,6 +5355,96 @@
       "title": "ListRequest",
       "type": "object"
     },
+    "ManifestPruneReply": {
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/definitions/PruneCandidate"
+          },
+          "type": "array"
+        },
+        "dry_run": {
+          "type": "boolean"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed_count": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "candidates",
+        "dry_run",
+        "removed",
+        "removed_count"
+      ],
+      "title": "PruneReport",
+      "type": "object"
+    },
+    "ManifestPruneRequest": {
+      "additionalProperties": false,
+      "description": "`orphans` explicitly selects the destructive mode. The library defaults to preview; the CLI explicitly maps its existing `--dry-run` flag.",
+      "properties": {
+        "dry_run": {
+          "default": true,
+          "type": "boolean"
+        },
+        "orphans": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "PruneRequest",
+      "type": "object"
+    },
+    "ManifestRemoveReply": {
+      "properties": {
+        "manifest_file_deleted": {
+          "type": "boolean"
+        },
+        "manifest_path": {
+          "type": "string"
+        },
+        "slot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_file_deleted",
+        "manifest_path",
+        "slot_hash"
+      ],
+      "title": "RemoveReport",
+      "type": "object"
+    },
+    "ManifestRemoveRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "manifest_file": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "RemoveRequest",
+      "type": "object"
+    },
     "ManifestVerifyReply": {
       "description": "Identity of a slot whose runtime checksum verification succeeded.",
       "properties": {
@@ -2851,6 +5488,189 @@
       "title": "VerifyRequest",
       "type": "object"
     },
+    "MismatchReason": {
+      "enum": [
+        "chain_break",
+        "signature",
+        "malformed",
+        "truncated_tail",
+        "count_mismatch",
+        "sequence_mismatch",
+        "root_mismatch",
+        "environment_mismatch",
+        "snapshot_root_mismatch",
+        "head_mismatch",
+        "ledger_break",
+        "malformed_seal",
+        "io"
+      ],
+      "type": "string"
+    },
+    "MutationIntent": {
+      "description": "Operations without a genuine preview require this explicit intent.",
+      "enum": [
+        "execute"
+      ],
+      "type": "string"
+    },
+    "OpenRequest": {
+      "additionalProperties": false,
+      "description": "Creation inputs contain references and identities, never secret material.",
+      "properties": {
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resume_point": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "members",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "ParkReason": {
+      "enum": [
+        "approval_wait",
+        "idle",
+        "host_shutdown",
+        "operator",
+        "retention_demotion"
+      ],
+      "type": "string"
+    },
+    "ParkRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "retain_for": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "journal_cursor",
+        "reason",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "PlanSummary": {
+      "properties": {
+        "changes": {
+          "items": {
+            "$ref": "#/definitions/ChangeSummary"
+          },
+          "type": "array"
+        },
+        "refused_protected": {
+          "items": {
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "refused_unappliable": {
+          "items": {
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "skipped_excluded": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "changes",
+        "refused_protected",
+        "refused_unappliable",
+        "skipped_excluded"
+      ],
+      "type": "object"
+    },
+    "PoolStats": {
+      "properties": {
+        "capacity_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "used_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "volume_count": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capacity_bytes",
+        "used_bytes",
+        "volume_count"
+      ],
+      "type": "object"
+    },
     "PortMapping": {
       "additionalProperties": false,
       "description": "A host:guest port forwarding on a machine — plain listing data that mirrors a backend's port mapping so a machine record can carry its forwards without exposing a runtime type.",
@@ -2871,6 +5691,70 @@
         "host"
       ],
       "type": "object"
+    },
+    "PostureCheck": {
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/PostureStatus"
+        }
+      },
+      "required": [
+        "detail",
+        "name",
+        "status"
+      ],
+      "type": "object"
+    },
+    "PostureInspectReply": {
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/definitions/PostureCheck"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "checks"
+      ],
+      "title": "PostureReport",
+      "type": "object"
+    },
+    "PostureInspectRequest": {
+      "additionalProperties": false,
+      "title": "PostureRequest",
+      "type": "object"
+    },
+    "PostureStatus": {
+      "oneOf": [
+        {
+          "description": "The check passed — the mitigation is active.",
+          "enum": [
+            "ok"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The check passed structurally but the operator may want to act (e.g., allowlist is empty so the tool is fail- closed but inactive).",
+          "enum": [
+            "warn"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The check failed — the mitigation is NOT active.",
+          "enum": [
+            "fail"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ProcState": {
       "description": "Lifecycle state of a tracked process.",
@@ -2917,6 +5801,119 @@
         }
       ]
     },
+    "ProvenanceReport": {
+      "properties": {
+        "flake_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lock_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PruneCandidate": {
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "slot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason",
+        "slot_hash"
+      ],
+      "type": "object"
+    },
+    "RecordedTransition": {
+      "description": "The durable transition identity as published by the session contract.",
+      "properties": {
+        "admitted_plan_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "digest": {
+          "type": "string"
+        },
+        "identity": {
+          "$ref": "#/definitions/TransitionIdentity"
+        }
+      },
+      "required": [
+        "digest",
+        "identity"
+      ],
+      "type": "object"
+    },
+    "RecoveryReport": {
+      "oneOf": [
+        {
+          "properties": {
+            "apply_id": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "interrupted"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "apply_id",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "apply_id": {
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "unaudited"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "apply_id",
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RelationReport": {
+      "properties": {
+        "apply_id": {
+          "type": "string"
+        },
+        "merkle_root": {
+          "type": "string"
+        },
+        "target_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "apply_id",
+        "merkle_root",
+        "target_id"
+      ],
+      "type": "object"
+    },
     "RemoteErrorReply": {
       "description": "The structured error a function workload's wrapper reported for an exception the user's function raised.",
       "properties": {
@@ -2934,6 +5931,317 @@
         "error_id",
         "kind",
         "message"
+      ],
+      "type": "object"
+    },
+    "RenewRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_deadline": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "extend_for": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "extend_for",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "ReplayRunSessionReply": {
+      "description": "Dry runs have a verified summary but no execution report.",
+      "properties": {
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionReplayReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "$ref": "#/definitions/SessionReplaySummary"
+        }
+      },
+      "required": [
+        "summary"
+      ],
+      "title": "SessionReplayRunReport",
+      "type": "object"
+    },
+    "ReplayRunSessionRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "dry_run": {
+          "default": true,
+          "type": "boolean"
+        },
+        "selection": {
+          "$ref": "#/definitions/SessionReplayRequest"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "selection",
+        "tenant",
+        "timeout_secs"
+      ],
+      "title": "ReplayRequest",
+      "type": "object"
+    },
+    "Residency": {
+      "enum": [
+        "active",
+        "hibernated",
+        "closed"
+      ],
+      "type": "string"
+    },
+    "RestoreRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "tenant": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "tenant"
+      ],
+      "type": "object"
+    },
+    "ResumeRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approval_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "backend": {
+          "type": "string"
+        },
+        "boot": {
+          "type": "boolean"
+        },
+        "cpus": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expected_generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "image": {
+          "type": "string"
+        },
+        "image_sha256": {
+          "type": "string"
+        },
+        "kernel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mem_mib": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "backend",
+        "boot",
+        "cpus",
+        "image",
+        "image_sha256",
+        "mem_mib",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "RetentionStatus": {
+      "oneOf": [
+        {
+          "properties": {
+            "remaining_secs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "alive"
+              ],
+              "type": "string"
+            },
+            "until_unix": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "remaining_secs",
+            "state",
+            "until_unix"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "expired_for_secs": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "expired"
+              ],
+              "type": "string"
+            },
+            "until_unix": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expired_for_secs",
+            "state",
+            "until_unix"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReviewSummary": {
+      "oneOf": [
+        {
+          "properties": {
+            "status": {
+              "enum": [
+                "unchanged"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "plan": {
+              "$ref": "#/definitions/PlanSummary"
+            },
+            "status": {
+              "enum": [
+                "refused"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "plan",
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "fingerprint": {
+              "type": "string"
+            },
+            "plan": {
+              "$ref": "#/definitions/PlanSummary"
+            },
+            "status": {
+              "enum": [
+                "ready"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "fingerprint",
+            "plan",
+            "status"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RootfsReport": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format",
+        "hash",
+        "path",
+        "size"
       ],
       "type": "object"
     },
@@ -3024,6 +6332,67 @@
         }
       ]
     },
+    "SealCheck": {
+      "properties": {
+        "seal": {
+          "$ref": "#/definitions/SessionSeal"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "seal",
+        "seq"
+      ],
+      "type": "object"
+    },
+    "SealReason": {
+      "enum": [
+        "exited",
+        "failed",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "SessionBinding": {
+      "additionalProperties": false,
+      "description": "The durable agent session a checkpoint is a resume point for.\n\n`generation` fences a resume: reopening a parked session increments it, so a frame addressed to an earlier generation is refused rather than delivered into a successor. `journal_cursor` is the session-journal position the capture is consistent with, and `approval_head` names the approval-ledger state the capture was admitted under — a resume bounds its fresh grants against that head rather than against whatever the ledger holds later. `replay_input_digest`, when present, commits the encrypted input artifact executed immediately before this step was captured.",
+      "properties": {
+        "approval_head": {
+          "$ref": "#/definitions/ApprovalHead"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "replay_input_digest": {
+          "description": "Content-address of the encrypted input committed at this step. Optional for older and non-step session checkpoints; replay accepts only a step carrying this binding.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "$ref": "#/definitions/AgentSessionId"
+        }
+      },
+      "required": [
+        "approval_head",
+        "generation",
+        "journal_cursor",
+        "session_id"
+      ],
+      "type": "object"
+    },
     "SessionCallReply": {
       "description": "The reply to `entrypoint.call` and `session.call`.",
       "properties": {
@@ -3102,6 +6471,116 @@
       "title": "SessionCallRequest",
       "type": "object"
     },
+    "SessionEntry": {
+      "properties": {
+        "bundle_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "bundle_version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "caller_commitment": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CallerCommitment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event": {
+          "type": "string"
+        },
+        "image_name": {
+          "type": "string"
+        },
+        "image_sha256": {
+          "type": "string"
+        },
+        "labels": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "plan_version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "tenant": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "image_name",
+        "image_sha256",
+        "plan_id",
+        "plan_version",
+        "tenant",
+        "timestamp"
+      ],
+      "type": "object"
+    },
+    "SessionEnvelope": {
+      "properties": {
+        "canonical": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entry": {
+          "$ref": "#/definitions/SessionEntry"
+        },
+        "prev_hash": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entry",
+        "prev_hash",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "SessionEvent": {
+      "properties": {
+        "envelope": {
+          "$ref": "#/definitions/SessionEnvelope"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "envelope",
+        "seq"
+      ],
+      "type": "object"
+    },
     "SessionInfoReply": {
       "description": "A session's record, as `session.info` reports it.",
       "properties": {
@@ -3172,6 +6651,340 @@
         "session_id"
       ],
       "title": "SessionRef",
+      "type": "object"
+    },
+    "SessionReplayInput": {
+      "description": "Public metadata for one encrypted input. Never contains prompt bytes.",
+      "properties": {
+        "artifact_digest": {
+          "type": "string"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_digest",
+        "journal_cursor"
+      ],
+      "type": "object"
+    },
+    "SessionReplayReport": {
+      "description": "Replay outcome without runtime implementation types.",
+      "properties": {
+        "applied": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "duplicates": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "last_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "nonzero_exits": {
+          "items": {
+            "items": [
+              {
+                "format": "uint64",
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "format": "int32",
+                "type": "integer"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "duplicates",
+        "last_cursor",
+        "nonzero_exits"
+      ],
+      "type": "object"
+    },
+    "SessionReplayRequest": {
+      "additionalProperties": false,
+      "description": "Select a signed session timeline without exposing its encrypted input store.",
+      "properties": {
+        "as_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "SessionReplaySummary": {
+      "description": "A validated replay selection suitable for dry-run output and host APIs.",
+      "properties": {
+        "checkpoint": {
+          "$ref": "#/definitions/CheckpointId"
+        },
+        "checkpoint_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "inputs": {
+          "items": {
+            "$ref": "#/definitions/SessionReplayInput"
+          },
+          "type": "array"
+        },
+        "restored_name": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint",
+        "checkpoint_cursor",
+        "generation",
+        "inputs",
+        "restored_name",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "SessionReport": {
+      "description": "Stable, owned view of a stored session, including retention at observation.",
+      "properties": {
+        "approval_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "last_transition": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RecordedTransition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "members": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "parent_checkpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "park_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ParkReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retain_until_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "retention": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RetentionStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/Residency"
+        },
+        "storage_tier": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/StorageTier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "created_unix",
+        "generation",
+        "journal_cursor",
+        "members",
+        "session_id",
+        "state",
+        "updated_unix"
+      ],
+      "type": "object"
+    },
+    "SessionSeal": {
+      "properties": {
+        "chain_head": {
+          "type": "string"
+        },
+        "compute_environment": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "type": "string"
+        },
+        "error_class": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_count": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "first_entry": {
+          "type": "string"
+        },
+        "first_seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "head_seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "image_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_entry": {
+          "type": "string"
+        },
+        "last_seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "prev_seal": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/SealReason"
+        },
+        "session_root": {
+          "type": "string"
+        },
+        "snapshot_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chain_head",
+        "ended_at",
+        "event_count",
+        "first_entry",
+        "first_seq",
+        "head_seq",
+        "last_entry",
+        "last_seq",
+        "prev_seal",
+        "reason",
+        "session_root",
+        "started_at"
+      ],
       "type": "object"
     },
     "SessionStartReply": {
@@ -3258,6 +7071,178 @@
       ],
       "title": "SessionRef",
       "type": "object"
+    },
+    "SessionSummary": {
+      "properties": {
+        "ended_at": {
+          "type": "string"
+        },
+        "event_count": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "image_name": {
+          "type": "string"
+        },
+        "plan_id": {
+          "type": "string"
+        },
+        "seal": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SessionSeal"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seal_seq": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sealed": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "ended_at",
+        "event_count",
+        "image_name",
+        "plan_id",
+        "sealed",
+        "started_at"
+      ],
+      "type": "object"
+    },
+    "StorageGcReply": {
+      "properties": {
+        "applied": {
+          "type": "boolean"
+        },
+        "candidates": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "pool_unavailable": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "candidates",
+        "removed"
+      ],
+      "title": "GcReport",
+      "type": "object"
+    },
+    "StorageGcRequest": {
+      "additionalProperties": false,
+      "description": "Collection is read-only unless `apply` is explicitly set. Prefixes are retained live references, not a list of names authorized for deletion.",
+      "properties": {
+        "apply": {
+          "default": false,
+          "type": "boolean"
+        },
+        "keep_prefix": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mock": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "GcRequest",
+      "type": "object"
+    },
+    "StorageInfoReply": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "pool": {
+          "type": "string"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "stats": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/PoolStats"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "volume_stats": {
+          "description": "Best-effort statistics; unavailable individual volumes are omitted.",
+          "items": {
+            "$ref": "#/definitions/VolumeStats"
+          },
+          "type": "array"
+        },
+        "volumes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "available",
+        "pool",
+        "volume_stats",
+        "volumes"
+      ],
+      "title": "InfoReport",
+      "type": "object"
+    },
+    "StorageInfoRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "mock": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "title": "InfoRequest",
+      "type": "object"
+    },
+    "StorageTier": {
+      "enum": [
+        "resident",
+        "parked",
+        "cold"
+      ],
+      "type": "string"
     },
     "StreamEvent": {
       "description": "One chunk of output.",
@@ -3372,6 +7357,887 @@
       "title": "MachineRef",
       "type": "object"
     },
+    "TimeRange": {
+      "additionalProperties": false,
+      "properties": {
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TimelineNode": {
+      "description": "One node in a rendered timeline plus its per-hop verification verdict.",
+      "properties": {
+        "created_unix": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "digest": {
+          "description": "The node's content-address (checkpoint `meta_digest` / image `node_digest`).",
+          "type": "string"
+        },
+        "error": {
+          "description": "The fail-closed reason when `verified` is false.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "Checkpoint id; absent for image nodes (identity is the digest).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "description": "A short human descriptor (checkpoint: class + vm + tag; image: build identity).",
+          "type": "string"
+        },
+        "parent": {
+          "description": "Parent hash-link (content-address); absent at genesis.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verified": {
+          "description": "Per-hop verdict against the signed audit chain.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "created_unix",
+        "digest",
+        "label",
+        "verified"
+      ],
+      "type": "object"
+    },
+    "Transition": {
+      "enum": [
+        "park",
+        "resume",
+        "renew"
+      ],
+      "type": "string"
+    },
+    "TransitionIdentity": {
+      "properties": {
+        "inputs": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": "object"
+        },
+        "kind": {
+          "$ref": "#/definitions/Transition"
+        },
+        "observed": {
+          "additionalProperties": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": "object"
+        },
+        "observed_generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "observed_generation",
+        "session_id"
+      ],
+      "type": "object"
+    },
+    "ValidationCheck": {
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "detail",
+        "name",
+        "ok"
+      ],
+      "type": "object"
+    },
+    "ValidationReport": {
+      "properties": {
+        "checks": {
+          "items": {
+            "$ref": "#/definitions/ValidationCheck"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "checks",
+        "ok"
+      ],
+      "type": "object"
+    },
+    "Verdict": {
+      "enum": [
+        "VERIFIED",
+        "MISMATCH",
+        "UNSEALED",
+        "NOT_FOUND"
+      ],
+      "type": "string"
+    },
+    "VolumeAttachmentsReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "One registered attachment, described without any key material.",
+        "properties": {
+          "access": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/AccessMode"
+              }
+            ],
+            "description": "Access mode presented to the guest."
+          },
+          "attached_at": {
+            "description": "RFC 3339 registration timestamp.",
+            "type": "string"
+          },
+          "guest_path": {
+            "description": "Guest mount point.",
+            "type": "string"
+          },
+          "host_path": {
+            "description": "Host path backing the attachment.",
+            "type": "string"
+          },
+          "host_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/HostSnapshotRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Present when `host_path` is a materialized image refreshed from a host directory at machine start."
+          },
+          "owner": {
+            "description": "Owner VM the attachment is registered for.",
+            "type": "string"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/AttachmentSource"
+              }
+            ],
+            "description": "Origin of the host path."
+          },
+          "volume": {
+            "description": "Logical volume identity.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "access",
+          "attached_at",
+          "guest_path",
+          "host_path",
+          "owner",
+          "source",
+          "volume"
+        ],
+        "title": "AttachmentRecord",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "VolumeAttachmentsRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "vm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "vm"
+      ],
+      "title": "MachineRequest",
+      "type": "object"
+    },
+    "VolumeCreateReply": {
+      "additionalProperties": false,
+      "description": "One managed local volume, described without any key material.",
+      "properties": {
+        "attached_to": {
+          "description": "Owner VM currently holding an attachment lease on this volume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "RFC 3339 creation timestamp.",
+          "type": "string"
+        },
+        "encryption": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EncryptionState"
+            }
+          ],
+          "description": "Encryption lifecycle position."
+        },
+        "host_artifact": {
+          "description": "Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VolumeSourceKind"
+            }
+          ],
+          "description": "Local artifact shape."
+        }
+      },
+      "required": [
+        "created_at",
+        "encryption",
+        "name",
+        "source"
+      ],
+      "title": "VolumeRecord",
+      "type": "object"
+    },
+    "VolumeCreateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "capacity_mib": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "root": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "capacity_mib",
+        "name"
+      ],
+      "title": "CreateRequest",
+      "type": "object"
+    },
+    "VolumeDetachReply": {
+      "additionalProperties": false,
+      "description": "One registered attachment, described without any key material.",
+      "properties": {
+        "access": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccessMode"
+            }
+          ],
+          "description": "Access mode presented to the guest."
+        },
+        "attached_at": {
+          "description": "RFC 3339 registration timestamp.",
+          "type": "string"
+        },
+        "guest_path": {
+          "description": "Guest mount point.",
+          "type": "string"
+        },
+        "host_path": {
+          "description": "Host path backing the attachment.",
+          "type": "string"
+        },
+        "host_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HostSnapshotRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present when `host_path` is a materialized image refreshed from a host directory at machine start."
+        },
+        "owner": {
+          "description": "Owner VM the attachment is registered for.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AttachmentSource"
+            }
+          ],
+          "description": "Origin of the host path."
+        },
+        "volume": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "access",
+        "attached_at",
+        "guest_path",
+        "host_path",
+        "owner",
+        "source",
+        "volume"
+      ],
+      "title": "AttachmentRecord",
+      "type": "object"
+    },
+    "VolumeDetachRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "guest_path": {
+          "type": "string"
+        },
+        "vm": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "guest_path",
+        "vm"
+      ],
+      "title": "DetachRequest",
+      "type": "object"
+    },
+    "VolumeInspectReply": {
+      "additionalProperties": false,
+      "description": "One managed local volume, described without any key material.",
+      "properties": {
+        "attached_to": {
+          "description": "Owner VM currently holding an attachment lease on this volume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "RFC 3339 creation timestamp.",
+          "type": "string"
+        },
+        "encryption": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EncryptionState"
+            }
+          ],
+          "description": "Encryption lifecycle position."
+        },
+        "host_artifact": {
+          "description": "Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VolumeSourceKind"
+            }
+          ],
+          "description": "Local artifact shape."
+        }
+      },
+      "required": [
+        "created_at",
+        "encryption",
+        "name",
+        "source"
+      ],
+      "title": "VolumeRecord",
+      "type": "object"
+    },
+    "VolumeInspectRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "NameRequest",
+      "type": "object"
+    },
+    "VolumeListReply": {
+      "items": {
+        "additionalProperties": false,
+        "description": "One managed local volume, described without any key material.",
+        "properties": {
+          "attached_to": {
+            "description": "Owner VM currently holding an attachment lease on this volume.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "description": "RFC 3339 creation timestamp.",
+            "type": "string"
+          },
+          "encryption": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/EncryptionState"
+              }
+            ],
+            "description": "Encryption lifecycle position."
+          },
+          "host_artifact": {
+            "description": "Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "description": "Logical volume identity.",
+            "type": "string"
+          },
+          "source": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/VolumeSourceKind"
+              }
+            ],
+            "description": "Local artifact shape."
+          }
+        },
+        "required": [
+          "created_at",
+          "encryption",
+          "name",
+          "source"
+        ],
+        "title": "VolumeRecord",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "VolumeListRequest": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "VolumeLockReply": {
+      "additionalProperties": false,
+      "description": "One managed local volume, described without any key material.",
+      "properties": {
+        "attached_to": {
+          "description": "Owner VM currently holding an attachment lease on this volume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "RFC 3339 creation timestamp.",
+          "type": "string"
+        },
+        "encryption": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EncryptionState"
+            }
+          ],
+          "description": "Encryption lifecycle position."
+        },
+        "host_artifact": {
+          "description": "Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VolumeSourceKind"
+            }
+          ],
+          "description": "Local artifact shape."
+        }
+      },
+      "required": [
+        "created_at",
+        "encryption",
+        "name",
+        "source"
+      ],
+      "title": "VolumeRecord",
+      "type": "object"
+    },
+    "VolumeLockRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "NameRequest",
+      "type": "object"
+    },
+    "VolumeMountReply": {
+      "additionalProperties": false,
+      "description": "One registered attachment, described without any key material.",
+      "properties": {
+        "access": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccessMode"
+            }
+          ],
+          "description": "Access mode presented to the guest."
+        },
+        "attached_at": {
+          "description": "RFC 3339 registration timestamp.",
+          "type": "string"
+        },
+        "guest_path": {
+          "description": "Guest mount point.",
+          "type": "string"
+        },
+        "host_path": {
+          "description": "Host path backing the attachment.",
+          "type": "string"
+        },
+        "host_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HostSnapshotRecord"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present when `host_path` is a materialized image refreshed from a host directory at machine start."
+        },
+        "owner": {
+          "description": "Owner VM the attachment is registered for.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AttachmentSource"
+            }
+          ],
+          "description": "Origin of the host path."
+        },
+        "volume": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "access",
+        "attached_at",
+        "guest_path",
+        "host_path",
+        "owner",
+        "source",
+        "volume"
+      ],
+      "title": "AttachmentRecord",
+      "type": "object"
+    },
+    "VolumeMountRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "access": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AccessMode"
+            }
+          ],
+          "default": "read-only"
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "host": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vm": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "guest_path",
+        "vm",
+        "volume"
+      ],
+      "title": "MountRequest",
+      "type": "object"
+    },
+    "VolumeRestoreReply": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "VolumeRestoreRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "snapshot"
+      ],
+      "title": "SnapshotRequest",
+      "type": "object"
+    },
+    "VolumeSnapshotReply": {
+      "additionalProperties": false,
+      "title": "Empty",
+      "type": "object"
+    },
+    "VolumeSnapshotRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "snapshot": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "snapshot"
+      ],
+      "title": "SnapshotRequest",
+      "type": "object"
+    },
+    "VolumeSourceKind": {
+      "description": "The local artifact shape backing a volume.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "mvm-managed portable ext4 image, authenticated ciphertext while locked.",
+          "properties": {
+            "capacity_mib": {
+              "format": "uint32",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "managed-block"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "capacity_mib",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Managed catalog directory relying on encrypted host storage.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "managed-directory"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Operator-supplied host directory relying on encrypted host storage.",
+          "properties": {
+            "kind": {
+              "enum": [
+                "ad-hoc-host-directory"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "VolumeStats": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "used_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "virtual_size_bytes": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "used_bytes",
+        "virtual_size_bytes"
+      ],
+      "type": "object"
+    },
+    "VolumeUnlockReply": {
+      "additionalProperties": false,
+      "description": "One managed local volume, described without any key material.",
+      "properties": {
+        "attached_to": {
+          "description": "Owner VM currently holding an attachment lease on this volume.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "description": "RFC 3339 creation timestamp.",
+          "type": "string"
+        },
+        "encryption": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/EncryptionState"
+            }
+          ],
+          "description": "Encryption lifecycle position."
+        },
+        "host_artifact": {
+          "description": "Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Logical volume identity.",
+          "type": "string"
+        },
+        "source": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/VolumeSourceKind"
+            }
+          ],
+          "description": "Local artifact shape."
+        }
+      },
+      "required": [
+        "created_at",
+        "encryption",
+        "name",
+        "source"
+      ],
+      "title": "VolumeRecord",
+      "type": "object"
+    },
+    "VolumeUnlockRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "NameRequest",
+      "type": "object"
+    },
     "WaitOutcome": {
       "description": "How a waited-on process ended.",
       "oneOf": [
@@ -3428,9 +8294,498 @@
           "type": "object"
         }
       ]
+    },
+    "WallClockGrant": {
+      "description": "Wall-clock bound.\n\n`Unbounded` is a named variant rather than a sentinel value. The legacy `TimeoutSpec::exec_secs` encodes unbounded as `0`, so a user writing `0` to mean \"no time allowed\" would get \"no limit\" — the exact inversion of their intent. `NonZeroU32` makes that unrepresentable here.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "unbounded"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "secs"
+              ],
+              "type": "string"
+            },
+            "secs": {
+              "format": "uint32",
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "secs"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Workspace": {
+      "description": "A writable snapshot and the identity of its verified baseline.",
+      "properties": {
+        "baseline_key": {
+          "type": "string"
+        },
+        "guest_path": {
+          "type": "string"
+        },
+        "image": {
+          "type": "string"
+        },
+        "source_dir": {
+          "type": "string"
+        },
+        "volume": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "baseline_key",
+        "guest_path",
+        "image",
+        "source_dir",
+        "volume"
+      ],
+      "type": "object"
+    },
+    "WorkspaceApplyReply": {
+      "properties": {
+        "applied": {
+          "$ref": "#/definitions/AppliedReport"
+        },
+        "recoveries": {
+          "items": {
+            "$ref": "#/definitions/RecoveryReport"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "applied",
+        "recoveries"
+      ],
+      "title": "ApplyReply",
+      "type": "object"
+    },
+    "WorkspaceApplyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "expected_fingerprint": {
+          "type": "string"
+        },
+        "workspace": {
+          "$ref": "#/definitions/WorkspaceRequest"
+        }
+      },
+      "required": [
+        "approved",
+        "expected_fingerprint",
+        "workspace"
+      ],
+      "title": "ApplyRequest",
+      "type": "object"
+    },
+    "WorkspaceRedoReply": {
+      "properties": {
+        "recoveries": {
+          "items": {
+            "$ref": "#/definitions/RecoveryReport"
+          },
+          "type": "array"
+        },
+        "relation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelationReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "recoveries"
+      ],
+      "title": "HistoryReply",
+      "type": "object"
+    },
+    "WorkspaceRedoRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "workspace": {
+          "$ref": "#/definitions/WorkspaceRequest"
+        }
+      },
+      "required": [
+        "approved",
+        "workspace"
+      ],
+      "title": "HistoryRequest",
+      "type": "object"
+    },
+    "WorkspaceRequest": {
+      "additionalProperties": false,
+      "description": "Select a registered workspace; callers cannot supply arbitrary host paths.",
+      "properties": {
+        "exclude": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protected_paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vm": {
+          "type": "string"
+        },
+        "volume": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "vm"
+      ],
+      "type": "object"
+    },
+    "WorkspaceReviewReply": {
+      "properties": {
+        "recoveries": {
+          "items": {
+            "$ref": "#/definitions/RecoveryReport"
+          },
+          "type": "array"
+        },
+        "review": {
+          "$ref": "#/definitions/ReviewSummary"
+        },
+        "workspace": {
+          "$ref": "#/definitions/Workspace"
+        }
+      },
+      "required": [
+        "recoveries",
+        "review",
+        "workspace"
+      ],
+      "title": "ReviewReply",
+      "type": "object"
+    },
+    "WorkspaceReviewRequest": {
+      "additionalProperties": false,
+      "description": "Select a registered workspace; callers cannot supply arbitrary host paths.",
+      "properties": {
+        "exclude": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "protected_paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "vm": {
+          "type": "string"
+        },
+        "volume": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "vm"
+      ],
+      "title": "WorkspaceRequest",
+      "type": "object"
+    },
+    "WorkspaceUndoReply": {
+      "properties": {
+        "recoveries": {
+          "items": {
+            "$ref": "#/definitions/RecoveryReport"
+          },
+          "type": "array"
+        },
+        "relation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RelationReport"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "recoveries"
+      ],
+      "title": "HistoryReply",
+      "type": "object"
+    },
+    "WorkspaceUndoRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "approved": {
+          "type": "boolean"
+        },
+        "workspace": {
+          "$ref": "#/definitions/WorkspaceRequest"
+        }
+      },
+      "required": [
+        "approved",
+        "workspace"
+      ],
+      "title": "HistoryRequest",
+      "type": "object"
     }
   },
   "properties": {
+    "agent_sessions_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsList",
+      "type": "object"
+    },
+    "agent_sessions_open": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsOpenReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsOpenRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsOpen",
+      "type": "object"
+    },
+    "agent_sessions_park": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsParkReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsParkRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsPark",
+      "type": "object"
+    },
+    "agent_sessions_renew": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsRenewReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsRenewRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsRenew",
+      "type": "object"
+    },
+    "agent_sessions_resume": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsResumeReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsResumeRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsResume",
+      "type": "object"
+    },
+    "agent_sessions_show": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AgentSessionsShowReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AgentSessionsShowRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AgentSessionsShow",
+      "type": "object"
+    },
+    "artifact_configure_firecracker": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ArtifactConfigureFirecrackerReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ArtifactConfigureFirecrackerRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ArtifactConfigureFirecracker",
+      "type": "object"
+    },
+    "artifact_inspect": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ArtifactInspectReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ArtifactInspectRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ArtifactInspect",
+      "type": "object"
+    },
+    "artifact_validate": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ArtifactValidateReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ArtifactValidateRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ArtifactValidate",
+      "type": "object"
+    },
+    "audit_sessions_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AuditSessionsListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AuditSessionsListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AuditSessionsList",
+      "type": "object"
+    },
+    "audit_sessions_show": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AuditSessionsShowReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AuditSessionsShowRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AuditSessionsShow",
+      "type": "object"
+    },
+    "audit_sessions_verify": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AuditSessionsVerifyReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AuditSessionsVerifyRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AuditSessionsVerify",
+      "type": "object"
+    },
     "backend_capabilities": {
       "additionalProperties": false,
       "properties": {
@@ -3446,6 +8801,176 @@
         "reply"
       ],
       "title": "BackendCapabilities",
+      "type": "object"
+    },
+    "bundle_export": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/BundleExportReply"
+        },
+        "request": {
+          "$ref": "#/definitions/BundleExportRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "BundleExport",
+      "type": "object"
+    },
+    "checkpoints_capture": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsCaptureReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsCaptureRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsCapture",
+      "type": "object"
+    },
+    "checkpoints_diff": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsDiffReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsDiffRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsDiff",
+      "type": "object"
+    },
+    "checkpoints_fork": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsForkReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsForkRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsFork",
+      "type": "object"
+    },
+    "checkpoints_info": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsInfoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsInfoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsInfo",
+      "type": "object"
+    },
+    "checkpoints_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsList",
+      "type": "object"
+    },
+    "checkpoints_remove": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsRemoveReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsRemoveRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsRemove",
+      "type": "object"
+    },
+    "checkpoints_restore": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsRestoreReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsRestoreRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsRestore",
+      "type": "object"
+    },
+    "checkpoints_timeline": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsTimelineReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsTimelineRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsTimeline",
+      "type": "object"
+    },
+    "checkpoints_verify": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/CheckpointsVerifyReply"
+        },
+        "request": {
+          "$ref": "#/definitions/CheckpointsVerifyRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "CheckpointsVerify",
       "type": "object"
     },
     "entrypoint_call": {
@@ -4060,6 +9585,40 @@
       "title": "MachineStop",
       "type": "object"
     },
+    "maintenance_reconcile": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MaintenanceReconcileReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MaintenanceReconcileRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MaintenanceReconcile",
+      "type": "object"
+    },
+    "manifest_export_oci": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestExportOciReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestExportOciRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestExportOci",
+      "type": "object"
+    },
     "manifest_info": {
       "additionalProperties": false,
       "properties": {
@@ -4094,6 +9653,40 @@
       "title": "ManifestList",
       "type": "object"
     },
+    "manifest_prune": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestPruneReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestPruneRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestPrune",
+      "type": "object"
+    },
+    "manifest_remove": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestRemoveReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestRemoveRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestRemove",
+      "type": "object"
+    },
     "manifest_verify": {
       "additionalProperties": false,
       "properties": {
@@ -4109,6 +9702,40 @@
         "reply"
       ],
       "title": "ManifestVerify",
+      "type": "object"
+    },
+    "posture_inspect": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/PostureInspectReply"
+        },
+        "request": {
+          "$ref": "#/definitions/PostureInspectRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "PostureInspect",
+      "type": "object"
+    },
+    "replay_run_session": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ReplayRunSessionReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ReplayRunSessionRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ReplayRunSession",
       "type": "object"
     },
     "session_call": {
@@ -4179,6 +9806,40 @@
       "title": "SessionStop",
       "type": "object"
     },
+    "storage_gc": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/StorageGcReply"
+        },
+        "request": {
+          "$ref": "#/definitions/StorageGcRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "StorageGc",
+      "type": "object"
+    },
+    "storage_info": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/StorageInfoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/StorageInfoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "StorageInfo",
+      "type": "object"
+    },
     "telemetry_records": {
       "additionalProperties": false,
       "properties": {
@@ -4212,9 +9873,291 @@
       ],
       "title": "TelemetryStatus",
       "type": "object"
+    },
+    "volume_attachments": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeAttachmentsReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeAttachmentsRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeAttachments",
+      "type": "object"
+    },
+    "volume_create": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeCreateReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeCreateRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeCreate",
+      "type": "object"
+    },
+    "volume_detach": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeDetachReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeDetachRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeDetach",
+      "type": "object"
+    },
+    "volume_inspect": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeInspectReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeInspectRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeInspect",
+      "type": "object"
+    },
+    "volume_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeList",
+      "type": "object"
+    },
+    "volume_lock": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeLockReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeLockRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeLock",
+      "type": "object"
+    },
+    "volume_mount": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeMountReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeMountRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeMount",
+      "type": "object"
+    },
+    "volume_restore": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeRestoreReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeRestoreRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeRestore",
+      "type": "object"
+    },
+    "volume_snapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeSnapshotReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeSnapshotRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeSnapshot",
+      "type": "object"
+    },
+    "volume_unlock": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/VolumeUnlockReply"
+        },
+        "request": {
+          "$ref": "#/definitions/VolumeUnlockRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "VolumeUnlock",
+      "type": "object"
+    },
+    "workspace_apply": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/WorkspaceApplyReply"
+        },
+        "request": {
+          "$ref": "#/definitions/WorkspaceApplyRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "WorkspaceApply",
+      "type": "object"
+    },
+    "workspace_redo": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/WorkspaceRedoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/WorkspaceRedoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "WorkspaceRedo",
+      "type": "object"
+    },
+    "workspace_review": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/WorkspaceReviewReply"
+        },
+        "request": {
+          "$ref": "#/definitions/WorkspaceReviewRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "WorkspaceReview",
+      "type": "object"
+    },
+    "workspace_undo": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/WorkspaceUndoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/WorkspaceUndoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "WorkspaceUndo",
+      "type": "object"
     }
   },
   "required": [
+    "agent_sessions_list",
+    "agent_sessions_show",
+    "agent_sessions_open",
+    "agent_sessions_park",
+    "agent_sessions_renew",
+    "agent_sessions_resume",
+    "checkpoints_list",
+    "checkpoints_info",
+    "checkpoints_diff",
+    "checkpoints_verify",
+    "checkpoints_timeline",
+    "checkpoints_remove",
+    "checkpoints_capture",
+    "checkpoints_restore",
+    "checkpoints_fork",
+    "replay_run_session",
+    "workspace_review",
+    "workspace_apply",
+    "workspace_undo",
+    "workspace_redo",
+    "artifact_inspect",
+    "artifact_validate",
+    "artifact_configure_firecracker",
+    "audit_sessions_list",
+    "audit_sessions_show",
+    "audit_sessions_verify",
+    "posture_inspect",
+    "volume_list",
+    "volume_inspect",
+    "volume_create",
+    "volume_unlock",
+    "volume_lock",
+    "volume_mount",
+    "volume_detach",
+    "volume_attachments",
+    "volume_snapshot",
+    "volume_restore",
+    "manifest_remove",
+    "manifest_prune",
+    "manifest_export_oci",
+    "storage_info",
+    "storage_gc",
+    "bundle_export",
+    "maintenance_reconcile",
     "manifest_info",
     "manifest_list",
     "manifest_verify",

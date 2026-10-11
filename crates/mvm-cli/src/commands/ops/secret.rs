@@ -42,11 +42,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
+#[cfg(test)]
+use mvm_client::secret::definition::resolve_sigv4_params;
+use mvm_client::secret::definition::{BindingShapeInput, OAuthBindingInput, resolve_binding_shape};
 use mvm_client::secret::{
     DEFAULT_CONSENT_TIMEOUT, OAuthLoginOptions, PutOutcome, SecretApproval, SecretBindingMeta,
     SecretService, SecretValueInput,
 };
-use mvm_contract::ir::{AuthType, Sigv4Params};
+use mvm_contract::ir::AuthType;
+#[cfg(test)]
+use mvm_contract::ir::Sigv4Params;
 use mvm_contract::service_catalog;
 use mvm_core::crypto::secret_binding::OAuthBindingMeta;
 
@@ -517,6 +522,20 @@ impl From<ApproveArg> for SecretApproval {
 }
 
 fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
+    cmd_set_with_readers(
+        service,
+        set,
+        read_secret_from_stdin,
+        read_secret_from_prompt_or_stdin,
+    )
+}
+
+fn cmd_set_with_readers(
+    service: &SecretService,
+    set: SetArgs,
+    mut read_stdin: impl FnMut() -> Result<String>,
+    mut read_prompt: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
     let SetArgs {
         tenant,
         name,
@@ -541,51 +560,8 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         region,
         aws_service,
     })?;
-    if !inject.admits(resolved.auth_type) {
-        anyhow::bail!(
-            "--inject {} is incompatible with --type {}; signing credentials stay in headers, and basic_auth requires type basic",
-            inject.label(),
-            auth_type_label(resolved.auth_type)
-        );
-    }
     let oauth = resolve_oauth_params(resolved.auth_type, &oauth_args)?;
-    if oauth_args.login.is_some()
-        && (value.value.is_some() || value.value_file.is_some() || value.from.is_some())
-    {
-        // The consent writes the value; a source given alongside it would be
-        // silently discarded.
-        anyhow::bail!("--oauth-login writes the value itself and takes no value source");
-    }
-    if oauth.is_some() && value.from.is_some() {
-        // Token sets are written by the host flows (the refresher's first
-        // exchange, the browser consent flow), never imported from another
-        // host location; a live token set's import path would be a leakage
-        // channel the rest of the design refuses to have.
-        anyhow::bail!("--from cannot be combined with the --oauth-* binding flags");
-    }
-    // A consent or a client secret writes its own value: a set awaiting the
-    // consent, or the initial token set the host-side refresher exchanges
-    // from. Any other value source would be clobbered, so clap conflicts them
-    // at parse time; --value/--value-file remain meaningful for staging a
-    // pre-obtained token set by hand.
-    let client_secret = resolve_client_secret(&oauth_args)?;
-    let token_set = match (oauth_args.login, client_secret) {
-        (Some(_), client_secret) => Some(mvm_hostd::keyholder::oauth::awaiting_consent_token_set(
-            client_secret.as_deref(),
-        )),
-        (None, Some(secret)) => Some(mvm_hostd::keyholder::oauth::initial_token_set(&secret)),
-        (None, None) => None,
-    };
-    let input = match token_set {
-        Some(token_set) => SecretValueInput::new(
-            serde_json::to_string(&token_set).context("serializing the initial oauth token set")?,
-        ),
-        None => value.resolve(&name)?,
-    };
-    service.put(&tenant, &name, input)?;
-    // Binding after value: the service refuses to bind a secret with no
-    // stored value, so a failed value write never leaves a dangling binding.
-    service.bind(
+    let mut input = service.prepare_definition(
         &tenant,
         &name,
         SecretBindingMeta {
@@ -598,6 +574,46 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             oauth,
         },
     )?;
+    match &oauth_args.client_secret {
+        Some(OAuthClientSecretSource::File(path)) => {
+            input = input.with_client_secret_file(path.clone());
+        }
+        Some(OAuthClientSecretSource::Inline(secret)) => {
+            let secret = if secret == "-" {
+                read_stdin()?
+            } else {
+                secret.clone()
+            };
+            input = input.with_client_secret(SecretValueInput::new(secret));
+        }
+        None => {}
+    }
+    if oauth_args.login.is_some() {
+        input = input.awaiting_consent();
+    }
+    let ValueSource {
+        value,
+        value_file,
+        from,
+    } = value;
+    if let Some(reference) = &from {
+        input = input.with_source(reference.parse()?);
+    }
+    let prompt = value.is_none()
+        && value_file.is_none()
+        && from.is_none()
+        && oauth_args.login.is_none()
+        && oauth_args.client_secret.is_none();
+    if let Some(path) = value_file {
+        input = input.with_value_file(path);
+    }
+    if let Some(value) = value {
+        let value = if value == "-" { read_stdin()? } else { value };
+        input = input.with_value(SecretValueInput::new(value));
+    } else if prompt {
+        input = input.with_value(SecretValueInput::new(read_prompt(&name)?));
+    }
+    service.define(&tenant, &name, input)?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
     if let Some(ui) = oauth_args.login {
         cmd_login(service, &tenant, &name, ui).with_context(|| {
@@ -659,115 +675,6 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Read the OAuth client secret the operator pointed at. A client secret
-/// without a resolved oauth binding (checked in `resolve_oauth_params`) is
-/// refused there. The inline `-` form reads stdin, matching `--value -`.
-fn resolve_client_secret(args: &OAuthArgs) -> Result<Option<String>> {
-    let Some(source) = &args.client_secret else {
-        return Ok(None);
-    };
-    match source {
-        OAuthClientSecretSource::Inline(secret) if secret == "-" => {
-            read_secret_from_stdin().map(Some)
-        }
-        OAuthClientSecretSource::Inline(secret) => Ok(Some(secret.clone())),
-        OAuthClientSecretSource::File(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading oauth client secret from {}", path.display()))
-            .map(Some),
-    }
-}
-
-/// The destination-and-auth inputs to [`resolve_binding_shape`].
-struct BindingShapeInput {
-    provider: Option<String>,
-    hosts: Vec<String>,
-    auth_type: Option<AuthType>,
-    aws_access_key_id: Option<String>,
-    region: Option<String>,
-    aws_service: Option<String>,
-}
-
-/// What a binding will be recorded with, after a provider (if any) is expanded.
-///
-/// `Debug` is safe here: every field is operator-declared destination policy.
-/// The secret value is resolved separately and never reaches this struct — the
-/// SigV4 access-key id it can carry is public and pairs with the stored
-/// secret-access-key, which stays in the value store.
-#[derive(Debug)]
-struct ResolvedBindingShape {
-    allowed_hosts: Vec<String>,
-    auth_type: AuthType,
-    sigv4: Option<Sigv4Params>,
-    provider: Option<String>,
-}
-
-/// Expand `--provider` into literal hosts and an auth type, or take the
-/// explicit `--host`/`--type` form.
-///
-/// The expansion happens here, once, and the *literal* hosts are what get
-/// stored: the catalog is never consulted again for this binding. That is what
-/// keeps a later catalog edit from silently widening a binding that already
-/// exists, and keeps the egress path free of catalog lookups. The provider name
-/// travels alongside for display and audit and is not an input to any decision.
-///
-/// An unrecognised provider is refused. It must not fall through to the
-/// explicit form or to a default: a typo'd `--provider` that quietly became
-/// "no restriction" is exactly the failure this whole feature exists to remove.
-fn resolve_binding_shape(input: BindingShapeInput) -> Result<ResolvedBindingShape> {
-    let BindingShapeInput {
-        provider,
-        hosts,
-        auth_type,
-        aws_access_key_id,
-        region,
-        aws_service,
-    } = input;
-
-    let Some(provider_name) = provider else {
-        // Explicit form. clap guarantees both are present without --provider,
-        // but the type is still Option, so name the invariant rather than
-        // unwrapping it.
-        let auth_type = auth_type.context("--type is required when --provider is not given")?;
-        let sigv4 = resolve_sigv4_params(auth_type, aws_access_key_id, region, aws_service)?;
-        return Ok(ResolvedBindingShape {
-            allowed_hosts: hosts,
-            auth_type,
-            sigv4,
-            provider: None,
-        });
-    };
-
-    let catalog = service_catalog::builtin();
-    let entry = catalog.find(&provider_name).with_context(|| {
-        let known = catalog
-            .all()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "unknown provider {provider_name:?}; known providers: {known}. \
-             Use --host/--type for a destination the catalog does not carry."
-        )
-    })?;
-
-    // The entry supplies the service; the operator still supplies the
-    // account-scoped halves, which are theirs and not the provider's.
-    let sigv4 = resolve_sigv4_params(
-        entry.auth,
-        aws_access_key_id,
-        region,
-        entry.sigv4_service.clone(),
-    )?;
-
-    Ok(ResolvedBindingShape {
-        allowed_hosts: entry.hosts.clone(),
-        auth_type: entry.auth,
-        sigv4,
-        provider: Some(entry.name.clone()),
-    })
-}
-
 /// `mvmctl secret providers` — the catalog, with no store access.
 fn cmd_providers(search: Option<&str>) -> Result<()> {
     let catalog = service_catalog::builtin();
@@ -801,105 +708,20 @@ fn cmd_providers(search: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Validate + assemble the SigV4 scope params against the auth-type. Pure so it
-/// is unit-testable without a store. `Sigv4` demands all three (`access_key_id`,
-/// `region`, `service`); any other auth-type rejects all three (a passed param
-/// would otherwise be silently ignored, masking an operator mistake). The secret
-/// value (the secret-access-key) is resolved separately and never lands here.
-fn resolve_sigv4_params(
-    auth_type: AuthType,
-    access_key_id: Option<String>,
-    region: Option<String>,
-    service: Option<String>,
-) -> Result<Option<Sigv4Params>> {
-    match auth_type {
-        AuthType::Sigv4 => {
-            let access_key_id = access_key_id
-                .filter(|s| !s.is_empty())
-                .context("--type sigv4 requires --aws-access-key-id")?;
-            let region = region
-                .filter(|s| !s.is_empty())
-                .context("--type sigv4 requires --region")?;
-            let service = service
-                .filter(|s| !s.is_empty())
-                .context("--type sigv4 requires --service")?;
-            Ok(Some(Sigv4Params {
-                access_key_id,
-                region,
-                service,
-            }))
-        }
-        AuthType::Hmac | AuthType::Bearer | AuthType::Basic => {
-            if access_key_id.is_some() || region.is_some() || service.is_some() {
-                anyhow::bail!(
-                    "--aws-access-key-id/--region/--service are only valid with --type sigv4"
-                );
-            }
-            Ok(None)
-        }
-    }
-}
-
-/// Validate + assemble the OAuth flow metadata against the auth type. Pure
-/// so it is unit-testable without a store. The three core flags
-/// (`--oauth-authorization-url`, `--oauth-token-url`, `--oauth-client-id`)
-/// are all-or-nothing; scopes, the access-token pointer, and the client
-/// secret source are optional riders that require the core three. The URLs
-/// themselves are checked (absolute https) by the service's binding
-/// validation, the single enforcement point every author passes through.
-/// OAuth binds the stored value to a bearer credential, so any non-bearer
-/// auth type rejects the flags, mirroring the SigV4 shape.
+/// Map the CLI flag group into the client's metadata-only preparation input.
 fn resolve_oauth_params(auth_type: AuthType, args: &OAuthArgs) -> Result<Option<OAuthBindingMeta>> {
-    let core = [
-        args.authorization_url.as_ref(),
-        args.token_url.as_ref(),
-        args.client_id.as_ref(),
-    ];
-    let riders_present = !args.scopes.is_empty()
-        || args.response_access_token_pointer.is_some()
-        || args.client_secret.is_some()
-        || args.login.is_some();
-    let present = core.iter().flatten().count();
-    if present == 0 {
-        if riders_present {
-            anyhow::bail!(
-                "the --oauth-scope/--oauth-response-access-token-pointer/--oauth-client-secret*/--oauth-login \
-                 flags require --oauth-authorization-url, --oauth-token-url and --oauth-client-id"
-            );
-        }
-        return Ok(None);
-    }
-    if present != 3 {
-        anyhow::bail!(
-            "--oauth-authorization-url, --oauth-token-url and --oauth-client-id must be given together"
-        );
-    }
-    if auth_type != AuthType::Bearer {
-        anyhow::bail!("the --oauth-* flags are only valid with --type bearer");
-    }
-    // `present == 3` guarantees all three; filter keeps the no-unwrap rule.
-    let authorization_url = args
-        .authorization_url
-        .clone()
-        .filter(|value| !value.is_empty())
-        .context("--oauth-authorization-url must not be empty")?;
-    let token_url = args
-        .token_url
-        .clone()
-        .filter(|value| !value.is_empty())
-        .context("--oauth-token-url must not be empty")?;
-    let client_id = args
-        .client_id
-        .clone()
-        .filter(|value| !value.is_empty())
-        .context("--oauth-client-id must not be empty")?;
-    Ok(Some(OAuthBindingMeta {
-        authorization_url,
-        token_url,
-        client_id,
-        scopes: args.scopes.clone(),
-        response_access_token_pointer: args.response_access_token_pointer.clone(),
-    }))
+    mvm_client::secret::definition::resolve_oauth_params(
+        auth_type,
+        &OAuthBindingInput {
+            authorization_url: args.authorization_url.clone(),
+            token_url: args.token_url.clone(),
+            client_id: args.client_id.clone(),
+            scopes: args.scopes.clone(),
+            response_access_token_pointer: args.response_access_token_pointer.clone(),
+            has_client_secret: args.client_secret.is_some(),
+            login: args.login.is_some(),
+        },
+    )
 }
 
 fn cmd_get(service: &SecretService, tenant: String, name: String) -> Result<()> {
@@ -1239,6 +1061,107 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("incompatible"));
         assert!(f.service.metadata("local", "bad-signer").unwrap().is_none());
+    }
+
+    #[test]
+    fn set_validates_metadata_before_collecting_stdin_prompt_or_client_secret() {
+        use mvm_contract::ir::InjectionMode;
+        use std::cell::Cell;
+
+        for invalid in [false, true] {
+            for incompatible_injection in [false, true] {
+                for source in ["stdin", "prompt", "client-secret"] {
+                    // OAuth requires bearer, so the injection incompatibility
+                    // case uses the ordinary value collectors.
+                    if incompatible_injection && source == "client-secret" {
+                        continue;
+                    }
+                    let f = fixture();
+                    let stdin_reads = Cell::new(0);
+                    let prompt_reads = Cell::new(0);
+                    let result = cmd_set_with_readers(
+                        &f.service,
+                        SetArgs {
+                            tenant: "local".into(),
+                            name: "collection-order".into(),
+                            provider: None,
+                            hosts: vec![
+                                if invalid && !incompatible_injection {
+                                    "*.com"
+                                } else {
+                                    "api.example.com"
+                                }
+                                .into(),
+                            ],
+                            auth_type: Some(if incompatible_injection {
+                                AuthType::Hmac
+                            } else {
+                                AuthType::Bearer
+                            }),
+                            inject: if invalid && incompatible_injection {
+                                InjectionMode::UrlPath
+                            } else {
+                                InjectionMode::default()
+                            },
+                            aws_access_key_id: None,
+                            region: None,
+                            service: None,
+                            approve: SecretApproval::Never,
+                            oauth: if source == "client-secret" {
+                                oauth_args(Some(OAuthClientSecretSource::Inline("-".into())))
+                            } else {
+                                OAuthArgs::default()
+                            },
+                            value: ValueSource {
+                                value: (source == "stdin").then(|| "-".into()),
+                                value_file: None,
+                                from: None,
+                            },
+                        },
+                        || {
+                            stdin_reads.set(stdin_reads.get() + 1);
+                            Ok("collected-private".into())
+                        },
+                        |name| {
+                            assert_eq!(name, "collection-order");
+                            prompt_reads.set(prompt_reads.get() + 1);
+                            Ok("collected-private".into())
+                        },
+                    );
+                    let log = audit_text(&f);
+                    assert!(!log.contains("collected-private"));
+                    // Preparation emits refusals only; a valid define emits
+                    // exactly one successful bind after writing the value.
+                    assert_eq!(log.matches("\"action\":\"bind\"").count(), 1);
+                    if invalid {
+                        assert!(result.is_err(), "{source}");
+                        assert_eq!(stdin_reads.get(), 0, "{source}");
+                        assert_eq!(prompt_reads.get(), 0, "{source}");
+                        assert!(
+                            FileSecretStore::with_dir(&f.secrets_dir)
+                                .get("local", "collection-order")
+                                .is_err()
+                        );
+                        assert!(log.contains("\"outcome\":\"err\""));
+                        assert!(!log.contains("\"action\":\"create\""));
+                    } else {
+                        result.unwrap();
+                        assert_eq!(stdin_reads.get(), usize::from(source != "prompt"));
+                        assert_eq!(prompt_reads.get(), usize::from(source == "prompt"));
+                        let store = FileSecretStore::with_dir(&f.secrets_dir);
+                        let stored = store.get("local", "collection-order").unwrap();
+                        if source == "client-secret" {
+                            let tokens: serde_json::Value =
+                                serde_json::from_str(stored.expose_secret()).unwrap();
+                            assert_eq!(tokens["client_secret"], "collected-private");
+                        } else {
+                            assert_eq!(stored.expose_secret(), "collected-private");
+                        }
+                        assert!(log.contains("\"action\":\"create\""));
+                    }
+                }
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────

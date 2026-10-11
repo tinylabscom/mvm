@@ -30,12 +30,9 @@ release-channel = ["mvm-build/release-channel"]
 # so a pure-local consumer stays light; a fleet/studio build turns it on.
 remote = ["mvm-core/client-remote"]
 # Republish a workload's output stream into the consumer's own `tracing`
-# subscriber (`stream_tracing`). Off by default: `tracing` is already a
-# dependency here for diagnostics, but a consumer that only reads records
-# should not link the base64 encoder the bridge needs to carry payload bytes
-# through a field API that has no byte type. `serde_json` is no longer gated
-# here: the volume and secret lifecycle services need it unconditionally.
-tracing-bridge = ["dep:base64"]
+# subscriber (`stream_tracing`). Off by default. The bridge shares its
+# base64 and JSON dependencies with the audit and lifecycle services.
+tracing-bridge = []
 # Forwards to `mvm-runtime/test-support`: the hermetic in-memory mock backend
 # `LocalBackend::with_hypervisor("mock")` drives in `pause`/`resume`'s
 # canned-snapshot test path. Off by default so the mock never reaches a
@@ -45,17 +42,17 @@ test-support = ["mvm-runtime/test-support"]
 # flag parses straight into the one profile table instead of a CLI-side copy.
 # Off by default: an embedder names a profile by value and links no parser.
 clap = ["dep:clap"]
-# Forwards to `mvm-core/manifest-verify`: the in-process Sigstore verifier that
-# checks signed artifacts and keyless instruction-file signatures. Explicit
-# no-default-features builds report signatures as uncheckable, never verified.
-manifest-verify = ["mvm-core/manifest-verify"]
+# Enable the in-process Sigstore verifier for both instruction signatures and
+# acquired release artifacts. Embedders must not rely on the CLI enabling the
+# builder's verifier through workspace feature unification.
+manifest-verify = ["mvm-core/manifest-verify", "mvm-build/manifest-verify"]
 # Derive schemas for authored policy and instruction trust policy, and build
 # their emitters. Off by default so no shipped closure carries schemars;
-# mvm-contract/schema covers policy endpoint routes and backend kinds.
-schema = ["dep:schemars", "mvm-contract/schema"]
+# Contract schemas cover policy routes and core checkpoint DTOs.
+schema = ["dep:schemars", "mvm-contract/schema", "mvm-core/schema"]
 
 [dependencies]
-mvm-core = { workspace = true, features = ["client"] }
+mvm-core = { workspace = true, features = ["client", "provenance"] }
 # Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`)
 # + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
 # this edge is acyclic.
@@ -79,7 +76,9 @@ mvm-vmm.workspace = true
 # Shared run-path orchestration (`run_image::inject_and_materialize`) and its
 # unconditional pure-Rust ext4 writer — the same path the CLI's `run --image`
 # uses. mvm-fs is already in the mvmctl closure via the CLI.
-mvm-build = { workspace = true, default-features = false }
+# Persistent builder operations also own the libkrun backend; standalone
+# hostlib consumers must not depend on CLI feature unification to compile it.
+mvm-build = { workspace = true, default-features = false, features = ["builder-libkrun"] }
 # Sealing built artifacts into a signed `.mvmpkg` (`bundle` module). Depends on
 # mvm-core alone, so the only crate this edge adds is mvm-bundler itself.
 mvm-bundler = { workspace = true }
@@ -93,6 +92,10 @@ flate2 = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
+# Transcript capture IDs retain the existing UUID wire representation.
+uuid = { workspace = true }
+# Signal constants only; process inspection and signaling use safe VMM helpers.
+libc = { workspace = true }
 # Verified audit reader surface: ed25519 for the trusted verifying key in
 # the reader's constructor; the shared chrono/serde/serde_json/thiserror
 # entries below serve its filters, DTOs, and typed refusals too. Already
@@ -101,9 +104,8 @@ ed25519-dalek = { workspace = true }
 # Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
 # Already in the mvmctl closure via mvm-runtime, so this adds no crates.
 tracing = { workspace = true }
-# `tracing-bridge` only: payload bytes are hash-chained and must reach an
-# event unaltered, and `tracing` has no byte-typed field to carry them in.
-base64 = { workspace = true, optional = true }
+# Audit certificate/proof key decoding and tracing-bridge payload encoding.
+base64 = { workspace = true }
 # The local encrypted-volume lifecycle service (`volume` module). Every entry
 # below is already in the mvmctl closure via mvm-core / mvm-runtime / mvm-cli,
 # so none adds new crates to the default build.
@@ -131,6 +133,9 @@ thiserror = { workspace = true }
 # The approval broker's webhook backend. Already in this crate's closure
 # through mvm-hostd, so the direct edge adds no crates.
 mvm-http = { workspace = true }
+# Native process-table inspection; already in the closure through mvm-hostd.
+# Maintenance must not invoke ps or another host executable.
+sysinfo = { version = "0.30", default-features = false }
 # `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
 # the one crate that turns the feature on.
 clap = { workspace = true, optional = true }
@@ -161,9 +166,13 @@ required-features = ["schema"]
 [dev-dependencies]
 mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
+# Reuse the signed-image-set fixture instead of duplicating acquisition policy.
+mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 # The runtime-source tests build a shared-object fixture to check which guest
 # runtime a rootfs needs.
 mvm-fs = { workspace = true, features = ["test-support"] }
+# Native FIFO fixtures, including macOS where rustix does not expose mkfifoat.
+nix = { version = "0.29", default-features = false, features = ["fs"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
 # The tracing bridge's tests install a capturing subscriber to assert the
 # emitted event carries the payload bytes back out unaltered.

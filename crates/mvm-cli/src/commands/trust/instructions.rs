@@ -8,18 +8,14 @@
 //! `mvm_client::instruction_trust`; this module is argument handling and
 //! output.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use ed25519_dalek::SigningKey;
 
-use mvm_client::instruction_trust::gate::{
-    Decision, PolicyLocations, ScanReport, default_trust_store, load_effective_policy, scan_roots,
-};
-use mvm_client::instruction_trust::policy::{EffectivePolicy, Enforcement, PublisherSummary};
-use mvm_client::instruction_trust::scan::{RootKind, ScanRoot, find_instruction_files};
-use mvm_client::instruction_trust::{sign, templates};
+use mvm_client::instruction_trust::gate::{Decision, PolicyLocations, ScanReport};
+use mvm_client::instruction_trust::operations::{self, InitRequest, SignRequest, VerifyRequest};
+use mvm_client::instruction_trust::policy::{Enforcement, PublisherSummary};
 use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
@@ -126,49 +122,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn init(args: InitArgs) -> Result<()> {
-    let enforcement = Enforcement::from(args.enforcement);
-    let (path, body) = match &args.project {
-        Some(dir) => (
-            mvm_core::config::project_instruction_trust_policy_path(dir),
-            templates::project_policy(enforcement),
-        ),
-        None => {
-            let signer = mvm_hostd::audit::host_keypair::load_or_init()
-                .context("loading this host's signing key for the starter policy")?;
-            (
-                mvm_core::config::instruction_trust_policy_path(),
-                templates::user_policy(enforcement, &hex::encode(signer.verifying.to_bytes())),
-            )
-        }
-    };
-    if path.exists() && !args.force {
-        anyhow::bail!(
-            "{} already exists; pass --force to overwrite it",
-            path.display()
-        );
-    }
-    let parent = path
-        .parent()
-        .context("a policy path always has a parent directory")?;
-    if args.project.is_some() {
-        std::fs::create_dir_all(parent)
-    } else {
-        mvm_core::config::create_private_dir(parent)
-    }
-    .with_context(|| format!("creating {}", parent.display()))?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    mvm_core::audit_emit!(
-        TrustInstructionsInit,
-        "path={},enforcement={}",
-        path.display(),
-        enforcement.as_str()
-    );
+    let outcome = operations::init(&InitRequest {
+        project: args.project,
+        enforcement: args.enforcement.into(),
+        force: args.force,
+    })?;
     ui::success(&format!(
         "Wrote {} (enforcement: {})",
-        path.display(),
-        enforcement.as_str()
+        outcome.path.display(),
+        outcome.enforcement.as_str()
     ));
-    if args.project.is_some() {
+    if outcome.project {
         ui::info("A project policy only tightens a user policy; alone it is advisory.");
     } else {
         ui::info(
@@ -179,93 +143,43 @@ fn init(args: InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// The effective policy for `root`: the user policy (or `--policy`), plus
-/// the project policy under `root` when it is a directory.
-fn policy_for(root: &Path, user_policy: Option<&Path>) -> Result<EffectivePolicy> {
-    let locations = PolicyLocations {
-        user: user_policy.map(Path::to_path_buf),
-        project_root: root.is_dir().then(|| root.to_path_buf()),
-    };
-    Ok(load_effective_policy(&locations, &default_trust_store()?)?)
-}
-
-/// Every file `sign` would sign: an explicitly named file as-is, and the
-/// instruction files under a named directory.
-fn files_to_sign(args: &SignArgs) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for path in &args.paths {
-        if path.is_dir() {
-            let policy = policy_for(path, args.policy.as_deref())?;
-            let found = find_instruction_files(&ScanRoot::new(path, RootKind::Explicit), &policy)
-                .with_context(|| format!("scanning {}", path.display()))?;
-            files.extend(found.into_iter().map(|f| f.path));
-        } else if path.is_file() {
-            files.push(path.clone());
-        } else {
-            anyhow::bail!("{} is not a file or directory", path.display());
-        }
-    }
-    Ok(files)
-}
-
-fn load_signing_key(path: Option<&Path>) -> Result<SigningKey> {
-    let Some(path) = path else {
-        return Ok(mvm_hostd::audit::host_keypair::load_or_init()
-            .context("loading this host's signing key")?
-            .signing);
-    };
-    let bytes = zeroize::Zeroizing::new(
-        std::fs::read(path).with_context(|| format!("reading key {}", path.display()))?,
-    );
-    let seed: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "key {} is {} bytes; expected a raw 32-byte Ed25519 secret key",
-            path.display(),
-            bytes.len()
-        )
-    })?;
-    Ok(SigningKey::from_bytes(&seed))
-}
-
 fn sign_paths(args: SignArgs) -> Result<()> {
-    let files = files_to_sign(&args)?;
+    let outcome = operations::sign(&SignRequest {
+        paths: args.paths,
+        key: args.key,
+        dry_run: args.dry_run,
+        policy: args.policy,
+    })?;
     if args.dry_run {
-        for file in &files {
+        for file in &outcome.selected {
             println!("{}", file.display());
         }
         return Ok(());
     }
-    if files.is_empty() {
+    let Some(key_id) = outcome.key_id else {
         ui::info("No instruction files found; nothing signed.");
         return Ok(());
-    }
-    let key = load_signing_key(args.key.as_deref())?;
-    let key_id = mvm_core::plan::bundle::key_id_from_pubkey(&key.verifying_key());
-    for file in &files {
-        let sidecar = sign::sign_file(file, &key)?;
-        let sha256 = mvm_core::crypto::image_verify::sha256_file(file)
-            .with_context(|| format!("hashing {}", file.display()))?;
-        mvm_core::audit_emit!(
-            TrustInstructionsSign,
-            "path={},sha256={},key_id={}",
-            file.display(),
-            sha256,
-            key_id.0
+    };
+    for file in &outcome.signed {
+        println!(
+            "signed {} -> {}",
+            file.path.display(),
+            file.sidecar.display()
         );
-        println!("signed {} -> {}", file.display(), sidecar.display());
     }
     ui::success(&format!(
         "Signed {} instruction file(s) with key {}",
-        files.len(),
-        key_id.0
+        outcome.signed.len(),
+        key_id
     ));
     Ok(())
 }
 
 fn verify(args: VerifyArgs) -> Result<()> {
-    let root = args.path.unwrap_or_else(|| PathBuf::from("."));
-    let policy = policy_for(&root, args.policy.as_deref())?;
-    let report = scan_roots(&[ScanRoot::new(&root, RootKind::Explicit)], &policy)?;
+    let report = operations::verify(&VerifyRequest {
+        path: args.path.unwrap_or_else(|| PathBuf::from(".")),
+        policy: args.policy,
+    })?;
     if args.json {
         crate::json_out::emit_json(&report)?;
     } else {
@@ -309,7 +223,7 @@ fn policy(args: PolicyArgs) -> Result<()> {
         user: args.policy.clone(),
         project_root: args.project.clone(),
     };
-    let summary = load_effective_policy(&locations, &default_trust_store()?)?.summary();
+    let summary = operations::policy(&locations)?;
     if args.json {
         return crate::json_out::emit_json(&summary);
     }
@@ -377,14 +291,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let short = dir.path().join("short.key");
         std::fs::write(&short, [1u8; 31]).unwrap();
-        let err = load_signing_key(Some(&short)).unwrap_err();
+        let file = dir.path().join("CLAUDE.md");
+        std::fs::write(&file, b"x").unwrap();
+        let mut request = SignRequest {
+            paths: vec![file],
+            key: Some(short),
+            dry_run: false,
+            policy: None,
+        };
+        let err = operations::sign(&request).unwrap_err();
         assert!(format!("{err:#}").contains("32-byte"), "{err:#}");
         let good = dir.path().join("good.key");
         std::fs::write(&good, [1u8; 32]).unwrap();
-        assert_eq!(
-            load_signing_key(Some(&good)).unwrap().to_bytes(),
-            SigningKey::from_bytes(&[1u8; 32]).to_bytes()
-        );
+        request.key = Some(good);
+        assert!(operations::sign(&request).unwrap().key_id.is_some());
     }
 
     #[test]
@@ -395,25 +315,25 @@ mod tests {
         let explicit = dir.path().join("notes.txt");
         std::fs::write(&explicit, b"x").unwrap();
         let absent_policy = dir.path().join("absent.toml");
-        let args = SignArgs {
+        let args = SignRequest {
             paths: vec![dir.path().to_path_buf(), explicit.clone()],
             key: None,
             dry_run: true,
             policy: Some(absent_policy),
         };
-        let files = files_to_sign(&args).unwrap();
+        let files = operations::sign(&args).unwrap().selected;
         assert_eq!(files, vec![dir.path().join("CLAUDE.md"), explicit]);
     }
 
     #[test]
     fn a_missing_path_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
-        let args = SignArgs {
+        let args = SignRequest {
             paths: vec![dir.path().join("absent")],
             key: None,
             dry_run: true,
             policy: None,
         };
-        assert!(files_to_sign(&args).is_err());
+        assert!(operations::sign(&args).is_err());
     }
 }

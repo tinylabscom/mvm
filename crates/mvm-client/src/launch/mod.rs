@@ -16,6 +16,8 @@ pub mod grants_report;
 pub mod machine_start;
 pub mod manifest_ref;
 pub mod persistent;
+pub mod prepared_start;
+pub mod prewarm;
 mod request;
 pub mod runtime_overlay;
 pub mod runtime_source;

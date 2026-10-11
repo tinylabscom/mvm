@@ -224,6 +224,23 @@ impl LocalVolumeService {
         size_mib: u32,
     ) -> Result<AttachmentRecord> {
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        self.prepare_ad_hoc_snapshot_attachment_locked(
+            request,
+            source_dir,
+            image,
+            fingerprint,
+            size_mib,
+        )
+    }
+
+    pub(super) fn prepare_ad_hoc_snapshot_attachment_locked(
+        &self,
+        request: &AttachmentRequest,
+        source_dir: &Path,
+        image: &Path,
+        fingerprint: &str,
+        size_mib: u32,
+    ) -> Result<AttachmentRecord> {
         lifecycle::recover_local_volume_catalog()?;
         lifecycle::validate_volume_name(request.volume.as_str())?;
         validate_snapshot_source(source_dir, fingerprint)?;
@@ -250,12 +267,29 @@ impl LocalVolumeService {
         fingerprint: &str,
         size_mib: u32,
     ) -> Result<AttachmentRecord> {
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
+        self.refresh_ad_hoc_snapshot_attachment_locked(
+            owner,
+            guest_path,
+            image,
+            fingerprint,
+            size_mib,
+        )
+    }
+
+    pub(super) fn refresh_ad_hoc_snapshot_attachment_locked(
+        &self,
+        owner: &str,
+        guest_path: &str,
+        image: &Path,
+        fingerprint: &str,
+        size_mib: u32,
+    ) -> Result<AttachmentRecord> {
         validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
         validate_snapshot_fingerprint(fingerprint)?;
         validate_snapshot_image(image)?;
         let canonical_guest = validate_mount_path(guest_path)
             .with_context(|| format!("registered guest path {guest_path:?} rejected"))?;
-        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         let mut registry = VolumeMountRegistry::load(owner)?;
         let entry = registry
             .mounts
@@ -268,6 +302,8 @@ impl LocalVolumeService {
                 entry.guest_path
             );
         }
+        super::host_snapshot::ensure_image_unleased(Path::new(&entry.host_path))?;
+        super::host_snapshot::ensure_image_unleased(image)?;
         entry.host_path = image.to_string_lossy().into_owned();
         entry.kind = LocalVolumeKind::BlockImage { size_mib };
         entry
@@ -276,6 +312,8 @@ impl LocalVolumeService {
             .expect("host snapshot presence checked above")
             .fingerprint = fingerprint.to_string();
         let refreshed = entry.clone();
+        registry.remove(&canonical_guest);
+        registry.add(refreshed.clone())?;
         registry.save(owner)?;
         Ok(attachment_record(owner, &refreshed))
     }
@@ -415,6 +453,7 @@ impl VolumeService for LocalVolumeService {
 
     fn detach(&self, owner: &str, guest_path: &str) -> Result<AttachmentRecord> {
         validate_vm_name(owner).with_context(|| format!("invalid VM name: {owner:?}"))?;
+        let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         let mut registry = VolumeMountRegistry::load(owner)?;
         let dropped = registry
             .remove(guest_path)

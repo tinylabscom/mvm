@@ -67,7 +67,9 @@ pub enum OpAction {
 /// lives once the apply is staged.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpImage {
-    /// SHA-256 of the content, hex. `None` only for a not-yet-staged image.
+    /// SHA-256 of the content, hex. Before staging a fresh apply this may
+    /// pin reviewed bytes; it does not imply the blob already exists.
+    /// Undo/redo post-images name persisted blobs. `None` is unbound or absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     /// Size in bytes.

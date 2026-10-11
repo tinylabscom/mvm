@@ -50,85 +50,10 @@ impl Below {
     }
 }
 
-const HOSTD: &[Below] = &[Below::Hostd];
-const RUNTIME: &[Below] = &[Below::Runtime];
-const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
-
 /// Files under `crates/mvm-cli/src/commands` that still reach a crate below
 /// the client, and which. Every entry is existing debt; remove it when the
 /// logic moves into `mvm-client`.
-const ALLOWLIST: &[(&str, &[Below])] = &[
-    // Command dispatch and top-level verbs.
-    ("agent_session.rs", BOTH),
-    ("bootstrap.rs", HOSTD),
-    ("builder_shell_job.rs", RUNTIME),
-    ("cmd_audit.rs", HOSTD),
-    ("mod.rs", BOTH),
-    ("pool.rs", BOTH),
-    // Builds, bundles and the builder VM.
-    ("build/build.rs", RUNTIME),
-    ("build/image_lineage.rs", BOTH),
-    ("build/persistent_builder.rs", RUNTIME),
-    ("build/sandbox_record.rs", HOSTD),
-    ("build/trace_secret_scan.rs", HOSTD),
-    ("build/validate.rs", RUNTIME),
-    ("bundle/export.rs", RUNTIME),
-    ("env/builder_vm/default_microvm.rs", RUNTIME),
-    ("env/builder_vm/kernel.rs", RUNTIME),
-    ("env/builder_vm/local_pair.rs", RUNTIME),
-    ("env/builder_vm/shell_job.rs", RUNTIME),
-    ("env/cleanup.rs", RUNTIME),
-    ("env/setup.rs", RUNTIME),
-    ("env/sign.rs", RUNTIME),
-    // Images and manifests.
-    ("image/base_image.rs", RUNTIME),
-    ("image/materialize.rs", RUNTIME),
-    ("image/pull_core.rs", RUNTIME),
-    ("manifest/export_oci.rs", RUNTIME),
-    ("manifest/prune.rs", RUNTIME),
-    ("manifest/rm.rs", RUNTIME),
-    // Machine lifecycle.
-    ("machine/checkpoint.rs", RUNTIME),
-    ("machine/input_journal.rs", RUNTIME),
-    ("machine/mod.rs", RUNTIME),
-    ("machine/prewarm.rs", RUNTIME),
-    ("machine/runtime.rs", RUNTIME),
-    // Audit, cache, secrets, storage and trust operations.
-    ("ops/audit.rs", BOTH),
-    ("ops/audit/sessions.rs", HOSTD),
-    ("ops/audit_posture.rs", HOSTD),
-    ("ops/cache.rs", BOTH),
-    ("ops/reconcile.rs", RUNTIME),
-    ("ops/secret.rs", HOSTD),
-    ("ops/transcript.rs", HOSTD),
-    ("shared/resolve.rs", RUNTIME),
-    ("storage/gc.rs", RUNTIME),
-    ("storage/info.rs", RUNTIME),
-    ("trust/instructions.rs", HOSTD),
-    // Runs, checkpoints, workspaces and the audit-chain readers behind them.
-    ("vm/artifact.rs", RUNTIME),
-    ("vm/audit_chain.rs", HOSTD),
-    ("vm/checkpoint.rs", BOTH),
-    ("vm/checkpoint/fork_vm_full.rs", BOTH),
-    ("vm/checkpoint/lineage.rs", BOTH),
-    ("vm/checkpoint/prompt_step.rs", RUNTIME),
-    ("vm/checkpoint/revert.rs", BOTH),
-    ("vm/checkpoint/timeline.rs", RUNTIME),
-    ("vm/checkpoint/vm_state.rs", RUNTIME),
-    ("vm/console.rs", RUNTIME),
-    ("vm/exec.rs", BOTH),
-    ("vm/host_signer.rs", HOSTD),
-    ("vm/invoke.rs", BOTH),
-    ("vm/outputs.rs", HOSTD),
-    ("vm/phase_timing.rs", RUNTIME),
-    ("vm/plan_persist.rs", HOSTD),
-    ("vm/prompt_replay.rs", RUNTIME),
-    ("vm/run_plan.rs", HOSTD),
-    ("vm/session.rs", RUNTIME),
-    ("vm/volume.rs", RUNTIME),
-    ("vm/workspace.rs", RUNTIME),
-    ("vm/workspace_apply.rs", RUNTIME),
-];
+const ALLOWLIST: &[(&str, &[Below])] = &[];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let root = workspace.join("crates/mvm-cli/src/commands");
@@ -287,6 +212,10 @@ fn file_is_all_test(src: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HOSTD: &[Below] = &[Below::Hostd];
+    const RUNTIME: &[Below] = &[Below::Runtime];
+    const BOTH: &[Below] = &[Below::Hostd, Below::Runtime];
 
     fn found(entries: &[(&str, &str)]) -> BTreeMap<String, Vec<Reach>> {
         entries

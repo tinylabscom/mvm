@@ -1,7 +1,271 @@
 {
   "abi_major": 1,
-  "abi_minor": 7,
+  "abi_minor": 8,
   "methods": [
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_list",
+      "name": "agent_sessions.list",
+      "summary": "Lists durable local agent sessions."
+    },
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_show",
+      "name": "agent_sessions.show",
+      "summary": "Reads a durable agent session."
+    },
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_open",
+      "name": "agent_sessions.open",
+      "summary": "Records a durable agent session with explicit execution intent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_park",
+      "name": "agent_sessions.park",
+      "summary": "Parks a durable agent session."
+    },
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_renew",
+      "name": "agent_sessions.renew",
+      "summary": "Renews a parked durable agent session."
+    },
+    {
+      "classification": "dev_only",
+      "key": "agent_sessions_resume",
+      "name": "agent_sessions.resume",
+      "summary": "Re-admits a durable agent session using the configured host signer."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_list",
+      "name": "checkpoints.list",
+      "summary": "Lists the local checkpoint catalog."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_info",
+      "name": "checkpoints.info",
+      "summary": "Reads checkpoint metadata."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_diff",
+      "name": "checkpoints.diff",
+      "summary": "Compares checkpoint manifests without decrypting content."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_verify",
+      "name": "checkpoints.verify",
+      "summary": "Verifies checkpoint lineage against the signed audit chain."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_timeline",
+      "name": "checkpoints.timeline",
+      "summary": "Reads a checkpoint or image lineage timeline."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_remove",
+      "name": "checkpoints.remove",
+      "summary": "Removes an unpinned leaf checkpoint with explicit execution intent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_capture",
+      "name": "checkpoints.capture",
+      "summary": "Captures machine state under its admitted key domain."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_restore",
+      "name": "checkpoints.restore",
+      "summary": "Restores a full-machine checkpoint with tenant and lineage checks."
+    },
+    {
+      "classification": "dev_only",
+      "key": "checkpoints_fork",
+      "name": "checkpoints.fork",
+      "summary": "Forks checkpoint state through client-owned admission and attenuation."
+    },
+    {
+      "classification": "dev_only",
+      "key": "replay_run_session",
+      "name": "replay.run_session",
+      "summary": "Previews or executes verified session replay on a fresh admitted fork."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "workspace_review",
+      "name": "workspace.review",
+      "summary": "Recover interrupted work and review a registered workspace without approving changes."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "workspace_apply",
+      "name": "workspace.apply",
+      "summary": "Apply only a freshly revalidated fingerprint with explicit approval."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "workspace_undo",
+      "name": "workspace.undo",
+      "summary": "Explicitly undo registered workspace history, reporting recoveries."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "workspace_redo",
+      "name": "workspace.redo",
+      "summary": "Explicitly redo registered workspace history, reporting recoveries."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "artifact_inspect",
+      "name": "artifact.inspect",
+      "summary": "Inspect a published local artifact."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "artifact_validate",
+      "name": "artifact.validate",
+      "summary": "Validate a published local artifact."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "artifact_configure_firecracker",
+      "name": "artifact.configure_firecracker",
+      "summary": "Write a Firecracker configuration for a local artifact."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "audit_sessions_list",
+      "name": "audit.sessions.list",
+      "summary": "List sessions only after verifying the configured tenant chain."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "audit_sessions_show",
+      "name": "audit.sessions.show",
+      "summary": "Show verified session events without accepting trust-key overrides."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "audit_sessions_verify",
+      "name": "audit.sessions.verify",
+      "summary": "Report session verification including absent and unsealed sessions."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "posture_inspect",
+      "name": "posture.inspect",
+      "summary": "Inspect security posture using only the configured host context."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_list",
+      "name": "volume.list",
+      "summary": "List managed volumes after lifecycle recovery."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_inspect",
+      "name": "volume.inspect",
+      "summary": "Inspect a managed volume without key material."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_create",
+      "name": "volume.create",
+      "summary": "Create a locked managed encrypted block volume."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_unlock",
+      "name": "volume.unlock",
+      "summary": "Unlock a volume through the configured client key provider."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_lock",
+      "name": "volume.lock",
+      "summary": "Seal a managed volume through its authoritative lifecycle."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_mount",
+      "name": "volume.mount",
+      "summary": "Register a read-only-by-default volume or encrypted host snapshot."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_detach",
+      "name": "volume.detach",
+      "summary": "Detach a registered volume."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_attachments",
+      "name": "volume.attachments",
+      "summary": "List registered attachments for a machine."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_snapshot",
+      "name": "volume.snapshot",
+      "summary": "Snapshot a locked managed volume without exporting key material."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "volume_restore",
+      "name": "volume.restore",
+      "summary": "Restore a locked managed volume from a verified local snapshot."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_remove",
+      "name": "manifest.remove",
+      "summary": "Remove a local built slot, optionally deleting its source manifest."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_prune",
+      "name": "manifest.prune",
+      "summary": "Preview or explicitly remove orphaned local manifest slots."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_export_oci",
+      "name": "manifest.export_oci",
+      "summary": "Export an existing local OCI archive."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "storage_info",
+      "name": "storage.info",
+      "summary": "Inspect the host thin pool."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "storage_gc",
+      "name": "storage.gc",
+      "summary": "Preview or explicitly collect host thin-pool volumes."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "bundle_export",
+      "name": "bundle.export",
+      "summary": "Export registered artifacts signed by the host key."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "maintenance_reconcile",
+      "name": "maintenance.reconcile",
+      "summary": "Preview host-local registry drift, or explicitly apply repairs."
+    },
     {
       "classification": "prod_safe",
       "key": "manifest_info",

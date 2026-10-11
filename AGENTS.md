@@ -26,6 +26,15 @@ anything this file describes, update this file in the same change.
 
 ## Execution boundaries
 
+**No subprocess implementation of client operations.** ADR-056
+(`specs/adrs/056-in-process-client-operations.md`) requires in-process APIs
+throughout `mvm-client` operations and their frontend adapters, transitive
+providers, and test fixtures. Never introduce or preserve `Command::new`,
+shell/interpreter calls, direct spawn/exec, or wrappers/delegates that hide
+them when implementing or migrating an operation. Existing calls are migration
+debt, not exceptions. Missing in-process support is unfinished work, not
+permission for a subprocess fallback or silently reduced functionality.
+
 **Builder VM requirement.** All Nix builds/evals, Firecracker operations,
 `mvmctl` runtime commands (anything that boots, talks to, or manages microVMs),
 and Linux-specific syscalls MUST run inside the project builder VM — never a

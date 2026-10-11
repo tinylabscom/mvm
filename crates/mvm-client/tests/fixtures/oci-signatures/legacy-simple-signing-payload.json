@@ -1,0 +1,1 @@
+{"critical":{"identity":{"docker-reference":"gcr.io/distroless/static"},"image":{"docker-manifest-digest":"sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3"},"type":"cosign container image signature"},"optional":null}

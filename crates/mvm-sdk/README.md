@@ -64,6 +64,60 @@ Admission, audit, OCI resolution and persistent machine state stay in
 `mvm-client`; the library is a thin JSON-in/JSON-out veneer over it. How the
 SDKs find the library is documented in `crates/mvm-hostlib/README.md`.
 
+### Durable sessions, checkpoints and replay
+
+ABI 1.8 adds the following local, stateless operations. These do not replace
+the short-lived `session` authoring API or `audit.sessions` inspection.
+
+| Python namespace | TypeScript namespace | Methods | Client owner |
+| --- | --- | --- | --- |
+| `mvm.agent_sessions` | `agentSessions` | `open`, `list`, `show`, `park`, `renew`, `resume` | `AgentSessions::local()` |
+| `mvm.checkpoints` | `checkpoints` | `list`, `info`, `diff`, `verify`, `timeline`, `remove`, `capture`, `restore`, `fork` | `Checkpoints::open()` (`info` calls `read`) |
+| `mvm.replay` | `replay` | `run_session` / `runSession` | `ReplayService::run_session` |
+
+Every session or checkpoint mutation requires `intent="execute"` in Python,
+or `{ intent: "execute", ...options }` in TypeScript. The ABI uses
+`{"intent":"execute","request":{...}}`; omission or an unknown intent is
+refused before invoking the service. These operations have no genuine preview.
+In particular, session `resume(boot=False)` still re-admits and changes durable
+state, and a `vm_full` checkpoint fork boots even when `boot` is false.
+Session generation/deadline fences and transition retry reports are preserved.
+
+Replay defaults to `dry_run=True` / `dryRun: true`, the client's verified
+preview. Set it explicitly false to fork, boot and deliver prompts.
+Tenant and timeout are explicit inputs. The reply contains verified selection
+metadata and an optional execution report, not plaintext prompts or a prepared
+replay handle. Fork and replay observers are captured internally, not streamed
+or serialized; guest output is not returned. Failure midway through replay can
+leave its fork running, as with the client operation.
+
+```python
+from mvm import agent_sessions, checkpoints, replay
+
+agent_sessions.open("research", intent="execute", members=[])
+sessions = agent_sessions.list()
+catalog = checkpoints.list()
+preview = replay.run_session("research", tenant="local", timeout_secs=30)
+```
+
+An empty session has no replay timeline; the final example requires that the
+session has subsequently recorded a checkpoint and prompts.
+
+Private keys, custom store roots, caller nonces, raw backends, admission
+overrides, secret rebinding/drop controls and caller-supplied audit anchors are
+not exposed. The services retain configured host signer custody, tenant checks,
+signed lineage verification and grant attenuation. Fork requests are ordinary
+forks with no declared secret replacements and no permission to drop secrets;
+parents requiring explicit rebinding may therefore be refused.
+
+**Parity remaining:** `revert`, `rewind` and `advance` are deliberately absent.
+Their shared client workflow can return an image-revert launch handoff rather
+than finish the operation. The SDK must not run part of that workflow and then
+report success or an after-the-fact unavailable error. Image-revert launch
+handoff completion is unavailable until it is a complete client-owned operation.
+Low-level preparation, direct store access, custom-root construction, raw
+capture/restore drivers and privileged admission controls remain excluded.
+
 ## Single source of truth
 
 This crate's `ir` module (`Workload` struct, `schemars` derive) emits

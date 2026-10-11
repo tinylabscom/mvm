@@ -66,8 +66,12 @@ pub const TELEMETRY_STATUS: &str = "telemetry.status";
 /// undecodable-line count, and whether the page reached the end.
 pub const TELEMETRY_RECORDS: &str = "telemetry.records";
 
+/// Preview or explicitly apply host-local registry repairs. Errors remain in
+/// the report rather than turning automatic maintenance into a command failure.
+pub const MAINTENANCE_RECONCILE: &str = "maintenance.reconcile";
+
 /// Every method this library answers through the client.
-pub const METHODS: [&str; 15] = [
+pub const METHODS: [&str; 16] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
@@ -83,6 +87,7 @@ pub const METHODS: [&str; 15] = [
     MACHINE_SET_TTL,
     TELEMETRY_STATUS,
     TELEMETRY_RECORDS,
+    MAINTENANCE_RECONCILE,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -305,6 +310,10 @@ pub(crate) async fn dispatch(client: &dyn MvmClient, method: &str, request: &[u8
 
 async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<Outcome, Outcome> {
     Ok(match method {
+        MAINTENANCE_RECONCILE => {
+            let request: mvm_client::maintenance::ReconcileRequest = parse_or_default(request)?;
+            Outcome::ok(&mvm_client::maintenance::reconcile(&request))
+        }
         MACHINE_LIST => {
             let filter: MachineFilter = parse_or_default(request)?;
             Outcome::ok(&client.list_machines(filter).await?)
@@ -953,5 +962,30 @@ mod tests {
         for method in METHODS {
             assert!(is_known(method), "{method}");
         }
+    }
+
+    #[test]
+    fn maintenance_rejects_unknown_and_mistyped_mutation_flags() {
+        let client = MockBackend::default();
+        for request in [br#"{"apply":"yes"}"#.as_slice(), br#"{"force":true}"#] {
+            let outcome = run(dispatch(&client, MAINTENANCE_RECONCILE, request));
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        }
+    }
+
+    #[test]
+    fn maintenance_returns_the_client_report_without_a_machine() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let outcome = run(dispatch(
+            &MockBackend::default(),
+            MAINTENANCE_RECONCILE,
+            b"{}",
+        ));
+        assert_eq!(outcome.status, crate::status::MVM_HOSTLIB_OK);
+        let report: mvm_client::maintenance::ReconcileReport =
+            serde_json::from_slice(&outcome.body).unwrap();
+        assert!(report.is_clean());
     }
 }

@@ -393,7 +393,10 @@ fn manifest_for(
     }
 }
 
-/// The archive being written, at `<out>.partial` until it is complete.
+/// The archive being written in an exclusively created private sibling file.
+///
+/// On Unix, the completed archive retains the temporary file's 0600 mode,
+/// including when replacing an ordinary existing output.
 ///
 /// The file and its parent directories are created on the first byte, which
 /// the archive writer emits only after the manifest is validated and signed,
@@ -401,18 +404,14 @@ fn manifest_for(
 /// partial file; a finished one is renamed over `out`.
 struct PartialOutput<'a> {
     out: &'a Path,
-    partial: PathBuf,
-    file: Option<std::fs::File>,
+    file: Option<tempfile::NamedTempFile>,
     written: u64,
 }
 
 impl<'a> PartialOutput<'a> {
     fn new(out: &'a Path) -> Self {
-        let mut partial = out.as_os_str().to_owned();
-        partial.push(".partial");
         Self {
             out,
-            partial: PathBuf::from(partial),
             file: None,
             written: 0,
         }
@@ -425,27 +424,34 @@ impl<'a> PartialOutput<'a> {
             {
                 std::fs::create_dir_all(parent)?;
             }
-            self.file = Some(std::fs::File::create(&self.partial)?);
+            let parent = self
+                .out
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            self.file = Some(tempfile::NamedTempFile::new_in(parent)?);
         }
         self.file
             .as_mut()
+            .map(tempfile::NamedTempFile::as_file_mut)
             .ok_or_else(|| std::io::Error::other("partial bundle file was not opened"))
     }
 
     /// Promote the archive when `sealed` succeeded; remove it otherwise.
     /// Returns the archive's size.
     fn finish(mut self, sealed: Result<()>) -> Result<u64> {
-        let promoted = sealed.and_then(|()| {
-            let file = self.open().context("creating the bundle file")?;
-            file.sync_all().context("syncing the bundle file")?;
-            std::fs::rename(&self.partial, self.out)
-                .with_context(|| format!("writing bundle to {}", self.out.display()))
-        });
-        if promoted.is_err() && self.file.is_some() {
-            // Best effort: the error being returned is the one that matters.
-            let _ = std::fs::remove_file(&self.partial);
-        }
-        promoted.map(|()| self.written)
+        sealed?;
+        self.open()
+            .context("creating the bundle file")?
+            .sync_all()
+            .context("syncing the bundle file")?;
+        self.file
+            .take()
+            .context("partial bundle file was not opened")?
+            .persist(self.out)
+            .map_err(|error| error.error)
+            .with_context(|| format!("writing bundle to {}", self.out.display()))?;
+        Ok(self.written)
     }
 }
 
@@ -544,6 +550,54 @@ mod tests {
         assert!(format!("{err:#}").contains("signer refused"));
         assert!(!out.exists());
         assert!(!dir.path().join("dist").join("app.mvmpkg.partial").exists());
+        assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn predictable_partial_links_are_never_opened() {
+        use std::io::Write;
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        for hard_link in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let protected = dir.path().join("protected-test-bytes");
+            let fixture_bytes = b"fixed non-secret protected fixture";
+            std::fs::write(&protected, fixture_bytes).unwrap();
+            let out = dir.path().join("app.mvmpkg");
+            let partial = dir.path().join("app.mvmpkg.partial");
+            if hard_link {
+                std::fs::hard_link(&protected, &partial).unwrap();
+            } else {
+                symlink(&protected, &partial).unwrap();
+            }
+            std::fs::write(&out, b"old archive").unwrap();
+            let mut output = PartialOutput::new(&out);
+            output.write_all(b"new archive").unwrap();
+            let stage = output.file.as_ref().unwrap();
+            assert_ne!(stage.path(), partial);
+            assert_eq!(stage.path().parent(), out.parent());
+            assert_eq!(
+                stage.as_file().metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(output.finish(Ok(())).unwrap(), 11);
+            assert!(std::fs::read(&protected).unwrap() == fixture_bytes);
+            assert_eq!(std::fs::read(&out).unwrap(), b"new archive");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        }
+    }
+
+    #[test]
+    fn promotion_failure_removes_private_stage() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("directory");
+        std::fs::create_dir(&out).unwrap();
+        let mut output = PartialOutput::new(&out);
+        output.write_all(b"archive").unwrap();
+        let error = output.finish(Ok(())).unwrap_err();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert!(error.to_string().contains("writing bundle"));
     }
 
     #[test]

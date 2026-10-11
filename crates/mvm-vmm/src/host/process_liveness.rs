@@ -396,6 +396,15 @@ mod tests {
     }
 
     #[test]
+    fn liveness_reports_a_process_owned_by_another_uid_as_alive() {
+        assert!(
+            kill_zero_reports_alive(-1, Some(libc::EPERM)),
+            "a process running under another uid must read as alive"
+        );
+        assert!(!kill_zero_reports_alive(-1, Some(libc::ESRCH)));
+    }
+
+    #[test]
     fn kill_zero_treats_permission_denied_as_a_live_process() {
         assert!(kill_zero_reports_alive(0, None));
         assert!(kill_zero_reports_alive(-1, Some(libc::EPERM)));

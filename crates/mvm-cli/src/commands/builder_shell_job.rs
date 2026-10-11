@@ -13,12 +13,13 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_choice};
-use mvm_build::builder_vm::{BuilderShellJob, BuilderVm, BuilderVmError};
-use mvm_build::libkrun_builder::LibkrunBuilderVm;
+use mvm_build::builder_backend_select::{
+    BuilderBackendChoice, BuilderFactoryOptions, resolve_choice,
+};
+use mvm_build::builder_vm::BuilderShellJob;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
@@ -65,45 +66,13 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     admit_source_builder_image(choice, || {
         crate::commands::env::builder_vm::bootstrap_tool_builder_vm_image()
     })?;
-    let result = match choice {
-        BuilderBackendChoice::Libkrun => libkrun_shell_builder(cli.verbose)
-            .run_shell_script(&job)
-            .map_err(builder_vm_err)?,
-        BuilderBackendChoice::Hvf => {
-            let image = mvm_runtime::builder_runner::resolve_driver_builder_image()
-                .map_err(builder_vm_err)?;
-            mvm_runtime::builder_runner::DriverBuilderVm::new(
-                mvm_backends::driver::hvf::HvfDriver::new(),
-                image.kernel,
-                image.rootfs,
-            )
-            .run_shell_script(&job)
-            .map_err(builder_vm_err)?
-        }
-        BuilderBackendChoice::Firecracker => {
-            let image = mvm_runtime::builder_runner::resolve_driver_builder_image()
-                .map_err(builder_vm_err)?;
-            mvm_runtime::builder_runner::DriverBuilderVm::new(
-                mvm_backends::driver::fc::FcDriver::new(),
-                image.kernel,
-                image.rootfs,
-            )
-            .run_shell_script(&job)
-            .map_err(builder_vm_err)?
-        }
-        BuilderBackendChoice::Qemu => {
-            bail!(
-                "builder shell jobs are not yet wired for the QEMU backend; \
-                 use --builder hvf, --builder firecracker, or --builder libkrun"
-            )
-        }
-        BuilderBackendChoice::WebLinux => {
-            bail!(
-                "builder shell jobs are not available for the WebLinux backend; \
-                 WebLinux is browser-only; use --builder hvf, --builder firecracker, or --builder libkrun"
-            )
-        }
-    };
+    let result = mvm_client::builder::run_shell_job_with_options(
+        &job,
+        Some(choice),
+        BuilderFactoryOptions {
+            verbose: cli.verbose > 0,
+        },
+    )?;
 
     let console_log = result.vm_state_dir.join("console.log");
     if console_log.is_file()
@@ -123,10 +92,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     Ok(())
 }
 
-fn libkrun_shell_builder(verbosity: u8) -> LibkrunBuilderVm {
-    LibkrunBuilderVm::default().with_verbose(verbosity > 0)
-}
-
 fn admit_source_builder_image(
     choice: BuilderBackendChoice,
     bootstrap: impl FnOnce() -> Result<()>,
@@ -142,10 +107,6 @@ fn admit_source_builder_image(
         bootstrap().context("admitting the current source builder VM image")?;
     }
     Ok(())
-}
-
-fn builder_vm_err(e: BuilderVmError) -> anyhow::Error {
-    anyhow::anyhow!("builder VM shell job failed: {e}")
 }
 
 #[cfg(test)]
@@ -196,12 +157,5 @@ mod tests {
         })
         .expect("source image admission");
         assert!(called.get());
-    }
-
-    #[test]
-    fn verbose_cli_streams_the_libkrun_guest_console() {
-        assert!(!libkrun_shell_builder(0).verbose);
-        assert!(libkrun_shell_builder(1).verbose);
-        assert!(libkrun_shell_builder(u8::MAX).verbose);
     }
 }

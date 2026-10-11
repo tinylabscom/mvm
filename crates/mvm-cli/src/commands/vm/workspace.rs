@@ -7,88 +7,17 @@
 //! the guest does reaches the host directory — a diff compares the copy with
 //! the baseline, and only a later reviewed apply may write the host tree.
 
-use std::path::PathBuf;
-
-use anyhow::{Context, Result};
-use mvm_client::volume::{AccessMode, AttachmentRecord, LocalVolumeService, VolumeService};
-use mvm_runtime::checkpoint::WorkspaceVolume;
-
-/// One workspace volume attached to a machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct Workspace {
-    /// The registered volume name.
-    pub volume: String,
-    /// Where the guest sees it.
-    pub guest_path: String,
-    /// The host directory it was snapshotted from.
-    pub source_dir: PathBuf,
-    /// The mount-cache key of the image the copy began as.
-    pub baseline_key: String,
-    /// The image the guest writes.
-    pub image: PathBuf,
-}
-
-/// The workspaces among `attachments`: writable, and backed by a host
-/// directory snapshot. A read-only snapshot cannot change, and a managed
-/// volume has no host directory to compare against.
-pub(in crate::commands) fn workspaces_in(attachments: Vec<AttachmentRecord>) -> Vec<Workspace> {
-    let mut workspaces: Vec<Workspace> = attachments
-        .into_iter()
-        .filter(|attachment| attachment.access == AccessMode::ReadWrite)
-        .filter_map(|attachment| {
-            let snapshot = attachment.host_snapshot?;
-            Some(Workspace {
-                volume: attachment.volume,
-                guest_path: attachment.guest_path,
-                source_dir: PathBuf::from(snapshot.source_path),
-                baseline_key: snapshot.fingerprint,
-                image: PathBuf::from(attachment.host_path),
-            })
-        })
-        .collect();
-    workspaces.sort_by(|a, b| a.volume.cmp(&b.volume));
-    workspaces
-}
-
-/// Every workspace registered for `vm`.
-pub(in crate::commands) fn workspaces_of(vm: &str) -> Result<Vec<Workspace>> {
-    let attachments = LocalVolumeService::new()
-        .list_attachments(vm)
-        .with_context(|| format!("listing the volumes registered for {vm:?}"))?;
-    Ok(workspaces_in(attachments))
-}
-
-/// The capture set a checkpoint of `vm` freezes with the machine.
-pub(in crate::commands) fn capture_set(workspaces: &[Workspace]) -> Vec<WorkspaceVolume> {
-    workspaces
-        .iter()
-        .filter(|workspace| workspace.image.is_file())
-        .map(|workspace| WorkspaceVolume {
-            name: workspace.volume.clone(),
-            image: workspace.image.clone(),
-        })
-        .collect()
-}
-
-/// The image `workspace` began as, verified against the digest it was
-/// published with.
-pub(in crate::commands) fn baseline_image(workspace: &Workspace) -> Result<PathBuf> {
-    let cache = crate::mount_cache::MountImageCache::new()?;
-    cache
-        .published_image(&workspace.baseline_key)?
-        .with_context(|| {
-            format!(
-                "the baseline image volume {:?} was copied from is no longer cached, or no \
-                 longer matches its recorded digest; it cannot be compared against",
-                workspace.volume
-            )
-        })
-}
+#[cfg(test)]
+use mvm_client::workspace_apply::workspaces_in;
+pub(in crate::commands) use mvm_client::workspace_apply::{
+    Workspace, baseline_image, workspaces_of,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_client::volume::{AttachmentSource, HostSnapshotRecord};
+    use mvm_client::volume::{AccessMode, AttachmentRecord, AttachmentSource, HostSnapshotRecord};
+    use std::path::PathBuf;
 
     fn attachment(volume: &str, access: AccessMode, snapshot: bool) -> AttachmentRecord {
         AttachmentRecord {

@@ -19,6 +19,7 @@ pub mod boot;
 pub mod call;
 pub mod dispatch;
 pub mod envelope;
+mod output;
 pub mod session;
 pub mod stdin_stream;
 pub mod verb_audit;
@@ -40,6 +41,7 @@ pub use dispatch::{
     route_event,
 };
 pub use envelope::{RemoteErrorEnvelope, parse_last_envelope};
+pub use output::{RecordedCopy, ShownChunk};
 pub use session::{
     IdleTimeoutUpdate, SessionStart, call_session, kill_session, reap_expired_sessions,
     require_running_session, session_info, set_session_idle_timeout, start_session,

@@ -6,11 +6,9 @@
 //! the persistent admission path. Presentation — dry runs, JSON, prompts,
 //! receipts — stays with the caller.
 //!
-//! What differs between the processes that start machines comes through
-//! [`StartHost`]: where the workload kernel comes from, how an OCI image
-//! reference becomes a bootable rootfs, and how the machine's volumes are
-//! prepared. The CLI may build a kernel or materialize a rootfs through the
-//! builder VM; a library embedder never builds.
+//! Local starts resolve verified, prepared artifacts only. Acquisition is an
+//! explicit administration operation, never a side effect of starting a
+//! persisted definition.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,8 +28,8 @@ pub trait StartHost {
     /// carries its own.
     fn workload_kernel(&self, backend: &str) -> Result<Option<String>>;
 
-    /// The bootable rootfs for the OCI image `reference`, pulling and
-    /// materializing it if it is not cached.
+    /// The verified, prepared rootfs for the OCI image `reference`.
+    /// A missing artifact must be refused, never acquired during a start.
     fn resolve_image(&self, reference: &str) -> Result<BootImage>;
 
     /// `name`'s volumes, from the spec's volume declarations, merged with the
@@ -228,6 +226,20 @@ fn persisted_network_policy(
     .with_routes(spec.routes.clone()))
 }
 
+/// Side-effect-free policy validation shared by named start and its preflight.
+/// It deliberately does not resolve an image, acquire a volume or create state.
+pub fn preflight_machine_spec(
+    spec: &mp::MachineSpec,
+    hypervisor: &str,
+    image_requested: bool,
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    validate_init_profile(&spec.profile, &spec.init)?;
+    mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
+    let policy = persisted_network_policy(spec)?;
+    crate::boot::validate_image_egress_backend_name(hypervisor, image_requested, &policy)?;
+    Ok(policy)
+}
+
 /// Start the machine `spec` describes on `params.hypervisor`.
 ///
 /// The spec is not modified; once the machine is up and anything the caller
@@ -240,7 +252,7 @@ pub fn start_machine_spec(
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
     validate_registry_pack_source(spec)?;
-    let network_policy = persisted_network_policy(spec)?;
+    let network_policy = preflight_machine_spec(spec, params.hypervisor, spec.image.is_some())?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let boot = resolve_boot_source(spec, host)?;
@@ -301,6 +313,21 @@ fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
     Ok(())
 }
 
+/// Commands recorded in a definition require a development-capable grant.
+/// Validate again at start because stored definitions can predate the gate.
+pub fn validate_init_profile(profile: &str, init: &[String]) -> Result<()> {
+    if init.is_empty() {
+        return Ok(());
+    }
+    let parsed = crate::profile::RunProfile::from_name(profile)
+        .with_context(|| format!("machine spec carries an unrecognised profile {profile:?}"))?;
+    anyhow::ensure!(
+        parsed.grants().dev_guest,
+        "machine dev.init requires a dev-capable profile; use --profile dev or --profile permissive"
+    );
+    Ok(())
+}
+
 /// The workload kernel a process that never builds one can boot on
 /// `backend`: `None` for the mock, which boots nothing, otherwise the verified
 /// kernel in the cache. libkrun is no exception: its workload driver boots an
@@ -326,6 +353,44 @@ pub fn cached_workload_kernel(backend: &str) -> Result<Option<String>> {
             mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
         ),
     }
+}
+
+/// Resolve the named machine's explicitly selected kernel without acquisition.
+/// A selected local image checkout remains authoritative, including on a miss.
+pub fn prepared_machine_kernel(backend: &str, pinned: bool) -> Result<Option<String>> {
+    use crate::builder_images::prepared;
+    if let Some(checkout) = prepared::selected_local_checkout()? {
+        return Ok(Some(
+            prepared::resolve_pair_workload_kernel(
+                &checkout,
+                mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
+            )?
+            .display()
+            .to_string(),
+        ));
+    }
+    if pinned {
+        // A pin requires a real verified workload kernel even on a backend
+        // whose default boot normally uses a bundled one.
+        return cached_workload_kernel("firecracker");
+    }
+    cached_workload_kernel(backend)
+}
+
+/// Resolve an image under the same receipt and policy checks as every prepared
+/// launch. This synchronous operation cannot fetch or rematerialize an image.
+pub fn prepared_machine_image(reference: &str) -> Result<BootImage> {
+    let image =
+        crate::image_admin::resolve_prepared_image(&crate::image_admin::ResolveImageRequest {
+            cache_root: crate::image_admin::oci_cache_root(),
+            reference: reference.to_owned(),
+            prod: false,
+        })?;
+    Ok(BootImage {
+        label: image.reference,
+        rootfs: image.rootfs_path,
+        digest: image.resolved_digest,
+    })
 }
 
 /// How a library embedder supplies a start.
@@ -421,10 +486,17 @@ impl StartHost for EmbedderStartHost {
 
 /// Resolve the OCI image or rootfs `reference` to a bootable rootfs for the
 /// machine `name`, recording the digest of the bytes that will boot.
+///
+/// OCI callers must first call [`crate::image_admin::prepare_image`]. This
+/// applies to in-process `LocalBackend` callers as well as command frontends:
+/// starting a machine never implicitly downloads or repairs an OCI image.
 pub async fn resolve_boot_image(reference: &str, name: &str) -> Result<BootImage> {
     let source: mvm_core::rootfs_source::RootfsSource = reference
         .parse()
         .map_err(|e| anyhow::anyhow!("image {reference:?}: {e}"))?;
+    if let mvm_core::rootfs_source::RootfsSource::Oci { image_ref } = &source {
+        return prepared_machine_image(image_ref);
+    }
     let rootfs = crate::local::resolve_local_rootfs(&source, name)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -441,6 +513,33 @@ pub async fn resolve_boot_image(reference: &str, name: &str) -> Result<BootImage
 pub fn record_machine_started(spec: &mut mp::MachineSpec, resolved_digest: String) {
     spec.resolved_digest = Some(resolved_digest);
     spec.last_started_at = Some(mvm_core::time::utc_now());
+}
+
+/// Successful named-start metadata, safe to render or put in a receipt.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NamedStartOutcome {
+    pub resolved_digest: String,
+    pub started_at: String,
+    pub init_commands_executed: usize,
+}
+
+/// Record a successfully initialized start. Failed init must never call this.
+pub fn record_started_definition(
+    spec: &mut mp::MachineSpec,
+    resolved_digest: String,
+) -> NamedStartOutcome {
+    record_machine_started(spec, resolved_digest.clone());
+    if let Err(error) = mp::overwrite_machine_spec(spec) {
+        tracing::warn!(%error, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
+    }
+    NamedStartOutcome {
+        resolved_digest,
+        started_at: spec
+            .last_started_at
+            .clone()
+            .expect("record_machine_started stamps last_started_at"),
+        init_commands_executed: spec.init.len(),
+    }
 }
 
 fn persistent_workload_dir(spec: &mp::MachineSpec) -> Option<PathBuf> {
@@ -460,6 +559,102 @@ fn persistent_workload_dir(spec: &mp::MachineSpec) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn named_machine_image_refuses_a_cold_cache_without_acquisition() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let error = prepared_machine_image("127.0.0.1:1/missing:latest").unwrap_err();
+        assert!(format!("{error:#}").contains("not prepared"), "{error:#}");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn named_backend_oci_resolution_uses_the_prepared_image_gate() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let error = resolve_boot_image("oci:127.0.0.1:1/missing:latest", "web")
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("not prepared"), "{error:#}");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn named_launch_resolves_explicitly_prepared_bytes_without_the_source() {
+        use mvm_build::guest_agent_build::{GuestAgentLayout, guest_binary_source};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
+        let cache = crate::image_admin::oci_cache_root();
+        let binary_source = guest_binary_source().unwrap();
+        for key in [binary_source.cache_key(), env!("CARGO_PKG_VERSION")] {
+            let layout = GuestAgentLayout::under(&cache, key, mvm_core::arch::GuestArch::host());
+            std::fs::create_dir_all(&layout.dir).unwrap();
+            for path in [
+                &layout.agent,
+                &layout.netinit,
+                &layout.egress_client,
+                &layout.entrypoint_runner,
+            ] {
+                std::fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+            }
+        }
+        let source = home.path().join("root");
+        std::fs::create_dir_all(source.join("etc")).unwrap();
+        std::fs::write(source.join("etc/issue"), b"named launch fixture\n").unwrap();
+        let reference = format!("rootfs-dir:{}", source.display());
+        let prepared = crate::image_admin::prepare_image(
+            &crate::image_admin::PrepareImageRequest {
+                cache_root: cache,
+                reference: reference.clone(),
+                prod: false,
+            },
+            None,
+        )
+        .unwrap();
+        std::fs::remove_dir_all(source).unwrap();
+        let resolved = resolve_boot_image(&reference, "web").await.unwrap();
+        assert_eq!(resolved.rootfs, prepared.rootfs_path);
+        assert_eq!(resolved.digest, prepared.resolved_digest);
+        assert_eq!(resolved.label, reference);
+        std::fs::remove_file(resolved.rootfs.parent().unwrap().join("rootfs.verity")).unwrap();
+        let error = resolve_boot_image(&reference, "web").await.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("incomplete rootfs artifacts"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn named_start_outcome_round_trips_without_runtime_state() {
+        let outcome = NamedStartOutcome {
+            resolved_digest: "sha256:abc".into(),
+            started_at: "2026-01-01T00:00:00Z".into(),
+            init_commands_executed: 2,
+        };
+        let encoded = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<NamedStartOutcome>(&encoded).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn initialization_authority_is_checked_by_the_client() {
+        let commands = vec!["true".to_owned()];
+        for profile in ["dev", "permissive"] {
+            validate_init_profile(profile, &commands).unwrap();
+        }
+        for profile in ["standard", "restrictive", "unknown"] {
+            assert!(validate_init_profile(profile, &commands).is_err());
+        }
+        validate_init_profile("unknown", &[]).unwrap();
+    }
 
     fn spec(name: &str) -> mp::MachineSpec {
         mp::MachineSpec {

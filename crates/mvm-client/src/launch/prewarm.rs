@@ -1,0 +1,95 @@
+//! Prepared-only source resolution for asynchronous warm-artifact jobs.
+//!
+//! The client owns image verification and template lookup. The runtime worker
+//! owns durable jobs, staging, and publication.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use mvm_core::arch::GuestArch;
+use mvm_core::config;
+use mvm_core::vm_backend::WarmPrewarmSource;
+use mvm_runtime::{
+    WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,
+    WarmArtifactWorker, WarmGoldenVmFactory,
+};
+
+/// Resolve a host-path-free prewarm source into concrete boot inputs. The
+/// runtime worker still re-checks regular-file status and content digests
+/// before publication.
+pub fn resolve_warm_artifact_plan(
+    source: &WarmPrewarmSource,
+    _key: &WarmArtifactKey,
+) -> Result<WarmArtifactBuildPlan> {
+    source.validate().map_err(anyhow::Error::msg)?;
+    let arch = GuestArch::host();
+    let cache_root = PathBuf::from(config::mvm_cache_dir());
+    match source {
+        WarmPrewarmSource::OciImage { reference } => {
+            let image = crate::image_admin::resolve_prepared_image(
+                &crate::image_admin::ResolveImageRequest {
+                    cache_root: crate::image_admin::oci_cache_root(),
+                    reference: reference.clone(),
+                    prod: false,
+                },
+            )
+            .with_context(|| format!("resolve prewarm OCI image {reference:?}"))?;
+            let kernel_path = super::machine_start::prepared_machine_kernel("firecracker", true)?
+                .context("resolve prewarm workload kernel")?;
+            Ok(WarmArtifactBuildPlan {
+                rootfs_path: image.rootfs_path,
+                kernel_path: PathBuf::from(kernel_path),
+                arch,
+                cache_root,
+            })
+        }
+        WarmPrewarmSource::Template { template_id } => {
+            let (_, kernel, _initramfs, rootfs, _) =
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(template_id)
+                    .with_context(|| format!("resolve prewarm template {template_id:?}"))?;
+            Ok(WarmArtifactBuildPlan {
+                rootfs_path: PathBuf::from(rootfs),
+                kernel_path: PathBuf::from(kernel),
+                arch,
+                cache_root,
+            })
+        }
+    }
+}
+
+/// Construct the runtime worker with the client's source resolver and the shared
+/// authenticated golden-VM readiness verifier. The factory remains
+/// backend-specific because only the selected VMM can assemble and boot its
+/// disposable golden VM.
+pub fn warm_artifact_worker(
+    store: WarmArtifactStore,
+    factory: WarmGoldenVmFactory,
+) -> WarmArtifactWorker {
+    let resolver: WarmArtifactPlanResolver = Arc::new(resolve_warm_artifact_plan);
+    WarmArtifactWorker::with_authenticated_readiness(store, resolver, factory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_source_is_rejected_before_source_resolution() {
+        let key = WarmArtifactKey {
+            backend: "hvf".into(),
+            backend_version: "v1".into(),
+            guest_agent_sha256: "a".repeat(64),
+            kernel_sha256: "b".repeat(64),
+            initramfs_sha256: "c".repeat(64),
+            rootfs_sha256: "d".repeat(64),
+            runtime_overlay_sha256: Some("e".repeat(64)),
+        };
+        let source = WarmPrewarmSource::OciImage {
+            reference: " ".into(),
+        };
+        let error = resolve_warm_artifact_plan(&source, &key)
+            .expect_err("invalid source must fail before image resolution");
+        assert!(error.to_string().contains("source identifier is empty"));
+    }
+}

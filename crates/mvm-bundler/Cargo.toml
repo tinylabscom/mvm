@@ -22,8 +22,6 @@ chrono = { workspace = true }
 # The optional debug summary written beside an exported bundle.
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
 tempfile = { workspace = true }
 
 [lints]

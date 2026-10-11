@@ -891,7 +891,7 @@ pub fn fetch_cli_release_archive(
     dest: &Path,
 ) -> Result<(), RuntimeOverlayError> {
     let expected = fetch_expected_hashes(&format!("{release_url}/{asset}.sha256"), &[asset])?;
-    curl_download(&format!("{release_url}/{asset}"), dest)?;
+    download_artifact(&format!("{release_url}/{asset}"), dest)?;
     verify_file_sha256(dest, asset, expected.get(asset))?;
     crate::release_signature::verify_release_archive_signature(
         &crate::release_signature::ReleaseSignatureRequest {
@@ -1224,7 +1224,7 @@ pub(crate) fn fetch_expected_hashes(
     wanted: &[&str],
 ) -> Result<std::collections::HashMap<String, String>, RuntimeOverlayError> {
     let tmp = tempfile::NamedTempFile::new()?;
-    curl_download(checksums_url, tmp.path())?;
+    download_artifact(checksums_url, tmp.path())?;
     let body = std::fs::read_to_string(tmp.path())?;
     let map = mvm_fs::overlay::parse_checksums_manifest(&body);
 
@@ -1278,41 +1278,14 @@ pub(crate) fn verify_file_sha256(
     Ok(())
 }
 
-/// Shell out to `curl -fSL` to download `url` to `dest`. Mirrors
-/// the existing `download_file` helper in
-/// `mvm-cli::commands::env::artifact_verify` so operator
-/// expectations stay uniform across the three downloaders
-/// (dev image, builder VM image, runtime overlay).
-pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
-    let output = mvm_core::env_hygiene::helper_command("curl")
-        .args(["-fSL", "--silent", "--show-error", "-o"])
-        .arg(dest)
-        .arg(url)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => Ok(()),
-        Ok(out) => {
-            let _ = std::fs::remove_file(dest);
-            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-            let code = out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            Err(RuntimeOverlayError::DownloadFailed {
-                url: url.to_string(),
-                reason: format!("curl exited {code}; stderr={stderr}"),
-            })
+/// In-process transport shared with locked image-set and signature acquisition.
+pub(crate) fn download_artifact(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
+    crate::artifact_download::download(url, dest).map_err(|error| {
+        RuntimeOverlayError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("{error:#}"),
         }
-        Err(e) => {
-            let _ = std::fs::remove_file(dest);
-            Err(RuntimeOverlayError::DownloadFailed {
-                url: url.to_string(),
-                reason: format!("spawn curl failed: {e}"),
-            })
-        }
-    }
+    })
 }
 
 #[cfg(test)]

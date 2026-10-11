@@ -15,6 +15,161 @@ use super::*;
 const VM: &str = "agent-vm";
 const VOLUME: &str = "source";
 
+#[test]
+fn review_fingerprint_binds_content_and_policy() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    let fingerprint = pending.fingerprint().unwrap();
+    assert_eq!(fingerprint, workspace.ready().fingerprint().unwrap());
+    let mut request = WorkspaceRequest {
+        vm: VM.into(),
+        volume: Some(VOLUME.into()),
+        exclude: Vec::new(),
+        protected_paths: Vec::new(),
+    };
+    assert!(super::workspace::ensure_review_policy(&pending, &request).is_ok());
+    request.protected_paths.push("private/**".into());
+    assert!(super::workspace::ensure_review_policy(&pending, &request).is_err());
+    request.protected_paths.clear();
+    request.exclude.push("private/**".into());
+    assert!(super::workspace::ensure_review_policy(&pending, &request).is_err());
+    image(
+        workspace.home.path(),
+        "live.ext4",
+        &[("/edit.txt", b"other\n")],
+    );
+    assert_ne!(fingerprint, workspace.ready().fingerprint().unwrap());
+}
+
+#[test]
+fn apply_refuses_equal_length_guest_changes_after_review() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    image(
+        workspace.home.path(),
+        "live.ext4",
+        &[("/edit.txt", b"other\n")],
+    );
+    let audit = workspace.signed_audit();
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit).unwrap();
+    assert!(applier.apply(pending).is_err());
+    assert_eq!(workspace.host(), "before\n");
+}
+
+#[test]
+fn staging_ingests_reviewed_content_without_an_existing_blob() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    let store = ApplyStore::open(workspace.store_root()).unwrap();
+    let staged = store
+        .stage(pending.plan, &workspace.source, &pending.live, None)
+        .expect("a review digest is not an already persisted blob");
+    assert_eq!(workspace.host(), "before\n");
+    store.commit(&staged, &workspace.source).unwrap();
+    assert_eq!(workspace.host(), "after\n");
+}
+
+#[test]
+fn staging_refuses_equal_length_guest_changes_after_the_final_review() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    image(
+        workspace.home.path(),
+        "changed.ext4",
+        &[("/edit.txt", b"other\n")],
+    );
+    let changed = Ext4Tree::open(&workspace.home.path().join("changed.ext4")).unwrap();
+    let store = ApplyStore::open(workspace.store_root()).unwrap();
+    let error = store
+        .stage(pending.plan, &workspace.source, &changed, None)
+        .expect_err("stage must verify the actual bytes against the approval");
+    assert!(error.to_string().contains("content changed since review"));
+    assert_eq!(workspace.host(), "before\n");
+    assert!(store.recover_source(&workspace.source).unwrap().is_none());
+    assert_eq!(
+        fs::read_dir(workspace.store_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn staging_refuses_a_host_change_after_the_final_review() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    fs::write(workspace.source.join("edit.txt"), "edited\n").unwrap();
+    let store = ApplyStore::open(workspace.store_root()).unwrap();
+    let error = store
+        .stage(pending.plan, &workspace.source, &pending.live, None)
+        .expect_err("stage must verify the captured pre-image");
+    assert!(error.to_string().contains("content changed since review"));
+    assert_eq!(workspace.host(), "edited\n");
+    assert!(store.recover_source(&workspace.source).unwrap().is_none());
+}
+
+#[test]
+fn staging_validates_reviewed_symlink_targets_without_requiring_a_blob() {
+    use sha2::{Digest, Sha256};
+    let workspace = Workspace::new(None);
+    let mut pending = workspace.ready();
+    let target = "target-a";
+    pending.plan.ops[0].action = OpAction::WriteSymlink {
+        target: target.into(),
+    };
+    pending.plan.ops[0].post = Some(mvm_fs::workspace_apply::OpImage {
+        sha256: Some(hex::encode(Sha256::digest(target.as_bytes()))),
+        size: target.len() as u64,
+    });
+    let store = ApplyStore::open(workspace.store_root()).unwrap();
+    let mut altered = pending.plan.clone();
+    altered.ops[0].action = OpAction::WriteSymlink {
+        target: "target-b".into(),
+    };
+    let error = store
+        .stage(altered, &workspace.source, &pending.live, None)
+        .expect_err("equal-length changed symlink target must be refused");
+    assert!(error.to_string().contains("content changed since review"));
+    assert!(store.recover_source(&workspace.source).unwrap().is_none());
+    let staged = store
+        .stage(pending.plan, &workspace.source, &pending.live, None)
+        .expect("reviewed target must be ingested into the blob store");
+    assert_eq!(workspace.host(), "before\n");
+    assert_eq!(staged.manifest().ops[0].post.as_ref().unwrap().size, 8);
+}
+
+#[test]
+fn apply_refuses_a_host_change_after_review() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    fs::write(workspace.source.join("edit.txt"), "edited\n").unwrap();
+    let audit = workspace.signed_audit();
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit).unwrap();
+    assert!(applier.apply(pending).is_err());
+    assert_eq!(workspace.host(), "edited\n");
+}
+
+#[test]
+fn apply_rechecks_protected_paths_after_review() {
+    let workspace = Workspace::new(None);
+    let pending = workspace.ready();
+    image(
+        workspace.home.path(),
+        "live.ext4",
+        &[
+            ("/edit.txt", b"after\n"),
+            ("/.github/workflows/ci.yml", b"changed"),
+        ],
+    );
+    let audit = workspace.signed_audit();
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit).unwrap();
+    assert!(applier.apply(pending).is_err());
+    assert_eq!(workspace.host(), "before\n");
+}
+
 /// A host directory holding `edit.txt`, and two images of it: the baseline
 /// the workspace began as and a live image in which the guest changed
 /// `edit.txt` and, optionally, wrote one more file.
@@ -80,7 +235,7 @@ impl Workspace {
 
     fn ready(&self) -> PendingApply {
         match review(self.target(), &self.request()).expect("review") {
-            Review::Ready(pending) => pending,
+            Review::Ready(pending) => *pending,
             Review::Refused(plan) => panic!("refused: {:?}", plan.refused_protected),
             Review::Unchanged => panic!("nothing to apply"),
         }

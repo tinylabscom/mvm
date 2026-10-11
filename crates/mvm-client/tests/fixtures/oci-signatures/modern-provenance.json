@@ -1,0 +1,19 @@
+{
+  "source_url": "https://raw.githubusercontent.com/sigstore/cosign/e2d25b54f768bdaa868318651e453b7bbc53c0ce/pkg/cosign/testdata/oci-attestation.sigstore.json",
+  "source_commit": "e2d25b54f768bdaa868318651e453b7bbc53c0ce",
+  "bundle_sha256": "a6c1fc36d2a9d6c7844bdb3caf052947fc48b4360e421d637d4647db40d4f9b0",
+  "payload_sha256": "15692616e9c435907c41411466e493f195a39ca68c973a4f5390df3d301398bd",
+  "subject": [
+    {
+      "name": "127.0.0.1:60943/repo",
+      "digest": {
+        "sha256": "732112270d7e59418a8c080b134b24cabd67d250d0d0147a97ed95ba5c280aa4"
+      }
+    }
+  ],
+  "predicateType": "https://cosign.sigstore.dev/attestation/v1",
+  "identity": "cody@soyland.com",
+  "issuer": "https://github.com/login/oauth",
+  "rekor_log_index": "175508996",
+  "rekor_proof_tree_size": "53604735"
+}

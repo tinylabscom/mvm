@@ -30,8 +30,11 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_fs::oci::{ImageReference, LayerDescriptor, UnpackOptions, UnpackReport, unpack_layer};
-use mvm_runtime::AnyBackend;
+use mvm_fs::oci::{
+    ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
+};
+pub use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
@@ -85,6 +88,17 @@ pub fn default_vcpus() -> u32 {
 #[must_use]
 pub fn auto_selected_backend_name() -> String {
     AnyBackend::auto_select().name().to_string()
+}
+
+/// Select the backend for an explicit `--hypervisor` name, refusing a
+/// selector this build cannot serve.
+///
+/// Frontends hold the returned handle only to pass it back to the client and
+/// to the CLI's own presentation helpers; backend construction and validation
+/// stay behind the client.
+pub fn selectable_backend_for_hypervisor(name: &str) -> anyhow::Result<AnyBackend> {
+    AnyBackend::require_hypervisor_selectable(name)?;
+    Ok(AnyBackend::from_hypervisor(name))
 }
 
 impl LocalBackend {

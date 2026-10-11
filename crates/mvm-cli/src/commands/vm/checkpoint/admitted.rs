@@ -45,7 +45,7 @@ impl AdmittedCapture {
 /// its content-address and every fork of it is refused before the grants are
 /// consulted at all.
 pub(super) fn admitted_capture_for(name: &str) -> Result<AdmittedCapture> {
-    let path = super::super::plan_persist::plan_path(name)?;
+    let path = mvm_client::audit::plan_persist::plan_path(name)?;
     // A VM that never had a plan legitimately has no grant to seal, and that is
     // the only tolerated absence. Every other failure — a corrupt plan, one at
     // loose permissions, one that will not parse — is refused rather than
@@ -56,7 +56,7 @@ pub(super) fn admitted_capture_for(name: &str) -> Result<AdmittedCapture> {
     if !path.exists() {
         return AdmittedCapture::from_plan(None);
     }
-    let plan = super::super::plan_persist::read_plan_at(&path).with_context(|| {
+    let plan = mvm_client::audit::plan_persist::read_plan_at(&path).with_context(|| {
         format!(
             "reading {name}'s admitted plan to seal its grants into the checkpoint; \
              refusing to seal a checkpoint whose permission set cannot be determined"

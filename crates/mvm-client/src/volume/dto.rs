@@ -14,9 +14,98 @@ use serde::{Deserialize, Serialize};
 
 use crate::profile::RunProfile;
 
+/// An explicitly granted launch volume. The materialized image remains
+/// separate from the host directory whose identity admission signs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExplicitVolume {
+    pub host: String,
+    pub guest: String,
+    pub size: String,
+    #[serde(default = "read_only_default")]
+    pub read_only: bool,
+    #[serde(default)]
+    pub materialized_image: Option<String>,
+    #[serde(default)]
+    pub kind: mvm_core::vm_backend::VmVolumeKind,
+    #[serde(default)]
+    pub encrypted: bool,
+}
+
+fn read_only_default() -> bool {
+    true
+}
+
+#[cfg(test)]
+mod explicit_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_volume_defaults_safe_and_keeps_materialized_identity() {
+        let request: ExplicitVolume =
+            serde_json::from_str(r#"{"host":"/source","guest":"/work","size":"1G"}"#).unwrap();
+        assert!(request.read_only);
+        assert!(request.materialized_image.is_none());
+        assert!(!request.encrypted);
+        assert!(
+            serde_json::from_str::<ExplicitVolume>(
+                r#"{"host":"a","guest":"b","size":"1G","secret":"no"}"#,
+            )
+            .is_err()
+        );
+        let original = ExplicitVolume {
+            materialized_image: Some("/state/source.ext4".into()),
+            read_only: false,
+            encrypted: true,
+            ..request
+        };
+        let runtime = RuntimeVolume::from(original.clone());
+        assert_eq!(runtime.host, "/source");
+        assert_eq!(
+            runtime.materialized_image.as_deref(),
+            Some("/state/source.ext4")
+        );
+        assert_eq!(ExplicitVolume::from(runtime), original);
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ExplicitVolume>(&json).unwrap(),
+            original
+        );
+    }
+}
+
+impl From<RuntimeVolume> for ExplicitVolume {
+    fn from(v: RuntimeVolume) -> Self {
+        Self {
+            host: v.host,
+            guest: v.guest,
+            size: v.size,
+            read_only: v.read_only,
+            materialized_image: v.materialized_image,
+            kind: v.kind,
+            encrypted: v.encrypted,
+        }
+    }
+}
+
+impl From<ExplicitVolume> for RuntimeVolume {
+    fn from(v: ExplicitVolume) -> Self {
+        Self {
+            host: v.host,
+            guest: v.guest,
+            size: v.size,
+            read_only: v.read_only,
+            materialized_image: v.materialized_image,
+            kind: v.kind,
+            encrypted: v.encrypted,
+        }
+    }
+}
+
 /// How a guest sees an attachment: read-only (the default everywhere) or
 /// read-write (an explicit opt-in gated on the admitted profile).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AccessMode {
     #[default]
@@ -117,6 +206,7 @@ impl From<RunProfile> for AdmittedProfile {
 
 /// The local artifact shape backing a volume.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum VolumeSourceKind {
     /// mvm-managed portable ext4 image, authenticated ciphertext while locked.
@@ -132,6 +222,7 @@ pub enum VolumeSourceKind {
 /// [`EncryptionState::Recovering`]; the recovery pass drives them back to a
 /// terminal state before any new lifecycle operation proceeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum EncryptionState {
     /// At-rest encryption comes from the host filesystem or block device.
@@ -146,6 +237,7 @@ pub enum EncryptionState {
 
 /// One managed local volume, described without any key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct VolumeRecord {
     /// Logical volume identity.
@@ -336,6 +428,7 @@ impl AttachmentRequestBuilder {
 
 /// Origin of a registered attachment's host path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum AttachmentSource {
     /// The path must keep matching an encrypted local-catalog entry.
@@ -347,6 +440,7 @@ pub enum AttachmentSource {
 
 /// Source identity retained for an ad-hoc host directory snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HostSnapshotRecord {
     pub source_path: String,
@@ -355,6 +449,7 @@ pub struct HostSnapshotRecord {
 
 /// One registered attachment, described without any key material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AttachmentRecord {
     /// Owner VM the attachment is registered for.
@@ -423,6 +518,13 @@ pub struct LaunchLeaseRequestBuilder {
 }
 
 impl LaunchLeaseRequestBuilder {
+    /// Explicit client-domain volumes, preserving the granted source identity.
+    #[must_use]
+    pub fn explicit_specs(mut self, explicit: Vec<ExplicitVolume>) -> Self {
+        self.explicit = explicit.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Explicit (non-registered) volumes the launch already carries.
     #[must_use]
     pub fn explicit_volumes(mut self, explicit: Vec<RuntimeVolume>) -> Self {

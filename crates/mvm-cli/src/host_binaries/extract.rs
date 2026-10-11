@@ -78,6 +78,17 @@ pub fn host_bin_cache_root() -> PathBuf {
 pub struct EmbeddedBootPayload;
 
 impl BootPayloadSource for EmbeddedBootPayload {
+    fn host_bin_dir(&self) -> Result<Option<PathBuf>, BootPayloadError> {
+        let cache_root = host_bin_cache_root();
+        ensure_extracted(&cache_root)
+            .map(Some)
+            .map_err(|source| BootPayloadError::Io {
+                op: "extracting mvmctl's embedded builder binaries into",
+                path: cache_root,
+                source,
+            })
+    }
+
     fn boot_payload(&self) -> Result<BuilderBootPayload, BootPayloadError> {
         let cache_root = host_bin_cache_root();
         builder_boot_payload(&cache_root).map_err(|source| BootPayloadError::Io {

@@ -5,6 +5,108 @@
 * and run json-schema-to-typescript to regenerate this file.
 */
 
+export type Transition = ("park" | "resume" | "renew")
+export type ParkReason = ("approval_wait" | "idle" | "host_shutdown" | "operator" | "retention_demotion")
+export type RetentionStatus = ({
+remaining_secs: number
+state: "alive"
+until_unix: number
+} | {
+expired_for_secs: number
+state: "expired"
+until_unix: number
+})
+export type Residency = ("active" | "hibernated" | "closed")
+export type StorageTier = ("resident" | "parked" | "cold")
+export type AgentSessionsListReply = SessionReport[]
+/**
+ * Operations without a genuine preview require this explicit intent.
+ */
+export type MutationIntent = "execute"
+export type SealReason = ("exited" | "failed" | "stopped")
+/**
+ * Opaque caller-supplied 32-byte commitment bound into an execution plan.
+ * 
+ * MVM validates only the byte width and canonical wire encoding. The caller and external verifier define what the bytes commit to; MVM does not assign a hash algorithm or interpret their semantics.
+ * 
+ * @minItems 32
+ * @maxItems 32
+ */
+export type CallerCommitment = [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
+export type MismatchReason = ("chain_break" | "signature" | "malformed" | "truncated_tail" | "count_mismatch" | "sequence_mismatch" | "root_mismatch" | "environment_mismatch" | "snapshot_root_mismatch" | "head_mismatch" | "ledger_break" | "malformed_seal" | "io")
+export type Verdict = ("VERIFIED" | "MISMATCH" | "UNSEALED" | "NOT_FOUND")
+/**
+ * Profile baked into an mvm guest image. Determines the set of vsock verbs the guest agent's dispatcher will accept; dev-only verbs (`Exec`, `ConsoleOpen`, `ProcStart`, `RunCode`, filesystem RPC, port forwarding) are rejected pre-handler when the image declares `SealedProd`.
+ * 
+ * **Source of truth.** The profile is declared by the image config — `/etc/mvm/security.json` on a sealed-prod image lives on a dm-verity rootfs, so the value cannot be widened at runtime: any modification breaks the verity hash and the kernel panics in `mvm-verity-init` before userspace. The loader treats absence of the policy file as an unprovisioned dev image (`SecurityPolicy::dev_defaults`).
+ * 
+ * **Builder uses a different protocol.** `mvm-builder-agent`'s wire type is `HostVmRequest`, not `GuestRequest`; the `Builder` profile is reserved for any future `GuestRequest` variant that only makes sense during a build. No current variant is `BuilderOnly`, so the value is wire-stable but unused for the tenant agent today.
+ */
+export type AgentProfile = ("sealed-prod" | "dev" | "builder")
+/**
+ * The capture mechanism behind a checkpoint. Only `FsQuick` is currently implemented; `VmFull` is reserved so the memory-state path can slot into the same model without a new surface.
+ */
+export type CheckpointClass = ("fs_quick" | "vm_full")
+/**
+ * CPU bound. The two variants are different units, not different precisions, and no conversion between them is offered: a share is a fraction of host wall-clock CPU, fuel is a count of executed instructions.
+ */
+export type CpuGrant = ({
+millicores: number
+unit: "share"
+} | {
+instructions: number
+unit: "fuel"
+})
+/**
+ * Wall-clock bound.
+ * 
+ * `Unbounded` is a named variant rather than a sentinel value. The legacy `TimeoutSpec::exec_secs` encodes unbounded as `0`, so a user writing `0` to mean "no time allowed" would get "no limit" — the exact inversion of their intent. `NonZeroU32` makes that unrepresentable here.
+ */
+export type WallClockGrant = ({
+kind: "unbounded"
+} | {
+kind: "secs"
+secs: number
+})
+/**
+ * Stable identifier for a checkpoint (also its on-disk directory name under `config::checkpoints_dir()`).
+ */
+export type CheckpointId = string
+/**
+ * Isolation boundary for checkpoint chunk deduplication.
+ * 
+ * The wire form is either `host` or `tenant:<name>`. The field is sealed into [`CheckpointMeta::meta_digest`], so changing the domain after capture makes lineage verification fail. Storage code hashes this value before using it as a directory name; tenant-controlled text never becomes a path component.
+ */
+export type CheckpointKeyDomain = string
+/**
+ * Content-address of a [`CheckpointMeta`]: `sha256(serde_json(load-bearing fields))` rendered `sha256:<64 lowercase hex>`. A child hash-links to its parent by this digest, so editing an ancestor's sealed record is detectable from any descendant — the recomputed ancestor digest no longer matches the child's link.
+ * 
+ * This is a content-address, not a signature and not an exact-byte blob digest. It shares the `sha256:<64-hex>` wire shape with several unrelated ids (OCI manifest/layer digests, blob shas, workload addresses) precisely so the boundary between them is a type-system property, not a string check: there is no `From`/`Into`/`Deref` to or from any of them (nor to [`CheckpointId`]), so handing one where another is expected does not compile.
+ */
+export type CheckpointDigest = string
+/**
+ * The approval-ledger head a [`SessionBinding`] was admitted under.
+ * 
+ * Shares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both are heads of a hash chain — but an approval-ledger head is deliberately not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the shape is shared with no conversion: so the boundary between unrelated hash-chain heads is a type-system property, not a string check. Without this newtype, `approval_head: CheckpointDigest` would let an approval head be assigned wherever a checkpoint content-address is expected (or the reverse) with the compiler saying nothing — and because `SessionBinding` sits inside `CheckpointMeta`'s digest input, whichever encoding shipped first would freeze into every sealed record's `meta_digest`.
+ */
+export type ApprovalHead = string
+/**
+ * Stable public agent-session identifier.
+ */
+export type AgentSessionId = string
+/**
+ * How a content blob changed between two checkpoint manifests.
+ */
+export type BlobStatus = ("unchanged" | "changed" | "added_in_b" | "removed_from_b")
+/**
+ * Direct content-addressed relationship between two checkpoint records.
+ */
+export type LineageRelation = ("b_child_of_a" | "a_child_of_b" | "same" | "unrelated")
+export type CheckpointsListReply = CheckpointMeta3[]
+/**
+ * Which lineage DAG a `sha256:<hex>` digest refers to. Only used to resolve the rare cross-store collision where one digest names both a checkpoint and an image node.
+ */
+export type LineageKind = ("checkpoint" | "image")
 /**
  * Kind of agent-side error reported via `EntrypointEvent::Error`.
  * 
@@ -97,9 +199,75 @@ export type MachineListReply = MachineState2[]
  */
 export type RunMode = ("transient" | "persistent")
 export type ManifestListReply = SlotRow[]
+export type PostureStatus = ("ok" | "warn" | "fail")
+/**
+ * How a guest sees an attachment: read-only (the default everywhere) or read-write (an explicit opt-in gated on the admitted profile).
+ */
+export type AccessMode = ("read-only" | "read-write")
+/**
+ * Origin of a registered attachment's host path.
+ */
+export type AttachmentSource = ("managed-catalog" | "ad-hoc-host")
+export type VolumeAttachmentsReply = AttachmentRecord[]
+/**
+ * Lifecycle position of a volume's encryption, collapsed to what a presentation surface needs. Transitional catalog states surface as [`EncryptionState::Recovering`]; the recovery pass drives them back to a terminal state before any new lifecycle operation proceeds.
+ */
+export type EncryptionState = ("host-backed" | "locked" | "unlocked" | "recovering")
+/**
+ * The local artifact shape backing a volume.
+ */
+export type VolumeSourceKind = ({
+capacity_mib: number
+kind: "managed-block"
+} | {
+kind: "managed-directory"
+} | {
+kind: "ad-hoc-host-directory"
+})
+export type VolumeListReply = VolumeRecord2[]
+export type RecoveryReport = ({
+apply_id: string
+kind: "interrupted"
+} | {
+apply_id: string
+kind: "unaudited"
+})
+export type ReviewSummary = ({
+status: "unchanged"
+} | {
+plan: PlanSummary
+status: "refused"
+} | {
+fingerprint: string
+plan: PlanSummary
+status: "ready"
+})
+export type ChangeAction = ("write_file" | "write_symlink" | "remove")
 
 export interface HostAbi {
+agent_sessions_list: AgentSessionsList
+agent_sessions_open: AgentSessionsOpen
+agent_sessions_park: AgentSessionsPark
+agent_sessions_renew: AgentSessionsRenew
+agent_sessions_resume: AgentSessionsResume
+agent_sessions_show: AgentSessionsShow
+artifact_configure_firecracker: ArtifactConfigureFirecracker
+artifact_inspect: ArtifactInspect
+artifact_validate: ArtifactValidate
+audit_sessions_list: AuditSessionsList
+audit_sessions_show: AuditSessionsShow
+audit_sessions_verify: AuditSessionsVerify
 backend_capabilities: BackendCapabilities
+bundle_export: BundleExport
+checkpoints_capture: CheckpointsCapture
+checkpoints_diff: CheckpointsDiff
+checkpoints_fork: CheckpointsFork
+checkpoints_info: CheckpointsInfo
+checkpoints_list: CheckpointsList
+checkpoints_remove: CheckpointsRemove
+checkpoints_restore: CheckpointsRestore
+checkpoints_timeline: CheckpointsTimeline
+checkpoints_verify: CheckpointsVerify
 entrypoint_call: EntrypointCall
 guest_cp: GuestCp
 guest_fs_list: GuestFsList
@@ -136,19 +304,444 @@ machine_run: MachineRun
 machine_set_ttl: MachineSetTtl
 machine_start: MachineStart
 machine_stop: MachineStop
+maintenance_reconcile: MaintenanceReconcile
+manifest_export_oci: ManifestExportOci
 manifest_info: ManifestInfo
 manifest_list: ManifestList
+manifest_prune: ManifestPrune
+manifest_remove: ManifestRemove
 manifest_verify: ManifestVerify
+posture_inspect: PostureInspect
+replay_run_session: ReplayRunSession
 session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
 session_stop: SessionStop
+storage_gc: StorageGc
+storage_info: StorageInfo
 telemetry_records: TelemetryRecords
 telemetry_status: TelemetryStatus
+volume_attachments: VolumeAttachments
+volume_create: VolumeCreate
+volume_detach: VolumeDetach
+volume_inspect: VolumeInspect
+volume_list: VolumeList
+volume_lock: VolumeLock
+volume_mount: VolumeMount
+volume_restore: VolumeRestore
+volume_snapshot: VolumeSnapshot
+volume_unlock: VolumeUnlock
+workspace_apply: WorkspaceApply
+workspace_redo: WorkspaceRedo
+workspace_review: WorkspaceReview
+workspace_undo: WorkspaceUndo
+}
+export interface AgentSessionsList {
+reply: AgentSessionsListReply
+request: Empty
+}
+/**
+ * Stable, owned view of a stored session, including retention at observation.
+ */
+export interface SessionReport {
+approval_head?: (string | null)
+created_unix: number
+generation: number
+journal_cursor: number
+last_transition?: (RecordedTransition | null)
+members: string[]
+parent_checkpoint?: (string | null)
+park_reason?: (ParkReason | null)
+retain_until_unix?: (number | null)
+retention?: (RetentionStatus | null)
+session_id: string
+state: Residency
+storage_tier?: (StorageTier | null)
+updated_unix: number
+}
+/**
+ * The durable transition identity as published by the session contract.
+ */
+export interface RecordedTransition {
+admitted_plan_id?: (string | null)
+digest: string
+identity: TransitionIdentity
+}
+export interface TransitionIdentity {
+inputs?: {
+[k: string]: (string | null)
+}
+kind: Transition
+observed?: {
+[k: string]: (string | null)
+}
+observed_generation: number
+session_id: string
+}
+export interface Empty {
+
+}
+export interface AgentSessionsOpen {
+reply: SessionReport1
+request: MutationFor_OpenRequest
+}
+/**
+ * Stable, owned view of a stored session, including retention at observation.
+ */
+export interface SessionReport1 {
+approval_head?: (string | null)
+created_unix: number
+generation: number
+journal_cursor: number
+last_transition?: (RecordedTransition | null)
+members: string[]
+parent_checkpoint?: (string | null)
+park_reason?: (ParkReason | null)
+retain_until_unix?: (number | null)
+retention?: (RetentionStatus | null)
+session_id: string
+state: Residency
+storage_tier?: (StorageTier | null)
+updated_unix: number
+}
+export interface MutationFor_OpenRequest {
+intent: MutationIntent
+request: OpenRequest
+}
+/**
+ * Creation inputs contain references and identities, never secret material.
+ */
+export interface OpenRequest {
+members: string[]
+resume_point?: (string | null)
+session_id: string
+}
+export interface AgentSessionsPark {
+reply: TransitionReport
+request: MutationFor_ParkRequest
+}
+export interface TransitionReport {
+admitted_plan_id?: (string | null)
+booted_sandbox?: (string | null)
+replayed: boolean
+session: SessionReport2
+transition: Transition
+/**
+ * Audit failures after a durable mutation do not imply the mutation failed.
+ */
+warnings?: string[]
+}
+/**
+ * Stable, owned view of a stored session, including retention at observation.
+ */
+export interface SessionReport2 {
+approval_head?: (string | null)
+created_unix: number
+generation: number
+journal_cursor: number
+last_transition?: (RecordedTransition | null)
+members: string[]
+parent_checkpoint?: (string | null)
+park_reason?: (ParkReason | null)
+retain_until_unix?: (number | null)
+retention?: (RetentionStatus | null)
+session_id: string
+state: Residency
+storage_tier?: (StorageTier | null)
+updated_unix: number
+}
+export interface MutationFor_ParkRequest {
+intent: MutationIntent
+request: ParkRequest
+}
+export interface ParkRequest {
+approval_head?: (string | null)
+expected_generation?: (number | null)
+journal_cursor: number
+reason: string
+retain_for?: (string | null)
+session_id: string
+}
+export interface AgentSessionsRenew {
+reply: TransitionReport1
+request: MutationFor_RenewRequest
+}
+export interface TransitionReport1 {
+admitted_plan_id?: (string | null)
+booted_sandbox?: (string | null)
+replayed: boolean
+session: SessionReport2
+transition: Transition
+/**
+ * Audit failures after a durable mutation do not imply the mutation failed.
+ */
+warnings?: string[]
+}
+export interface MutationFor_RenewRequest {
+intent: MutationIntent
+request: RenewRequest
+}
+export interface RenewRequest {
+expected_deadline?: (number | null)
+expected_generation?: (number | null)
+extend_for: string
+session_id: string
+}
+export interface AgentSessionsResume {
+reply: TransitionReport2
+request: MutationFor_ResumeRequest
+}
+export interface TransitionReport2 {
+admitted_plan_id?: (string | null)
+booted_sandbox?: (string | null)
+replayed: boolean
+session: SessionReport2
+transition: Transition
+/**
+ * Audit failures after a durable mutation do not imply the mutation failed.
+ */
+warnings?: string[]
+}
+export interface MutationFor_ResumeRequest {
+intent: MutationIntent
+request: ResumeRequest
+}
+export interface ResumeRequest {
+approval_head?: (string | null)
+backend: string
+boot: boolean
+cpus: number
+expected_generation?: (number | null)
+image: string
+image_sha256: string
+kernel?: (string | null)
+kernel_sha256?: (string | null)
+mem_mib: number
+session_id: string
+}
+export interface AgentSessionsShow {
+reply: SessionReport3
+request: ShowRequest
+}
+/**
+ * Stable, owned view of a stored session, including retention at observation.
+ */
+export interface SessionReport3 {
+approval_head?: (string | null)
+created_unix: number
+generation: number
+journal_cursor: number
+last_transition?: (RecordedTransition | null)
+members: string[]
+parent_checkpoint?: (string | null)
+park_reason?: (ParkReason | null)
+retain_until_unix?: (number | null)
+retention?: (RetentionStatus | null)
+session_id: string
+state: Residency
+storage_tier?: (StorageTier | null)
+updated_unix: number
+}
+export interface ShowRequest {
+session_id: string
+}
+export interface ArtifactConfigureFirecracker {
+reply: BackendConfigReport
+request: ArtifactRequest
+}
+export interface BackendConfigReport {
+backend: string
+path: string
+}
+/**
+ * An exact artifact ID or an unambiguous prefix, never a filesystem path.
+ */
+export interface ArtifactRequest {
+id: string
+}
+export interface ArtifactInspect {
+reply: ArtifactReport
+request: ArtifactRequest1
+}
+export interface ArtifactReport {
+arch: string
+artifact_id: string
+backend: string
+build_id: string
+builder_version: string
+config_path?: (string | null)
+kernel: KernelReport
+provenance?: (ProvenanceReport | null)
+rootfs: RootfsReport
+tenant_id?: (string | null)
+timestamp_unix: number
+validation?: (ValidationReport | null)
+}
+export interface KernelReport {
+format: string
+hash: string
+path: string
+version?: (string | null)
+}
+export interface ProvenanceReport {
+flake_ref?: (string | null)
+lock_hash?: (string | null)
+}
+export interface RootfsReport {
+format: string
+hash: string
+path: string
+size: number
+}
+export interface ValidationReport {
+checks: ValidationCheck[]
+ok: boolean
+}
+export interface ValidationCheck {
+detail: string
+name: string
+ok: boolean
+}
+/**
+ * An exact artifact ID or an unambiguous prefix, never a filesystem path.
+ */
+export interface ArtifactRequest1 {
+id: string
+}
+export interface ArtifactValidate {
+reply: ValidationReport1
+request: ArtifactRequest2
+}
+export interface ValidationReport1 {
+checks: ValidationCheck[]
+ok: boolean
+}
+/**
+ * An exact artifact ID or an unambiguous prefix, never a filesystem path.
+ */
+export interface ArtifactRequest2 {
+id: string
+}
+export interface AuditSessionsList {
+reply: ListReport
+request: ListRequest
+}
+export interface ListReport {
+/**
+ * None means no chain exists, not a verified empty ledger.
+ */
+ledger?: (LedgerCheck | null)
+sessions: SessionSummary[]
+}
+export interface LedgerCheck {
+detail?: (string | null)
+intact: boolean
+seals: number
+}
+export interface SessionSummary {
+ended_at: string
+event_count: number
+image_name: string
+plan_id: string
+seal?: (SessionSeal | null)
+seal_seq?: (number | null)
+sealed: boolean
+started_at: string
+}
+export interface SessionSeal {
+chain_head: string
+compute_environment?: (string | null)
+ended_at: string
+error_class?: (string | null)
+event_count: number
+exit_code?: (string | null)
+first_entry: string
+first_seq: number
+head_seq: number
+image_sha256?: (string | null)
+kernel_sha256?: (string | null)
+last_entry: string
+last_seq: number
+prev_seal: string
+reason: SealReason
+session_root: string
+snapshot_root?: (string | null)
+started_at: string
+}
+export interface ListRequest {
+range?: TimeRange
+tenant?: string
+}
+export interface TimeRange {
+since?: (string | null)
+until?: (string | null)
+}
+export interface AuditSessionsShow {
+reply: ShowReport
+request: ShowRequest1
+}
+export interface ShowReport {
+events: SessionEvent[]
+plan_id: string
+}
+export interface SessionEvent {
+envelope: SessionEnvelope
+seq: number
+}
+export interface SessionEnvelope {
+canonical?: (string | null)
+entry: SessionEntry
+prev_hash: string
+signature: string
+}
+export interface SessionEntry {
+bundle_id?: (string | null)
+bundle_version?: (number | null)
+caller_commitment?: (CallerCommitment | null)
+event: string
+image_name: string
+image_sha256: string
+labels?: {
+[k: string]: string
+}
+plan_id: string
+plan_version: number
+tenant: string
+timestamp: string
+}
+export interface ShowRequest1 {
+filter?: EventFilter
+selector: string
+tenant?: string
+}
+export interface EventFilter {
+kind?: (string | null)
+range?: TimeRange
+}
+export interface AuditSessionsVerify {
+reply: SessionVerification
+request: VerifyRequest
+}
+export interface SessionVerification {
+detail?: (string | null)
+event_count: number
+late_entries: number
+plan_id: string
+reason?: (MismatchReason | null)
+seals: SealCheck[]
+verdict: Verdict
+}
+export interface SealCheck {
+seal: SessionSeal
+seq: number
+}
+export interface VerifyRequest {
+selector: string
+tenant?: string
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
-request: Empty
+request: Empty1
 }
 /**
  * Opaque report; the shape is owned by the capability negotiation module.
@@ -159,8 +752,511 @@ export interface BackendCapabilitiesReply {
 /**
  * A request that carries nothing.
  */
-export interface Empty {
+export interface Empty1 {
 
+}
+export interface BundleExport {
+reply: ExportReport
+request: ExportRequest
+}
+export interface ExportReport {
+key_id: string
+path: string
+size_bytes: number
+}
+export interface ExportRequest {
+cmdline?: (string | null)
+label?: (string | null)
+out: string
+posture?: (ExportPosture | null)
+template: string
+}
+export interface ExportPosture {
+allow_egress?: boolean
+allow_unauthenticated?: boolean
+allow_volumes?: boolean
+profile: AgentProfile
+}
+export interface CheckpointsCapture {
+reply: CheckpointMeta
+request: MutationFor_CaptureRequest
+}
+/**
+ * On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
+ * 
+ * `parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.
+ * 
+ * `audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.
+ */
+export interface CheckpointMeta {
+audit_ref?: (string | null)
+class: CheckpointClass
+content: ContentBlob[]
+created_unix: number
+/**
+ * The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child.
+ */
+grants?: (Grants | null)
+id: CheckpointId
+/**
+ * Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape.
+ */
+key_domain?: CheckpointKeyDomain
+/**
+ * Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.
+ */
+machine_input_cursor?: (number | null)
+/**
+ * Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record.
+ */
+meta_digest: CheckpointDigest
+parent?: (CheckpointDigest | null)
+runtime_overlay_version?: (string | null)
+/**
+ * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
+ */
+session?: (SessionBinding | null)
+/**
+ * Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.
+ */
+snapshot_id?: (string | null)
+supervisor_config_digest: string
+tag?: (string | null)
+vm_name: string
+}
+/**
+ * One named artifact inside a checkpoint's `content/` dir, with its hash.
+ */
+export interface ContentBlob {
+name: string
+sha256: string
+}
+/**
+ * A workload's permission set. Every field is optional: absent means "unspecified", which each dimension resolves differently — an absent `egress` is deny-all, an absent `cpu` is uncapped.
+ */
+export interface Grants {
+cpu?: (CpuGrant | null)
+/**
+ * Host-to-guest display input. Viewing is the separate `host.display.view.v1` service token; this grants the input direction only. Absent means no input path exists.
+ */
+display_input?: (DisplayInputGrant | null)
+drive?: (DriveGrant | null)
+egress?: (EgressGrant | null)
+wall_clock?: (WallClockGrant | null)
+}
+/**
+ * Authority to send display input events to a workload.
+ */
+export interface DisplayInputGrant {
+/**
+ * A human attends this run. Required before a sealed workload accepts display input, and reported by `doctor` and `machine ls`.
+ */
+attended?: boolean
+/**
+ * Host-to-guest paste. Absent means no paste event is accepted.
+ */
+clipboard?: (DisplayClipboardGrant | null)
+/**
+ * A human will enter a credential through the display during this run.
+ */
+human_credential?: (HumanCredentialGrant | null)
+}
+/**
+ * Host-to-guest paste authority.
+ */
+export interface DisplayClipboardGrant {
+/**
+ * Largest paste, in UTF-8 bytes. Admission refuses a value above [`MAX_CLIPBOARD_PASTE_BYTES`].
+ */
+max_paste_bytes: number
+}
+/**
+ * The signed statement that a human credential will be typed into the guest.
+ * 
+ * The credential itself never appears anywhere in the plan or the audit chain. What the plan records is where the resulting session may be used.
+ */
+export interface HumanCredentialGrant {
+/**
+ * The only destinations this run may reach. Never empty: a credential with nowhere to be used needs no display input.
+ */
+destinations: HostPort[]
+}
+/**
+ * A host:port pair for network allowlist rules.
+ */
+export interface HostPort {
+host: string
+port: number
+}
+/**
+ * The bounded authority to drive one plan-selected program and its workspace.
+ */
+export interface DriveGrant {
+max_bytes_in: number
+max_bytes_out: number
+program_id: string
+/**
+ * Lifetime of one opened drive session, in seconds.
+ */
+ttl: number
+workspace_roots: string[]
+}
+/**
+ * Outbound destinations. An empty `allow` is "no egress" and is distinct from an absent `EgressGrant`, which is also deny-all — both are closed, so the distinction never opens anything.
+ */
+export interface EgressGrant {
+allow: HostPort[]
+}
+/**
+ * The durable agent session a checkpoint is a resume point for.
+ * 
+ * `generation` fences a resume: reopening a parked session increments it, so a frame addressed to an earlier generation is refused rather than delivered into a successor. `journal_cursor` is the session-journal position the capture is consistent with, and `approval_head` names the approval-ledger state the capture was admitted under — a resume bounds its fresh grants against that head rather than against whatever the ledger holds later. `replay_input_digest`, when present, commits the encrypted input artifact executed immediately before this step was captured.
+ */
+export interface SessionBinding {
+approval_head: ApprovalHead
+generation: number
+journal_cursor: number
+/**
+ * Content-address of the encrypted input committed at this step. Optional for older and non-step session checkpoints; replay accepts only a step carrying this binding.
+ */
+replay_input_digest?: (string | null)
+session_id: AgentSessionId
+}
+export interface MutationFor_CaptureRequest {
+intent: MutationIntent
+request: CaptureRequest
+}
+/**
+ * Capture the current machine state without exposing stores, drivers, or keys.
+ */
+export interface CaptureRequest {
+class: CheckpointClass
+name: string
+tag?: (string | null)
+}
+export interface CheckpointsDiff {
+reply: CheckpointDiff
+request: DiffRequest
+}
+/**
+ * Stable metadata comparison result, preserving the command JSON shape.
+ */
+export interface CheckpointDiff {
+a_id: CheckpointId
+b_id: CheckpointId
+blobs: BlobDelta[]
+class_a: CheckpointClass
+class_b: CheckpointClass
+created_unix_a: number
+created_unix_b: number
+lineage: LineageRelation
+supervisor_config_digest_same: boolean
+tag_a?: (string | null)
+tag_b?: (string | null)
+vm_name_a: string
+vm_name_b: string
+}
+/**
+ * A manifest delta; no checkpoint contents are decrypted to compute it.
+ */
+export interface BlobDelta {
+name: string
+sha_a?: (string | null)
+sha_b?: (string | null)
+status: BlobStatus
+}
+export interface DiffRequest {
+a: string
+b: string
+}
+export interface CheckpointsFork {
+reply: ForkReport
+request: MutationFor_ForkRequest
+}
+/**
+ * A completed fork. The checkpoint is the child's sealed lineage record.
+ */
+export interface ForkReport {
+action: string
+booted: boolean
+checkpoint: CheckpointMeta1
+child_vm_name: string
+parent_id: CheckpointId
+schema_version: number
+}
+/**
+ * On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
+ * 
+ * `parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.
+ * 
+ * `audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.
+ */
+export interface CheckpointMeta1 {
+audit_ref?: (string | null)
+class: CheckpointClass
+content: ContentBlob[]
+created_unix: number
+/**
+ * The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child.
+ */
+grants?: (Grants | null)
+id: CheckpointId
+/**
+ * Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape.
+ */
+key_domain?: CheckpointKeyDomain
+/**
+ * Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.
+ */
+machine_input_cursor?: (number | null)
+/**
+ * Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record.
+ */
+meta_digest: CheckpointDigest
+parent?: (CheckpointDigest | null)
+runtime_overlay_version?: (string | null)
+/**
+ * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
+ */
+session?: (SessionBinding | null)
+/**
+ * Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.
+ */
+snapshot_id?: (string | null)
+supervisor_config_digest: string
+tag?: (string | null)
+vm_name: string
+}
+export interface MutationFor_ForkRequest {
+intent: MutationIntent
+request: ForkRequest
+}
+/**
+ * Ordinary forks cannot replace secret bindings or opt out of attenuation.
+ */
+export interface ForkRequest {
+boot: boolean
+cpus?: (number | null)
+hypervisor: string
+id: string
+memory?: (string | null)
+new_id?: (string | null)
+tenant: string
+}
+export interface CheckpointsInfo {
+reply: CheckpointMeta2
+request: IdRequest
+}
+/**
+ * On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
+ * 
+ * `parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.
+ * 
+ * `audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.
+ */
+export interface CheckpointMeta2 {
+audit_ref?: (string | null)
+class: CheckpointClass
+content: ContentBlob[]
+created_unix: number
+/**
+ * The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child.
+ */
+grants?: (Grants | null)
+id: CheckpointId
+/**
+ * Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape.
+ */
+key_domain?: CheckpointKeyDomain
+/**
+ * Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.
+ */
+machine_input_cursor?: (number | null)
+/**
+ * Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record.
+ */
+meta_digest: CheckpointDigest
+parent?: (CheckpointDigest | null)
+runtime_overlay_version?: (string | null)
+/**
+ * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
+ */
+session?: (SessionBinding | null)
+/**
+ * Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.
+ */
+snapshot_id?: (string | null)
+supervisor_config_digest: string
+tag?: (string | null)
+vm_name: string
+}
+export interface IdRequest {
+id: string
+}
+export interface CheckpointsList {
+reply: CheckpointsListReply
+request: Empty2
+}
+/**
+ * On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
+ * 
+ * `parent` hash-links to the parent checkpoint's `meta_digest` (its content-address), not to a mutable name — so a descendant can detect any post-seal edit of an ancestor. `meta_digest` is the content-address of this record's load-bearing fields, derived in [`CheckpointMetaBuilder::build`] and never set by callers.
+ * 
+ * `audit_ref` is a non-load-bearing back-pointer backfilled after the chain-signed entry is emitted; it and `meta_digest` are excluded from the digest so the backfill does not perturb the content-address.
+ */
+export interface CheckpointMeta3 {
+audit_ref?: (string | null)
+class: CheckpointClass
+content: ContentBlob[]
+created_unix: number
+/**
+ * The permission set the captured VM was admitted under. Load-bearing so a restore can bound a child against it: the digest covers this field, the signed chain covers the digest, and a record edited to widen what the parent held stops verifying before it can justify a wider child.
+ */
+grants?: (Grants | null)
+id: CheckpointId
+/**
+ * Deduplication boundary for chunk objects. Host is omitted on the wire so pre-chunk whole-file records retain their original digest shape.
+ */
+key_domain?: CheckpointKeyDomain
+/**
+ * Last fully committed machine-exec input at the instant this checkpoint was captured. Replay uses this exact cursor instead of a wall clock, so two operations in one second cannot be reordered or executed twice.
+ */
+machine_input_cursor?: (number | null)
+/**
+ * Content-address of the load-bearing fields above. Required with no serde default: a record that carries no content-address cannot be lineage-verified, so a pre-lineage meta.json must fail closed rather than load as an unverifiable record.
+ */
+meta_digest: CheckpointDigest
+parent?: (CheckpointDigest | null)
+runtime_overlay_version?: (string | null)
+/**
+ * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
+ */
+session?: (SessionBinding | null)
+/**
+ * Content-addressed snapshot-store entry containing this checkpoint's immutable bytes. It is part of the load-bearing digest so a claim cannot redirect materialization to an unrelated staged snapshot.
+ */
+snapshot_id?: (string | null)
+supervisor_config_digest: string
+tag?: (string | null)
+vm_name: string
+}
+export interface Empty2 {
+
+}
+export interface CheckpointsRemove {
+reply: Empty3
+request: MutationFor_IdRequest
+}
+export interface Empty3 {
+
+}
+export interface MutationFor_IdRequest {
+intent: MutationIntent
+request: IdRequest1
+}
+export interface IdRequest1 {
+id: string
+}
+export interface CheckpointsRestore {
+reply: RestoreReport
+request: MutationFor_RestoreRequest
+}
+export interface RestoreReport {
+action: string
+id: CheckpointId
+schema_version: number
+vm_name: string
+}
+export interface MutationFor_RestoreRequest {
+intent: MutationIntent
+request: RestoreRequest
+}
+export interface RestoreRequest {
+id: CheckpointId
+tenant: string
+}
+export interface CheckpointsTimeline {
+reply: Timeline
+request: TimelineRequest
+}
+/**
+ * A rendered lineage: ancestors (genesis → the target's parent), the target, and its immediate children. Common shape for both the checkpoint and image DAGs; per-store presentation feeds this one struct.
+ */
+export interface Timeline {
+action: string
+/**
+ * Ancestors ordered genesis → the target's immediate parent (excludes the target itself).
+ */
+ancestors: TimelineNode[]
+/**
+ * The target's immediate children — forward is a tree, so this may fork.
+ */
+children: TimelineNode[]
+/**
+ * `"checkpoint"` or `"image"`.
+ */
+kind: string
+/**
+ * A structural break that stopped the ancestry walk before genesis (a dangling parent hash-link or a would-be cycle), if any.
+ */
+lineage_broken?: (string | null)
+/**
+ * The target node.
+ */
+node: TimelineNode
+schema_version: number
+/**
+ * What identifies the target: a checkpoint id, or an image node digest.
+ */
+target: string
+/**
+ * Overall verdict: every rendered hop verified AND the ancestry reached genesis with no structural break. Surfaced, never enforced.
+ */
+verified: boolean
+}
+/**
+ * One node in a rendered timeline plus its per-hop verification verdict.
+ */
+export interface TimelineNode {
+created_unix: number
+/**
+ * The node's content-address (checkpoint `meta_digest` / image `node_digest`).
+ */
+digest: string
+/**
+ * The fail-closed reason when `verified` is false.
+ */
+error?: (string | null)
+/**
+ * Checkpoint id; absent for image nodes (identity is the digest).
+ */
+id?: (string | null)
+/**
+ * A short human descriptor (checkpoint: class + vm + tag; image: build identity).
+ */
+label: string
+/**
+ * Parent hash-link (content-address); absent at genesis.
+ */
+parent?: (string | null)
+/**
+ * Per-hop verdict against the signed audit chain.
+ */
+verified: boolean
+}
+export interface TimelineRequest {
+kind?: (LineageKind | null)
+target: string
+}
+export interface CheckpointsVerify {
+reply: Empty4
+request: IdRequest2
+}
+export interface Empty4 {
+
+}
+export interface IdRequest2 {
+id: string
 }
 export interface EntrypointCall {
 reply: EntrypointCallReply
@@ -225,10 +1321,10 @@ timeout_secs?: (number | null)
 workload?: (string | null)
 }
 export interface GuestCp {
-reply: Empty1
+reply: Empty5
 request: CopyRequest
 }
-export interface Empty1 {
+export interface Empty5 {
 
 }
 /**
@@ -270,10 +1366,10 @@ id: string
 path: string
 }
 export interface GuestFsMkdir {
-reply: Empty2
+reply: Empty6
 request: MkdirRequest
 }
-export interface Empty2 {
+export interface Empty6 {
 
 }
 export interface MkdirRequest {
@@ -309,10 +1405,10 @@ path: string
 recursive?: boolean
 }
 export interface GuestFsRename {
-reply: Empty3
+reply: Empty7
 request: RenameRequest
 }
-export interface Empty3 {
+export interface Empty7 {
 
 }
 export interface RenameRequest {
@@ -364,10 +1460,10 @@ mode?: (number | null)
 path: string
 }
 export interface GuestProcKill {
-reply: Empty4
+reply: Empty8
 request: ProcessRequest
 }
-export interface Empty4 {
+export interface Empty8 {
 
 }
 export interface ProcessRequest {
@@ -397,10 +1493,10 @@ export interface MachineRequest {
 id: string
 }
 export interface GuestProcSignal {
-reply: Empty5
+reply: Empty9
 request: SignalRequest
 }
-export interface Empty5 {
+export interface Empty9 {
 
 }
 export interface SignalRequest {
@@ -436,10 +1532,10 @@ id: string
 token: string
 }
 export interface GuestProcStreamClose {
-reply: Empty6
+reply: Empty10
 request: CloseRequest
 }
-export interface Empty6 {
+export interface Empty10 {
 
 }
 export interface CloseRequest {
@@ -476,12 +1572,12 @@ wait_ms?: (number | null)
 }
 export interface GuestProcStreamOpen {
 reply: OpenReply
-request: OpenRequest
+request: OpenRequest1
 }
 export interface OpenReply {
 stream: number
 }
-export interface OpenRequest {
+export interface OpenRequest1 {
 id: string
 /**
  * Bounds the wait on the guest; the stream ends `timed_out` past it.
@@ -713,12 +1809,12 @@ id: string
 }
 export interface MachineInventory {
 reply: MachineInventoryReply
-request: Empty7
+request: Empty11
 }
 /**
  * A request that carries nothing.
  */
-export interface Empty7 {
+export interface Empty11 {
 
 }
 export interface MachineList {
@@ -813,10 +1909,10 @@ id: string
 tail_lines?: (number | null)
 }
 export interface MachineLogsStreamClose {
-reply: Empty8
+reply: Empty12
 request: CloseRequest1
 }
-export interface Empty8 {
+export interface Empty12 {
 
 }
 export interface CloseRequest1 {
@@ -1044,7 +2140,7 @@ net?: (boolean | null)
 }
 export interface MachineResume {
 reply: ResumeOutcome
-request: ResumeRequest
+request: ResumeRequest1
 }
 /**
  * What a `resume_machine` did — the detail the caller renders in its success line, and the detail of the `WorkloadWake` entry the local backend writes to its local audit log, at parity with [`PauseOutcome`]. Plain data, REST-satisfiable.
@@ -1070,7 +2166,7 @@ vmstate_len?: number
 /**
  * A `machine.resume` request.
  */
-export interface ResumeRequest {
+export interface ResumeRequest1 {
 id: string
 /**
  * Resume through the backend's live-memory warm-start path, which a disk-only backend refuses.
@@ -1078,10 +2174,10 @@ id: string
 warm?: boolean
 }
 export interface MachineRm {
-reply: Empty9
+reply: Empty13
 request: RemoveRequest1
 }
-export interface Empty9 {
+export interface Empty13 {
 
 }
 /**
@@ -1235,10 +2331,10 @@ template?: (string | null)
 ttl_seconds?: (number | null)
 }
 export interface MachineSetTtl {
-reply: Empty10
+reply: Empty14
 request: SetTtlRequest
 }
-export interface Empty10 {
+export interface Empty14 {
 
 }
 /**
@@ -1328,10 +2424,10 @@ export interface MachineRef1 {
 id: string
 }
 export interface MachineStop {
-reply: Empty11
+reply: Empty15
 request: StopRequest
 }
-export interface Empty11 {
+export interface Empty15 {
 
 }
 /**
@@ -1339,6 +2435,40 @@ export interface Empty11 {
  */
 export interface StopRequest {
 id: string
+}
+export interface MaintenanceReconcile {
+reply: ReconcileReport
+request: ReconcileRequest
+}
+/**
+ * Observed drift and non-fatal errors, with the CLI's established JSON shape.
+ */
+export interface ReconcileReport {
+dead_process_reaped: string[]
+errors: string[]
+live: string[]
+orphan_state_reaped: string[]
+stale_record_dropped: string[]
+unadmitted_resume_stopped: string[]
+}
+/**
+ * Preview drift unless the caller explicitly authorizes applying repairs.
+ */
+export interface ReconcileRequest {
+apply?: boolean
+}
+export interface ManifestExportOci {
+reply: ExportOciReport
+request: ExportOciRequest
+}
+export interface ExportOciReport {
+path: string
+size_bytes: number
+slot_hash: string
+}
+export interface ExportOciRequest {
+out: string
+template: string
 }
 export interface ManifestInfo {
 reply: ManifestInfoReply
@@ -1367,7 +2497,7 @@ path?: (string | null)
 }
 export interface ManifestList {
 reply: ManifestListReply
-request: ListRequest
+request: ListRequest1
 }
 /**
  * One built slot, preserving the manifest-list JSON representation.
@@ -1383,13 +2513,48 @@ updated_at: string
 /**
  * Filters for built slots. Tags have intersection semantics.
  */
-export interface ListRequest {
+export interface ListRequest1 {
 orphans?: boolean
 tags?: string[]
 }
+export interface ManifestPrune {
+reply: PruneReport
+request: PruneRequest
+}
+export interface PruneReport {
+candidates: PruneCandidate[]
+dry_run: boolean
+removed: string[]
+removed_count: number
+}
+export interface PruneCandidate {
+reason: string
+slot_hash: string
+}
+/**
+ * `orphans` explicitly selects the destructive mode. The library defaults to preview; the CLI explicitly maps its existing `--dry-run` flag.
+ */
+export interface PruneRequest {
+dry_run?: boolean
+orphans?: boolean
+}
+export interface ManifestRemove {
+reply: RemoveReport
+request: RemoveRequest2
+}
+export interface RemoveReport {
+manifest_file_deleted: boolean
+manifest_path: string
+slot_hash: string
+}
+export interface RemoveRequest2 {
+force?: boolean
+manifest_file?: boolean
+path?: (string | null)
+}
 export interface ManifestVerify {
 reply: VerifiedSlot
-request: VerifyRequest
+request: VerifyRequest1
 }
 /**
  * Identity of a slot whose runtime checksum verification succeeded.
@@ -1401,10 +2566,77 @@ slot_hash: string
 /**
  * Checksum verification of a built slot, optionally at a specific revision.
  */
-export interface VerifyRequest {
+export interface VerifyRequest1 {
 check_signature?: boolean
 path?: (string | null)
 revision?: (string | null)
+}
+export interface PostureInspect {
+reply: PostureReport
+request: PostureRequest
+}
+export interface PostureReport {
+checks: PostureCheck[]
+}
+export interface PostureCheck {
+detail: string
+name: string
+status: PostureStatus
+}
+export interface PostureRequest {
+
+}
+export interface ReplayRunSession {
+reply: SessionReplayRunReport
+request: ReplayRequest
+}
+/**
+ * Dry runs have a verified summary but no execution report.
+ */
+export interface SessionReplayRunReport {
+execution?: (SessionReplayReport | null)
+summary: SessionReplaySummary
+}
+/**
+ * Replay outcome without runtime implementation types.
+ */
+export interface SessionReplayReport {
+applied: number
+duplicates: number
+last_cursor: number
+nonzero_exits: [number, number][]
+}
+/**
+ * A validated replay selection suitable for dry-run output and host APIs.
+ */
+export interface SessionReplaySummary {
+checkpoint: CheckpointId
+checkpoint_cursor: number
+generation: number
+inputs: SessionReplayInput[]
+restored_name: string
+session_id: string
+}
+/**
+ * Public metadata for one encrypted input. Never contains prompt bytes.
+ */
+export interface SessionReplayInput {
+artifact_digest: string
+journal_cursor: number
+}
+export interface ReplayRequest {
+dry_run?: boolean
+selection: SessionReplayRequest
+tenant: string
+timeout_secs: number
+}
+/**
+ * Select a signed session timeline without exposing its encrypted input store.
+ */
+export interface SessionReplayRequest {
+as_name?: (string | null)
+from?: (string | null)
+session_id: string
 }
 export interface SessionCall {
 reply: EntrypointCallReply1
@@ -1503,10 +2735,10 @@ memory_mib?: (number | null)
 workload?: (string | null)
 }
 export interface SessionStop {
-reply: Empty12
+reply: Empty16
 request: SessionRef1
 }
-export interface Empty12 {
+export interface Empty16 {
 
 }
 /**
@@ -1514,6 +2746,52 @@ export interface Empty12 {
  */
 export interface SessionRef1 {
 session_id: string
+}
+export interface StorageGc {
+reply: GcReport
+request: GcRequest
+}
+export interface GcReport {
+applied: boolean
+candidates: string[]
+pool_unavailable?: (string | null)
+removed: string[]
+}
+/**
+ * Collection is read-only unless `apply` is explicitly set. Prefixes are retained live references, not a list of names authorized for deletion.
+ */
+export interface GcRequest {
+apply?: boolean
+keep_prefix?: string[]
+mock?: boolean
+}
+export interface StorageInfo {
+reply: InfoReport
+request: InfoRequest1
+}
+export interface InfoReport {
+available: boolean
+pool: string
+reason?: (string | null)
+stats?: (PoolStats | null)
+/**
+ * Best-effort statistics; unavailable individual volumes are omitted.
+ */
+volume_stats: VolumeStats[]
+volumes: string[]
+}
+export interface PoolStats {
+capacity_bytes: number
+used_bytes: number
+volume_count: number
+}
+export interface VolumeStats {
+name: string
+used_bytes: number
+virtual_size_bytes: number
+}
+export interface InfoRequest1 {
+mock?: boolean
 }
 export interface TelemetryRecords {
 reply: TelemetryRecordsReply
@@ -1554,4 +2832,447 @@ export interface TelemetryStatusReply {
  */
 export interface MachineRef2 {
 id: string
+}
+export interface VolumeAttachments {
+reply: VolumeAttachmentsReply
+request: MachineRequest1
+}
+/**
+ * One registered attachment, described without any key material.
+ */
+export interface AttachmentRecord {
+/**
+ * Access mode presented to the guest.
+ */
+access: AccessMode
+/**
+ * RFC 3339 registration timestamp.
+ */
+attached_at: string
+/**
+ * Guest mount point.
+ */
+guest_path: string
+/**
+ * Host path backing the attachment.
+ */
+host_path: string
+/**
+ * Present when `host_path` is a materialized image refreshed from a host directory at machine start.
+ */
+host_snapshot?: (HostSnapshotRecord | null)
+/**
+ * Owner VM the attachment is registered for.
+ */
+owner: string
+/**
+ * Origin of the host path.
+ */
+source: AttachmentSource
+/**
+ * Logical volume identity.
+ */
+volume: string
+}
+/**
+ * Source identity retained for an ad-hoc host directory snapshot.
+ */
+export interface HostSnapshotRecord {
+fingerprint: string
+source_path: string
+}
+export interface MachineRequest1 {
+vm: string
+}
+export interface VolumeCreate {
+reply: VolumeRecord
+request: CreateRequest1
+}
+/**
+ * One managed local volume, described without any key material.
+ */
+export interface VolumeRecord {
+/**
+ * Owner VM currently holding an attachment lease on this volume.
+ */
+attached_to?: (string | null)
+/**
+ * RFC 3339 creation timestamp.
+ */
+created_at: string
+/**
+ * Encryption lifecycle position.
+ */
+encryption: EncryptionState
+/**
+ * Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.
+ */
+host_artifact?: (string | null)
+/**
+ * Logical volume identity.
+ */
+name: string
+/**
+ * Local artifact shape.
+ */
+source: VolumeSourceKind
+}
+export interface CreateRequest1 {
+capacity_mib: number
+name: string
+root?: (string | null)
+}
+export interface VolumeDetach {
+reply: AttachmentRecord1
+request: DetachRequest
+}
+/**
+ * One registered attachment, described without any key material.
+ */
+export interface AttachmentRecord1 {
+/**
+ * Access mode presented to the guest.
+ */
+access: AccessMode
+/**
+ * RFC 3339 registration timestamp.
+ */
+attached_at: string
+/**
+ * Guest mount point.
+ */
+guest_path: string
+/**
+ * Host path backing the attachment.
+ */
+host_path: string
+/**
+ * Present when `host_path` is a materialized image refreshed from a host directory at machine start.
+ */
+host_snapshot?: (HostSnapshotRecord | null)
+/**
+ * Owner VM the attachment is registered for.
+ */
+owner: string
+/**
+ * Origin of the host path.
+ */
+source: AttachmentSource
+/**
+ * Logical volume identity.
+ */
+volume: string
+}
+export interface DetachRequest {
+guest_path: string
+vm: string
+}
+export interface VolumeInspect {
+reply: VolumeRecord1
+request: NameRequest
+}
+/**
+ * One managed local volume, described without any key material.
+ */
+export interface VolumeRecord1 {
+/**
+ * Owner VM currently holding an attachment lease on this volume.
+ */
+attached_to?: (string | null)
+/**
+ * RFC 3339 creation timestamp.
+ */
+created_at: string
+/**
+ * Encryption lifecycle position.
+ */
+encryption: EncryptionState
+/**
+ * Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.
+ */
+host_artifact?: (string | null)
+/**
+ * Logical volume identity.
+ */
+name: string
+/**
+ * Local artifact shape.
+ */
+source: VolumeSourceKind
+}
+export interface NameRequest {
+name: string
+}
+export interface VolumeList {
+reply: VolumeListReply
+request: Empty17
+}
+/**
+ * One managed local volume, described without any key material.
+ */
+export interface VolumeRecord2 {
+/**
+ * Owner VM currently holding an attachment lease on this volume.
+ */
+attached_to?: (string | null)
+/**
+ * RFC 3339 creation timestamp.
+ */
+created_at: string
+/**
+ * Encryption lifecycle position.
+ */
+encryption: EncryptionState
+/**
+ * Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.
+ */
+host_artifact?: (string | null)
+/**
+ * Logical volume identity.
+ */
+name: string
+/**
+ * Local artifact shape.
+ */
+source: VolumeSourceKind
+}
+export interface Empty17 {
+
+}
+export interface VolumeLock {
+reply: VolumeRecord3
+request: NameRequest1
+}
+/**
+ * One managed local volume, described without any key material.
+ */
+export interface VolumeRecord3 {
+/**
+ * Owner VM currently holding an attachment lease on this volume.
+ */
+attached_to?: (string | null)
+/**
+ * RFC 3339 creation timestamp.
+ */
+created_at: string
+/**
+ * Encryption lifecycle position.
+ */
+encryption: EncryptionState
+/**
+ * Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.
+ */
+host_artifact?: (string | null)
+/**
+ * Logical volume identity.
+ */
+name: string
+/**
+ * Local artifact shape.
+ */
+source: VolumeSourceKind
+}
+export interface NameRequest1 {
+name: string
+}
+export interface VolumeMount {
+reply: AttachmentRecord2
+request: MountRequest
+}
+/**
+ * One registered attachment, described without any key material.
+ */
+export interface AttachmentRecord2 {
+/**
+ * Access mode presented to the guest.
+ */
+access: AccessMode
+/**
+ * RFC 3339 registration timestamp.
+ */
+attached_at: string
+/**
+ * Guest mount point.
+ */
+guest_path: string
+/**
+ * Host path backing the attachment.
+ */
+host_path: string
+/**
+ * Present when `host_path` is a materialized image refreshed from a host directory at machine start.
+ */
+host_snapshot?: (HostSnapshotRecord | null)
+/**
+ * Owner VM the attachment is registered for.
+ */
+owner: string
+/**
+ * Origin of the host path.
+ */
+source: AttachmentSource
+/**
+ * Logical volume identity.
+ */
+volume: string
+}
+export interface MountRequest {
+access?: (AccessMode & string)
+guest_path: string
+host?: (string | null)
+vm: string
+volume: string
+}
+export interface VolumeRestore {
+reply: Empty18
+request: SnapshotRequest
+}
+export interface Empty18 {
+
+}
+export interface SnapshotRequest {
+name: string
+snapshot: string
+}
+export interface VolumeSnapshot {
+reply: Empty19
+request: SnapshotRequest1
+}
+export interface Empty19 {
+
+}
+export interface SnapshotRequest1 {
+name: string
+snapshot: string
+}
+export interface VolumeUnlock {
+reply: VolumeRecord4
+request: NameRequest2
+}
+/**
+ * One managed local volume, described without any key material.
+ */
+export interface VolumeRecord4 {
+/**
+ * Owner VM currently holding an attachment lease on this volume.
+ */
+attached_to?: (string | null)
+/**
+ * RFC 3339 creation timestamp.
+ */
+created_at: string
+/**
+ * Encryption lifecycle position.
+ */
+encryption: EncryptionState
+/**
+ * Host path of the (plaintext) attachment artifact. Present only for host-backed volumes and unlocked managed volumes.
+ */
+host_artifact?: (string | null)
+/**
+ * Logical volume identity.
+ */
+name: string
+/**
+ * Local artifact shape.
+ */
+source: VolumeSourceKind
+}
+export interface NameRequest2 {
+name: string
+}
+export interface WorkspaceApply {
+reply: ApplyReply
+request: ApplyRequest
+}
+export interface ApplyReply {
+applied: AppliedReport
+recoveries: RecoveryReport[]
+}
+export interface AppliedReport {
+apply_id: string
+changes: number
+merkle_root: string
+snapshot_root: string
+}
+export interface ApplyRequest {
+approved: boolean
+expected_fingerprint: string
+workspace: WorkspaceRequest
+}
+/**
+ * Select a registered workspace; callers cannot supply arbitrary host paths.
+ */
+export interface WorkspaceRequest {
+exclude?: string[]
+protected_paths?: string[]
+vm: string
+volume?: (string | null)
+}
+export interface WorkspaceRedo {
+reply: HistoryReply
+request: HistoryRequest
+}
+export interface HistoryReply {
+recoveries: RecoveryReport[]
+relation?: (RelationReport | null)
+}
+export interface RelationReport {
+apply_id: string
+merkle_root: string
+target_id: string
+}
+export interface HistoryRequest {
+approved: boolean
+workspace: WorkspaceRequest
+}
+export interface WorkspaceReview {
+reply: ReviewReply
+request: WorkspaceRequest1
+}
+export interface ReviewReply {
+recoveries: RecoveryReport[]
+review: ReviewSummary
+workspace: Workspace
+}
+export interface PlanSummary {
+changes: ChangeSummary[]
+refused_protected: [string, string][]
+refused_unappliable: [string, string][]
+skipped_excluded: string[]
+}
+export interface ChangeSummary {
+action: ChangeAction
+path: string
+}
+/**
+ * A writable snapshot and the identity of its verified baseline.
+ */
+export interface Workspace {
+baseline_key: string
+guest_path: string
+image: string
+source_dir: string
+volume: string
+}
+/**
+ * Select a registered workspace; callers cannot supply arbitrary host paths.
+ */
+export interface WorkspaceRequest1 {
+exclude?: string[]
+protected_paths?: string[]
+vm: string
+volume?: (string | null)
+}
+export interface WorkspaceUndo {
+reply: HistoryReply1
+request: HistoryRequest1
+}
+export interface HistoryReply1 {
+recoveries: RecoveryReport[]
+relation?: (RelationReport | null)
+}
+export interface HistoryRequest1 {
+approved: boolean
+workspace: WorkspaceRequest
 }

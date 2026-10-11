@@ -90,12 +90,12 @@ fn main() -> ExitCode {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("libkrun-supervisor");
-    // macOS Hypervisor.framework rejects any process without
-    // `com.apple.security.hypervisor`. The ad-hoc signer
-    // self-signs + re-spawns the binary on first run; subsequent
-    // invocations are silent (`MVM_SIGNED=1`). Without this,
-    // `krun_start_enter` fails at VM creation with rc -22.
-    mvm_runtime::codesign::ensure_signed();
+    // Entitlements must be established by preparation before process load.
+    // A running supervisor cannot acquire them by signing and re-executing.
+    if let Err(error) = mvm_runtime::codesign::ensure_signed() {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
 
     // Diagnostic: opt-in libkrun internal logger. Set
     // `MVM_KRUN_LOG={off,error,warn,info,debug,trace}` to surface
@@ -324,8 +324,8 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     }
 }
 
-/// Prelaunched-standby flow. `ensure_signed()` + the libkrun
-/// dylib are already warm (done in `main`). Bind the control UDS, accept ONE
+/// Prelaunched-standby flow. Loaded signing readiness is checked and the libkrun
+/// dylib is already warm (done in `main`). Bind the control UDS, accept ONE
 /// connection (per-conn timeout), read the attach frame, re-verify+merge, then
 /// hand the whole config to the existing bridge path. One-shot: any failure or
 /// timeout exits non-zero WITHOUT `start_enter`.

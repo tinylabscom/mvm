@@ -25,14 +25,13 @@
 //!    uses. The SDK's atexit hook writes the recording.
 //! 2. `mvm_sdk::runtime::compile_recording` lowers the recording
 //!    into a `Workload`.
-//! 3. For each app in the Workload, [`synthesize_plan`] is called
-//!    with a `SynthesisInput` derived from the app's resources +
+//! 3. The client plan service synthesizes each app using its resources +
 //!    a content-addressed placeholder image SHA. The placeholder
 //!    is intentional: plan-mode is a **shape check**, not a real
 //!    build, so there's no rootfs on disk to hash. The shape that
 //!    flows downstream (validity window, signing, nonce, policy
 //!    refs) is the same as the live path's.
-//! 4. [`admit_for_run`] threads each plan through the full
+//! 4. The client threads each plan through the full
 //!    admission pipeline (sign → verify → window → nonce ledger).
 //!    Failures surface verbatim so the user sees exactly which
 //!    gate refused.
@@ -55,18 +54,12 @@
 //! handles statically.
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use crate::commands::build::trace_secret_scan::SecretFinding;
-use mvm_contract::ir::{App, PortProto, PortTransform, Workload};
-
-use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
     LoadedRecording, auto_exec_record_script, script_language_from_path,
 };
-use mvm_core::plan::{IngressMapping, IngressProtocol, IngressTransform, SynthesisInput};
-use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
+use mvm_client::sdk_plan::{PlanError, PlanOptions};
 
 use super::exec::{RunArgs, RunMode};
 
@@ -203,74 +196,49 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
         )
     })?;
 
-    let LoadedRecording {
-        workload,
-        findings,
-        digest_hex,
-        secret_findings,
-    } = auto_exec_record_script(&script, lang).with_context(|| {
+    let recording = auto_exec_record_script(&script, lang).with_context(|| {
         format!(
             "lowering Sandbox-shaped script {} for plan-mode admission",
             script.display()
         )
     })?;
 
-    eprintln!("recording sha256: {digest_hex}");
-    refuse_embedded_secrets(&secret_findings)?;
-    require_acknowledged(&findings, &sdk.ack_divergence)?;
-
-    if workload.apps.is_empty() {
-        bail!(
-            "Sandbox recording produced no apps to admit — the script must call \
-             `Sandbox.create(...)` at least once."
-        );
+    eprintln!("recording sha256: {}", recording.digest_hex);
+    let options = PlanOptions {
+        acknowledged_divergences: sdk.ack_divergence.clone(),
+        caller_commitment: args.caller_commitment.clone(),
+    };
+    if let Err(error) = recording.validate(&options) {
+        render_validation_error(&recording, &error);
+        return Err(error.into());
     }
 
     eprintln!(
         "mvmctl run --mode plan: workload {} has {} app(s); admitting each via mvm_hostd::supervisor::admit_for_run",
-        workload.id,
-        workload.apps.len()
+        recording.workload.id,
+        recording.workload.apps.len()
     );
 
-    let ledger = InMemoryNonceLedger::new();
-    let clock = SystemClock;
-    let mut admitted_count = 0usize;
-    let mut failed_count = 0usize;
-
-    for app in &workload.apps {
-        let network_mode = crate::commands::machine::preflight_network();
-        let input =
-            synthesis_input_for_app(&workload, app, network_mode, args.caller_commitment.clone())?;
-        // A recorded sandbox run is a developer artifact; nothing here is
-        // sealed, so an unenforceable grant is reported, not fatal.
-        match admit_for_run(
-            &input,
-            &clock,
-            &ledger,
-            None,
-            None,
-            mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
-        ) {
-            Ok(admitted) => {
-                admitted_count += 1;
-                println!(
-                    "ADMITTED app={} plan_id={} signer={} cpus={} mem_mib={} workload={} tenant={}",
-                    app.name,
-                    admitted.plan_id().0,
-                    admitted.signer_id(),
-                    admitted.plan().resources.cpus,
-                    admitted.plan().resources.mem_mib,
-                    admitted.plan().workload.0,
-                    admitted.plan().tenant.0,
-                );
-            }
-            Err(e) => {
-                failed_count += 1;
-                eprintln!("REJECTED app={} reason={:#}", app.name, e);
-            }
+    let report = recording.admit_observing(&options, |app| match &app.result {
+        Ok(admitted) => {
+            println!(
+                "ADMITTED app={} plan_id={} signer={} cpus={} mem_mib={} workload={} tenant={}",
+                app.app,
+                admitted.plan_id,
+                admitted.signer_id,
+                admitted.cpus,
+                admitted.mem_mib,
+                admitted.workload,
+                admitted.tenant,
+            );
         }
-    }
+        Err(e) => {
+            eprintln!("REJECTED app={} reason={:#}", app.app, e);
+        }
+    })?;
 
+    let admitted_count = report.admitted_count();
+    let failed_count = report.rejected_count();
     eprintln!(
         "mvmctl run --mode plan: {} admitted, {} rejected (no microVM booted)",
         admitted_count, failed_count
@@ -280,56 +248,36 @@ fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<
         bail!(
             "plan-mode admission refused {} of {} app(s); see REJECTED lines above for details",
             failed_count,
-            workload.apps.len()
+            report.apps.len()
         );
     }
     Ok(())
 }
 
-/// Refuse plan-mode admission when the recording carries raw secret-shaped
-/// material. Unlike divergence findings, there is no acknowledgement path —
-/// a raw secret in the workload definition defeats the host-substitution
-/// posture, and the only fix is to replace the literal with a `SecretRef`.
-fn refuse_embedded_secrets(findings: &[SecretFinding]) -> Result<()> {
-    if findings.is_empty() {
-        return Ok(());
+/// Print evidence selected by the client's typed validation refusal.
+fn render_validation_error(recording: &LoadedRecording, error: &PlanError) {
+    match error {
+        PlanError::EmbeddedSecrets { .. } => {
+            for f in &recording.secret_findings {
+                eprintln!(
+                    "EMBEDDED SECRET: {} matched [{}]",
+                    f.location,
+                    f.rules.join(", ")
+                );
+            }
+        }
+        PlanError::Unacknowledged { findings, .. } => {
+            for f in findings {
+                eprintln!("UNACKNOWLEDGED divergence: {f}");
+            }
+        }
+        PlanError::TooLarge { .. }
+        | PlanError::Digest(_)
+        | PlanError::Parse(_)
+        | PlanError::Lower(_)
+        | PlanError::NoApps
+        | PlanError::Synthesis { .. } => {}
     }
-    for f in findings {
-        eprintln!(
-            "EMBEDDED SECRET: {} matched [{}]",
-            f.location,
-            f.rules.join(", ")
-        );
-    }
-    bail!(
-        "refusing plan-mode admission: {} location(s) carry raw secret-shaped material. \
-         Replace each literal with a SecretRef so the value substitutes host-side and never \
-         enters the workload definition. This is not acknowledgeable — remove the secret.",
-        findings.len()
-    )
-}
-
-/// Refuse admission while any divergence finding's class is not
-/// explicitly acknowledged. The preview ran one way; the replay
-/// behaves another — shipping that silently is the failure mode
-/// this gate exists to stop.
-fn require_acknowledged(findings: &[mvm_sdk::runtime::Divergence], acks: &[String]) -> Result<()> {
-    let unacked: Vec<&mvm_sdk::runtime::Divergence> = findings
-        .iter()
-        .filter(|f| !acks.iter().any(|a| a == f.kind_slug()))
-        .collect();
-    if unacked.is_empty() {
-        return Ok(());
-    }
-    for f in &unacked {
-        eprintln!("UNACKNOWLEDGED divergence: {f}");
-    }
-    bail!(
-        "refusing plan-mode admission: {} unacknowledged divergence finding(s). Re-run with \
-         --ack-divergence <kind> for each class you accept (kinds above in brackets), or fix \
-         the script so the recording lowers cleanly.",
-        unacked.len()
-    )
 }
 
 /// Pull the script path off `args.argv`. Both `--mode plan` and
@@ -354,146 +302,14 @@ fn extract_script_arg(args: &RunArgs) -> Result<PathBuf> {
     )
 }
 
-/// Map an app from the Workload into a `SynthesisInput` for
-/// `admit_for_run`. Plan-mode never builds a rootfs, so the
-/// `image_sha256` is a deterministic placeholder derived from the
-/// app's identity (`workload_id::app_name`). This is intentional:
-/// plan-mode is a shape check; downstream consumers that want the
-/// real artifact hash run the live path.
-fn synthesis_input_for_app<'a>(
-    workload: &'a Workload,
-    app: &'a App,
-    network_mode: mvm_contract::plan::NetworkMode,
-    caller_commitment: Option<mvm_core::plan::CallerCommitment>,
-) -> Result<SynthesisInput<'a>> {
-    let lowered_secrets = lower_app_secrets(app);
-    // `SynthesisInput` borrows `image_sha256` as `&str`; we need a
-    // 64-char hex string that lives long enough. Since we can't
-    // return a reference to a local in the synthesis input struct,
-    // we leak the placeholder into a `Box<str>` whose lifetime is
-    // bound to the call-site loop — that's why this helper takes
-    // `'a` from both workload and app and returns a value owning
-    // the string indirectly. To keep the borrowck happy we lean on
-    // the fact that admit_for_run is fully synchronous and the
-    // input is consumed before this function returns.
-    //
-    // The cleanest path is just to allocate a `String` and use
-    // `Box::leak` once per app. Plan-mode runs once per CLI
-    // invocation, so the leak is bounded by app count (typically
-    // 1).
-    let placeholder = placeholder_image_sha(&workload.id, &app.name);
-    let leaked: &'static str = Box::leak(placeholder.into_boxed_str());
-    let ingress = lower_ingress(app)?;
-
-    Ok(SynthesisInput {
-        outputs: Vec::new(),
-        grants: None,
-        stream_edges: Vec::new(),
-        kernel_sha256: None,
-        network_mode,
-        ingress,
-        vm_name: &app.name,
-        tenant: None,
-        backend_name: "firecracker",
-        image_name: &app.name,
-        image_sha256: leaked,
-        image_cosign_bundle: None,
-        intent: Some("code:execute"),
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        network_policy_ref: None,
-        fs_policy_ref: None,
-        egress_policy_ref: None,
-        tool_policy_ref: None,
-        secret_release: lowered_secrets.secret_release,
-        secrets: lowered_secrets.secrets,
-        audit_event_prefix: None,
-        cpus: app.resources.cpu_cores.max(1) as u32,
-        mem_mib: app.resources.memory_mb.max(64) as u64,
-        disk_mib: app.resources.rootfs_size_mb as u64,
-        boot_timeout_secs: 60,
-        destroy_on_exit: true,
-        bundle_pin: None,
-        // Plan-mode synthesis does not run the install pipeline; it
-        // synthesizes one plan per Sandbox call for dry-run admission.
-        // No boot path supplies a deps-volume binding today.
-        deps_volume: None,
-        shares: Vec::new(),
-        assets: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        tools: Default::default(),
-        caller_commitment,
-        audit_labels: Default::default(),
-        agent_verbs: None,
-        services: Vec::new(),
-        extensions: Vec::new(),
-        stream_retention: Default::default(),
-        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
-    })
-}
-
-fn lower_ingress(app: &App) -> Result<Vec<IngressMapping>> {
-    app.network
-        .as_ref()
-        .map(|network| {
-            network
-                .ports
-                .iter()
-                .map(|mapping| {
-                    let builder = IngressMapping::builder()
-                        .mapping_id(mapping.mapping_id)
-                        .protocol(match mapping.proto {
-                            PortProto::Tcp => IngressProtocol::Tcp,
-                            PortProto::Udp => IngressProtocol::Udp,
-                        })
-                        .host_addr(&mapping.host_addr)
-                        .host_port(mapping.host)
-                        .guest_addr(&mapping.guest_addr)
-                        .guest_port(mapping.guest)
-                        .transform(match mapping.transform {
-                            PortTransform::Opaque => IngressTransform::Opaque,
-                            PortTransform::Http => IngressTransform::Http,
-                            PortTransform::Tls => IngressTransform::Tls,
-                        });
-                    let builder = match mapping.tls_secret.as_deref() {
-                        Some(secret) => builder.tls_secret(secret),
-                        None => builder,
-                    };
-                    builder
-                        .build()
-                        .with_context(|| format!("invalid ingress mapping {}", mapping.mapping_id))
-                })
-                .collect()
-        })
-        .unwrap_or_else(|| Ok(Vec::new()))
-}
-
-/// SHA-256 over `workload_id::app_name` to derive a stable 64-char
-/// hex placeholder image SHA for plan-mode admission. Distinct
-/// apps in the same workload get distinct nonces *and* distinct
-/// image SHAs, so the audit chain entries are independent. This
-/// is not a real artifact hash — calling code documents the
-/// caveat.
-fn placeholder_image_sha(workload_id: &str, app_name: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(workload_id.as_bytes());
-    hasher.update(b"::");
-    hasher.update(app_name.as_bytes());
-    let bytes = hasher.finalize();
-    let mut hex = String::with_capacity(64);
-    for byte in bytes {
-        hex.push_str(&format!("{:02x}", byte));
-    }
-    hex
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::build::trace_secret_scan::scan_recording_for_secrets;
     use crate::commands::vm::exec::RunProfile;
     use base64::Engine;
-    use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
+    use mvm_client::builder::{RecordingSecretScanner as SecretsScanner, SecretFinding};
+    use mvm_client::sdk_plan::{refuse_embedded_secrets, require_acknowledged};
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
     use std::collections::BTreeMap;
 
@@ -577,8 +393,7 @@ mod tests {
             }],
         };
 
-        let findings =
-            scan_recording_for_secrets(&recording, &SecretsScanner::with_default_rules());
+        let findings = scan_recording_for_secrets(&recording, &SecretsScanner::default());
         assert!(
             !findings.is_empty(),
             "scan must surface the embedded secret"
@@ -650,27 +465,6 @@ mod tests {
             timeout: Some(60),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn placeholder_image_sha_is_64_hex_chars() {
-        let sha = placeholder_image_sha("wl-id", "app-1");
-        assert_eq!(sha.len(), 64);
-        assert!(sha.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
-    }
-
-    #[test]
-    fn placeholder_image_sha_is_stable() {
-        let a = placeholder_image_sha("wl", "app");
-        let b = placeholder_image_sha("wl", "app");
-        assert_eq!(a, b, "same inputs must yield same SHA");
-    }
-
-    #[test]
-    fn placeholder_image_sha_differs_per_app() {
-        let a = placeholder_image_sha("wl", "app1");
-        let b = placeholder_image_sha("wl", "app2");
-        assert_ne!(a, b, "different app names must yield different SHAs");
     }
 
     #[test]

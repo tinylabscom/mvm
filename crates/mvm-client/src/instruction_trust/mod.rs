@@ -31,6 +31,7 @@
 pub mod gate;
 mod identity;
 mod image_scan;
+pub mod operations;
 pub mod policy;
 pub mod scan;
 pub mod sign;

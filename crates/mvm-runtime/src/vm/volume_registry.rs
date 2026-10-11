@@ -320,12 +320,8 @@ impl VolumeMountRegistry {
         let json = serde_json::to_vec_pretty(self).context("serialize VolumeMountRegistry")?;
         mvm_core::util::atomic_io::atomic_write(&path, &json)
             .with_context(|| format!("atomic_write {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("chmod 0600 {}", path.display()))?;
-        }
+        // atomic_write publishes a fresh private tempfile (0600), including
+        // on replacement. Do not add fallible work after that commit point.
         Ok(())
     }
 
@@ -338,6 +334,13 @@ impl VolumeMountRegistry {
                 "VM already has a volume mount at {:?}; remove it first",
                 entry.guest_path
             );
+        }
+        if self.mounts.values().any(|existing| {
+            (entry.host_snapshot.is_some() || existing.host_snapshot.is_some())
+                && (existing.volume_name == entry.volume_name
+                    || existing.host_path == entry.host_path)
+        }) {
+            anyhow::bail!("host snapshot volume or image is already registered; remove it first");
         }
         if self.mounts.len() >= MAX_VOLUME_MOUNTS_PER_VM {
             anyhow::bail!(
@@ -694,6 +697,14 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+        let path = VolumeMountRegistry::path_for("perm-test");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        r.save("perm-test").unwrap();
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "replacement publishes a fresh private inode"
+        );
     }
 
     #[test]

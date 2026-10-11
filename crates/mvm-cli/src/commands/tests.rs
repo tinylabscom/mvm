@@ -6436,13 +6436,13 @@ fn sdk_live_mode_shelled_commands_keep_parsing() {
 /// failing.
 #[test]
 fn startup_registers_the_output_stream_plane() {
-    register_stream_plane();
+    register_inhouse_builder();
     assert!(
         mvm_runtime::workload_runner::console_streamer_installed(),
         "mvmctl must hand the workload runner a real console streamer at startup"
     );
     // Idempotent: a second call must not panic or unregister the first.
-    register_stream_plane();
+    register_inhouse_builder();
     assert!(mvm_runtime::workload_runner::console_streamer_installed());
 }
 

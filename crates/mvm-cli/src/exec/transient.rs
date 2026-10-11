@@ -85,7 +85,7 @@ pub(super) fn boot_transient_vm(
     // this on-use reap is what enforces the standby TTL between invocations —
     // without it a one-off run (or runs against different images) leaves warm
     // spares resident until a manual `cache prune`. Best-effort; never blocks.
-    crate::commands::pool::reap_stale_standbys_best_effort();
+    mvm_client::pool::reap_stale_standbys_best_effort();
     report_phase("standby_reap");
 
     if let Some(marks) = warm_claim_marks.as_mut() {
@@ -96,23 +96,19 @@ pub(super) fn boot_transient_vm(
     // pre-booted to agent-ready and runs under its own standby-id, so the
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
-    // internally (an auto-named launch of a shape a shared parent can serve,
-    // a non-zero standby target, admitted tenant + signed plan threaded into
-    // start_config, backend supports the pool). Finding no standby is not an
-    // error: the launch boots cold, and says so when a standby could have
-    // served it. Only a residency the operator set by name on a backend with
-    // no pool is returned as an actionable error.
-    let (vm_name, cold_reason) = match claim_warm_standby(attempt) {
-        Ok(crate::commands::pool::WarmClaimOutcome::Claimed(id)) => {
-            ui::info(&format!(
-                "Claimed a warm standby ({}) — skipping cold boot.",
-                id.0
-            ));
-            (id.0, None)
-        }
-        Ok(crate::commands::pool::WarmClaimOutcome::Cold(reason)) => {
-            if let Some(declaration) = reason.declaration() {
-                ui::notice(declaration);
+    // internally (warm_pool_size > 0, admitted tenant + signed plan threaded
+    // into start_config, a launch shape a shared parent can serve, backend
+    // supports the pool). An explicitly configured but unsupported standby pool
+    // is returned as an actionable error; only an ineligible launch shape
+    // proceeds cold.
+    let (vm_name, warm_claimed) =
+        match mvm_client::pool::try_warm_claim(attempt.backend, attempt.start_config, false) {
+            Ok(Some(id)) => {
+                ui::info(&format!(
+                    "Claimed a warm standby ({}) — skipping cold boot.",
+                    id.0
+                ));
+                (id.0, true)
             }
             (vm_name, Some(reason))
         }

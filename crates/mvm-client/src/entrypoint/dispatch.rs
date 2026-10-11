@@ -22,9 +22,10 @@ use mvm_agentd::vsock::{EntrypointEvent, GuestRequest, RunEntrypointError};
 use mvm_contract::stream::StreamKind;
 use mvm_core::session::{SessionId, SessionState};
 use mvm_hostd::plan_admission::AdmittedPlan;
-use mvm_hostd::stream::{EntrypointSink, RecordedCopy, ShownChunk};
+use mvm_hostd::stream::EntrypointSink;
 
 use super::stdin_stream::{PlaneInput, StdinStream, StreamedInputReport};
+use super::{RecordedCopy, ShownChunk};
 
 /// The largest payload a call carries in its `RunEntrypoint` frame.
 ///
@@ -347,12 +348,12 @@ pub fn route_event(
 ) {
     match event {
         EntrypointEvent::Stdout { chunk } => {
-            let shown = capture.ingest(StreamKind::Stdout, chunk);
+            let shown = ShownChunk::from_capture(capture.ingest(StreamKind::Stdout, chunk));
             divergence.note(&shown.recorded);
             observer.output(&shown);
         }
         EntrypointEvent::Stderr { chunk } => {
-            let shown = capture.ingest(StreamKind::Stderr, chunk);
+            let shown = ShownChunk::from_capture(capture.ingest(StreamKind::Stderr, chunk));
             divergence.note(&shown.recorded);
             observer.output(&shown);
         }
@@ -362,7 +363,8 @@ pub fn route_event(
         } => {
             // The header is the record; the fd-3 payload rides along and
             // neither consumer renders it.
-            let shown = capture.ingest(StreamKind::Trace, header_json.as_bytes());
+            let shown =
+                ShownChunk::from_capture(capture.ingest(StreamKind::Trace, header_json.as_bytes()));
             divergence.note(&shown.recorded);
             observer.control(&String::from_utf8_lossy(&shown.body), payload.len());
         }

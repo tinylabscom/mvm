@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from mvm import _hostsvc
+from mvm import _audit_sessions as sessions
 
 HOST_AUDIT_SERVICE = "host.audit.v1"
 

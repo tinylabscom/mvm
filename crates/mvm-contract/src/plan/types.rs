@@ -969,6 +969,7 @@ impl Variant {
 /// A secret binding from a name (visible inside the guest) to its
 /// source (resolved by the supervisor's `KeystoreReleaser`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SecretBinding {
     /// Name as the workload sees it (e.g. env var name or
@@ -1034,6 +1035,7 @@ mod secret_binding_approval_tests {
 /// `KeystoreReleaser` resolves at admission; the plan (persisted to
 /// `plan.json`) carries no plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SecretSource {
     /// Per-run release from the supervisor's keystore. The address

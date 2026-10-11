@@ -51,13 +51,17 @@ pub fn load_or_init(secret_path: &Path, public_path: &Path) -> Result<(SigningKe
     Ok((signing, derived))
 }
 
-/// Load an existing identity without creating, replacing, or repairing either
-/// half. Evidence maintenance must not mint a new signer when custody is lost.
-pub fn load_existing(secret_path: &Path, public_path: &Path) -> Result<(SigningKey, VerifyingKey)> {
+/// Load the verifier from an existing keypair without creating or repairing
+/// either half. The secret's permissions and the public half's binding are
+/// checked exactly as for signing; no secret material leaves this function.
+/// This reads and validates the secret half before deriving the public key.
+/// Like the signing loader, separate metadata/open operations do not provide
+/// race-free filesystem validation against concurrent path replacement.
+pub fn load_verifier(secret_path: &Path, public_path: &Path) -> Result<VerifyingKey> {
     let signing = load_secret_half(secret_path)?;
     let derived = signing.verifying_key();
     check_public_half(secret_path, public_path, &derived)?;
-    Ok((signing, derived))
+    Ok(derived)
 }
 
 fn mint_seed() -> Zeroizing<Vec<u8>> {

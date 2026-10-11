@@ -260,6 +260,75 @@ impl RegistryClient {
             .await
     }
 
+    /// Fetch optional repository metadata. Only an actual HTTP 404 means
+    /// absence; authentication and transport errors remain errors.
+    pub async fn get_optional_manifest(
+        &self,
+        reference: &ImageReference,
+        accept: &[&str],
+    ) -> Result<Option<RegistryResponse>, OciError> {
+        let url = self.endpoint(reference, &manifest_path(reference));
+        let parts = RequestParts {
+            accept: Some(accept),
+            ..RequestParts::default()
+        };
+        let response = self.send(Method::GET, &url, reference, &parts).await?;
+        if response.status() == mvm_http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        self.registry_response(url, response, RedirectPolicy::Refuse)
+            .await
+            .map(Some)
+    }
+
+    /// Fetch a page of OCI referrers through the image's authenticated
+    /// transport. A continuation may change only the query of this endpoint,
+    /// never its origin or repository. Callers read the next `Link` header
+    /// from the returned response and bound the number of pages they accept.
+    pub async fn get_referrers(
+        &self,
+        reference: &ImageReference,
+        digest: &str,
+        continuation: Option<&str>,
+    ) -> Result<Option<RegistryResponse>, OciError> {
+        super::layer::validate_layer_digest(digest)?;
+        let endpoint = self.endpoint(
+            reference,
+            &format!("/v2/{}/referrers/{digest}", reference.repository),
+        );
+        let base = mvm_http::Url::parse(&endpoint)
+            .map_err(|e| OciError::Registry(format!("invalid referrers endpoint: {e}")))?;
+        let url = if let Some(continuation) = continuation {
+            let next = base
+                .join(continuation)
+                .map_err(|e| OciError::Registry(format!("invalid referrers continuation: {e}")))?;
+            if !same_origin(&base, &next)
+                || base.path() != next.path()
+                || !next.username().is_empty()
+                || next.password().is_some()
+                || next.fragment().is_some()
+            {
+                return Err(OciError::Registry(
+                    "referrers continuation changes the repository endpoint".to_string(),
+                ));
+            }
+            next.to_string()
+        } else {
+            endpoint
+        };
+        let parts = RequestParts {
+            accept: Some(&["application/vnd.oci.image.index.v1+json"]),
+            ..RequestParts::default()
+        };
+        let response = self.send(Method::GET, &url, reference, &parts).await?;
+        if response.status() == mvm_http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        self.registry_response(url, response, RedirectPolicy::Refuse)
+            .await
+            .map(Some)
+    }
+
     /// Whether the repository already holds a blob with this digest.
     ///
     /// Only a `200` counts as present. A registry that answers `HEAD` with a

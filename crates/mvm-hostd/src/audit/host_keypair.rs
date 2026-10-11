@@ -103,6 +103,15 @@ pub fn load_or_init_at(keys_dir: &Path) -> Result<HostSigner> {
     })
 }
 
+/// Load only the verifier from the existing host identity, without creating
+/// directories, initializing keys, repairing public material, or changing modes.
+pub fn load_verifier_at(keys_dir: &Path) -> Result<VerifyingKey> {
+    ed25519_keypair::load_verifier(
+        &keys_dir.join(SECRET_FILENAME),
+        &keys_dir.join(PUBLIC_FILENAME),
+    )
+}
+
 /// The loaded signer + its derived public half. Carries the path
 /// so error messages have somewhere to point.
 ///
@@ -156,6 +165,62 @@ mod tests {
 
     fn fresh_keys_dir() -> TempDir {
         tempfile::tempdir().expect("tmpdir")
+    }
+
+    #[test]
+    fn read_only_verifier_never_initializes_or_repairs_keys() {
+        let dir = fresh_keys_dir();
+        let missing = dir.path().join("missing");
+        assert!(load_verifier_at(&missing).is_err());
+        assert!(!missing.exists());
+        assert!(load_verifier_at(dir.path()).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        let signer = load_or_init_at(dir.path()).unwrap();
+        let secret = std::fs::read(&signer.secret_path).unwrap();
+        let public = std::fs::read(&signer.public_path).unwrap();
+        assert_eq!(load_verifier_at(dir.path()).unwrap(), signer.verifying);
+        assert_eq!(std::fs::read(&signer.secret_path).unwrap(), secret);
+        assert_eq!(std::fs::read(&signer.public_path).unwrap(), public);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+
+        std::fs::remove_file(&signer.public_path).unwrap();
+        assert!(load_verifier_at(dir.path()).is_err());
+        assert!(!signer.public_path.exists());
+        assert_eq!(std::fs::read(&signer.secret_path).unwrap(), secret);
+    }
+
+    #[test]
+    fn read_only_verifier_refuses_invalid_material_without_changing_it() {
+        let dir = fresh_keys_dir();
+        let signer = load_or_init_at(dir.path()).unwrap();
+        let secret = std::fs::read(&signer.secret_path).unwrap();
+        let public = std::fs::read(&signer.public_path).unwrap();
+        let wrong_public = SigningKey::from_bytes(&[42; 32]).verifying_key();
+        for invalid in [b"short".to_vec(), wrong_public.to_bytes().to_vec()] {
+            std::fs::write(&signer.public_path, &invalid).unwrap();
+            assert!(load_verifier_at(dir.path()).is_err());
+            assert_eq!(std::fs::read(&signer.public_path).unwrap(), invalid);
+            assert_eq!(std::fs::read(&signer.secret_path).unwrap(), secret);
+        }
+        std::fs::write(&signer.public_path, &public).unwrap();
+        std::fs::write(&signer.secret_path, b"short").unwrap();
+        assert!(load_verifier_at(dir.path()).is_err());
+        assert_eq!(std::fs::read(&signer.secret_path).unwrap(), b"short");
+        std::fs::write(&signer.secret_path, &secret).unwrap();
+        std::fs::set_permissions(&signer.secret_path, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert!(load_verifier_at(dir.path()).is_err());
+        assert_eq!(
+            std::fs::metadata(&signer.secret_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o644
+        );
+        assert_eq!(std::fs::read(&signer.public_path).unwrap(), public);
+        assert_eq!(std::fs::read(&signer.secret_path).unwrap(), secret);
     }
 
     #[test]

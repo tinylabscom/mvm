@@ -6,14 +6,12 @@ use serde::Serialize;
 
 use crate::ui;
 
-use mvm_core::manifest::{
-    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance,
-    key_for_manifest_identity, resolve_manifest_config_path,
-};
+use mvm_client::builder::source;
+use mvm_core::manifest::{self, Manifest, resolve_manifest_config_path};
+#[cfg(test)]
+use mvm_core::manifest::{PersistedManifest, key_for_manifest_identity};
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::image;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::Cli;
 use super::shared::{PhaseEvent, clap_flake_ref, resolve_flake_ref};
@@ -180,24 +178,8 @@ fn build_manifest(
         return build_manifest_from_image(&manifest, &canonical, &image_ref, json, mode);
     }
 
-    // Resolve flake "." relative to the manifest's parent directory so a
-    // user running `mvmctl build /elsewhere/mvm.toml` from any cwd still
-    // picks up the right flake.
-    let flake = manifest.flake_ref();
-    let resolved_flake = if flake == "." {
-        canonical
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| ".".to_string())
-    } else if !flake.contains(':') && !std::path::Path::new(flake).is_absolute() {
-        // Relative path inside the flake field — resolve against manifest's parent.
-        canonical
-            .parent()
-            .map(|p| p.join(flake).display().to_string())
-            .unwrap_or_else(|| flake.to_string())
-    } else {
-        flake.to_string()
-    };
+    let persisted = source::prepare_manifest(&manifest, &canonical)?;
+    let resolved_flake = &persisted.flake_ref;
 
     if json {
         PhaseEvent::new("build", "manifest", "started")
@@ -221,29 +203,7 @@ fn build_manifest(
         );
     }
 
-    // Synthesize a fresh PersistedManifest. If a slot record already
-    // exists at the same hash, template_build_from_manifest's
-    // template_persist_slot call refreshes updated_at/provenance and
-    // preserves created_at via touch(); the synthesized created_at here
-    // is only used for first-build slots.
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
-    // Override flake_ref to the resolved (absolute) path so the slot's
-    // record matches what dev_build actually saw.
-    let mut persisted =
-        PersistedManifest::from_manifest(&manifest, &canonical, &backend, Provenance::current())?;
-    persisted.flake_ref = resolved_flake;
-
-    prepare_builder_vm_image_for_build()
-        .context("ensuring the builder VM image before the manifest build")?;
-
-    // A selected checkout is the workload kernel's source here too: the
-    // template's kernel fallback otherwise reaches the builder kernel,
-    // which has no device-mapper and cannot activate a sealed rootfs.
-    crate::commands::env::builder_vm::seed_pair_workload_kernel_cache()?;
-
-    let revision = match tmpl::template_build_from_manifest(&persisted, force, update_hash, mode) {
+    let revision = match source::build_flake_manifest(&persisted, force, update_hash, mode) {
         Ok(r) => r,
         Err(e) => {
             if json {
@@ -251,22 +211,9 @@ fn build_manifest(
                     .with_error(&format!("{:#}", e))
                     .emit();
             }
-            audit_build_error("manifest", &persisted.manifest_path, &e);
             return Err(e);
         }
     };
-
-    audit_build_ok(
-        "manifest",
-        &persisted.manifest_path,
-        &persisted.manifest_hash,
-        &revision.revision_hash,
-    );
-
-    // Record the compiled image as an audited version-lineage node before
-    // reporting success. A build that produced an image but could not record
-    // its lineage is a failure to surface, not a silent skip.
-    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
 
     if json {
         #[derive(Serialize)]
@@ -337,35 +284,8 @@ fn build_manifest_from_image(
         );
     }
 
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
-    let persisted =
-        PersistedManifest::from_manifest(manifest, canonical, &backend, Provenance::current())?;
-
-    let kernel = super::super::env::builder_vm::ensure_workload_kernel()
-        .context("resolving the workload kernel for an image-backed build")?;
-
-    // Keyed by the slot, not by a machine name: the artifact belongs to the
-    // manifest, and two machines booting the same slot must not each
-    // re-materialize it.
-    let cache_key = format!("slot-{}", persisted.manifest_hash);
-    let rootfs = tokio::runtime::Runtime::new()
-        .context("starting the runtime for the image pull")?
-        .block_on(mvm_client::local::materialize_image_rootfs(
-            image_ref, &cache_key,
-        ))
-        .with_context(|| format!("materializing {image_ref}"))?;
-
-    let revision = match mvm_runtime::vm::template::lifecycle::template_build_from_image(
-        &persisted,
-        &mvm_runtime::vm::template::lifecycle::ImageBuildSources {
-            rootfs,
-            kernel: std::path::PathBuf::from(&kernel),
-            image_ref: image_ref.to_string(),
-        },
-        mode,
-    ) {
+    let persisted = source::prepare_manifest(manifest, canonical)?;
+    let revision = match source::build_image_manifest(&persisted, image_ref, mode) {
         Ok(r) => r,
         Err(e) => {
             if json {
@@ -373,17 +293,9 @@ fn build_manifest_from_image(
                     .with_error(&format!("{e:#}"))
                     .emit();
             }
-            audit_build_error("manifest", &persisted.manifest_path, &e);
             return Err(e);
         }
     };
-
-    audit_build_ok(
-        "manifest",
-        &persisted.manifest_path,
-        &persisted.manifest_hash,
-        &revision.revision_hash,
-    );
 
     if json {
         PhaseEvent::new("build", "manifest", "completed")
@@ -437,14 +349,7 @@ fn prepare_builder_vm_image_for_build_with(
 }
 
 fn build_mvmfile(path: &str, output: Option<&str>) -> Result<()> {
-    let elf_path = match image::build(path, output) {
-        Ok(p) => p,
-        Err(e) => {
-            audit_build_error("mvmfile", path, &e);
-            return Err(e);
-        }
-    };
-    audit_build_ok("mvmfile", path, "", &elf_path);
+    let elf_path = source::build_mvmfile(path, output)?;
     ui::success(&format!("\nImage ready: {}", elf_path));
     Ok(())
 }
@@ -458,12 +363,6 @@ fn build_flake(
 ) -> Result<()> {
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
-
-    let build_env = mvm_runtime::build_env::default_build_env();
-    let env = build_env.as_ref();
-
-    prepare_builder_vm_image_for_build()
-        .context("ensuring the builder VM image before the flake build")?;
 
     let resolved = resolve_flake_ref(flake_ref)?;
     let watch_enabled = watch && !resolved.contains(':');
@@ -487,10 +386,7 @@ fn build_flake(
             );
         }
 
-        // An image build is the other cost a launch measurement must never
-        // absorb; record it at the one site that starts one.
-        mvm_core::launch_trace::record_image_build();
-        let result = match mvm_build::dev_build::dev_build(env, &resolved, profile, mode) {
+        let result = match source::build_flake(&resolved, profile, mode) {
             Ok(r) => r,
             Err(e) => {
                 if json {
@@ -498,11 +394,9 @@ fn build_flake(
                         .with_error(&format!("{:#}", e))
                         .emit();
                 }
-                audit_build_error("flake", &resolved, &e);
                 return Err(e);
             }
         };
-        audit_build_ok("flake", &resolved, "", &result.revision_hash);
         // No post-build agent injection: every mkGuest image resolves its
         // agent from the runtime overlay (or mkGuest's own bake) at boot,
         // so there is nothing to verify or patch into the rootfs here.
@@ -572,36 +466,6 @@ fn build_flake(
             }
         }
     }
-}
-
-/// Emit a `TemplateBuild` audit line for a successful build.
-///
-/// `mode` is one of `manifest` / `flake` / `mvmfile` so the audit log
-/// distinguishes the build-graph entry path; the artifact identifier
-/// (revision hash for nix builds, ELF path for mvmfile) lands in the
-/// detail string so a reader can correlate without parsing JSON.
-fn audit_build_ok(mode: &str, source: &str, slot_hash: &str, artifact: &str) {
-    let detail = if slot_hash.is_empty() {
-        format!("mode={mode} source={source} artifact={artifact}")
-    } else {
-        format!("mode={mode} source={source} slot_hash={slot_hash} artifact={artifact}")
-    };
-    mvm_core::audit_emit!(TemplateBuild, "{detail}");
-}
-
-/// Emit a `TemplateBuildError` audit line for a failed build.
-///
-/// Records the same `mode`/`source` shape as the success path so an
-/// operator scanning the log sees a paired success/failure pattern.
-/// Only the first line of the error chain lands in the detail to keep
-/// the audit record bounded.
-fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
-    let head = err.to_string();
-    let head = head.lines().next().unwrap_or("").trim();
-    mvm_core::audit_emit!(
-        TemplateBuildError,
-        "mode={mode} source={source} error={head}"
-    );
 }
 
 /// `mvmctl build --deps` implementation.
@@ -773,67 +637,16 @@ pub(in crate::commands) fn build_flake_to_slot(
     flake_ref: &str,
     profile: Option<&str>,
 ) -> Result<String> {
-    validate_flake_ref(flake_ref)
-        .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
-
-    prepare_builder_vm_image_for_build()
-        .context("ensuring the builder VM image before the flake build")?;
-
-    let resolved = resolve_flake_ref(flake_ref)?;
-    // A flake slot may contain a sealed rootfs but no kernel of its own.
-    // Populate the verified workload-kernel cache before slot installation so
-    // it cannot fall back to the builder kernel, which lacks device-mapper.
-    if !build_stub_outdir_set() {
-        crate::commands::env::builder_vm::ensure_workload_kernel()
-            .context("resolving the dm-verity-capable workload kernel for flake slot")?;
-    }
-    let backend = mvm_runtime::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
-    let mode = mvm_build::pipeline::BuildMode::Dev;
-
-    // Synthesize a manifest so we can use the slot-registration machinery.
-    // The manifest_path key is a deterministic fake path derived from the
-    // flake ref — it is never read from disk (the PersistedManifest records
-    // the resolved flake_ref directly) and exists solely to give the slot
-    // a stable sha256 key.
-    let persisted = flake_slot_manifest(&resolved, profile, &backend);
-
-    let slot_hash = persisted.manifest_hash.clone();
-    let revision = tmpl::template_build_from_manifest(&persisted, false, false, mode)
-        .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
-
-    audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
-
-    // Record the compiled image as an audited version-lineage node (same
-    // fail-closed posture as the manifest build path).
-    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
-
-    Ok(slot_hash)
+    source::build_flake_to_slot(flake_ref, profile)
 }
 
+#[cfg(test)]
 fn flake_slot_manifest(
     resolved_flake_ref: &str,
     profile: Option<&str>,
     backend: &str,
 ) -> PersistedManifest {
-    let synthetic_path = format!("<flake-slot>/{resolved_flake_ref}");
-    PersistedManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        manifest_path: synthetic_path.clone(),
-        manifest_hash: key_for_manifest_identity(&synthetic_path),
-        flake_ref: resolved_flake_ref.to_string(),
-        profile: profile.unwrap_or("default").to_string(),
-        vcpus: 2,
-        mem_mib: 512,
-        mem_initial_mib: None,
-        data_disk_mib: 0,
-        name: None,
-        backend: backend.to_string(),
-        provenance: Provenance::current(),
-        created_at: mvm_core::time::utc_now(),
-        updated_at: mvm_core::time::utc_now(),
-    }
+    source::flake_slot_manifest(resolved_flake_ref, profile, backend)
 }
 
 /// Read the volume's `meta.json.annotations.lockfile_sha256`. Returns

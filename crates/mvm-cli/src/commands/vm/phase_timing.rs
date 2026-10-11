@@ -10,8 +10,8 @@
 use std::time::Instant;
 
 use crate::bench::cold_launch::MIN_MATRIX_SAMPLES;
+use mvm_client::workspace_apply::StopTiming;
 use mvm_core::launch_trace::PhaseTimingMode;
-use mvm_runtime::workload_runner::StopTiming;
 use serde::{Deserialize, Serialize};
 
 use super::launch_sample::LaunchSubTimings;
@@ -305,9 +305,9 @@ impl LaunchSubMarks {
 
     /// Record the backend's stop sequence when the selected backend exposes
     /// the shared workload-runner timing surface.
-    pub fn record_stop_timing(&mut self, timing: Option<StopTiming>) {
+    pub fn record_stop_timing<T: Into<StopTiming>>(&mut self, timing: Option<T>) {
         if self.enabled {
-            self.stop_timing = timing;
+            self.stop_timing = timing.map(Into::into);
         }
     }
 
@@ -983,7 +983,7 @@ mod tests {
             driver_kill: Duration::from_millis(3),
             console_cleanup: Duration::from_millis(4),
             total: Duration::from_millis(10),
-            driver_detail: Some(mvm_vmm::driver::RunningVmStopTiming {
+            driver_detail: Some(mvm_client::workspace_apply::StopDetail {
                 supervisor_signal: Duration::from_millis(5),
                 pid_disappearance: Duration::from_millis(6),
                 force_kill_wait: Duration::from_millis(7),

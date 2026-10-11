@@ -1,7 +1,7 @@
 //! `mvm-hvf-supervisor` — one process per raw-HVF guest.
 //!
 //! Reads an [`mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig`] JSON document on
-//! stdin (written by `mvm_runtime::backends::hvf`), self-signs the `hypervisor`
+//! stdin (written by `mvm_runtime::backends::hvf`), checks the loaded `hypervisor`
 //! entitlement, boots the guest via `mvm_runtime::backends::hvf::boot_kernel` (which drives
 //! the unified `vmm::run` loop), captures its console to the configured log, and
 //! writes/removes a PID file so the backend can confirm launch and stop/status
@@ -15,170 +15,6 @@ fn main() {
          this is a stub build"
     );
     std::process::exit(1);
-}
-
-/// Ad-hoc entitlement applied at first launch — `Hypervisor.framework` rejects an
-/// unsigned process. Hypervisor-only — no virtualization entitlement.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const HVF_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-    <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
-    \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
-    <plist version=\"1.0\"><dict>\n\
-    <key>com.apple.security.hypervisor</key><true/>\n\
-    </dict></plist>";
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
-    mvm_core::env_hygiene::helper_command("codesign")
-        .args(["-d", "--entitlements", "-", "--xml"])
-        .arg(exe)
-        .output()
-        .map(|out| {
-            out.status.success()
-                && String::from_utf8_lossy(&out.stdout).contains("com.apple.security.hypervisor")
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn signed_marker_path(exe: &std::path::Path) -> std::path::PathBuf {
-    let mut marker = exe.as_os_str().to_os_string();
-    marker.push(".mvm-hvf-signed");
-    std::path::PathBuf::from(marker)
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn executable_fingerprint(exe: &std::path::Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = std::fs::metadata(exe).ok()?;
-    let modified = metadata
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    Some(format!(
-        "{}:{}:{}:{}",
-        metadata.ino(),
-        metadata.len(),
-        modified.as_secs(),
-        modified.subsec_nanos()
-    ))
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn signed_marker_matches(exe: &std::path::Path) -> bool {
-    let Some(fingerprint) = executable_fingerprint(exe) else {
-        return false;
-    };
-    std::fs::read_to_string(signed_marker_path(exe))
-        .map(|cached| cached.trim() == fingerprint)
-        .unwrap_or(false)
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn record_signed_marker(exe: &std::path::Path) {
-    if let Some(fingerprint) = executable_fingerprint(exe) {
-        let _ = std::fs::write(signed_marker_path(exe), fingerprint);
-    }
-}
-
-/// Self-sign ad-hoc with the hypervisor entitlement, then re-exec. We ship the
-/// bin unsigned and HVF rejects it otherwise. `MVM_HVF_SIGNED` breaks the exec
-/// loop; `exec()` preserves the pid + the stdin config pipe. A file lock
-/// serializes concurrent launches (codesign --force rewrites the shared binary
-/// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn ensure_self_signed() {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
-    if std::env::var("MVM_HVF_SIGNED").as_deref() == Ok("1") {
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    // The helper is stable between builds. Avoid spawning `codesign` for every
-    // short-lived workload by caching only metadata observed after a successful
-    // entitlement check or signing operation. Hypervisor.framework remains the
-    // final authority and still rejects an unsigned helper.
-    if signed_marker_matches(&exe) {
-        return;
-    }
-    if exe_has_hypervisor_entitlement(&exe) {
-        record_signed_marker(&exe);
-        return;
-    }
-
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(std::env::temp_dir().join("mvm-hvf-supervisor.codesign.lock"))
-        .ok();
-    if let Some(f) = &lock {
-        // SAFETY: flock on a valid fd; LOCK_EX blocks until exclusive.
-        unsafe {
-            libc::flock(f.as_raw_fd(), libc::LOCK_EX);
-        }
-    }
-
-    if !exe_has_hypervisor_entitlement(&exe) {
-        let ent = std::env::temp_dir().join("mvm-hvf-supervisor-entitlements.plist");
-        if std::fs::write(&ent, HVF_ENTITLEMENTS_PLIST).is_err() {
-            return;
-        }
-        let output = mvm_core::env_hygiene::helper_command("codesign")
-            .args(["--sign", "-", "--force", "--entitlements"])
-            .arg(&ent)
-            .arg(&exe)
-            .output();
-        let signed = output.as_ref().map(|o| o.status.success()).unwrap_or(false);
-        if !signed {
-            eprintln!("mvm-hvf-supervisor: ad-hoc codesign failed; VM start may be rejected");
-            if let Ok(o) = &output {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                let stderr = stderr.trim_end();
-                if !stderr.is_empty() {
-                    eprintln!("{stderr}");
-                }
-            }
-            return;
-        }
-        record_signed_marker(&exe);
-    }
-    drop(lock);
-
-    let err = mvm_core::env_hygiene::helper_command(&exe)
-        .args(std::env::args_os().skip(1))
-        .env("MVM_HVF_SIGNED", "1")
-        .exec();
-    eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
-    std::process::exit(1);
-}
-
-#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
-mod tests {
-    use super::{record_signed_marker, signed_marker_matches};
-    use std::io::Write;
-
-    #[test]
-    fn signed_marker_is_bound_to_the_executable_metadata() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let exe = dir.path().join("mvm-hvf-supervisor");
-        let mut file = std::fs::File::create(&exe).expect("create executable");
-        file.write_all(b"signed helper").expect("write executable");
-        file.flush().expect("flush executable");
-
-        assert!(!signed_marker_matches(&exe));
-        record_signed_marker(&exe);
-        assert!(signed_marker_matches(&exe));
-
-        std::fs::write(&exe, b"replacement helper with different size")
-            .expect("replace executable");
-        assert!(!signed_marker_matches(&exe));
-    }
 }
 
 /// Set by the SIGTERM/SIGINT handler; `boot_kernel_until`'s watchdog polls it and
@@ -233,8 +69,8 @@ fn main() -> anyhow::Result<()> {
     use mvm_vmm::host::hvf_supervisor::{HvfShutdownTimingRecord, HvfSupervisorConfig};
 
     mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
-    // Sign + re-exec before anything else (preserves the stdin config pipe).
-    ensure_self_signed();
+    // Preparation must happen before launch; the loaded identity is immutable.
+    mvm_vmm::host::codesign::ensure_signed().map_err(anyhow::Error::msg)?;
 
     // Graceful stop: SIGTERM/SIGINT set STOP, which the boot watchdog observes and
     // force-exits the guest (then we flush the console + drop the PID file).

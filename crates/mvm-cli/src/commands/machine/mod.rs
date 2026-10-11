@@ -29,7 +29,7 @@ mod spec_ops;
 mod start_create_flags;
 mod volume_profile;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use clap::{Args as ClapArgs, Subcommand};
 use ed25519_dalek::Signer;
@@ -45,24 +45,24 @@ use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
 
-use mvm_runtime::machine::persist::{
+use mvm_client::machine_spec::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
-    reconcile_machine_spec, save_machine_spec, validate_machine_memory,
+    save_machine_spec, validate_machine_memory,
 };
 
 use super::Cli;
 use super::build::build;
 use super::vm::exec::{RunArgs, RunProfile, run_secure_started};
 use super::vm::group::VmCmd;
-#[cfg(test)]
-use super::vm::host_signer::PUBLIC_FILENAME;
-use super::vm::host_signer::{host_signer_id, load_or_init};
 use super::vm::{console, down};
 use crate::ui;
 use checkpoint::{ForkVmFullMachineInput, fork_vm_full_machine};
 use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
 use manifest_source::{absolutize_manifest_volume_spec, load_machine_manifest_source};
+#[cfg(test)]
+use mvm_client::audit::host_keypair::PUBLIC_FILENAME;
+use mvm_client::audit::host_keypair::{host_signer_id, load_or_init};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
 use receipt::{
@@ -79,7 +79,6 @@ use spec_ops::{
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
 use volume_profile::{
     enforce_persisted_volume_profile, enforce_volume_profile, machine_run_volume_specs,
-    persistent_dir_share_refusal,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -1322,10 +1321,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn profile_allows_dev_init(profile: RunProfile) -> bool {
-    profile.grants().dev_guest
-}
-
 /// `dev.init` runs commands in the guest before the workload, so it needs the
 /// dev guest profile.
 ///
@@ -1334,17 +1329,7 @@ fn profile_allows_dev_init(profile: RunProfile) -> bool {
 /// should stop the boot rather than be treated as whichever preset a string
 /// comparison happened to miss.
 fn enforce_dev_init_profile(profile: &str, init: &[String]) -> Result<()> {
-    if init.is_empty() {
-        return Ok(());
-    }
-    let parsed = RunProfile::from_name(profile)
-        .ok_or_else(|| anyhow!("machine spec carries an unrecognised profile {profile:?}"))?;
-    if !profile_allows_dev_init(parsed) {
-        bail!(
-            "machine dev.init requires a dev-capable profile; use --profile dev or --profile permissive"
-        );
-    }
-    Ok(())
+    mvm_client::launch::machine_start::validate_init_profile(profile, init)
 }
 
 pub(super) fn validate_machine_name(name: &str) -> Result<()> {
@@ -1404,6 +1389,7 @@ fn humanize_age(created: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> St
     }
 }
 
+#[cfg(test)]
 use mvm_client::launch::machine_start::record_machine_started as mark_machine_started;
 
 /// Human/JSON notice printed when `machine start` targets a machine that is
@@ -1437,27 +1423,8 @@ fn machine_exec_command(argv: &[String]) -> String {
 
 fn build_machine_volume_cfg(
     volume_specs: &[String],
-) -> Result<Vec<mvm_runtime::image::RuntimeVolume>> {
-    let mut volume_cfg = Vec::with_capacity(volume_specs.len());
-    for volume in volume_specs {
-        let spec = super::shared::parse_volume_spec(volume)?;
-        // The spec-time gate refuses this too; a spec saved before it existed
-        // must still not reach boot with a directory it cannot attach.
-        if let super::shared::VolumeSpec::DirShare {
-            host_dir,
-            guest_mount,
-            ..
-        } = &spec
-        {
-            bail!(persistent_dir_share_refusal(host_dir, guest_mount));
-        }
-        let vmv = super::shared::vm_volume_from_spec_validated(&spec)
-            .with_context(|| format!("volume {volume:?}"))?;
-        super::shared::materialize_disk_volume(&vmv)
-            .with_context(|| format!("volume {volume:?}"))?;
-        volume_cfg.push(mvm_runtime::image::RuntimeVolume::from(&vmv));
-    }
-    Ok(volume_cfg)
+) -> Result<Vec<mvm_client::volume::ExplicitVolume>> {
+    mvm_client::machine_spec::explicit_volumes_for_specs(volume_specs)
 }
 
 fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {

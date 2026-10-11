@@ -10,6 +10,11 @@ use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::{BundleSecurityPosture, HostShareGrant, SDK_SIDECAR_GUEST_PATH};
 use mvm_core::security::AgentProfile;
 
+// Reading an installed bundle's signed posture is admission input; the
+// registry read and manifest verification stay in one place and frontends
+// name only the client.
+pub use mvm_runtime::vm::template::lifecycle::installed_bundle_posture;
+
 /// What the launch asks for, in the terms a posture can bound.
 #[derive(Debug, Clone, Copy)]
 pub struct PostureRequest<'a> {

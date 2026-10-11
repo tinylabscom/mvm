@@ -31,24 +31,41 @@
 //! carries key material or plaintext volume bytes.
 
 pub mod dto;
+mod host_snapshot;
 mod lease;
 mod lifecycle;
 mod service;
 mod snapshot;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod wire;
 
 pub use dto::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, AttachmentRequestBuilder,
     AttachmentSource, CreateBlockVolumeRequest, CreateBlockVolumeRequestBuilder, EncryptionState,
-    HostSnapshotRecord, LaunchLeaseRequest, LaunchLeaseRequestBuilder, ReleaseOutcome,
-    UnlockPolicy, VolumeRecord, VolumeSourceKind,
+    ExplicitVolume, HostSnapshotRecord, LaunchLeaseRequest, LaunchLeaseRequestBuilder,
+    ReleaseOutcome, UnlockPolicy, VolumeRecord, VolumeSourceKind,
 };
+pub use host_snapshot::{host_snapshot_image, image_size_mib};
 pub use lease::LaunchLease;
+pub use mvm_vmm::host::encryption::require_host_path_encrypted;
 pub use service::{
     DenyAllHostEncryptionProbe, HostEncryptionProbe, LaunchPreparation, LocalVolumeService,
     VolumeService, default_block_volume_root, probe_from_fn,
 };
+
+/// The persisted machine profile governs registration, even before launch.
+/// A machine without a spec retains the development registration default.
+pub fn registration_profile(vm_name: &str) -> anyhow::Result<AdmittedProfile> {
+    use anyhow::Context;
+    mvm_core::naming::validate_vm_name(vm_name)?;
+    if !mvm_core::config::machine_spec_path(vm_name).exists() {
+        return Ok(crate::profile::RunProfile::Dev.into());
+    }
+    let spec = mvm_runtime::machine::persist::load_machine_spec(vm_name)
+        .with_context(|| format!("reading the stored profile of machine {vm_name:?}"))?;
+    Ok(AdmittedProfile::from_profile_name(&spec.profile))
+}
 
 #[cfg(test)]
 mod tests {

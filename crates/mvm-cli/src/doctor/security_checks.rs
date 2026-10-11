@@ -344,7 +344,13 @@ pub(super) fn security_host_fde_check() -> Check {
     }
 }
 
-/// Enforce the volume storage rule for a host directory snapshot's location.
+pub(crate) use mvm_vmm::host::encryption::HostFdeStatus;
+#[cfg(test)]
+use mvm_vmm::host::encryption::{
+    parse_linux_volume_backing_types, parse_macos_diskutil_encryption_status,
+};
+
+/// Enforce encrypted backing for a LocalBackend volume mount.
 ///
 /// A directory snapshot is plaintext guest data on the host, so where it is
 /// kept must be verified encrypted, or the operator accepted unverified
@@ -352,58 +358,7 @@ pub(super) fn security_host_fde_check() -> Check {
 /// The detector is the one the volume service uses for managed volume
 /// plaintext, so the two cannot disagree.
 pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -> Result<()> {
-    mvm_core::host_storage_encryption::require_volume_storage(path, "host directory snapshot")
-}
-
-/// Where managed volume plaintext is materialized by default, and whether that
-/// storage is verified encrypted.
-///
-/// Warn-only, like the host FDE line: an unverified host can still run
-/// everything that does not unlock a managed volume or create a writable disk
-/// image, and those refuse on their own with the same explanation.
-pub(super) fn security_volume_storage_check() -> Check {
-    let target = mvm_core::config::volumes_dir()
-        .join("mvm-managed")
-        .join("unlocked");
-    let probe_at = mvm_core::host_storage_encryption::nearest_existing_ancestor(&target)
-        .unwrap_or_else(|| target.clone());
-    volume_storage_check_from(
-        &target,
-        mvm_core::host_storage_encryption::detect_host_path_encryption_status(&probe_at),
-        mvm_core::host_storage_encryption::override_requested(),
-    )
-}
-
-pub(super) fn volume_storage_check_from(
-    target: &std::path::Path,
-    status: HostFdeStatus,
-    override_set: bool,
-) -> Check {
-    let env = mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV;
-    let info = match (status.enabled, override_set) {
-        (true, _) => format!(
-            "verified encrypted: managed volume plaintext at {} ({})",
-            target.display(),
-            status.info
-        ),
-        (false, false) => format!(
-            "NOT verified encrypted: unlocking a managed volume or creating a writable \
-             disk image there is refused ({}). Enable FileVault / dm-crypt+LUKS, use \
-             `--root` on encrypted storage, or for local development set {env}=1",
-            status.info
-        ),
-        (false, true) => format!(
-            "NOT verified encrypted, and {env}=1 is set: plaintext will be placed there \
-             anyway and each use audited; --prod refuses this ({})",
-            status.info
-        ),
-    };
-    Check {
-        name: "volume storage (encrypted backing)",
-        category: "security",
-        ok: true,
-        info,
-    }
+    mvm_client::volume::require_host_path_encrypted(path)
 }
 
 /// Best-effort detection of host full-disk encryption.
@@ -1511,25 +1466,14 @@ mod tests {
             verified.info
         );
 
-        let refused = volume_storage_check_from(
-            target,
-            HostFdeStatus::not_enabled("synthetic plain disk"),
-            false,
+    #[test]
+    fn macos_diskutil_parser_accepts_filevault_volume() {
+        let path = std::path::Path::new("/Users/alice/volumes/work");
+        let status = parse_macos_diskutil_encryption_status(
+            path,
+            "Device Identifier: disk3s1\nFileVault: Yes (Unlocked)\n",
         );
-        assert!(refused.ok, "warn-only like the host FDE line");
-        assert!(refused.info.contains("is refused"), "{}", refused.info);
-        assert!(
-            refused.info.contains("synthetic plain disk"),
-            "{}",
-            refused.info
-        );
-        assert!(refused.info.contains(env), "{}", refused.info);
-
-        let overridden = volume_storage_check_from(
-            target,
-            HostFdeStatus::not_enabled("synthetic plain disk"),
-            true,
-        );
+        assert!(status.enabled, "expected enabled: {}", status.info);
         assert!(
             overridden.info.contains(&format!("{env}=1 is set")),
             "{}",

@@ -48,9 +48,7 @@ use baked_entrypoint::{
 #[cfg(test)]
 use baked_entrypoint::{baked_entrypoint_timeout_secs, dispatched_exit_status};
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
-pub(crate) use mvm_client::boot::{
-    select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
-};
+pub(crate) use mvm_client::boot::{select_exec_backend, validate_image_egress_backend};
 pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrate};
 pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_env};
 use session::wait_for_agent_timed;
@@ -61,16 +59,7 @@ use transient::{
     standby_to_leave, start_mode, teardown_transient_vm,
 };
 
-pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
-
-/// Human-facing message for a command killed by its `--timeout`. `None`
-/// timeout ⇒ no duration suffix (e.g. the interactive console path).
-pub(crate) fn timeout_exit_message(timeout_secs: Option<u64>) -> String {
-    let suffix = timeout_secs
-        .map(|s| format!(" after {s}s"))
-        .unwrap_or_default();
-    format!("error: command timed out{suffix}")
-}
+pub use mvm_client::execution::{EXEC_TIMEOUT_EXIT_CODE, shell_quote, timeout_exit_message};
 
 /// Where to source the command that runs inside the transient microVM.
 ///
@@ -352,24 +341,6 @@ fn quote_argv_for_exec(argv: &[String]) -> String {
     format!("exec {}", quoted.join(" "))
 }
 
-/// Quote a single argument for inclusion in a shell command line.
-///
-/// Wraps in single quotes and escapes embedded single quotes the
-/// portable POSIX way (`'` → `'\''`).
-pub fn shell_quote(arg: &str) -> String {
-    let mut out = String::with_capacity(arg.len() + 2);
-    out.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            out.push_str(r"'\''");
-        } else {
-            out.push(ch);
-        }
-    }
-    out.push('\'');
-    out
-}
-
 /// Build the wrapper script that runs inside the guest:
 ///   1. exports launch-plan-derived env vars (when target is LaunchPlan)
 ///   2. exports CLI `--env` vars (CLI overrides launch-plan)
@@ -383,30 +354,20 @@ pub fn shell_quote(arg: &str) -> String {
 /// entrypoint.env → CLI `--env`. The first two are merged in
 /// `parse_launch_plan`; CLI wins by being emitted last.
 pub fn build_guest_wrapper(req: &ExecRequest) -> String {
-    let mut script = String::from("set -e\n");
-    if let ExecTarget::LaunchPlan { entrypoint } = &req.target {
-        for (k, v) in &entrypoint.env {
-            script.push_str(&format!("export {k}={}\n", shell_quote(v)));
-        }
-    }
-    for (k, v) in &req.env {
-        script.push_str(&format!("export {k}={}\n", shell_quote(v)));
-    }
-    // After the caller's exports, and composed against `$PATH` in the guest, so
-    // the mediated tools win whatever the image or the caller sets. A NIC-less
-    // guest's `ping` is one of these: the image's own copy fails at `socket()`.
-    script.push_str(&format!(
-        "export PATH={}:\"$PATH\"\n",
-        shell_quote(mvm_core::guest_netd::MEDIATED_TOOLS_BIN),
-    ));
-    if let ExecTarget::LaunchPlan { entrypoint } = &req.target
-        && let Some(wd) = &entrypoint.working_dir
-    {
-        script.push_str(&format!("cd {}\n", shell_quote(wd)));
-    }
-    script.push_str(&req.target_command());
-    script.push('\n');
-    script
+    let (argv, mut env, working_dir) = match &req.target {
+        ExecTarget::Inline { argv } => (argv, Vec::new(), None),
+        ExecTarget::LaunchPlan { entrypoint } => (
+            &entrypoint.command,
+            entrypoint
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+            entrypoint.working_dir.as_deref(),
+        ),
+    };
+    env.extend(req.env.iter().cloned());
+    mvm_client::execution::guest_wrapper(argv, &env, working_dir)
 }
 
 /// Generate a transient VM name for an exec invocation.

@@ -44,9 +44,7 @@ pub use image_lock::{
     acquire_nix_store_image_lock_named, ensure_nix_store_image_unlocked, hold_image_lock,
     nix_store_image_is_contended,
 };
-pub(crate) use image_lock::{
-    acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_image,
-};
+pub(crate) use image_lock::{acquire_sidecar_lock_within, sidecar_lock_path, sparse_create_image};
 
 /// Wall-clock timeout for a builder VM run when the operator hasn't
 /// overridden it. 30 minutes covers a cold-cache `nix build` of the

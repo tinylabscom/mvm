@@ -178,6 +178,16 @@ pub struct DetachedBoot<'a> {
 /// `boot` is the caller's start: the CLI's carries receipts, init commands and
 /// banners; [`boot_recorded`] is the plain one.
 pub fn persist_and_boot(run: DetachedBoot<'_>, boot: impl FnOnce() -> Result<()>) -> Result<bool> {
+    if !persist_for_start(run)? {
+        return Ok(false);
+    }
+    boot()?;
+    Ok(true)
+}
+
+/// Reconcile and persist a definition and its secret references. Returns
+/// whether a start is needed; presentation callers supply no policy callback.
+pub fn persist_for_start(run: DetachedBoot<'_>) -> Result<bool> {
     let DetachedBoot {
         name,
         spec,
@@ -209,11 +219,7 @@ pub fn persist_and_boot(run: DetachedBoot<'_>, boot: impl FnOnce() -> Result<()>
                 .context("recording persistent-machine secret references")?;
         }
     }
-    if machine_is_running(name) {
-        return Ok(false);
-    }
-    boot()?;
-    Ok(true)
+    Ok(!machine_is_running(name))
 }
 
 /// Boot a persisted definition through the admitted start, then stamp it

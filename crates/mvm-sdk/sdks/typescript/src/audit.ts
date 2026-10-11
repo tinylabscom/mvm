@@ -12,6 +12,8 @@
 
 import { call, type InvokeFn } from "./_hostsvc.js";
 
+export * as sessions from "./_audit-sessions.js";
+
 export const HOST_AUDIT_SERVICE = "host.audit.v1";
 
 interface EmitOptions {

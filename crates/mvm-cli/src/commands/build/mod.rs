@@ -11,10 +11,6 @@ pub(super) mod compile;
 mod driver_builder_live;
 pub(super) mod group;
 pub(super) mod guest_bins;
-/// Records an audited image-lineage node after a successful flake build, so
-/// every compiled image produces a tamper-evident version-chain record anchored
-/// in the host-signed audit log.
-pub(in crate::commands) mod image_lineage;
 /// `build image-set`: one target of the local image checkout, built in the
 /// builder VM and published to the local image cache.
 pub(super) mod image_set;
