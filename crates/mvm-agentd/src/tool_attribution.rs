@@ -266,8 +266,10 @@ fn spawn_attributed_in_group(
             assume_group(gid)
         });
     }
-    // After the group change, which every tier refuses.
-    crate::workload_seccomp::confine(command);
+    // No workload seccomp tier here: what execs is the mediation shim, not
+    // workload code, and its one helper handshake needs `connect`, which the
+    // standard tier refuses. The tool the helper may spawn is the workload
+    // code; it never inherits a filter from this child either way.
     let mut live = live();
     let child = command.spawn()?;
     let session = child.id();
