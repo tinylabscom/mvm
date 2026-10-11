@@ -157,7 +157,8 @@ fn exec_capability_probe() {
     let status = std::fs::read_to_string("/proc/thread-self/status").expect("status");
     match stage.as_str() {
         "helper" | "installed-helper" | "nonexecutable-helper" => {
-            assert_caps(&status, "00000000000000c0");
+            let expected = format!("{:016x}", TOOL_HELPER_IDENTITY.capabilities());
+            assert_caps(&status, &expected);
             assert_eq!(field(&status, "Uid"), "906\t906\t906\t906");
             assert_eq!(field(&status, "Gid"), "906\t906\t906\t906");
             let stash = std::env::var(STASH).ok();
