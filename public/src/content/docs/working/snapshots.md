@@ -178,18 +178,76 @@ mvmctl machine checkpoint restore <checkpoint-id>
 
 `checkpoint create` pauses the VM, saves machine state and memory to the checkpoint directory, and records the content hash in the audit chain. `checkpoint restore` re-hashes the checkpoint content and checks the record against the signed audit chain before restoring.
 
-Memory and rootfs images are stored as authenticated 1 MiB chunks. Chunks are
-deduplicated only inside the checkpoint's key domain, and zero chunks occupy no
-object storage. Restore keeps a verified, read-only contiguous materialization
-for each chunk index. A later restore clones the closest cached index and
-rewrites only changed chunks, then verifies every chunk in the private result
-before handing it to the backend. The shared cache is never the file a VM
-loads, so changing a cache entry after restore cannot change a running guest's
-private image.
+### Checkpoints are encrypted at rest
+
+A checkpoint holds the guest's disk and, for `vm_full`, its memory, so every
+checkpoint `mvmctl` captures is encrypted. There is no setting that captures an
+unencrypted one. Each content blob — rootfs, memory, the backend's machine
+state, the launch config, the machine id, sidecars, workspace volumes — is cut
+into 1 MiB chunks, and each chunk and each blob's chunk index is sealed in an
+authenticated envelope (AES-256-GCM under a per-object data key, wrapped under
+the key domain's wrapping key, with the object's kind, key domain, keyed
+reference and length bound in). The checkpoint record states that its content
+is protected, and that statement is part of the record's digest, which the
+signed audit chain covers.
+
+Keys come from the same places as the snapshot key, per key domain:
+
+- **Host domain** — checkpoints of a VM admitted under no tenant, warm-pool
+  parents and other host artifacts — uses the host snapshot key
+  (`MVM_TENANT_KEY_LOCAL`, the keystore entry `mvm/local`, or
+  `/var/lib/mvm/keys/local.key`).
+- **Tenant domain** `tenant:<name>` uses that tenant's own key
+  (`MVM_TENANT_KEY_<NAME>`, the keystore entry `mvm/<name>`, or
+  `/var/lib/mvm/keys/<name>.key`). The host key is never used in its place.
+
+Each domain's wrapping and reference keys are derived from its root under
+labels that include the domain's name, so two domains never share a key.
+
+`checkpoint create` admits the key, and checks that the store's staging area
+is a private directory, before it pauses the VM or writes anything. A missing,
+unreadable or malformed key refuses the capture with the VM untouched. The
+capture's plaintext exists only in that private staging area; it is sealed and
+removed before the checkpoint is published, and a capture that fails part way
+publishes nothing and leaves any earlier checkpoint under the same name as it
+was.
+
+Chunks are deduplicated only inside one key domain: a chunk's reference is an
+HMAC under the domain's own key, each domain has its own object directory, and
+an object already stored under a reference is reused only after it opens under
+that domain's keys as the same chunk. Zero chunks occupy no object storage.
+Snapshot mirrors of a checkpoint — the warm-pool snapshot store and a trusted
+snapshot backend — receive the sealed objects only; a claim from a mirror opens
+each blob from the checkpoint store, which authenticates every byte it
+releases.
+
+Restore and fork verify the record against the signed chain, then open each
+blob into a private file beside its destination, renamed into place only once
+every chunk has authenticated; on any failure — wrong key, another domain's
+key, a tampered, missing, replayed or swapped object or index — nothing is
+released and the partial file is removed. The opened files live where the VM
+that uses them lives: a fork's in the child's state directory, a restore's in
+a private directory under the checkpoint store that is removed when the
+restore returns. Protected content never enters the shared restore cache.
+
+Checkpoints captured before encryption carry no protection marker and are read
+as the unencrypted checkpoints they are, through the older verified path; a
+record cannot be relabelled either way without failing its digest. A store
+opened without key custody — only possible through the library, with an
+explicit root — captures unencrypted checkpoints and refuses to open an
+encrypted one.
+
+Unencrypted checkpoints are stored the same way, as authenticated 1 MiB
+chunks, without the envelope. For those, restore keeps a verified, read-only
+contiguous materialization for each chunk index. A later restore clones the
+closest cached index and rewrites only changed chunks, then verifies every
+chunk in the private result before handing it to the backend. The shared cache
+is never the file a VM loads, so changing a cache entry after restore cannot
+change a running guest's private image.
 
 Restore fails closed. A checkpoint whose content has drifted, whose record disagrees with the signed chain, or that carries no signed creation entry is refused rather than restored. `checkpoint restore` and a `vm_full` fork also refuse a checkpoint for any tenant other than the one whose signed chain recorded its creation, because its saved memory is that tenant's data. The recorded tenant comes from the signed entry. The tenant it is compared with is the one the caller runs as (`MVM_TENANT` or the configured tenant), which the caller chooses. So this check stops a checkpoint from being restored into another tenant by mistake; it is not an authenticated boundary. Warm-pool claims are exempt: a pool parent is a boot that never ran a workload and carries no plan, tenant, secrets or volumes, so its memory holds no tenant's data.
 
-On `hvf`, guest memory is not copied back into the restored VM. The RAM image is cloned into a private file in the VM's state directory, which must be on a local filesystem. The clone is opened read-only and its name removed, then it is hashed against the recorded digest, and the supervisor maps that same descriptor copy-on-write. The image is read once, to hash it. A page enters the restored VM's memory only when the guest touches it, and a page becomes private to that VM only when the guest writes it. Editing or replacing the checkpoint after verification does not reach the restored guest, because the guest maps the clone, not the checkpoint. Other users cannot write the clone either. This does not protect against a process running as your own user: in the moment between creating the clone and removing its name, such a process can open it for writing. That is outside the current threat model, because the VM supervisor already runs as your user, unsandboxed, and can read the host signing key. Each restore gets its own clone, so restored VMs share no memory pages with each other, even within one tenant. One limit: memory a restored VM frees is not handed back to the host while it runs. Free page reporting returns freed memory only for anonymous RAM, and a restored VM's RAM is a mapping of its clone, so pages it wrote stay charged to it until it stops. An encrypted RAM image is refused: mapping ciphertext as memory would boot noise, and decrypting it to disk would defeat the encryption. On a filesystem that cannot clone files, the image is copied byte for byte on every restore, which costs a full write of the guest's memory. Checkpoints taken before this layout (with guest RAM inside the frame file) are refused with a message asking you to capture them again.
+On `hvf`, guest memory is not copied back into the restored VM. The RAM image is cloned into a private file in the VM's state directory, which must be on a local filesystem. The clone is opened read-only and its name removed, then it is hashed against the recorded digest, and the supervisor maps that same descriptor copy-on-write. The image is read once, to hash it. A page enters the restored VM's memory only when the guest touches it, and a page becomes private to that VM only when the guest writes it. Editing or replacing the checkpoint after verification does not reach the restored guest, because the guest maps the clone, not the checkpoint. Other users cannot write the clone either. This does not protect against a process running as your own user: in the moment between creating the clone and removing its name, such a process can open it for writing. That is outside the current threat model, because the VM supervisor already runs as your user, unsandboxed, and can read the host signing key. Each restore gets its own clone, so restored VMs share no memory pages with each other, even within one tenant. One limit: memory a restored VM frees is not handed back to the host while it runs. Free page reporting returns freed memory only for anonymous RAM, and a restored VM's RAM is a mapping of its clone, so pages it wrote stay charged to it until it stops. The restorer only ever maps plaintext: an encrypted checkpoint is opened into private staging first, as described above, and a RAM image still in ciphertext is refused, because mapping it would boot noise. On a filesystem that cannot clone files, the image is copied byte for byte on every restore, which costs a full write of the guest's memory. Checkpoints taken before this layout (with guest RAM inside the frame file) are refused with a message asking you to capture them again.
 
 List and remove checkpoints:
 
@@ -211,7 +269,8 @@ mvmctl machine checkpoint fork <checkpoint-id> --new-id new-sandbox
 ## Security implications
 
 - Snapshot files contain guest memory and runtime state. Treat them as sensitive.
-- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; full-VM checkpoints use audit-chain hash comparison.
+- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; checkpoints use the audit-chain record digest plus their authenticated object envelopes.
+- An encrypted checkpoint is decrypted to disk while a VM restored from it runs, in that VM's own private state directory, and removed with it.
 - Deleting a snapshot removes the recovery artifact but does not by itself prove storage-level erasure.
 - Snapshots can preserve credentials or derived tokens that existed inside the guest at snapshot time.
 
