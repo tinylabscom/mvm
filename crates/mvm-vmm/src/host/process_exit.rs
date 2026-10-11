@@ -9,6 +9,39 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::time::Instant;
 
+/// Necessary precondition for retaining a Child as exclusive lifetime authority.
+/// This only queries disposition; callers must also prevent competing reapers
+/// and disposition changes for the whole ownership interval.
+#[cfg(unix)]
+pub fn require_owned_child_custody() -> io::Result<()> {
+    let mut action = std::mem::MaybeUninit::<libc::sigaction>::uninit();
+    // SAFETY: query only; the writable buffer has the required sigaction size.
+    if unsafe { libc::sigaction(libc::SIGCHLD, std::ptr::null(), action.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful sigaction initialized the entire output.
+    let action = unsafe { action.assume_init() };
+    validate_child_disposition(action.sa_sigaction, action.sa_flags)
+}
+
+#[cfg(unix)]
+fn validate_child_disposition(handler: libc::sighandler_t, flags: libc::c_int) -> io::Result<()> {
+    if handler != libc::SIG_DFL || flags & libc::SA_NOCLDWAIT != 0 {
+        return Err(io::Error::other(
+            "owned child requires default SIGCHLD and exclusive reaping",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn require_owned_child_custody() -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "owned child custody is unsupported",
+    ))
+}
+
 /// Result of waiting for an armed process-exit observer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessExitWait {
@@ -100,17 +133,27 @@ impl ProcessExitObserver {
 
     /// Wait until the process-exit event arrives or `deadline` passes.
     pub fn wait(&self, deadline: Instant) -> Result<ProcessExitWait, ProcessExitError> {
-        let outcome = match &self.kind {
-            ObserverKind::AlreadyExited => ProcessExitWait::Exited,
-            #[cfg(target_os = "macos")]
-            ObserverKind::Kqueue { fd } => wait_kqueue(*fd, deadline)?,
-            #[cfg(target_os = "linux")]
-            ObserverKind::PidFd { fd } => wait_pidfd(*fd, deadline)?,
-        };
+        let outcome = self.wait_event(deadline)?;
         if outcome == ProcessExitWait::Exited && !process_is_dead(self.pid) {
             return Err(ProcessExitError::VerificationFailed);
         }
         Ok(outcome)
+    }
+
+    /// Observe only the kernel event, without reaping or verifying final liveness.
+    ///
+    /// This does not provide an exit code or stronger process identity than the
+    /// armed observer. An owner of `std::process::Child` must still call its
+    /// `wait`/`try_wait` to reap and collect the authoritative exit status.
+    /// Use [`Self::wait`] when the existing final-liveness check is required.
+    pub fn wait_event(&self, deadline: Instant) -> Result<ProcessExitWait, ProcessExitError> {
+        match &self.kind {
+            ObserverKind::AlreadyExited => Ok(ProcessExitWait::Exited),
+            #[cfg(target_os = "macos")]
+            ObserverKind::Kqueue { fd } => wait_kqueue(*fd, deadline),
+            #[cfg(target_os = "linux")]
+            ObserverKind::PidFd { fd } => wait_pidfd(*fd, deadline),
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -321,6 +364,14 @@ mod tests {
     use std::process::Command;
     use std::time::Duration;
 
+    #[cfg(unix)]
+    #[test]
+    fn child_disposition_validation_never_changes_global_signal_state() {
+        assert!(validate_child_disposition(libc::SIG_DFL, 0).is_ok());
+        assert!(validate_child_disposition(libc::SIG_IGN, 0).is_err());
+        assert!(validate_child_disposition(libc::SIG_DFL, libc::SA_NOCLDWAIT).is_err());
+    }
+
     #[test]
     fn invalid_pid_is_rejected() {
         assert!(matches!(
@@ -427,6 +478,81 @@ mod tests {
         assert!(matches!(
             observer.wait(Instant::now()),
             Err(ProcessExitError::VerificationFailed)
+        ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn event_only_preserves_zero_and_nonzero_owned_child_status() {
+        for code in [0, 37] {
+            let mut child = Command::new("/bin/sh")
+                .env_clear()
+                .args(["-c", "exit \"$1\"", "owned-child", &code.to_string()])
+                .spawn()
+                .expect("spawn child");
+            let observer = ProcessExitObserver::arm(i32::try_from(child.id()).unwrap())
+                .expect("arm owned child");
+            let event = observer.wait_event(Instant::now() + Duration::from_secs(2));
+            let status = child.wait().expect("only Child may reap its status");
+            assert!(matches!(event, Ok(ProcessExitWait::Exited)));
+            assert_eq!(status.code(), Some(code));
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn event_only_registration_after_exit_does_not_reap_the_child() {
+        let mut child = Command::new("/bin/sh")
+            .env_clear()
+            .args(["-c", "exit 23"])
+            .spawn()
+            .expect("spawn child");
+        let pid = i32::try_from(child.id()).unwrap();
+        let first = ProcessExitObserver::arm(pid).expect("arm child");
+        let first_event = first.wait_event(Instant::now() + Duration::from_secs(2));
+        let second = ProcessExitObserver::arm(pid).expect("arm exited, unreaped child");
+        let second_event = second.wait_event(Instant::now() + Duration::from_secs(2));
+        let status = child.wait().expect("registration must not reap");
+        assert!(matches!(first_event, Ok(ProcessExitWait::Exited)));
+        assert!(matches!(second_event, Ok(ProcessExitWait::Exited)));
+        assert_eq!(status.code(), Some(23));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn event_only_timeout_leaves_a_live_child_owned_by_the_caller() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn long-lived fixture");
+        let observer =
+            ProcessExitObserver::arm(i32::try_from(child.id()).unwrap()).expect("arm child");
+        let event = observer.wait_event(Instant::now());
+        let still_live = child.try_wait().expect("probe owned child").is_none();
+        child.kill().expect("terminate owned fixture");
+        child.wait().expect("reap owned fixture");
+        assert!(matches!(event, Ok(ProcessExitWait::TimedOut)));
+        assert!(still_live);
+    }
+
+    #[test]
+    fn event_only_does_not_perform_the_verified_waits_liveness_check() {
+        let observer = ProcessExitObserver {
+            pid: std::process::id() as libc::pid_t,
+            kind: ObserverKind::AlreadyExited,
+        };
+        assert!(matches!(
+            observer.wait_event(Instant::now()),
+            Ok(ProcessExitWait::Exited)
+        ));
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn unsupported_platform_refuses_observer_registration() {
+        assert!(matches!(
+            ProcessExitObserver::arm(42),
+            Err(ProcessExitError::Unsupported)
         ));
     }
 

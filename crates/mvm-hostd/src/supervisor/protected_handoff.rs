@@ -24,6 +24,7 @@ impl CaptureRoute {
         owner: CaptureOwner,
         pid_file: PathBuf,
         stop: &'static AtomicBool,
+        stop_authority: super::hvf_stop::StopAuthority,
     ) -> Result<Self> {
         let (control, requests) = mpsc::sync_channel(1);
         std::thread::Builder::new()
@@ -39,7 +40,9 @@ impl CaptureRoute {
                                 Err(anyhow::anyhow!("capture owner already transferred"))
                             } else {
                                 claimed = true;
-                                transfer(&mut owner, &request, &pid_file)
+                                stop_authority.transfer(&request.child.child_vm_name, || {
+                                    transfer(&mut owner, &request, &pid_file)
+                                })
                             };
                             match result {
                                 Ok(bounds) => {
@@ -123,7 +126,7 @@ fn transfer(
     if !parent.finish() {
         anyhow::bail!("parent capture finalization incomplete");
     }
-    super::claimed_child::arm_for_claimed_child(&request.child, pid_file)
+    super::claimed_child::arm_for_claimed_child_preserving_evidence(&request.child, pid_file)
 }
 
 #[cfg(test)]
@@ -175,10 +178,13 @@ mod tests {
         })
         .unwrap();
         let stop = Box::leak(Box::new(AtomicBool::new(false)));
+        let stop_control =
+            super::super::hvf_stop::StopControl::start("route-parent", stop).unwrap();
         let route = CaptureRoute::start(
             owner,
             config::vm_state_dir("route-parent").join("supervisor.pid"),
             stop,
+            stop_control.authority(),
         )
         .unwrap();
         let mut uart = Pl011::new(0);

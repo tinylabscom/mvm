@@ -14,12 +14,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
+use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     ResourceControls, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
     VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
+use mvm_vmm::host::hvf_control_transport as stop_wire;
+use mvm_vmm::host::hvf_stop::{ConnectedInstance, OwnedInstance};
 use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_vmm::hvf_handoff::{HANDOFF_RESPONSE_MAX_BYTES, HandoffReply, HvfHandoffRequest};
 
@@ -334,14 +337,51 @@ fn bounded_supervisor_command(
     )
 }
 
+fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let launch_lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(state_dir.join("hvf-launch.lock"))?;
+    // SAFETY: the owned file holds this nonblocking launch lock until return.
+    if unsafe { libc::flock(launch_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        bail!("another HVF launch owns this instance name");
+    }
+    let evidence = [
+        stop_wire::INSTANCE_FILE,
+        stop_wire::SOCKET_FILE,
+        stop_wire::FINALIZED_FILE,
+        PID_FILE_NAME,
+        "supervisor.json",
+        "supervisor-status.json",
+        "workload.exit",
+    ]
+    .map(|name| state_dir.join(name));
+    for path in evidence.into_iter().chain([
+        mvm_core::config::vm_socket_dir_at(state_dir).join(stop_wire::SOCKET_FILE),
+        mvm_core::config::vm_hvf_agent_socket_at(state_dir),
+    ]) {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => bail!("existing HVF runtime evidence requires confirmed cleanup before reuse"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("inspect prior HVF runtime evidence"),
+        }
+    }
+    Ok(launch_lock)
+}
+
 fn boot_with_handoff(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
 ) -> Result<Box<dyn RunningVm>> {
-    let state_dir = vm_state_dir(&spec.name);
-    std::fs::create_dir_all(&state_dir)
-        .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+    mvm_vmm::host::process_exit::require_owned_child_custody()?;
+    let state_dir = stop_wire::state_dir(&spec.name)?;
+    mvm_core::config::create_private_dir(&state_dir)?;
+    let _launch_lock = claim_hvf_launch(&state_dir)?;
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -352,9 +392,9 @@ fn boot_with_handoff(
     crate::run_sidecars::clear_prior_run(&paths.state_dir);
     let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
     let config_path = paths.state_dir.join("supervisor.json");
-    std::fs::write(
+    mvm_core::atomic_io::atomic_write_new(
         &config_path,
-        serde_json::to_vec(&cfg).map_err(|e| anyhow!("serialize supervisor config: {e}"))?,
+        &serde_json::to_vec(&cfg).map_err(|e| anyhow!("serialize supervisor config: {e}"))?,
     )
     .map_err(|e| anyhow!("write supervisor config {}: {e}", config_path.display()))?;
     let json =
@@ -368,59 +408,84 @@ fn boot_with_handoff(
         .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
-        .write_all(json.as_bytes())
-        .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"))?;
-    let deadline = Instant::now() + PID_FILE_TIMEOUT;
-    let mut attempt = 0u32;
-    loop {
-        if paths.pid_file.exists() {
-            break;
-        }
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| anyhow!("poll supervisor: {e}"))?
-        {
-            bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); {}",
-                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
-            );
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}",
-                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
-            );
-        }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
-        attempt = attempt.saturating_add(1);
-    }
-
     let agent_socket = hvf_agent_socket(&paths.state_dir);
-    if let Err(error) = wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
+    let readiness = (|| -> Result<()> {
         child
-            .try_wait()
-            .map(|status| status.is_none())
-            .map_err(|e| anyhow!("poll hvf supervisor while waiting for agent socket: {e}"))
-    }) {
-        let _ = child.kill();
-        return Err(error).context(format!(
-            "HVF supervisor failed readiness; {}",
-            mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
-        ));
+            .stdin
+            .take()
+            .context("supervisor stdin was not piped")?
+            .write_all(json.as_bytes())
+            .context("pipe HVF supervisor config")?;
+        let deadline = Instant::now() + PID_FILE_TIMEOUT;
+        let mut attempt = 0u32;
+        loop {
+            if paths.pid_file.try_exists()? {
+                break;
+            }
+            if let Some(status) = child.try_wait()? {
+                bail!("HVF supervisor exited before readiness ({status}); retain runtime evidence");
+            }
+            if Instant::now() >= deadline {
+                bail!("HVF supervisor readiness deadline; retain runtime evidence");
+            }
+            // External readiness is reconciled; only authenticated control is
+            // termination authority. No PID-file disappearance proves exit.
+            std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+            attempt = attempt.saturating_add(1);
+        }
+        wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
+            child
+                .try_wait()
+                .map(|status| status.is_none())
+                .map_err(|error| anyhow!("observe owned HVF readiness: {error}"))
+        })
+    })();
+    if let Err(error) = readiness {
+        return Err(failed_owned_boot(error, &mut child, &spec.name));
     }
-
-    drop(child);
+    let mut child = Some(child);
+    let owned = match OwnedInstance::adopt(&mut child, &spec.name) {
+        Ok(owned) => owned,
+        Err(error) => {
+            return Err(failed_owned_boot(
+                error,
+                child.as_mut().context("unadopted supervisor missing")?,
+                &spec.name,
+            ));
+        }
+    };
+    let instance = owned.instance().clone();
     Ok(Box::new(HvfRunningVm {
         id: VmId(spec.name.clone()),
         state_dir: paths.state_dir,
         pid_file: paths.pid_file,
         agent_socket,
+        instance,
+        owned: Some(owned),
     }))
+}
+
+fn failed_owned_boot(
+    original: anyhow::Error,
+    child: &mut std::process::Child,
+    vm: &str,
+) -> anyhow::Error {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return original.context("owned supervisor exited; runtime evidence retained");
+    }
+    let cleanup = ConnectedInstance::connect_owned(vm, child.id())
+        .and_then(ConnectedInstance::stop)
+        .and_then(|proof| {
+            proof.verify_current()?;
+            child.wait()?;
+            Ok(())
+        });
+    match cleanup {
+        Ok(()) => original.context("owned HVF rollback confirmed; runtime evidence retained"),
+        Err(error) => anyhow!(
+            "{original:#}; safe HVF rollback unconfirmed: {error:#}; runtime evidence retained"
+        ),
+    }
 }
 
 impl VmmDriver for HvfDriver {
@@ -679,15 +744,15 @@ impl VmmDriver for HvfDriver {
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
-        // The handle is entirely disk-backed (the supervisor's pid file + the
-        // persisted workload-exit code under the VM's state dir), so reattaching is
-        // just re-deriving those paths — no live boot state to recover.
+        // Legacy/missing control identity is unknown, not proof of a stopped VM.
         let state_dir = vm_state_dir(&id.0);
         Ok(Box::new(HvfRunningVm {
             pid_file: state_dir.join(PID_FILE_NAME),
             agent_socket: hvf_agent_socket(&state_dir),
             state_dir,
             id: id.clone(),
+            instance: stop_wire::read_instance(&id.0)?,
+            owned: None,
         }))
     }
 
@@ -924,6 +989,8 @@ struct HvfRunningVm {
     pid_file: PathBuf,
     /// Host→guest agent RPC socket the supervisor bound for this VM.
     agent_socket: PathBuf,
+    instance: HvfInstance,
+    owned: Option<OwnedInstance>,
 }
 
 /// Host control for a running HVF standby parent. The supervisor owns the
@@ -1116,7 +1183,13 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn wait(&self) -> Result<VmExitStatus> {
-        Ok(mvm_vmm::host::workload_wait::wait_for_workload_exit(
+        let deadline = Instant::now() + mvm_vmm::host::workload_wait::WORKLOAD_WAIT_TIMEOUT;
+        match &self.owned {
+            Some(owned) => owned.wait(deadline)?,
+            None => ConnectedInstance::connect_instance(self.instance.clone())?.wait(deadline)?,
+        }
+        .verify_current()?;
+        Ok(mvm_vmm::host::workload_wait::read_exit_status_from(
             &self.state_dir,
         ))
     }
@@ -1126,18 +1199,16 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
-        let termination = hvf_backend::read_pid(&self.pid_file)
-            .map(hvf_backend::terminate_pid_timed)
-            .transpose()?
-            .unwrap_or_default();
-        let cleanup_started = Instant::now();
-        let _ = std::fs::remove_file(&self.pid_file);
-        let state_cleanup = cleanup_started.elapsed();
+        let proof = match &self.owned {
+            Some(owned) => owned.stop()?,
+            None => ConnectedInstance::connect_instance(self.instance.clone())?.stop()?,
+        };
+        proof.verify_current()?;
         Ok(Some(RunningVmStopTiming {
-            supervisor_signal: termination.supervisor_signal,
-            pid_disappearance: termination.pid_disappearance,
-            force_kill_wait: termination.force_kill_wait,
-            state_cleanup,
+            supervisor_signal: proof.dispatch,
+            pid_disappearance: proof.exit_wait,
+            force_kill_wait: std::time::Duration::ZERO,
+            state_cleanup: std::time::Duration::ZERO,
         }))
     }
 
@@ -1152,10 +1223,13 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn status(&self) -> Result<VmStatus> {
-        Ok(match hvf_backend::read_pid(&self.pid_file) {
-            Some(pid) if hvf_backend::pid_alive(pid) => VmStatus::Running,
-            _ => VmStatus::Stopped,
-        })
+        if let Some(owned) = &self.owned
+            && owned.try_exited()?
+        {
+            return Ok(VmStatus::Stopped);
+        }
+        let _ = ConnectedInstance::connect_instance(self.instance.clone())?;
+        Ok(VmStatus::Running)
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -1584,14 +1658,63 @@ mod tests {
     }
 
     #[test]
-    fn attach_builds_a_disk_backed_handle_that_reports_stopped_for_a_missing_vm() {
-        // Reattaching needs no boot state — it re-derives the state dir. A VM that
-        // never ran (or has exited) reports Stopped rather than erroring.
-        let vm = HvfDriver::new()
-            .attach(&VmId("hvf-nonexistent-attach-test-vm".into()))
-            .unwrap();
-        assert_eq!(vm.id().0, "hvf-nonexistent-attach-test-vm");
-        assert_eq!(vm.status().unwrap(), VmStatus::Stopped);
+    fn attach_missing_or_legacy_control_is_unknown_and_preserves_evidence() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "hvf-nonexistent-attach-test-vm";
+        assert!(HvfDriver::new().attach(&VmId(vm.into())).is_err());
+        let dir = vm_state_dir(vm);
+        mvm_core::config::create_private_dir(&dir).unwrap();
+        std::fs::write(dir.join(PID_FILE_NAME), "4242").unwrap();
+        assert!(HvfDriver::new().attach(&VmId(vm.into())).is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(PID_FILE_NAME)).unwrap(),
+            "4242"
+        );
+    }
+
+    #[test]
+    fn same_name_launch_is_exclusive_and_prior_outcome_is_not_absence_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = claim_hvf_launch(directory.path()).unwrap();
+        assert!(claim_hvf_launch(directory.path()).is_err());
+        drop(first);
+        drop(claim_hvf_launch(directory.path()).unwrap());
+        std::fs::write(directory.path().join("workload.exit"), "124").unwrap();
+        assert!(claim_hvf_launch(directory.path()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("workload.exit")).unwrap(),
+            "124"
+        );
+    }
+
+    #[test]
+    fn controlled_handle_missing_root_refuses_status_stop_and_keeps_pid_evidence() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "missing-root";
+        let directory = vm_state_dir(vm);
+        mvm_core::config::create_private_dir(&directory).unwrap();
+        let instance = HvfInstance {
+            vm_id: vm.into(),
+            boot_nonce: [9; 32],
+        };
+        std::fs::write(
+            directory.join(stop_wire::INSTANCE_FILE),
+            serde_json::to_vec(&instance).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(directory.join(PID_FILE_NAME), "4242").unwrap();
+        let handle = HvfDriver::new().attach(&VmId(vm.into())).unwrap();
+        assert!(handle.status().is_err());
+        assert!(handle.kill().is_err());
+        assert_eq!(
+            std::fs::read_to_string(directory.join(PID_FILE_NAME)).unwrap(),
+            "4242"
+        );
+        assert!(!mvm_core::config::mvm_keys_dir().exists());
     }
 
     #[test]
@@ -2064,6 +2187,11 @@ mod tests {
 
             let vm = HvfRunningVm {
                 id: VmId("agent-vm".into()),
+                instance: HvfInstance {
+                    vm_id: "agent-vm".into(),
+                    boot_nonce: [3; 32],
+                },
+                owned: None,
                 state_dir: dir.path().to_path_buf(),
                 pid_file: dir.path().join(PID_FILE_NAME),
                 agent_socket,
@@ -2088,6 +2216,11 @@ mod tests {
         std::fs::write(&pid_file, "4242\n").unwrap();
         let vm = HvfRunningVm {
             id: VmId("measured-vm".into()),
+            instance: HvfInstance {
+                vm_id: "measured-vm".into(),
+                boot_nonce: [3; 32],
+            },
+            owned: None,
             state_dir: dir.path().to_path_buf(),
             pid_file,
             agent_socket: dir.path().join("hvf-agent.sock"),
@@ -2145,6 +2278,11 @@ mod tests {
 
         let vm = HvfRunningVm {
             id: VmId("console-vm".into()),
+            instance: HvfInstance {
+                vm_id: "console-vm".into(),
+                boot_nonce: [3; 32],
+            },
+            owned: None,
             state_dir: dir.path().to_path_buf(),
             pid_file: dir.path().join(PID_FILE_NAME),
             agent_socket: dir.path().join("hvf-agent.sock"),

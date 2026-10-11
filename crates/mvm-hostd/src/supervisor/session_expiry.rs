@@ -280,6 +280,13 @@ impl SessionExpiryWatcher {
 /// builder VM) are never sessions. A watcher that cannot open the audit chain
 /// still enforces the timeout, and leaves the session unsealed.
 pub fn arm_for_supervisor(inputs: &SupervisorTimerInputs<'_>) -> bool {
+    arm_for_supervisor_with_killer(inputs, Box::new(inputs.exit_killer()))
+}
+
+pub fn arm_for_supervisor_with_killer(
+    inputs: &SupervisorTimerInputs<'_>,
+    killer: Box<dyn WorkloadKiller>,
+) -> bool {
     let Some(plan_json) = inputs.plan_json else {
         return false;
     };
@@ -294,7 +301,6 @@ pub fn arm_for_supervisor(inputs: &SupervisorTimerInputs<'_>) -> bool {
         );
         return false;
     };
-    let killer = Box::new(inputs.exit_killer());
     let mut watcher = SessionExpiryWatcher::new(vm_name, Utc::now(), killer);
     match decode_admitted_plan(plan_json).and_then(|plan| Ok((plan, supervisor_emitter(inputs)?))) {
         Ok((plan, emitter)) => watcher = watcher.sealing_under(plan, emitter),

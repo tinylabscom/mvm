@@ -375,6 +375,9 @@ impl HostAgentDaemon {
     /// signature verifies.
     pub fn apply(&mut self, req: &ControlRequest) -> Result<()> {
         match req {
+            ControlRequest::HvfInstanceV1(_) => {
+                bail!("HVF instance control requires the instance supervisor")
+            }
             ControlRequest::Register(r) => self.register(r),
             ControlRequest::Deregister(d) => {
                 // Drop = abort + unbind; idempotent on an unknown id.
@@ -799,6 +802,23 @@ mod tests {
     fn daemon(tenant: &str) -> HostAgentDaemon {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         HostAgentDaemon::new(tenant, vk, 64 * 1024)
+    }
+
+    #[test]
+    fn hvf_instance_control_is_refused_without_registration_side_effects() {
+        use mvm_core::protocol::hvf_control::{HvfInstance, HvfInstanceControl};
+        let mut daemon = daemon("local");
+        let request = ControlRequest::HvfInstanceV1(HvfInstanceControl::StopHvfInstance {
+            instance: HvfInstance {
+                vm_id: "vm-1".into(),
+                boot_nonce: [3; 32],
+            },
+            connection_nonce: [4; 32],
+            issued_at_secs: 100,
+        });
+        assert!(daemon.apply(&request).is_err());
+        assert!(daemon.vms.is_empty());
+        assert!(daemon.registrations.is_empty());
     }
 
     fn register(dir: &Path, vm: &str, tenant: &str, signer: Option<PathBuf>) -> RegisterVm {

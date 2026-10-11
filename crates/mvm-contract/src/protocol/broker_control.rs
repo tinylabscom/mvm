@@ -191,7 +191,8 @@ pub struct DeregisterVm {
     pub vm_id: String,
 }
 
-/// A control request the host-agent daemon's control socket accepts.
+/// Host-authorized control. HVF instance messages are accepted only by the
+/// instance supervisor, never forwarded by the host-agent daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
@@ -199,6 +200,8 @@ pub enum ControlRequest {
     Register(Box<RegisterVm>),
     /// Unbind + drop a VM.
     Deregister(DeregisterVm),
+    /// Domain-separated lifetime control for one native supervisor.
+    HvfInstanceV1(super::hvf_control::HvfInstanceControl),
 }
 
 /// A host-signed control message: the [`ControlRequest`] plus an Ed25519
