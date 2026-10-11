@@ -11,8 +11,11 @@
 #   1. build an unembedded and an embedded `mvmctl`;
 #   2. pack the SDK sidecars through the unembedded one, against a cold home:
 #      the guest runtime compiles on the host and no builder VM starts;
-#   3. bootstrap the builder image from source;
-#   4. build a user flake through the builder that step produced.
+#   3. bootstrap the builder image from source through the unembedded one: it
+#      owns no payload, so Stage 0 and the builder image are handed to the
+#      helper payload it produces from this checkout;
+#   4. build a user flake through the embedded one, on the builder image step 3
+#      produced.
 #
 # Every step is fatal. Unlike the release lane, there is no other result here
 # worth salvaging from a run whose bootstrap failed.
@@ -91,8 +94,10 @@ just payload::supervisors
 e2e_phase sdk-sidecar
 "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
+# Stage 0 is first reached here, by the binary that carries no payload. That
+# is the handoff step 2 no longer exercises now that sidecars pack on the host.
 e2e_phase builder-image
-"$MVMCTL" bootstrap
+"$UNEMBEDDED_MVMCTL" bootstrap
 
 e2e_phase flake-build
 "$MVMCTL" machine build --flake "$FLAKE"

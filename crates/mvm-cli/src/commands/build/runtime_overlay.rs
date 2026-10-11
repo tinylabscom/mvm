@@ -33,7 +33,8 @@ enum Cmd {
 struct BuildArgs {
     /// Where the overlay comes from. `build` assembles it from the source
     /// checkout, `download` fetches the published artifact, and `auto`
-    /// follows the same resolver ordinary required-overlay boots use.
+    /// follows the same resolver ordinary required-overlay boots use; on a
+    /// release binary that is its own release's guest runtime.
     #[arg(long, value_enum, default_value_t = Source::Auto)]
     source: Source,
 
@@ -76,6 +77,12 @@ fn run_build(args: BuildArgs) -> Result<()> {
         None => GuestArch::host(),
     };
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    if assembles_from_release(
+        args.source,
+        mvm_build::artifact_acquisition::compiled_channel(),
+    ) {
+        return assemble_from_release(&cache_root, &version, arch, args.force);
+    }
     let mode = requested_acquire_mode(args.source);
     let resolver =
         mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.clone());
@@ -147,6 +154,49 @@ fn run_build(args: BuildArgs) -> Result<()> {
     Ok(())
 }
 
+/// `auto` on a release binary assembles from the guest runtime its own
+/// release ships, as bootstrap does; `download` still names the image set.
+fn assembles_from_release(
+    source: Source,
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+) -> bool {
+    source == Source::Auto
+        && channel == mvm_build::artifact_acquisition::DistributionChannel::Release
+}
+
+/// Assemble the overlay from this release binary's own guest runtime. The
+/// runtime is version-locked to the binary, so another `--version` is refused.
+fn assemble_from_release(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    force: bool,
+) -> Result<()> {
+    let own = env!("CARGO_PKG_VERSION");
+    anyhow::ensure!(
+        version == own,
+        "this release binary's guest runtime is mvmctl {own}'s; it cannot assemble a runtime \
+         overlay for {version}"
+    );
+    let runtime = crate::release_guest_runtime::installed_for_running_binary(cache_root, arch)?;
+    if force {
+        mvm_build::runtime_pieces::discard_local_piece(
+            cache_root,
+            version,
+            arch,
+            mvm_build::runtime_pieces::RuntimePiece::RuntimeOverlay,
+        )
+        .context("discarding the cached runtime overlay")?;
+    }
+    ui::info("Assembling the runtime overlay from this release's guest runtime...");
+    let artifact = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+        cache_root, version, arch, &runtime,
+    )
+    .context("assembling the runtime overlay from the release guest runtime")?;
+    announce_built_overlay(&artifact, force);
+    Ok(())
+}
+
 fn requested_acquire_mode(source: Source) -> RuntimeOverlayAcquireMode {
     match source {
         Source::Auto => runtime_overlay_acquire_mode(),
@@ -204,6 +254,32 @@ mod tests {
             build_group::BuildCmd::RuntimeOverlay(_) => {}
             other => panic!("expected runtime-overlay command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn auto_on_a_release_binary_assembles_from_its_own_guest_runtime() {
+        use mvm_build::artifact_acquisition::DistributionChannel;
+        assert!(assembles_from_release(
+            Source::Auto,
+            DistributionChannel::Release
+        ));
+        for source in [Source::Build, Source::Download] {
+            assert!(!assembles_from_release(
+                source,
+                DistributionChannel::Release
+            ));
+        }
+        for source in [Source::Auto, Source::Build, Source::Download] {
+            assert!(!assembles_from_release(source, DistributionChannel::Source));
+        }
+    }
+
+    #[test]
+    fn a_release_binary_refuses_an_overlay_for_another_version() {
+        let cache = tempfile::tempdir().unwrap();
+        let error = assemble_from_release(cache.path(), "0.0.0-other", GuestArch::host(), false)
+            .expect_err("the release runtime is version-locked");
+        assert!(error.to_string().contains("0.0.0-other"), "{error}");
     }
 
     #[test]

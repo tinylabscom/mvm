@@ -2,14 +2,16 @@
 //! the cache came from.
 //!
 //! The runtime overlay, the initramfs and the two SDK sidecars are assembled
-//! from one guest-runtime archive in a source build, or installed from the
-//! pinned image set otherwise. A bug report about a guest needs to know which,
-//! and whether the pieces agree with each other and with the archive this tree
-//! builds today. Read from the cache alone: nothing is built, downloaded or
-//! hashed.
+//! from one guest-runtime archive: the one a source build compiles from its
+//! tree, or the one a release binary's own release ships. A release binary
+//! that has not adopted its archive yet, and a build that downloads, install
+//! them from the pinned image set instead. A bug report about a guest needs to
+//! know which, and whether the pieces agree with each other and with that
+//! archive. Read from the cache alone: nothing is built, downloaded or hashed.
 
 use mvm_build::runtime_pieces::{
-    PieceOrigin, PieceOriginError, RuntimePiece, piece_origin, short_digest,
+    PieceOrigin, PieceOriginError, RuntimePiece, adopted_release_archive, piece_origin,
+    short_digest,
 };
 use mvm_client::launch::runtime_overlay::{
     RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
@@ -17,14 +19,20 @@ use mvm_client::launch::runtime_overlay::{
 
 use super::Check;
 
-/// The archive this binary's source tree resolves to, if it has one.
+/// The archive this binary's pieces should come from, if it has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CurrentArchive {
-    /// A release build: there is no source tree to build an archive from.
+    /// No source tree, and no release guest runtime adopted into this cache.
     NoSourceTree,
     /// The tree's archive has not been built into this cache.
     NotBuilt,
     Built(String),
+    /// The release guest runtime this version adopted: its archive's file
+    /// name and digest.
+    Release {
+        name: String,
+        digest: String,
+    },
     Unreadable(String),
 }
 
@@ -35,7 +43,7 @@ impl CurrentArchive {
         arch: mvm_core::arch::GuestArch,
     ) -> Self {
         let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
-            return Self::NoSourceTree;
+            return Self::release(cache_root, version, arch);
         };
         match mvm_build::guest_runtime::source_guest_runtime_digest(
             cache_root,
@@ -49,19 +57,46 @@ impl CurrentArchive {
         }
     }
 
+    /// The release guest runtime this version adopted, read from its record.
+    fn release(
+        cache_root: &std::path::Path,
+        version: &str,
+        arch: mvm_core::arch::GuestArch,
+    ) -> Self {
+        match adopted_release_archive(cache_root, version, arch) {
+            Ok(Some(digest)) => Self::Release {
+                name: mvm_build::guest_bins::guest_bins_archive_name(version),
+                digest,
+            },
+            Ok(None) => Self::NoSourceTree,
+            Err(error) => Self::Unreadable(error.to_string()),
+        }
+    }
+
     fn describe(&self) -> String {
         match self {
-            Self::NoSourceTree => "no source archive (release build)".to_string(),
+            Self::NoSourceTree => "no source or release archive".to_string(),
             Self::NotBuilt => "this tree's archive is not built".to_string(),
             Self::Built(digest) => format!("this tree's archive {}", short_digest(digest)),
-            Self::Unreadable(error) => format!("this tree's archive unreadable: {error}"),
+            Self::Release { name, digest } => {
+                format!("release archive {name} {}", short_digest(digest))
+            }
+            Self::Unreadable(error) => format!("archive record unreadable: {error}"),
         }
     }
 
     fn digest(&self) -> Option<&str> {
         match self {
-            Self::Built(digest) => Some(digest),
+            Self::Built(digest) | Self::Release { digest, .. } => Some(digest),
             _ => None,
+        }
+    }
+
+    /// What a piece assembled from this archive is called on the line.
+    fn relation(&self) -> &'static str {
+        match self {
+            Self::Release { .. } => "this release",
+            _ => "this tree",
         }
     }
 }
@@ -96,11 +131,14 @@ fn guest_runtime_line(
     set_tag: &str,
     pieces: &[(RuntimePiece, Result<PieceOrigin, PieceOriginError>)],
 ) -> Check {
-    let acquisition = match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+    let acquisition = match (mode, current) {
+        (RuntimeOverlayAcquireMode::BuildFromSourceCheckout, _) => {
             "assembled from the source guest runtime".to_string()
         }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
+        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, CurrentArchive::Release { .. }) => {
+            "assembled from the release guest runtime".to_string()
+        }
+        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, _) => {
             format!("installed from image set {set_tag}")
         }
     };
@@ -109,7 +147,7 @@ fn guest_runtime_line(
         .iter()
         .map(|(piece, origin)| {
             let described = match origin {
-                Ok(origin) => describe_origin(origin, current.digest(), set_tag),
+                Ok(origin) => describe_origin(origin, current, set_tag),
                 Err(error) => {
                     ok = false;
                     format!("unreadable ({error})")
@@ -130,13 +168,13 @@ fn guest_runtime_line(
     }
 }
 
-fn describe_origin(origin: &PieceOrigin, current: Option<&str>, set_tag: &str) -> String {
+fn describe_origin(origin: &PieceOrigin, current: &CurrentArchive, set_tag: &str) -> String {
     match origin {
         PieceOrigin::Archive { digest } => {
-            let relation = match current {
-                Some(current) if current == digest => " (this tree)",
-                Some(_) => " (another archive)",
-                None => "",
+            let relation = match current.digest() {
+                Some(expected) if expected == digest => format!(" ({})", current.relation()),
+                Some(_) => " (another archive)".to_string(),
+                None => String::new(),
             };
             format!("archive {}{relation}", short_digest(digest))
         }
@@ -215,6 +253,70 @@ mod tests {
     }
 
     #[test]
+    fn a_release_build_names_the_release_archive_each_piece_came_from() {
+        let archive = || {
+            Ok(PieceOrigin::Archive {
+                digest: digest('c'),
+            })
+        };
+        let c = line(
+            CurrentArchive::Release {
+                name: "mvm-guest-bins-v9.9.9.tar.gz".to_string(),
+                digest: digest('c'),
+            },
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+            [archive(), archive(), archive(), archive()],
+        );
+        assert!(c.ok, "{}", c.info);
+        assert_eq!(c.info.matches(" — ").count(), 2, "{}", c.info);
+        assert!(
+            c.info.starts_with(
+                "release archive mvm-guest-bins-v9.9.9.tar.gz cccccccccccc — \
+                 assembled from the release guest runtime — "
+            ),
+            "{}",
+            c.info
+        );
+        assert_eq!(
+            c.info
+                .matches("archive cccccccccccc (this release)")
+                .count(),
+            4,
+            "{}",
+            c.info
+        );
+        assert!(!c.info.contains("image set"), "{}", c.info);
+    }
+
+    /// An adoption record lies only about the cache it is in, so the live
+    /// check reads it: a release binary's line names the archive it adopted.
+    #[test]
+    fn an_adopted_release_archive_is_read_from_its_record() {
+        let cache = tempfile::tempdir().unwrap();
+        let arch = mvm_core::arch::GuestArch::X86_64;
+        assert_eq!(
+            CurrentArchive::release(cache.path(), "9.9.9", arch),
+            CurrentArchive::NoSourceTree
+        );
+        let record =
+            mvm_build::runtime_pieces::release_adoption_record(cache.path(), "9.9.9", arch);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, format!("{}\n", digest('c'))).unwrap();
+        assert_eq!(
+            CurrentArchive::release(cache.path(), "9.9.9", arch),
+            CurrentArchive::Release {
+                name: "mvm-guest-bins-v9.9.9.tar.gz".to_string(),
+                digest: digest('c'),
+            }
+        );
+        std::fs::write(&record, "garbage\n").unwrap();
+        assert!(matches!(
+            CurrentArchive::release(cache.path(), "9.9.9", arch),
+            CurrentArchive::Unreadable(_)
+        ));
+    }
+
+    #[test]
     fn a_release_build_names_the_image_set_and_its_member_versions() {
         let member = || {
             Ok(PieceOrigin::ImageSet {
@@ -229,7 +331,7 @@ mod tests {
         assert!(c.ok, "{}", c.info);
         assert!(
             c.info.starts_with(
-                "no source archive (release build) — installed from image set image-set/v9.9.9 — "
+                "no source or release archive — installed from image set image-set/v9.9.9 — "
             ),
             "{}",
             c.info

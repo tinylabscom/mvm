@@ -64,6 +64,35 @@ pub fn validate_guest_runtime_manifest(
     version: &str,
     arch: GuestArch,
 ) -> Result<(), GuestRuntimeError> {
+    validate_manifest(manifest, version, arch, ArchiveScope::HostArch)
+}
+
+/// Which architectures an archive may carry members for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArchiveScope {
+    /// A source build: the host architecture alone.
+    HostArch,
+    /// A CLI release's guest runtime: every architecture the release ships,
+    /// of which the host's must be complete.
+    Release,
+}
+
+/// Admit a CLI release's guest runtime: it carries both architectures, and
+/// the host's members must be as complete as a source build's.
+pub fn validate_release_guest_runtime_manifest(
+    manifest: &GuestBinsManifest,
+    version: &str,
+    arch: GuestArch,
+) -> Result<(), GuestRuntimeError> {
+    validate_manifest(manifest, version, arch, ArchiveScope::Release)
+}
+
+fn validate_manifest(
+    manifest: &GuestBinsManifest,
+    version: &str,
+    arch: GuestArch,
+    scope: ArchiveScope,
+) -> Result<(), GuestRuntimeError> {
     if manifest.version != version {
         return Err(GuestRuntimeError::Version {
             expected: version.to_string(),
@@ -97,7 +126,7 @@ pub fn validate_guest_runtime_manifest(
             GuestBinsMember::Executable { arch: found, .. }
             | GuestBinsMember::InitramfsAgent { arch: found }
             | GuestBinsMember::SharedObject { arch: found, .. }
-                if found != arch =>
+                if found != arch && scope == ArchiveScope::HostArch =>
             {
                 return Err(GuestRuntimeError::ForeignArchitecture(member.to_string()));
             }
@@ -266,6 +295,28 @@ pub fn source_guest_runtime_digest(
     }
 }
 
+/// Install a CLI release's guest runtime into the same digest-keyed object
+/// store a source build uses, and return its verified extraction.
+///
+/// `archive` must already be authenticated: a release binary gets it from
+/// [`crate::guest_bins::release::acquire_release_guest_runtime`], which holds
+/// it to its digest and release signature, or adopts the copy an installer
+/// authenticated the same way. Here it is copied into the store and held to
+/// its own manifest again, and the host architecture's members must be
+/// complete. A copy already in the store is reverified rather than trusted. A
+/// failure is an error, never a reason to use another source.
+pub fn install_release_guest_runtime(
+    cache_root: &Path,
+    archive: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let base = cache_root.join("guest-runtime").join("v1");
+    fs::create_dir_all(&base)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
+    install_archive_scoped(&base, archive, version, arch, ArchiveScope::Release)
+}
+
 /// Whether `value` has the shape of an archive digest: 64 hex characters.
 pub fn is_archive_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -390,6 +441,16 @@ fn install_archive(
     version: &str,
     arch: GuestArch,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
+    install_archive_scoped(base, archive, version, arch, ArchiveScope::HostArch)
+}
+
+fn install_archive_scoped(
+    base: &Path,
+    archive: &Path,
+    version: &str,
+    arch: GuestArch,
+    scope: ArchiveScope,
+) -> Result<GuestRuntime, GuestRuntimeError> {
     let objects = base.join("objects");
     fs::create_dir_all(&objects)?;
     let stage = tempfile::Builder::new()
@@ -399,10 +460,19 @@ fn install_archive(
     fs::copy(archive, &snapshot)?;
     let digest = file_digest(&snapshot)?;
     let manifest = guest_bins::verify_guest_bins_archive(&snapshot)?;
-    validate_guest_runtime_manifest(&manifest, version, arch)?;
+    validate_manifest(&manifest, version, arch, scope)?;
     let destination = objects.join(&digest);
     match fs::symlink_metadata(&destination) {
-        Ok(_) => return load_cached(base, &digest, version, arch),
+        Ok(_) => {
+            return load_cached_scoped(
+                base,
+                &digest,
+                version,
+                arch,
+                scope,
+                std::time::SystemTime::now(),
+            );
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -451,6 +521,17 @@ fn load_cached_at(
     arch: GuestArch,
     now: std::time::SystemTime,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
+    load_cached_scoped(base, digest, version, arch, ArchiveScope::HostArch, now)
+}
+
+fn load_cached_scoped(
+    base: &Path,
+    digest: &str,
+    version: &str,
+    arch: GuestArch,
+    scope: ArchiveScope,
+    now: std::time::SystemTime,
+) -> Result<GuestRuntime, GuestRuntimeError> {
     if !is_archive_digest(digest) {
         return Err(GuestRuntimeError::Cache(
             "invalid archive digest pointer".to_string(),
@@ -463,10 +544,10 @@ fn load_cached_at(
         && verified_in == *stamp
         && runtime.digest == digest
     {
-        validate_guest_runtime_manifest(&runtime.manifest, version, arch)?;
+        validate_manifest(&runtime.manifest, version, arch, scope)?;
         return Ok(runtime);
     }
-    let runtime = verify_cached_object(&object, digest, version, arch)?;
+    let runtime = verify_cached_object(&object, digest, version, arch, scope)?;
     if let Some(stamp) = stamp {
         VERIFIED_OBJECTS.insert(object, (stamp, runtime.clone()));
     }
@@ -566,6 +647,7 @@ fn verify_cached_object(
     digest: &str,
     version: &str,
     arch: GuestArch,
+    scope: ArchiveScope,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     #[cfg(test)]
     FULL_OBJECT_VERIFICATIONS.with(|count| count.set(count.get() + 1));
@@ -592,7 +674,7 @@ fn verify_cached_object(
         )));
     }
     let manifest = guest_bins::verify_guest_bins_archive(&archive)?;
-    validate_guest_runtime_manifest(&manifest, version, arch)?;
+    validate_manifest(&manifest, version, arch, scope)?;
     let tree = object.join("tree");
     verify_tree(&tree, &manifest)?;
     Ok(GuestRuntime {
@@ -758,6 +840,110 @@ fn file_digest(path: &Path) -> Result<String, GuestRuntimeError> {
         hash.update(&buffer[..read]);
     }
     Ok(hex::encode(hash.finalize()))
+}
+
+/// A CLI release's guest runtime as `release.yml` publishes it: every member
+/// for both architectures, executables as static ELFs of their architecture
+/// (the OCI guest set is validated as such), written as one archive the way
+/// [`crate::guest_bins::GuestBinsArtifact`] lays it out.
+#[cfg(test)]
+pub(crate) mod release_fixture {
+    use super::*;
+    use mvm_core::image_set::{GitCommit, WorktreeState};
+
+    /// Every member a release carries for `arch`, with its bytes.
+    fn members(arch: GuestArch) -> Vec<(GuestBinsMember, Vec<u8>)> {
+        let mut members = Vec::new();
+        for name in guest_agent_build::RUNTIME_OVERLAY_SEALED_BINS
+            .into_iter()
+            .chain(guest_agent_build::RUNTIME_OVERLAY_ADDON_BINS)
+            .chain(["mvm-oci-entrypoint", "mvm-setpriv"])
+        {
+            members.push((
+                GuestBinsMember::executable(arch, name).unwrap(),
+                guest_agent_build::fake_static_elf(arch, name.as_bytes()),
+            ));
+        }
+        members.push((
+            GuestBinsMember::InitramfsAgent { arch },
+            guest_agent_build::fake_static_elf(arch, b"initramfs-agent"),
+        ));
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            for cdylib in [HOST_SERVICES_CDYLIB].into_iter().chain(GPU_SHIM_CDYLIBS) {
+                members.push((
+                    GuestBinsMember::shared_object(arch, libc, cdylib.soname).unwrap(),
+                    mvm_fs::elf::test_fixture::shared_object(&[
+                        "libgcc_s.so.1",
+                        libc.libc_soname().unwrap(),
+                    ]),
+                ));
+            }
+        }
+        members
+    }
+
+    /// Write `version`'s release archive into `dir` and return its path.
+    pub(crate) fn write_release_archive(dir: &Path, version: &str) -> PathBuf {
+        write_release_archive_tampering(dir, version, None)
+    }
+
+    /// [`write_release_archive`], with the bytes of `tampered` changed after
+    /// the manifest recorded their digest.
+    pub(crate) fn write_release_archive_tampering(
+        dir: &Path,
+        version: &str,
+        tampered: Option<&str>,
+    ) -> PathBuf {
+        let mut entries: Vec<(String, u32, Vec<u8>)> = Vec::new();
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            for (member, bytes) in members(arch) {
+                entries.push((member.path(), member.mode(), bytes));
+            }
+        }
+        entries.push(("sdk-py/mvm/__init__.py".to_string(), 0o644, Vec::new()));
+        let manifest = GuestBinsManifest {
+            schema_version: guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+            version: version.to_string(),
+            guest_source_fingerprint: "a".repeat(64),
+            sdk_cdylib_source_fingerprint: "b".repeat(64),
+            source: crate::image_source::RepoIdentity {
+                commit: GitCommit::new("c".repeat(40)).unwrap(),
+                worktree: WorktreeState::Clean,
+            },
+            files: entries
+                .iter()
+                .map(|(path, _, bytes)| (path.clone(), hex::encode(Sha256::digest(bytes))))
+                .collect(),
+        };
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join(guest_bins::guest_bins_archive_name(version));
+        let gz = flate2::GzBuilder::new()
+            .mtime(0)
+            .write(File::create(&path).unwrap(), flate2::Compression::fast());
+        let mut tar = tar::Builder::new(gz);
+        let mut append = |name: &str, mode: u32, bytes: &[u8]| {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).unwrap();
+            header.set_entry_type(EntryType::Regular);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(mode);
+            header.set_cksum();
+            tar.append(&header, bytes).unwrap();
+        };
+        append(
+            GUEST_BINS_MANIFEST_FILE,
+            0o644,
+            &serde_json::to_vec(&manifest).unwrap(),
+        );
+        for (name, mode, bytes) in &mut entries {
+            if tampered == Some(name.as_str()) {
+                bytes.push(b'!');
+            }
+            append(name, *mode, bytes);
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+        path
+    }
 }
 
 #[cfg(test)]
@@ -1334,5 +1520,88 @@ mod tests {
                 .is_err()
         );
         assert!(!target.join("guest-runtime/v1/sources").exists());
+    }
+
+    #[test]
+    fn a_release_runtime_carries_both_architectures_and_needs_the_hosts_complete() {
+        let mut release = fixture_manifest(GuestArch::X86_64);
+        release
+            .files
+            .extend(fixture_manifest(GuestArch::Aarch64).files);
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            validate_release_guest_runtime_manifest(&release, "1.2.3", arch).unwrap();
+            assert!(
+                matches!(
+                    validate_guest_runtime_manifest(&release, "1.2.3", arch),
+                    Err(GuestRuntimeError::ForeignArchitecture(_))
+                ),
+                "a source build stays single-architecture"
+            );
+        }
+        assert!(matches!(
+            validate_release_guest_runtime_manifest(&release, "1.2.4", GuestArch::X86_64),
+            Err(GuestRuntimeError::Version { .. })
+        ));
+        // The host's members must be whole even when the other architecture's
+        // are: an assembled overlay would otherwise miss a binary.
+        let mut incomplete = release.clone();
+        incomplete.files.remove("x86_64/bin/mvm-setpriv");
+        assert!(matches!(
+            validate_release_guest_runtime_manifest(&incomplete, "1.2.3", GuestArch::X86_64),
+            Err(GuestRuntimeError::MissingRequired(member)) if member == "x86_64/bin/mvm-setpriv"
+        ));
+        validate_release_guest_runtime_manifest(&incomplete, "1.2.3", GuestArch::Aarch64).unwrap();
+    }
+
+    #[test]
+    fn a_release_runtime_installs_under_its_archive_digest_and_is_reverified() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = release_fixture::write_release_archive(temp.path(), "1.2.3");
+        let cache = temp.path().join("cache");
+        let runtime =
+            install_release_guest_runtime(&cache, &archive, "1.2.3", GuestArch::X86_64).unwrap();
+        assert_eq!(runtime.digest, file_digest(&archive).unwrap());
+        assert!(
+            runtime
+                .root
+                .starts_with(cache.join("guest-runtime/v1/objects"))
+        );
+        assert!(runtime.root.join("aarch64/bin/mvm-guest-agent").is_file());
+
+        // Repeats go straight to the store: the build lock is fail-fast under
+        // test, and a sibling test's subprocess can inherit it briefly.
+        let base = cache.join("guest-runtime/v1");
+        let install = |version| {
+            install_archive_scoped(
+                &base,
+                &archive,
+                version,
+                GuestArch::X86_64,
+                ArchiveScope::Release,
+            )
+        };
+        // The same bytes reuse the object; a member changed in place since is
+        // refused rather than assembled from.
+        assert_eq!(install("1.2.3").unwrap().root, runtime.root);
+        fs::write(
+            runtime.root.join("x86_64/bin/mvm-guest-agent"),
+            b"tampered!",
+        )
+        .unwrap();
+        let refused = install("1.2.3");
+        assert!(
+            matches!(
+                &refused,
+                Err(GuestRuntimeError::TreeDigest { member, .. })
+                    if member == "x86_64/bin/mvm-guest-agent"
+            ),
+            "{refused:?}"
+        );
+        // Another version's archive is not this binary's runtime.
+        let other = install("1.2.4");
+        assert!(
+            matches!(&other, Err(GuestRuntimeError::Version { .. })),
+            "{other:?}"
+        );
     }
 }

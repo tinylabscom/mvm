@@ -28,7 +28,8 @@ struct BuildArgs {
     /// Where the sidecars come from. `build` packs them from this checkout's
     /// guest-runtime archive, building the archive first if it is not cached;
     /// `download` installs the pinned image set's members; `auto` builds in a
-    /// source checkout and downloads otherwise.
+    /// source checkout, packs from the release's own guest runtime on a
+    /// release binary, and downloads otherwise.
     #[arg(long, value_enum, default_value_t = Source::Auto)]
     source: Source,
 
@@ -49,6 +50,8 @@ enum Source {
 enum Route {
     /// Pack from the guest-runtime archive of the checkout at this root.
     Archive(std::path::PathBuf),
+    /// Pack from the guest runtime this release binary's release ships.
+    ReleaseArchive,
     /// Install the pinned image set's members.
     ImageSet,
 }
@@ -69,18 +72,33 @@ fn run_build(args: BuildArgs) -> Result<()> {
     match route(
         args.source,
         mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root(),
+        mvm_build::artifact_acquisition::compiled_channel(),
     )? {
         Route::Archive(workspace_root) => {
             pack_from_archive(&cache_root, version, arch, &workspace_root, args.force)
+        }
+        Route::ReleaseArchive => {
+            let runtime =
+                crate::release_guest_runtime::installed_for_running_binary(&cache_root, arch)?;
+            pack_from_runtime(&cache_root, version, arch, &runtime, args.force)
         }
         Route::ImageSet => install_from_image_set(&cache_root, arch, args.force),
     }
 }
 
-/// `auto` builds wherever there is a checkout to build from. An explicit
-/// `build` without one is refused with the way out named.
-fn route(source: Source, checkout: Option<std::path::PathBuf>) -> Result<Route> {
+/// `auto` builds wherever there is a checkout to build from, and on a release
+/// binary packs from the guest runtime its release ships. An explicit `build`
+/// without a checkout is refused with the way out named.
+fn route(
+    source: Source,
+    checkout: Option<std::path::PathBuf>,
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+) -> Result<Route> {
+    use mvm_build::artifact_acquisition::DistributionChannel;
     match (source, checkout) {
+        (Source::Auto, None) if channel == DistributionChannel::Release => {
+            Ok(Route::ReleaseArchive)
+        }
         (Source::Download, _) | (Source::Auto, None) => Ok(Route::ImageSet),
         (Source::Build | Source::Auto, Some(root)) => Ok(Route::Archive(root)),
         (Source::Build, None) => anyhow::bail!(
@@ -101,10 +119,6 @@ fn pack_from_archive(
     workspace_root: &std::path::Path,
     force: bool,
 ) -> Result<()> {
-    use mvm_build::runtime_pieces::{
-        RuntimePiece, SDK_SIDECAR_LIBCS, discard_local_piece, pack_sdk_sidecars, short_digest,
-    };
-
     let phase = crate::ui::activity::start(format!(
         "Resolving the guest runtime for {arch} from {}",
         workspace_root.display()
@@ -117,13 +131,28 @@ fn pack_from_archive(
     )
     .context("resolving the shared guest runtime")?;
     phase.finish();
+    pack_from_runtime(cache_root, version, arch, &runtime, force)
+}
+
+/// Pack both variants from `runtime`, repacking when `force`.
+fn pack_from_runtime(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    runtime: &mvm_build::guest_runtime::GuestRuntime,
+    force: bool,
+) -> Result<()> {
+    use mvm_build::runtime_pieces::{
+        RuntimePiece, SDK_SIDECAR_LIBCS, discard_local_piece, pack_sdk_sidecars, short_digest,
+    };
+
     if force {
         for libc in SDK_SIDECAR_LIBCS {
             discard_local_piece(cache_root, version, arch, RuntimePiece::SdkSidecar(libc))
                 .with_context(|| format!("discarding the cached {libc} SDK sidecar"))?;
         }
     }
-    for artifact in pack_sdk_sidecars(cache_root, version, arch, &runtime)? {
+    for artifact in pack_sdk_sidecars(cache_root, version, arch, runtime)? {
         ui::success(&format!(
             "SDK sidecar ({}) for {arch} cached from guest runtime archive {}: {}",
             artifact.libc,
@@ -201,7 +230,25 @@ mod tests {
     use super::*;
     use crate::commands::{Cli, Commands, build::group as build_group};
     use clap::Parser;
+    use mvm_build::artifact_acquisition::DistributionChannel;
     use std::path::PathBuf;
+
+    const SOURCE: DistributionChannel = DistributionChannel::Source;
+    const RELEASE: DistributionChannel = DistributionChannel::Release;
+
+    /// A release binary packs from its own release's guest runtime, never the
+    /// image set's members, unless `download` asks for those by name.
+    #[test]
+    fn a_release_binary_packs_from_its_own_guest_runtime_by_default() {
+        assert_eq!(
+            route(Source::Auto, None, RELEASE).unwrap(),
+            Route::ReleaseArchive
+        );
+        assert_eq!(
+            route(Source::Download, None, RELEASE).unwrap(),
+            Route::ImageSet
+        );
+    }
 
     #[test]
     fn the_build_verb_parses_its_source_and_force() {
@@ -229,24 +276,24 @@ mod tests {
     fn a_source_checkout_packs_from_the_archive_by_default() {
         let root = PathBuf::from("/checkout");
         assert_eq!(
-            route(Source::Auto, Some(root.clone())).unwrap(),
+            route(Source::Auto, Some(root.clone()), SOURCE).unwrap(),
             Route::Archive(root.clone())
         );
         assert_eq!(
-            route(Source::Build, Some(root.clone())).unwrap(),
+            route(Source::Build, Some(root.clone()), SOURCE).unwrap(),
             Route::Archive(root)
         );
     }
 
     #[test]
     fn without_a_checkout_auto_installs_the_image_set_members() {
-        assert_eq!(route(Source::Auto, None).unwrap(), Route::ImageSet);
+        assert_eq!(route(Source::Auto, None, SOURCE).unwrap(), Route::ImageSet);
     }
 
     #[test]
     fn download_installs_the_image_set_members_even_in_a_checkout() {
         assert_eq!(
-            route(Source::Download, Some(PathBuf::from("/checkout"))).unwrap(),
+            route(Source::Download, Some(PathBuf::from("/checkout")), SOURCE).unwrap(),
             Route::ImageSet
         );
     }
@@ -256,7 +303,7 @@ mod tests {
     /// the download alternative, not an image-checkout variable.
     #[test]
     fn an_explicit_build_without_a_checkout_names_the_way_out() {
-        let error = route(Source::Build, None).unwrap_err().to_string();
+        let error = route(Source::Build, None, SOURCE).unwrap_err().to_string();
         assert!(error.contains("--source download"), "{error}");
         assert!(
             error.contains(mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV),

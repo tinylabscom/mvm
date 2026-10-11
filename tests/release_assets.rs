@@ -818,6 +818,11 @@ fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
         script.contains("ready (installed beside mvmctl)"),
         "the smoke must require bootstrap to adopt the staged runtime"
     );
+    assert!(
+        script.contains("assembled from release guest runtime $runtime_name")
+            && script.contains("release archive $runtime_name"),
+        "the smoke must require the launch pieces to come from the staged runtime"
+    );
 }
 
 /// Slice one job's block out of a workflow — from its key to the next line at

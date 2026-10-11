@@ -150,8 +150,22 @@ and cite #4100 for the direction, never the reverse.
   `install.sh` and the deb and rpm packages install it beside `mvmctl`;
   `mvmctl bootstrap` on a release binary and `mvmctl env update` acquire it
   through `mvm_build::runtime_overlay::fetch_cli_release_archive` (digest,
-  then signature). Nothing assembles the overlay, initramfs or sidecar from
-  it yet (#4104), so a release binary still boots the image set's copies.
+  then signature).
+- A release binary's `mvmctl bootstrap` assembles the overlay, the initramfs,
+  both sidecars and the OCI guest runtime from that archive through the same
+  assemblers a source build uses
+  (`mvm_build::runtime_pieces::assemble_release_runtime_pieces`), so the
+  overlay's roothash is computed on the host there too. It then records which
+  archive it adopted, and `mvmctl doctor` names it. From then on a launch of
+  that version refuses the image set's copies
+  (`mvm_build::runtime_pieces::image_set_fallback_refusal`); a missing or
+  broken piece names `mvmctl bootstrap` instead. An archive that fails
+  verification fails bootstrap, and nothing is adopted. A release binary that
+  has not bootstrapped since it was installed still boots the image set's
+  copies, which is also all a release published before the archive existed
+  knows how to do: `install.sh` tolerates the missing asset only for those,
+  and a release carrying this code cannot be published without its archive.
+  The image set keeps carrying the three pieces until #4105.
 
 ## Consequences
 

@@ -147,6 +147,7 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     {
         return Ok(());
     }
+    refuse_image_set_oci_runtime_for(mvm_build::artifact_acquisition::compiled_channel())?;
     let phase = mvm_runtime::ui::activity::start(
         "Preparing the published guest runtime (first use; downloaded and cached afterward)",
     );
@@ -161,6 +162,24 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     {
         anyhow::bail!(
             "published runtime overlay {version} for {arch} did not install the OCI guest runtime"
+        );
+    }
+    Ok(())
+}
+
+/// A release binary's OCI guest runtime is installed by `mvmctl bootstrap`
+/// from the guest runtime its own release ships, with the other pieces from
+/// the same archive. Downloading the image set's overlay for it instead would
+/// boot guest code from another tree, so a release binary refuses and names
+/// the bootstrap. Other builds keep the image set.
+fn refuse_image_set_oci_runtime_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+) -> Result<()> {
+    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
+        anyhow::bail!(
+            "the guest runtime of mvmctl {} is not prepared; run `mvmctl bootstrap` first, which \
+             installs it from this release",
+            env!("CARGO_PKG_VERSION")
         );
     }
     Ok(())
@@ -318,6 +337,22 @@ mod acquisition_policy_tests {
         assert_eq!(shared_guest_runtime_cache_root(&oci).unwrap(), base);
         assert_eq!(shared_guest_runtime_cache_root(base).unwrap(), base);
         assert!(shared_guest_runtime_cache_root(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn a_release_binary_never_takes_its_oci_guest_runtime_from_the_image_set() {
+        let refused = refuse_image_set_oci_runtime_for(
+            mvm_build::artifact_acquisition::DistributionChannel::Release,
+        )
+        .expect_err("a release binary installs its own guest runtime");
+        assert!(
+            refused.to_string().contains("mvmctl bootstrap"),
+            "{refused}"
+        );
+        refuse_image_set_oci_runtime_for(
+            mvm_build::artifact_acquisition::DistributionChannel::Source,
+        )
+        .expect("a source build keeps the image set's published runtime");
     }
 
     #[test]

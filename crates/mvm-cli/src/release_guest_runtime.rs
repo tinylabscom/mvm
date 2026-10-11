@@ -6,7 +6,10 @@
 //! `mvmctl env update`, for the version it is about to install, before the
 //! running binary is touched. The acquisition itself — installed copy, cache,
 //! or download held to its digest and then its signature — is
-//! [`mvm_build::guest_bins::release`].
+//! [`mvm_build::guest_bins::release`]. Bootstrap then assembles the runtime
+//! overlay, the initramfs, both SDK sidecars and the OCI guest runtime from
+//! the archive it acquired
+//! ([`mvm_build::runtime_pieces::assemble_release_runtime_pieces`]).
 //!
 //! A source checkout builds its guest runtime from the tree instead, so
 //! nothing here runs for one.
@@ -69,6 +72,29 @@ pub(crate) fn prepare_for_running_binary() -> Result<Option<ReleaseGuestRuntime>
     )?;
     report(&runtime);
     Ok(Some(runtime))
+}
+
+/// The running release binary's guest runtime, acquired as bootstrap acquires
+/// it and installed into the digest-keyed store, for an explicit `build` verb
+/// that assembles one piece from it. Only a release binary ships one.
+pub(crate) fn installed_for_running_binary(
+    cache_root: &Path,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<mvm_build::guest_runtime::GuestRuntime> {
+    let release = prepare_for_running_binary()?
+        .context("only a release binary of mvmctl ships a guest runtime")?;
+    mvm_build::guest_runtime::install_release_guest_runtime(
+        cache_root,
+        &release.archive,
+        crate::update::current_version(),
+        arch,
+    )
+    .with_context(|| {
+        format!(
+            "installing the release guest runtime {}",
+            release.archive.display()
+        )
+    })
 }
 
 /// Fetch and verify the guest runtime the release `tag` ships, for

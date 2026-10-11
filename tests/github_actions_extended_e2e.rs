@@ -779,12 +779,15 @@ fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
 }
 
 /// Every step of the source witness is fatal, in the order the path runs.
+/// The builder image is bootstrapped through the unembedded binary: packing
+/// sidecars no longer reaches a builder VM, so this is the step that proves a
+/// binary without a payload hands Stage 0 to the helper it produces.
 #[test]
 fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     let script = source_bootstrap_script();
     let steps = [
         "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
-        "\"$MVMCTL\" bootstrap",
+        "\"$UNEMBEDDED_MVMCTL\" bootstrap",
         "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
     ];
     let mut last = 0;
@@ -803,7 +806,7 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
         .find("export MVM_ALLOW_LOCAL_BUILDER_BUILD=1")
         .expect("the witness must opt into a local builder-image build, or `build` is refused");
     assert!(
-        opt_in < script.find("\"$MVMCTL\" bootstrap").unwrap_or(0),
+        opt_in < script.find("\"$UNEMBEDDED_MVMCTL\" bootstrap").unwrap_or(0),
         "the opt-in must be exported before the builder image is bootstrapped"
     );
     assert!(

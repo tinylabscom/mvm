@@ -269,12 +269,24 @@ pub fn resolve_image_set_runtime_overlay(
 /// Resolve the overlay a boot of this host would attach, from cache alone:
 /// the entry matching `resolver`'s version (seeded from the default cache on a
 /// miss), and otherwise the one installed from the image set this build pins.
-/// A miss in both surfaces the version-matched resolve error.
+/// A miss in both surfaces the version-matched resolve error. A release
+/// binary that adopted its own guest runtime never takes the image set's copy
+/// ([`crate::runtime_pieces::image_set_fallback_refusal`]).
 pub fn resolve_cached_runtime_overlay(
     resolver: &RuntimeOverlayResolver,
     arch: GuestArch,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     resolve_or_seed_from_default_cache(resolver, arch).or_else(|version_matched| {
+        if let Some(refusal) = crate::runtime_pieces::image_set_fallback_refusal(
+            resolver.cache_root(),
+            resolver.expected_version(),
+            arch,
+            crate::runtime_pieces::RuntimePiece::RuntimeOverlay,
+        ) {
+            return Err(RuntimeOverlayError::DirectBuildFailed {
+                reason: format!("{refusal}: {version_matched}"),
+            });
+        }
         resolve_image_set_runtime_overlay(resolver.cache_root(), &SetMemberCache::locked(), arch)
             .map_err(|_| version_matched)
     })
@@ -505,7 +517,7 @@ fn assemble_runtime_overlay(
     )
 }
 
-fn verify_guest_runtime_overlay_verity(
+pub(crate) fn verify_guest_runtime_overlay_verity(
     artifact: &RuntimeOverlayArtifact,
 ) -> Result<(), RuntimeOverlayError> {
     let image = std::fs::read(&artifact.overlay_ext4)?;
@@ -2568,6 +2580,24 @@ mod tests {
         let artifact = resolve_cached_runtime_overlay(&resolver, GuestArch::Aarch64)
             .expect("the pinned set's member must satisfy a cache-only resolve");
         assert_eq!(artifact.version, MEMBER_VERSION);
+
+        // Once this version adopted its release guest runtime, the same
+        // cache-only resolve refuses the member instead.
+        let record = crate::runtime_pieces::release_adoption_record(
+            cache.path(),
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::Aarch64,
+        );
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, format!("{}\n", "e".repeat(64))).unwrap();
+        let refused = resolve_cached_runtime_overlay(&resolver, GuestArch::Aarch64)
+            .expect_err("an adopted release must not resolve the image set's overlay");
+        assert!(
+            refused
+                .to_string()
+                .contains("refusing the pinned image set's copy"),
+            "{refused}"
+        );
     }
 
     /// The version-matched cache keeps exact equality with the running CLI: a
