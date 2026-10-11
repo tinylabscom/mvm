@@ -257,10 +257,11 @@ just payload::refresh
 # path uses the faster wrapper, which links aws-lc through the LLVM overrides in
 # .cargo/fast.toml.
 # Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
-# for the contributor path: that command must re-exec the isolated embedded
-# helper for the complete HVF/Nix build, not resume in this payload-free parent.
-# The main suite binary is then rebuilt with the payload because later workload
-# launches consume the extracted host helpers directly.
+# for the contributor path: a binary that carries no host payload must still
+# pack both sidecars on the host from the checkout's guest runtime, without
+# reaching for a builder VM. The main suite binary is then rebuilt with the
+# payload because later workload launches consume the extracted host helpers
+# directly.
 # `user` by default: released binaries are built with it (see
 # MVMCTL_RELEASE_FEATURES in release.yml), so a lane without it attests the
 # documented surface using a binary less capable than the one users get.
@@ -417,66 +418,34 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
-# Where the SDK sidecar and the dev default image come from. The two image
-# verbs below read `MVM_FETCH_UNCHANGED_IMAGES`, and this runner hands it to
-# them alone, so every scenario sees the environment it always has:
+# Nothing here is pair-built through an mvm-images checkout. The SDK sidecar is
+# guest runtime and comes from this tree; the dev default image is Linux layer
+# and comes from the pinned, signed image set.
 #
-#   1 (default)  build both from this tree through an mvm-images checkout,
-#                adopting the pinned set's members only when they were built
-#                from exactly this tree's sources. A published sidecar carries
-#                the C ABI of the mvm commit its image set was built from, so a
-#                tree that changed it gets a sidecar built from itself.
-#   pinned       adopt the pinned, signed set's members whatever they were
-#                built from — what a user of this CLI boots. No checkout is
-#                needed, and a set that is refused or lacks them fails the
-#                step rather than falling back to a build. The release lane
-#                runs this way; guest-source changes are pair-built and booted
-#                by the merge queue's guest-image-boot lane instead.
-E2E_FETCH_MODE="${MVM_FETCH_UNCHANGED_IMAGES:-1}"
+# The service-plane scenarios load the sidecar. `--source build` packs both
+# libc variants on the host from this checkout's guest-runtime archive,
+# compiling the archive first when it is not cached, and refuses rather than
+# falling back to the image set's members. No builder VM starts.
+#
+# The fetch knob is cleared first: the sidecar verb adopts the set's members
+# whenever it is set, and no scenario should inherit it either.
 unset MVM_FETCH_UNCHANGED_IMAGES
-case "$E2E_FETCH_MODE" in
-  1|pinned) ;;
-  *)
-    echo "!!! MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE: this runner takes 1 or pinned." >&2
-    exit 1
-    ;;
-esac
-echo "    image source: MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE"
-
-# The image checkout is handed to these steps alone, so every other step keeps
-# resolving images from the pinned set, and it is kept out of the sibling path
-# an image checkout is discovered at for the same reason. Under `pinned` there
-# is none: nothing is built.
-E2E_IMAGE_ENV=(MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES="$E2E_FETCH_MODE")
-if [[ "$E2E_FETCH_MODE" != pinned ]]; then
-  E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
-  if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
-    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the dev default image is built" >&2
-    echo "!!! from its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
-    echo "!!! or MVM_FETCH_UNCHANGED_IMAGES=pinned to boot the pinned set's members." >&2
-    exit 1
-  fi
-  E2E_IMAGE_ENV+=(MVM_IMAGES_DIR="$E2E_IMAGES_DIR")
-fi
-
-# The service-plane scenarios load this sidecar. The verb reports which arm
-# ran and why, including how this tree's fingerprint compares with the set's.
 e2e_phase sdk-sidecar
-echo "==> preparing the SDK sidecar through unembedded mvmctl"
-env "${E2E_IMAGE_ENV[@]}" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+echo "==> packing the SDK sidecar from this tree's guest runtime"
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
-# `image dev ensure` takes the same arm as the sidecar, and reports it. A
-# fetched install carries no pair identity, and the warm boot below must
-# answer from the completed cache, not rebuild it, so only the ensure step
-# sees the image environment. The one scenario that boots the dev image is
-# Firecracker-only (the cached dev rootfs must stay byte-identical across
-# launches), so only the Linux lane prepares it, into the warm home every
-# scenario shares.
+# It is adopted from the pinned set (`MVM_FETCH_UNCHANGED_IMAGES=pinned`), and
+# a set that is refused or lacks it fails the step rather than falling back to
+# a build. A fetched install carries no pair identity, and the warm boot below
+# must answer from the completed cache, so only the ensure step sees the knob.
+# The one scenario that boots the dev image is Firecracker-only (the cached dev
+# rootfs must stay byte-identical across launches), so only the Linux lane
+# prepares it, into the warm home every scenario shares.
 if [[ "$(uname -s)" == Linux ]]; then
   e2e_phase dev-image
-  echo "==> preparing the dev default image"
-  env "${E2E_IMAGE_ENV[@]}" "$MVMCTL" image dev ensure
+  echo "==> adopting the dev default image from the pinned image set"
+  MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES=pinned "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
   # Named, so it takes the cold path. An unnamed launch has to claim a
   # prepared warm standby, and nothing has warmed one for the dev image.

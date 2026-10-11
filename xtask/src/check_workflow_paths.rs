@@ -1281,21 +1281,40 @@ mod tests {
         assert!(guest.contains(
             "if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'"
         ));
-        assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
-        assert!(guest.contains("Boot the mvm-images-built image"));
         assert!(
-            guest.contains("tinylabscom/mvm-images"),
-            "the guest-image witness must consume the external image source"
+            guest.contains("Boot the pinned base image with the tree's guest runtime"),
+            "the guest-image witness must boot the pinned base set"
+        );
+        for forbidden in [
+            "tinylabscom/mvm-images",
+            "image-source-ref",
+            "nix build",
+            "--override-input mvm",
+        ] {
+            assert!(
+                !guest.contains(forbidden),
+                "the guest-image witness must not build guest pieces through mvm-images: \
+                 found `{forbidden}`"
+            );
+        }
+        assert!(
+            guest.contains("./scripts/locked-image-tag.sh") && guest.contains("cosign verify-blob"),
+            "the base image must be the signed set images.lock pins"
         );
         assert!(
-            guest.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
-            "the manual guest-image diagnostic must build the image sources images.lock \
-             pins rather than mvm-images main"
+            guest.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build")
+                && guest.contains("build runtime-overlay build --source build"),
+            "the guest runtime under test must be assembled from this tree"
+        );
+        assert!(
+            !guest.contains("runtime-overlay-x86_64.tar.gz"),
+            "the set's runtime-overlay member must not stand in for the tree's"
         );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
-            guest.contains("nix build --rebuild"),
-            "the image job must rebuild the filesystem derivations and compare their bytes"
+            guest.contains("build runtime-overlay build --source build --arch x86_64 --force")
+                && guest.contains("cmp \"overlay-staging/$f\" \"$dir/$f\""),
+            "the overlay must be reassembled and its bytes compared"
         );
 
         let website = workflow("website.yml");

@@ -1677,122 +1677,134 @@ jobs:
             done
           done
   guest-image-boot:
-    name: Guest image boots (mvm-images)
-    # Canonical image builds, byte-for-byte rebuilds and boot probes belong to
-    # tinylabscom/mvm-images. Keep this source-override path as an operator
-    # diagnostic only; the merge queue consumes the locked published image in
-    # `boot-latency` instead of rebuilding the image factory for every entry.
+    name: Guest image boots (pinned base set, tree guest runtime)
+    # The Linux layer comes from the image set images.lock pins: kernels and
+    # base root filesystems are built, reproduced and signed in mvm-images.
+    # The guest runtime is this tree's, assembled on the host by `mvmctl` the
+    # way every source-checkout launch assembles it, so a guest change is
+    # booted here without building anything through mvm-images.
+    # Dispatch-only: the merge queue boots the locked published image in
+    # `boot-latency` instead.
     needs: [scope]
     if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
+      FC_VERSION: v1.17.0
+      # A home of the job's own, so the overlay below is the one this run
+      # assembled and not one a cache restored.
+      MVM_HOME: ${{ github.workspace }}/.guest-image-home
+      # Launch acquisition defaults to the published pieces even in a checkout;
+      # the guest runtime under test is this tree's.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/free-disk
-        if: needs.scope.outputs.nix == 'true'
-
-      - name: Install Nix
-        if: needs.scope.outputs.nix == 'true'
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Install Rust toolchain
-        if: needs.scope.outputs.nix == 'true'
         uses: dtolnay/rust-toolchain@1.97.1
 
       - uses: ./.github/actions/apt-deps
-        if: needs.scope.outputs.nix == 'true'
         with:
-          packages: lld
+          packages: lld e2fsprogs
 
-      # The commit that produced the image set images.lock pins, not
-      # mvm-images `main`: a manual diagnostic must reproduce the locked pair,
-      # not silently test newer image definitions. A change that needs newer
-      # image sources waits for them to be published in an image set and pinned;
-      # the pair's `main`s are compared by the `image-pair.yml` canary.
-      - name: Resolve the mvm-images commit images.lock pins
-        if: needs.scope.outputs.nix == 'true'
-        id: images-ref
-        run: |
-          ref="$(cargo run -q -p xtask -- image-source-ref)"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      # The guest binaries are static musl, cross-compiled with the pinned
+      # toolchain the build script and `mvmctl` both use.
+      - uses: ./.github/actions/install-zigbuild
 
-      - name: Check out mvm-images
-        if: needs.scope.outputs.nix == 'true'
-        uses: actions/checkout@v6
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - uses: ./.github/actions/rust-cache
         with:
-          repository: tinylabscom/mvm-images
-          ref: ${{ steps.images-ref.outputs.ref }}
-          path: mvm-images
+          key: guest-image-boot
 
-      - name: Build the guest image from mvm-images
-        if: needs.scope.outputs.nix == 'true'
+      - name: Resolve the locked image set
+        # Read from images.lock, never copied: the set a release of this tree
+        # boots is the set this diagnostic boots.
         run: |
           set -euo pipefail
-          # The image definitions come from tinylabscom/mvm-images; the `mvm`
-          # input is this checkout, so the queue boot-tests the PR's changes
-          # against the external image source.
-          nix build "path:$PWD/mvm-images#legacyPackages.x86_64-linux.default-tenant.default" \
-            --override-input mvm "path:$PWD" \
-            --impure --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p staging
-          # Resolve each artifact through its Nix store symlink.
-          cp -L "$STORE_PATH/vmlinux"       staging/vmlinux
-          cp -L "$STORE_PATH/rootfs.ext4"   staging/rootfs.ext4
-          cp -L "$STORE_PATH/mvm-meta.json" staging/mvm-meta.json
+          {
+            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
+            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
+            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
+            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+          } >> "$GITHUB_ENV"
 
-      - name: Assert the tree-built rootfs has an exec'able /init
-        if: needs.scope.outputs.nix == 'true'
+      - name: Fetch and verify the pinned base image
+        # The kernel and the root filesystem only. The set's guest-runtime
+        # members are not fetched: the overlay this lane boots is assembled
+        # from the tree below.
+        env:
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
         run: |
           set -euo pipefail
-          command -v debugfs >/dev/null 2>&1 \
-            || { sudo apt-get update && sudo apt-get install -y e2fsprogs; }
+          mkdir -p staging && cd staging
+          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
+          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
+          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
+          cosign verify-blob \
+            --bundle image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            image-set.json
+          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4; do
+            curl -fL --retry 3 -o "$f" "$base/$f"
+            jq -r --arg name "$f" '
+              .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
+              select(.name == $name) | "\(.sha256)  \(.name)"
+            ' image-set.json > expected.txt
+            test -s expected.txt
+            sha256sum -c expected.txt
+          done
+          mv default-microvm-vmlinux-x86_64 vmlinux
+          mv default-microvm-rootfs-x86_64.ext4 rootfs.ext4
+
+      - name: Assert the pinned rootfs has an exec'able /init
+        run: |
+          set -euo pipefail
           bash nix/packaging/release/assert-init-shebang.sh \
-            staging/rootfs.ext4 "tree-built x86_64"
+            staging/rootfs.ext4 "pinned x86_64"
           bash nix/packaging/release/assert-kernel-format.sh \
-            staging/vmlinux x86_64 "tree-built x86_64 kernel"
+            staging/vmlinux x86_64 "pinned x86_64 kernel"
 
-      - name: Build the runtime overlay from mvm-images
-        if: needs.scope.outputs.nix == 'true'
+      - name: Assemble the runtime overlay from this tree
+        # `--source build` compiles the guest runtime archive from this
+        # checkout and assembles the overlay from it on the host: the pure-Rust
+        # ext4 writer and the in-process verity tree, no Nix and no image
+        # checkout. A fresh home holds exactly one overlay afterwards.
         run: |
           set -euo pipefail
-          OVERLAY_PATH=$(nix build "path:$PWD/mvm-images#legacyPackages.x86_64-linux.runtime-overlay.default" \
-            --override-input mvm "path:$PWD" \
-            --no-link --print-out-paths | head -1)
+          mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
+          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          test "${#dirs[@]}" -eq 1
           mkdir -p overlay-staging
-          cp -L "$OVERLAY_PATH/overlay.ext4"     overlay-staging/overlay.ext4
-          cp -L "$OVERLAY_PATH/overlay.verity"   overlay-staging/overlay.verity
-          cp -L "$OVERLAY_PATH/overlay.roothash" overlay-staging/overlay.roothash
+          cp -L "${dirs[0]}/overlay.ext4"     overlay-staging/overlay.ext4
+          cp -L "${dirs[0]}/overlay.verity"   overlay-staging/overlay.verity
+          cp -L "${dirs[0]}/overlay.roothash" overlay-staging/overlay.roothash
           echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
             >> "$GITHUB_ENV"
 
-      - name: Rebuild the image filesystems and require identical bytes
-        if: needs.scope.outputs.nix == 'true'
+      - name: Reassemble the overlay and require identical bytes
+        # The overlay's ext4 and dm-verity bytes must not depend on when they
+        # were written: a random UUID, hash salt or timestamp would give every
+        # assembly its own root hash. `--force` discards the slot and
+        # reassembles from the same guest-runtime archive.
         run: |
           set -euo pipefail
-          # Rebuild each derivation that writes ext4 or dm-verity bytes and let
-          # Nix compare the result with the first build: a random UUID or hash
-          # seed fails the step with "may not be deterministic". Only these
-          # derivations are rebuilt; everything they depend on is reused.
-          image="path:$PWD/mvm-images#legacyPackages.x86_64-linux.default-tenant.default"
-          overlay="path:$PWD/mvm-images#legacyPackages.x86_64-linux.runtime-overlay.default"
-          override=(--override-input mvm "path:$PWD")
-          image_fs=$(nix path-info --impure -r --derivation "${override[@]}" "$image" \
-            | grep -E -- '-(ext4-fs\.img|mvm-rootfs-[^/]*\.ext4)\.drv$')
-          for drv in \
-            $(nix path-info --impure --derivation "${override[@]}" "$image") \
-            $image_fs \
-            $(nix path-info --derivation "${override[@]}" "$overlay"); do
-            echo "rebuilding $drv"
-            nix build --rebuild --no-link "$drv^*"
+          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64 --force
+          dir=$(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
+            cmp "overlay-staging/$f" "$dir/$f"
           done
 
       - name: Install firecracker
-        if: needs.scope.outputs.nix == 'true'
-        env:
-          # Tracks `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
-          FC_VERSION: v1.17.0
         run: |
           set -euo pipefail
           curl -fL -o firecracker.tgz \
@@ -1802,7 +1814,6 @@ jobs:
           /usr/bin/firecracker --version
 
       - name: Grant /dev/kvm access for the job
-        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           if [ ! -e /dev/kvm ]; then
@@ -1811,8 +1822,7 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
 
-      - name: Boot the mvm-images-built image
-        if: needs.scope.outputs.nix == 'true'
+      - name: Boot the pinned base image with the tree's guest runtime
         # This is a reach-userspace witness, not a latency assertion. The loose
         # budget and single run keep shared-runner variance out of the result.
         env:
@@ -1828,14 +1838,14 @@ jobs:
           MVM_RUNTIME_BOOT_BUDGET_MS: "60000"
         run: |
           set -euo pipefail
-          test -f staging/mvm-meta.json
           cargo test --test runtime_boot_bench \
             prebuilt_runtime_image_boots_within_budget -- --exact --nocapture
 
       - name: Guest console on failure
-        if: ${{ failure() && needs.scope.outputs.nix == 'true' }}
+        if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "$MVM_HOME"/vms/*/ "$HOME"/.mvm/vms/*/; do
+            [ -d "$d" ] || continue
             echo "===== $d ====="
             ls -la "$d" || true
             if [ -f "$d/console.log" ]; then

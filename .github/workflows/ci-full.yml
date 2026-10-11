@@ -328,9 +328,11 @@ jobs:
   # The documented-surface release lane fetches the pinned, signed builder
   # image, so it no longer proves a source checkout can build one. This lane
   # does, and only this: a cold home, Stage 0 building the builder image from
-  # an mvm-images checkout against this tree, the unembedded binary handing the
-  # SDK sidecar build to its helper, and a user flake built through the
-  # resulting builder. Every step is fatal.
+  # an mvm-images checkout, the unembedded binary handing that build to its
+  # helper, and a user flake built through the resulting builder. Every step
+  # is fatal. The checkout supplies the builder image's recipe and nothing
+  # else: the SDK sidecars, the runtime overlay and the initramfs are
+  # assembled on the host from this tree's guest runtime.
   #
   # Nightly rather than on release, because a cold Stage 0 measured 37 minutes on
   # a good run and hung for two hours on a bad one — cost no release scenario
@@ -362,10 +364,15 @@ jobs:
       # socket would overflow the Unix socket limit without the short socket
       # namespace, so this lane also keeps that fallback exercised.
       MVM_BUILDER_BACKEND: firecracker
-      # The image recipes this lane builds from. Checked out inside the
-      # workspace rather than beside it, at the path named here, so the
-      # selection is explicit instead of discovered.
+      # The builder image recipe this lane builds from — the Linux layer,
+      # which mvm-images owns. Checked out inside the workspace rather than
+      # beside it, at the path named here, so the selection is explicit
+      # instead of discovered.
       MVM_IMAGES_DIR: ${{ github.workspace }}/.source-bootstrap-mvm-images
+      # The guest runtime is this tree's: bootstrap assembles the overlay,
+      # the initramfs and the sidecars from it instead of installing the image
+      # set's members. The witness script exports the same.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
 
@@ -392,8 +399,9 @@ jobs:
           key: source-bootstrap-linux
 
       # At the commit that produced the image set images.lock pins, never at
-      # mvm-images `main`: this lane proves this tree builds the images it
-      # pins, and the two `main`s are compared by the `image-pair.yml` canary.
+      # mvm-images `main`: this lane proves this tree builds the builder image
+      # it pins, and the two `main`s are compared by the `image-pair.yml`
+      # canary.
       - name: Resolve the mvm-images commit images.lock pins
         id: images-ref
         run: |

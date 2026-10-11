@@ -882,16 +882,24 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
         opt_in < script.find("\"$UNEMBEDDED_MVMCTL\" bootstrap").unwrap_or(0),
         "the opt-in must be exported before the builder image is bootstrapped"
     );
+    let source_runtime = script
+        .find("export MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build")
+        .expect("bootstrap must assemble every guest piece from this tree's guest runtime");
+    assert!(
+        source_runtime < script.find("\"$UNEMBEDDED_MVMCTL\" bootstrap").unwrap_or(0),
+        "the source guest runtime must be selected before bootstrap prepares the pieces"
+    );
     assert!(
         !script.contains("|| true") && !script.contains("if ! "),
         "the source witness must not tolerate a failed step"
     );
 }
 
-/// The image recipes the witness builds from live in mvm-images, so the job
-/// has to hand it a checkout — at the commit that produced the pinned set.
-/// Without one, the first image the witness asks for is refused after the
-/// whole workspace has compiled.
+/// The builder image recipe the witness builds from lives in mvm-images, so the
+/// job has to hand it a checkout — at the commit that produced the pinned set.
+/// Without one, the builder image is refused after the whole workspace has
+/// compiled. The checkout is the Linux layer only: the job also selects this
+/// tree's guest runtime, so no guest piece is pair-built through it.
 #[test]
 fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
     let workflow = ci_full();
@@ -902,6 +910,11 @@ fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
         field_after(job, "MVM_IMAGES_DIR:").as_deref(),
         Some(format!("${{{{ github.workspace }}}}/{checkout_path}").as_str()),
         "the witness must name the mvm-images checkout it builds from"
+    );
+    assert_eq!(
+        field_after(job, "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE:").as_deref(),
+        Some("build"),
+        "the guest runtime must come from this tree, not the image checkout or the set"
     );
     let resolve = job
         .find("cargo run -q -p xtask -- image-source-ref")
@@ -1342,10 +1355,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     );
 }
 
-/// The sidecar is still built through the unembedded binary, but after the
-/// builder image is acquired: the embedded binary fetches and verifies it once,
-/// so the helper the unembedded binary re-executes finds it ready instead of
-/// being compiled only to acquire it.
+/// The sidecar is still packed through the unembedded binary, after the
+/// builder image is acquired: a binary without a host payload must pack both
+/// variants on the host from the checkout's guest runtime.
 #[test]
 fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
@@ -1388,95 +1400,67 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     }
 }
 
-/// A release boots the image set it pins; Extended CI keeps building from
-/// the tree. The release passes the input, both jobs translate it into the
-/// image-arm knob, the image checkout is skipped exactly when it is set, and
-/// the runner hands the knob to the two image verbs without demanding a
-/// checkout under `pinned`.
+/// Neither caller of the documented surface pair-builds guest pieces through
+/// mvm-images: the jobs check out no image repository and set no image-arm
+/// knob, the release passes no image input, and the runner packs the sidecar
+/// from the tree while adopting the Linux-layer dev image from the pinned set.
 #[test]
-fn the_release_lane_boots_the_pinned_image_set_and_the_nightly_builds_from_the_tree() {
+fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     let release =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
-    let call = job_block(&release, "e2e-docs");
-    assert!(
-        call.contains("boot_pinned_images: true"),
-        "the release must test the pinned image set its users boot"
-    );
     let nightly =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    assert!(
-        !nightly.contains("boot_pinned_images"),
-        "Extended CI keeps pair-building the sidecar and dev image from the tree"
-    );
-
     let workflow = extended_ci();
-    assert!(
-        workflow.contains("      boot_pinned_images:\n")
-            && workflow.contains("        default: false\n"),
-        "the input must exist and default off"
-    );
+    for (name, text) in [
+        ("release.yml", release.as_str()),
+        ("ci-full.yml", nightly.as_str()),
+        ("e2e-docs.yml", workflow.as_str()),
+    ] {
+        assert!(
+            !text.contains("boot_pinned_images"),
+            "{name}: the image-arm input is gone; there is no pair-build arm to choose"
+        );
+    }
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
-        assert!(
-            block.contains(
-                "MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}"
-            ),
-            "{job} must select the image arm from the input"
-        );
-        for step in [
-            "- name: Resolve the mvm-images commit images.lock pins\n        if: ${{ !inputs.boot_pinned_images }}",
-            "- name: Check out mvm-images for the source-matched SDK sidecar\n        if: ${{ !inputs.boot_pinned_images }}",
+        for forbidden in [
+            "tinylabscom/mvm-images",
+            "image-source-ref",
+            "MVM_E2E_IMAGES_DIR",
+            "MVM_IMAGES_DIR",
+            "MVM_FETCH_UNCHANGED_IMAGES",
         ] {
             assert!(
-                block.contains(step),
-                "{job}: the image checkout must be skipped when the pinned set is booted"
+                !block.contains(forbidden),
+                "{job} must not reach mvm-images for a guest piece: found `{forbidden}`"
             );
         }
     }
 
     let script = documented_surface_script();
-    assert!(
-        script.contains("E2E_FETCH_MODE=\"${MVM_FETCH_UNCHANGED_IMAGES:-1}\"")
-            && script.contains("unset MVM_FETCH_UNCHANGED_IMAGES"),
-        "the runner must take the knob from the job and keep it away from the scenarios"
-    );
-    assert!(
-        script.contains("if [[ \"$E2E_FETCH_MODE\" != pinned ]]; then"),
-        "only the pair-build arm may demand an image checkout"
-    );
-    for verb in [
-        "env \"${E2E_IMAGE_ENV[@]}\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
-        "env \"${E2E_IMAGE_ENV[@]}\" \"$MVMCTL\" image dev ensure",
-    ] {
+    for forbidden in ["MVM_E2E_IMAGES_DIR", "MVM_IMAGES_DIR=", "E2E_IMAGE_ENV"] {
         assert!(
-            script.contains(verb),
-            "both image verbs must run under the chosen arm: {verb}"
+            !script.contains(forbidden),
+            "the runner must not hand an image checkout to any step: found `{forbidden}`"
         );
     }
-}
-
-/// An unrecognised arm stops the runner before it builds anything, rather than
-/// silently picking one.
-#[cfg(unix)]
-#[test]
-fn the_documented_surface_refuses_an_unknown_image_arm() {
-    let home = tempfile::tempdir().expect("create home fixture");
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(
-            "sed -n '/^E2E_FETCH_MODE=/,/^esac$/p' scripts/e2e-documented-surface.sh > \"$1\" \
-             && bash \"$1\"",
+    let unset = script
+        .find("unset MVM_FETCH_UNCHANGED_IMAGES")
+        .expect("the runner must clear the fetch knob before the sidecar verb reads it");
+    let sidecar = script
+        .find(
+            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build",
         )
-        .arg("bash")
-        .arg(home.path().join("arm.sh"))
-        .env("MVM_FETCH_UNCHANGED_IMAGES", "pinnned")
-        .output()
-        .expect("run the arm selection");
-    assert_eq!(output.status.code(), Some(1));
+        .expect("the sidecar must be packed from the tree, refusing the image set's members");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("takes 1 or pinned"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        unset < sidecar,
+        "the knob must be cleared before the sidecar is packed"
+    );
+    assert!(
+        script.contains(
+            "MVM_HOME=\"$E2E_HOME\" MVM_FETCH_UNCHANGED_IMAGES=pinned \"$MVMCTL\" image dev ensure"
+        ),
+        "the dev default image is Linux layer and must be adopted from the pinned set"
     );
 }
 

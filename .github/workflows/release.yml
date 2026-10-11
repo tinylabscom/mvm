@@ -53,13 +53,11 @@ jobs:
       # evidence, so a macOS host that cannot boot a guest fails this workflow
       # here even though Extended CI tolerates it nightly.
       macos_blocks_on_unusable_host: true
-      # A release tests what its users get: this CLI against the image set
-      # images.lock pins, not a pair build of the tree's guest sources. The
-      # SDK sidecar and the dev default image are therefore adopted from that
-      # signed set whatever sources it was built from, and the lane fails if
-      # the set's signed compatibility excludes this CLI. The
-      # guest-image-boot lane is dispatch-only today.
-      boot_pinned_images: true
+      # A release tests what its users get, and nothing is pair-built through
+      # mvm-images: the Linux layer (kernels, base and dev root filesystems,
+      # the builder image) comes from the image set images.lock pins, and the
+      # guest runtime — the SDK sidecars, the runtime overlay, the initramfs —
+      # from the tagged tree, which is the runtime this release ships.
 
   # The guest runtime this release ships: the `mvm-guest-bins` archive for
   # both guest architectures, built from the tagged tree with the pinned

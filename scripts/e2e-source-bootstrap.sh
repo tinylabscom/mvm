@@ -4,18 +4,23 @@
 # The documented-surface release lane fetches the pinned, signed builder image,
 # because its scenarios exercise the CLI rather than the image. That leaves the
 # cold source path — Stage 0 building the builder image from an mvm-images
-# checkout against this tree, and an unembedded `mvmctl` handing the whole build
-# to its embedded helper — with no witness of its own. This is that witness, and
-# nothing else:
+# checkout, and an unembedded `mvmctl` handing the whole build to its embedded
+# helper — with no witness of its own. This is that witness, and nothing else:
 #
 #   1. build an unembedded and an embedded `mvmctl`;
 #   2. pack the SDK sidecars through the unembedded one, against a cold home:
 #      the guest runtime compiles on the host and no builder VM starts;
 #   3. bootstrap the builder image from source through the unembedded one: it
 #      owns no payload, so Stage 0 and the builder image are handed to the
-#      helper payload it produces from this checkout;
+#      helper payload it produces from this checkout. The runtime overlay and
+#      the initramfs are assembled on the host from the guest runtime step 2
+#      compiled, never pair-built through the image checkout or installed
+#      from the image set;
 #   4. build a user flake through the embedded one, on the builder image step 3
 #      produced.
+#
+# The image checkout supplies the Linux layer only — here, the builder image's
+# recipe. The guest runtime is this tree's and ships with `mvmctl`.
 #
 # Every step is fatal. Unlike the release lane, there is no other result here
 # worth salvaging from a run whose bootstrap failed.
@@ -27,9 +32,9 @@
 # The home must be empty or absent: a warm cache would let a broken source
 # bootstrap pass on the strength of an image an earlier run produced.
 #
-# The image recipes live in tinylabscom/mvm-images. Name a checkout with
-# MVM_IMAGES_DIR, or keep one beside this checkout; without either there is
-# nothing to build from, and the witness says so before compiling anything.
+# The builder image's recipe lives in tinylabscom/mvm-images. Name a checkout
+# with MVM_IMAGES_DIR, or keep one beside this checkout; without either there is
+# nothing to build it from, and the witness says so before compiling anything.
 
 set -euo pipefail
 
@@ -55,6 +60,10 @@ export MVM_BOOT_IMAGE=build
 # refused rather than answered with the published image. Building it locally
 # is the one thing this witness exists to prove.
 export MVM_ALLOW_LOCAL_BUILDER_BUILD=1
+# Every guest piece bootstrap prepares comes from this checkout's guest
+# runtime. Launch acquisition otherwise defaults to the image set's members,
+# and this witness would then boot guest bytes some other commit built.
+export MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build
 
 if [[ -d "$HOME_DIR" ]] && [[ -n "$(ls -A "$HOME_DIR" 2>/dev/null)" ]]; then
   echo "!!! $HOME_DIR is not empty; a cold source bootstrap needs a cold home" >&2
