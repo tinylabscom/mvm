@@ -101,73 +101,10 @@ pub fn encrypt_file_in_place_using_chunk_size(
         anyhow::bail!("chunk_size must be in 1..=u32::MAX, got {chunk_size}");
     }
 
-    let plaintext_meta =
-        fs::metadata(path).with_context(|| format!("stat plaintext {}", path.display()))?;
-    let pt_size = plaintext_meta.len();
-
     let tmp_path = path.with_extension("enc.tmp");
-
-    // Wrap the write in a closure so we can clean up on any error.
-    let result: Result<()> = (|| {
-        let plaintext_file =
-            File::open(path).with_context(|| format!("opening plaintext {}", path.display()))?;
-        let mut reader = BufReader::new(plaintext_file);
-
-        let tmp_file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open_with_mode(0o600, &tmp_path)
-            .with_context(|| format!("creating tmp {}", tmp_path.display()))?;
-        let mut writer = BufWriter::new(tmp_file);
-
-        // Header.
-        let mut header = [0u8; HEADER_SIZE];
-        header[0..4].copy_from_slice(MAGIC);
-        header[4] = SCHEMA_VERSION;
-        // bytes 5..8 reserved 0
-        header[8..12].copy_from_slice(&(chunk_size as u32).to_le_bytes());
-        header[12..20].copy_from_slice(&pt_size.to_le_bytes());
-        // bytes 20..24 reserved 0
-        writer
-            .write_all(&header)
-            .with_context(|| format!("writing header to {}", tmp_path.display()))?;
-
-        // Chunks.
-        let mut buf = vec![0u8; chunk_size];
-        let mut written_pt: u64 = 0;
-        loop {
-            let n = read_exact_up_to(&mut reader, &mut buf)?;
-            if n == 0 {
-                break;
-            }
-            // `seal` prepends a fresh nonce, so a sealed chunk is exactly
-            // the `nonce ‖ ct ‖ tag` the decoder reads back below.
-            let chunk = aead::seal(&key, &buf[..n], &[]);
-            writer
-                .write_all(&chunk)
-                .with_context(|| format!("writing encrypted chunk to {}", tmp_path.display()))?;
-            written_pt += n as u64;
-            if n < chunk_size {
-                break;
-            }
-        }
-
-        if written_pt != pt_size {
-            anyhow::bail!(
-                "encrypt read {} bytes from plaintext but stat reported {} \
-                 (file shrunk during encrypt?)",
-                written_pt,
-                pt_size
-            );
-        }
-
-        writer.flush().ok();
-        let f = writer.into_inner().context("flush BufWriter")?;
-        f.sync_all().ok();
-        Ok(())
-    })();
-
-    match result {
+    let encrypted = create_ciphertext_file(&tmp_path)
+        .and_then(|out| encrypt_into(path, out, &tmp_path, &key, chunk_size));
+    match encrypted {
         Ok(()) => {
             fs::rename(&tmp_path, path).with_context(|| {
                 format!("atomic rename {} → {}", tmp_path.display(), path.display())
@@ -179,6 +116,96 @@ pub fn encrypt_file_in_place_using_chunk_size(
             Err(e)
         }
     }
+}
+
+/// Encrypt `src` under `key` into a new file at `dst`, leaving `src` alone.
+///
+/// Only ciphertext is written: `dst` is created (mode 0600, refused if it
+/// exists) and receives the header and sealed chunks as `src` is read, so no
+/// plaintext copy is made beside it. On an error `dst` is removed.
+pub fn encrypt_file(src: &Path, dst: &Path, key: &[u8]) -> Result<()> {
+    let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("snapshot encryption {e}"))?;
+    // Created before anything else, so a refusal here never touches a file
+    // this call did not make.
+    let out = create_ciphertext_file(dst)?;
+    let result = encrypt_into(src, out, dst, &key, DEFAULT_CHUNK_SIZE);
+    if result.is_err() {
+        let _ = fs::remove_file(dst);
+    }
+    result
+}
+
+/// Create a new, owner-only ciphertext file; refuses an existing path.
+fn create_ciphertext_file(dst: &Path) -> Result<File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open_with_mode(0o600, dst)
+        .with_context(|| format!("creating {}", dst.display()))
+}
+
+/// Write the ciphertext of `src` into `out`, the file just created at `dst`.
+fn encrypt_into(
+    src: &Path,
+    out: File,
+    dst: &Path,
+    key: &aead::Key,
+    chunk_size: usize,
+) -> Result<()> {
+    let plaintext_meta =
+        fs::metadata(src).with_context(|| format!("stat plaintext {}", src.display()))?;
+    let pt_size = plaintext_meta.len();
+
+    let plaintext_file =
+        File::open(src).with_context(|| format!("opening plaintext {}", src.display()))?;
+    let mut reader = BufReader::new(plaintext_file);
+    let mut writer = BufWriter::new(out);
+
+    // Header.
+    let mut header = [0u8; HEADER_SIZE];
+    header[0..4].copy_from_slice(MAGIC);
+    header[4] = SCHEMA_VERSION;
+    // bytes 5..8 reserved 0
+    header[8..12].copy_from_slice(&(chunk_size as u32).to_le_bytes());
+    header[12..20].copy_from_slice(&pt_size.to_le_bytes());
+    // bytes 20..24 reserved 0
+    writer
+        .write_all(&header)
+        .with_context(|| format!("writing header to {}", dst.display()))?;
+
+    // Chunks.
+    let mut buf = vec![0u8; chunk_size];
+    let mut written_pt: u64 = 0;
+    loop {
+        let n = read_exact_up_to(&mut reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        // `seal` prepends a fresh nonce, so a sealed chunk is exactly
+        // the `nonce ‖ ct ‖ tag` the decoder reads back below.
+        let chunk = aead::seal(key, &buf[..n], &[]);
+        writer
+            .write_all(&chunk)
+            .with_context(|| format!("writing encrypted chunk to {}", dst.display()))?;
+        written_pt += n as u64;
+        if n < chunk_size {
+            break;
+        }
+    }
+
+    if written_pt != pt_size {
+        anyhow::bail!(
+            "encrypt read {} bytes from plaintext but stat reported {} \
+             (file shrunk during encrypt?)",
+            written_pt,
+            pt_size
+        );
+    }
+
+    writer.flush().ok();
+    let f = writer.into_inner().context("flush BufWriter")?;
+    f.sync_all().ok();
+    Ok(())
 }
 
 /// Read up to `buf.len()` bytes from `reader` into `buf`. Returns
@@ -372,6 +399,50 @@ mod tests {
 
         decrypt_file_in_place(&path, &test_key()).unwrap();
         assert_eq!(read_file(&path), plaintext);
+    }
+
+    #[test]
+    fn encrypt_file_writes_only_ciphertext_and_leaves_the_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("volume.ext4");
+        let dst = tmp.path().join("sealed").join("volume.mvve");
+        fs::create_dir(dst.parent().unwrap()).unwrap();
+        let plaintext = b"writable guest data that must survive sealing".to_vec();
+        write_file(&src, &plaintext);
+
+        encrypt_file(&src, &dst, &test_key()).unwrap();
+        assert_eq!(read_file(&src), plaintext, "the source is left as it was");
+        let sealed_dir: Vec<_> = fs::read_dir(dst.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            sealed_dir,
+            ["volume.mvve"],
+            "nothing but ciphertext beside it"
+        );
+        let ct = read_file(&dst);
+        assert_eq!(&ct[0..4], MAGIC);
+        assert!(!ct.windows(14).any(|w| w == b"writable guest"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        decrypt_file_in_place(&dst, &test_key()).unwrap();
+        assert_eq!(read_file(&dst), plaintext);
+    }
+
+    #[test]
+    fn encrypt_file_refuses_an_existing_destination_and_keeps_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("volume.ext4");
+        let dst = tmp.path().join("volume.mvve");
+        write_file(&src, b"data");
+        write_file(&dst, b"previous ciphertext");
+        assert!(encrypt_file(&src, &dst, &test_key()).is_err());
+        assert_eq!(read_file(&dst), b"previous ciphertext");
     }
 
     #[test]

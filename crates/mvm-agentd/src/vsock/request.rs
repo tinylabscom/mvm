@@ -217,6 +217,16 @@ pub enum GuestRequest {
         /// a reboot. Absent on callers that do not rotate grants.
         #[serde(default)]
         grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+        /// The seccomp tier the claiming launch's signed plan admits, for a
+        /// child restored out of a standby parent that booted with no plan and
+        /// so admitted no tier. The agent admits it before it acknowledges and
+        /// before anything else starts a workload process; a guest that already
+        /// admitted a different tier refuses it. Omitted from the wire when
+        /// absent, so a caller that sends none reaches an agent built before
+        /// the field; an agent that predates it refuses a request carrying it,
+        /// which fails the claim rather than leaving the child unfiltered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
@@ -832,6 +842,7 @@ mod tests {
                 hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
+                seccomp_tier: None,
             },
             GuestRequest::FsDiff,
             GuestRequest::SyncFilesystems,
@@ -968,6 +979,7 @@ mod tests {
             hostname: Some("worker-9".to_string()),
             host_epoch_secs: Some(1_717_000_000),
             grant_envelope: None,
+            seccomp_tier: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         match serde_json::from_str::<GuestRequest>(&json).unwrap() {
@@ -1485,6 +1497,7 @@ mod tests {
                     hostname: None,
                     host_epoch_secs: None,
                     grant_envelope: None,
+                    seccomp_tier: None,
                 },
                 "post-restore",
             ),

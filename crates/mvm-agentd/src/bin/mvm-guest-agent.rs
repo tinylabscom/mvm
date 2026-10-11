@@ -489,12 +489,14 @@ fn handle_client(
                 hostname,
                 host_epoch_secs,
                 grant_envelope,
+                seccomp_tier,
             } => handle_post_restore(
                 &mut ctx,
                 token,
                 hostname.as_deref(),
                 host_epoch_secs,
                 grant_envelope,
+                seccomp_tier,
             ),
 
             GuestRequest::Exec {

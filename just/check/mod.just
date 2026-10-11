@@ -82,7 +82,7 @@ ebpf:
     PATH="${HOME}/.cargo/bin:${PATH}" cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
 
 # Later required-overlay boots reuse it without rebuilding guest binaries on
-# the hot path. Pass through extra args like `--force` or `--source download`.
+# the hot path. Pass through extra args like `--force` or `--source build`.
 
 # Prebuild or refresh the version-matched read-only runtime overlay
 overlay *ARGS:

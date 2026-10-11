@@ -49,18 +49,14 @@ pub enum ImageBuildRole {
     BuilderVm,
     DefaultTenant,
     RootlessTenant,
-    RuntimeOverlay,
-    Initramfs,
     Kernel,
 }
 
 impl ImageBuildRole {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 4] = [
         Self::BuilderVm,
         Self::DefaultTenant,
         Self::RootlessTenant,
-        Self::RuntimeOverlay,
-        Self::Initramfs,
         Self::Kernel,
     ];
 
@@ -72,8 +68,6 @@ impl ImageBuildRole {
             Self::BuilderVm => "builder-vm",
             Self::DefaultTenant => "default-tenant",
             Self::RootlessTenant => "rootless-tenant",
-            Self::RuntimeOverlay => "runtime-overlay",
-            Self::Initramfs => "initramfs",
             Self::Kernel => "kernel",
         }
     }

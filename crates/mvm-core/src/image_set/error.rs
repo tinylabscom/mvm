@@ -73,8 +73,6 @@ pub enum ImageSetError {
         role: ImageSetRole,
         target: MemberTarget,
     },
-    #[error("SDK sidecar for {target} names no known C library")]
-    UnknownSidecarLibc { target: MemberTarget },
     #[error("set version {set_version} does not match release tag {release_tag}")]
     ReleaseTagVersionMismatch {
         set_version: Box<ImageSetVersion>,
@@ -363,7 +361,6 @@ impl ImageSetError {
             | Self::MissingBootProtocol { .. }
             | Self::UnexpectedBootProtocol { .. }
             | Self::TargetNotAllowedForRole { .. }
-            | Self::UnknownSidecarLibc { .. }
             | Self::BuildModeNotAllowedForRole { .. }
             | Self::ReleaseTagVersionMismatch { .. }
             | Self::SupersedesNotOlder { .. }

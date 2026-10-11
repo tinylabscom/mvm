@@ -194,22 +194,32 @@ impl ImageSetFixture {
         self
     }
 
-    /// Stamp `source_fingerprint` on every SDK sidecar member for `arch`
-    /// (None clears it), for the fetch-when-unchanged tests.
+    /// Add the guest-runtime members image sets published before the guest
+    /// runtime moved to the CLI release: an overlay, both SDK sidecars (with
+    /// the source fingerprint they carried) and an initramfs per
+    /// architecture. Nothing serves them; a consumer must never ask.
     #[must_use]
-    pub fn with_sidecar_fingerprints(
-        mut self,
-        arch: mvm_core::arch::GuestArch,
-        fingerprint: Option<String>,
-    ) -> Self {
-        for member in &mut self.manifest.members {
-            if matches!(
-                member.role,
-                mvm_core::image_set::ImageSetRole::SdkSidecar(_)
-            ) && member.target == mvm_core::image_set::MemberTarget::Arch(arch)
-            {
-                member.source_fingerprint =
-                    fingerprint.clone().map(|fp| Sha256Hex::new(fp).unwrap());
+    pub fn with_retired_guest_runtime(mut self) -> Self {
+        use mvm_contract::guest_libc::GuestLibc;
+        use mvm_core::image_set::RetiredGuestRuntimeRole;
+        for arch in [
+            mvm_core::arch::GuestArch::X86_64,
+            mvm_core::arch::GuestArch::Aarch64,
+        ] {
+            for retired in [
+                RetiredGuestRuntimeRole::RuntimeOverlay,
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+                RetiredGuestRuntimeRole::Initramfs,
+            ] {
+                let mut member = placeholder_member(
+                    ImageSetRole::RetiredGuestRuntime(retired),
+                    MemberTarget::Arch(arch),
+                );
+                if matches!(retired, RetiredGuestRuntimeRole::SdkSidecar(_)) {
+                    member.source_fingerprint = Some(Sha256Hex::from_bytes(b"sdk-sources"));
+                }
+                self.manifest.members.push(member);
             }
         }
         self

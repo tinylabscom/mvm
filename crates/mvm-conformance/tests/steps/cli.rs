@@ -217,20 +217,106 @@ fn isolated_mvm_home_on_encrypted_backing(world: &mut CliWorld) {
     world.encrypted_volume_probe_path = Some(install_encrypted_backing_probes(home.path()));
 }
 
+#[given(expr = "an isolated mvm home on unencrypted backing storage")]
+fn isolated_mvm_home_on_unencrypted_backing(world: &mut CliWorld) {
+    isolated_mvm_home(world);
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated MVM_HOME was just created");
+    world.encrypted_volume_probe_path = Some(install_backing_probes(
+        home.path(),
+        &UNENCRYPTED_BACKING_PROBES,
+    ));
+}
+
+#[when(
+    expr = "I run mvmctl in the isolated mvm home with {string} allowing unverified volume storage"
+)]
+fn run_mvmctl_in_isolated_home_allowing_unverified_storage(world: &mut CliWorld, args: String) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    let mut cmd = mvmctl_command();
+    cmd.args(mvm_conformance::doc_examples::tokenize(&args))
+        .isolated_home(home.path())
+        .env("MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE", "1");
+    apply_encrypted_volume_probe_path(world, &mut cmd);
+    world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
+}
+
+#[then("the isolated home audit log records a volume storage override")]
+fn isolated_home_audit_log_records_volume_storage_override(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("isolated home must exist");
+    let log_path = home.path().join("state").join("log").join("audit.jsonl");
+    let log = fs::read_to_string(&log_path)
+        .unwrap_or_else(|error| panic!("read audit log {}: {error}", log_path.display()));
+    assert!(
+        log.lines()
+            .any(|line| line.contains("\"volume_storage_override\"")),
+        "no volume_storage_override entry in {}:\n{log}",
+        log_path.display()
+    );
+}
+
 /// Install deterministic platform probes for a subprocess scenario whose
 /// encrypted-backing precondition is part of the declared fixture.
 pub(super) fn install_encrypted_backing_probes(home: &Path) -> OsString {
+    install_backing_probes(home, &ENCRYPTED_BACKING_PROBES)
+}
+
+/// The shapes the shared detector parses: one ext4 mount on a dm-crypt
+/// mapping, with its journal inside the filesystem.
+const ENCRYPTED_BACKING_PROBES: [(&str, &str); 4] = [
+    (
+        "findmnt",
+        "#!/bin/sh\nprintf '%s\\n' \
+             '{\"filesystems\":[{\"source\":\"/dev/mapper/mvm-bdd-crypt\",\"fstype\":\"ext4\"}]}'\n",
+    ),
+    (
+        "tune2fs",
+        "#!/bin/sh\nprintf '%s\\n' 'Filesystem features: has_journal extents' \
+             'Journal inode: 8'\n",
+    ),
+    (
+        "lsblk",
+        "#!/bin/sh\nprintf '%s\\n' '{\"blockdevices\":[{\"type\":\"crypt\"}]}'\n",
+    ),
+    ("diskutil", "#!/bin/sh\nprintf '%s\\n' 'FileVault: Yes'\n"),
+];
+
+/// The same mount on a plain partition, and a macOS volume that is only
+/// hardware-encrypted at rest: neither is verified encrypted.
+const UNENCRYPTED_BACKING_PROBES: [(&str, &str); 4] = [
+    (
+        "findmnt",
+        "#!/bin/sh\nprintf '%s\\n' \
+         '{\"filesystems\":[{\"source\":\"/dev/sda2\",\"fstype\":\"ext4\"}]}'\n",
+    ),
+    (
+        "tune2fs",
+        "#!/bin/sh\nprintf '%s\\n' 'Filesystem features: has_journal extents' \
+         'Journal inode: 8'\n",
+    ),
+    (
+        "lsblk",
+        "#!/bin/sh\nprintf '%s\\n' '{\"blockdevices\":[{\"type\":\"part\"}]}'\n",
+    ),
+    (
+        "diskutil",
+        "#!/bin/sh\nprintf '%s\\n' 'FileVault: No (Encrypted at rest)'\n",
+    ),
+];
+
+fn install_backing_probes(home: &Path, probes: &[(&str, &str)]) -> OsString {
     let probe_bin = home.join("encrypted-backing-probe-bin");
     fs::create_dir_all(&probe_bin)
         .unwrap_or_else(|error| panic!("create encryption probe bin {probe_bin:?}: {error}"));
-    for (name, body) in [
-        (
-            "findmnt",
-            "#!/bin/sh\nprintf '%s\\n' /dev/mapper/mvm-bdd-crypt\n",
-        ),
-        ("lsblk", "#!/bin/sh\nprintf '%s\\n' crypt\n"),
-        ("diskutil", "#!/bin/sh\nprintf '%s\\n' 'FileVault: Yes'\n"),
-    ] {
+    for (name, body) in probes {
         let probe = probe_bin.join(name);
         fs::write(&probe, body)
             .unwrap_or_else(|error| panic!("write encryption probe {probe:?}: {error}"));

@@ -4211,7 +4211,10 @@ fn start_resolver_recreates_with_force() {
 /// is applied until the machine starts.
 fn register_writable_state_volume(machine: &str) {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
@@ -4273,7 +4276,10 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
 
     let _state = IsolatedMachineState::new();
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
@@ -4381,4 +4387,30 @@ fn a_projects_allow_list_takes_effect_through_every_verb() {
     );
     assert_eq!(through_run, through_machine_run);
     assert_eq!(through_run, through_create);
+}
+
+/// `--attach` dispatches into a machine that is already running, so it boots
+/// nothing and has no source to infer. Inferring one anyway turned an attach
+/// started from a Rust checkout into an OCI `rust:1-alpine` boot, which
+/// `--entrypoint` then refused.
+#[test]
+fn an_attached_entrypoint_infers_no_boot_source() {
+    use crate::commands::vm::exec::Inference;
+    let attach = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "web",
+        "--stdin",
+        "/tmp/script.sh",
+    ])
+    .expect("attach parses");
+    assert_eq!(attach.source_inference(), Inference::ExplicitOnly);
+
+    let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("detach parses");
+    assert_eq!(detached.source_inference(), Inference::ExplicitOnly);
+
+    let transient = parse_run(&["run", "--", "true"]).expect("transient run parses");
+    assert_eq!(transient.source_inference(), Inference::Enabled);
 }

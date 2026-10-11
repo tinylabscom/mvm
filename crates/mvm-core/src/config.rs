@@ -241,6 +241,15 @@ pub fn mvm_cache_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::Pat
     mvm_home.as_ref().join("cache")
 }
 
+/// OCI image cache, and the guest runtime injected into images from it:
+/// `<mvm_home>/cache/oci`.
+///
+/// One answer for every caller that prepares or boots an OCI image, so the CLI
+/// and the host library resolve an image's guest runtime from the same place.
+pub fn oci_cache_dir() -> std::path::PathBuf {
+    mvm_cache_dir_at(mvm_home()).join("oci")
+}
+
 /// The cache directory of the *default* root (`$HOME/.mvm/cache`),
 /// deliberately ignoring the `MVM_HOME` override. Isolated sessions
 /// (worktrees pointing `MVM_HOME` at a tempdir) use this to

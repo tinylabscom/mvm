@@ -285,3 +285,103 @@ fn a_label_that_merely_contains_m1_does_not_count() {
         "    runs-on: [self-hosted, macOS, ARM64, m1]\n"
     ));
 }
+
+/// The self-hosted x86_64 KVM pool, as the shard worker spells its labels.
+const KVM_POOL: &str = r#"["self-hosted","Linux","X64","mvm","hetzner","kvm"]"#;
+
+/// The required CI workflow is the one untrusted-event workflow allowed to
+/// reach the KVM pool, and only through the runner picker. The picker reads
+/// the pull request's head repository before it reads the token, and a fork
+/// resolves to a hosted runner. A pull request from a branch of this
+/// repository was pushed by someone with write access; a fork's was not.
+#[test]
+fn only_the_runner_picker_routes_ci_to_the_kvm_pool_and_never_for_a_fork() {
+    let all = workflows();
+    let shard = all
+        .iter()
+        .find(|w| w.name == "workspace-shard.yml")
+        .expect("the workspace shard worker must exist");
+    assert!(
+        shard.text.contains(&format!("fromJSON('{KVM_POOL}')")),
+        "the shard worker is what places a job on the KVM pool; if it moved, \
+         this test is no longer guarding it"
+    );
+    assert!(
+        shard
+            .text
+            .contains("runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON("),
+        "only `runner_kind: hetzner` may select the KVM pool"
+    );
+
+    for workflow in &all {
+        let untrusted = untrusted_reach(&workflow.text).is_some();
+        if !untrusted || workflow.name == "workspace-shard.yml" {
+            continue;
+        }
+        for line in workflow.text.lines() {
+            let line = line.trim();
+            let line = line.strip_prefix("- ").unwrap_or(line);
+            if line.starts_with("runs-on:") || line.starts_with("runner:") {
+                assert!(
+                    !line.contains("hetzner"),
+                    "{}: an untrusted-event workflow places a job on the KVM pool \
+                     directly: {line:?}",
+                    workflow.name
+                );
+            }
+            // A literal `github` pins the hosted pool and is always safe;
+            // anything else must be the picker's answer.
+            if let Some(kind) = line.strip_prefix("runner_kind:") {
+                let kind = kind.trim();
+                assert!(
+                    kind == "github"
+                        || (workflow.name == "ci.yml"
+                            && kind
+                                == "${{ needs.runners.outputs.workspace == 'hetzner' && 'hetzner' || 'github' }}"),
+                    "{}: `runner_kind` must be `github` or ci.yml's runner picker, found {line:?}",
+                    workflow.name
+                );
+            }
+        }
+    }
+
+    let ci = all
+        .iter()
+        .find(|w| w.name == "ci.yml")
+        .expect("ci.yml must exist");
+    let picker = ci
+        .text
+        .split_once("\n  runners:\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\n  lint-core:\n").map(|(job, _)| job))
+        .expect("ci.yml must define the runner picker before lint-core");
+    let fork_check = picker
+        .find(r#"[ "$EVENT" = pull_request ] && [ "$HEAD_REPO" != "$REPO" ]"#)
+        .expect("the picker must refuse a fork's pull request");
+    let token_use = picker
+        .find(r#"GH_TOKEN="$PICKER_TOKEN""#)
+        .expect("the picker lists runners with its own token");
+    assert!(
+        fork_check < token_use,
+        "the fork refusal must come before the token is used"
+    );
+    for expected in [
+        "HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
+        "PICKER_TOKEN: ${{ secrets.RUNNER_PICKER_TOKEN }}",
+        "WORKSPACE_ROUTING: ${{ vars.RUNNER_PICKER_WORKSPACE }}",
+        r#"[ "$WORKSPACE_ROUTING" != true ]"#,
+        "workspace=github",
+        r#"select(.status == "online" and .busy == false)"#,
+        "exit 0",
+    ] {
+        assert!(
+            picker.contains(expected),
+            "the picker must fall back to hosted and only pick an idle online runner: \
+             missing {expected:?}"
+        );
+    }
+    assert!(
+        !picker.contains("run: |\n          set -e"),
+        "the picker must never fail a run, so it cannot run under `set -e`"
+    );
+}

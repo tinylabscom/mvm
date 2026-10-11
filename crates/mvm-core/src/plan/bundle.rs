@@ -84,8 +84,8 @@ pub use mvm_contract::plan::bundle::{
 use crate::arch::GuestArch;
 use crate::image_set::{
     BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetRequirement,
-    ImageSetRole, WorkloadImageProfile, check_protocol_compatibility, require_complete,
-    select_member, select_workload_image, validate_structure,
+    ImageSetRole, RetiredGuestRuntimeRole, WorkloadImageProfile, check_protocol_compatibility,
+    require_complete, select_member, select_workload_image, validate_structure,
 };
 use crate::packs::Sha256Hex;
 
@@ -780,6 +780,20 @@ pub struct VerifiedBootAssets {
     pub image_set: VerifiedEmbeddedImageSet,
 }
 
+/// The image-set role of the runtime overlay a bundle's boot assets carry.
+///
+/// Boot assets are the one consumer of an image set's guest-runtime members:
+/// a portable bundle authenticates its overlay and initramfs through the set
+/// manifest it embeds, so it can only be built from a set that still publishes
+/// them. Every other path assembles the guest runtime from the CLI's own.
+pub const BOOT_ASSET_OVERLAY_ROLE: ImageSetRole =
+    ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::RuntimeOverlay);
+
+/// The image-set role of the universal initramfs a bundle's boot assets carry;
+/// see [`BOOT_ASSET_OVERLAY_ROLE`].
+pub const BOOT_ASSET_INITRAMFS_ROLE: ImageSetRole =
+    ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::Initramfs);
+
 /// Select the two portable Linux runtime archives from an original full manifest.
 /// Actual launch still checks the target backend and host protocol support.
 pub fn select_boot_asset_members(
@@ -792,8 +806,8 @@ pub fn select_boot_asset_members(
         .expect("Qemu declares portable Linux image support");
     support.artifact_formats = vec![crate::image_set::ArtifactFormat::TarGz];
     let selected = [
-        select_member(manifest, ImageSetRole::RuntimeOverlay, arch, &support)?,
-        select_member(manifest, ImageSetRole::Initramfs, arch, &support)?,
+        select_member(manifest, BOOT_ASSET_OVERLAY_ROLE, arch, &support)?,
+        select_member(manifest, BOOT_ASSET_INITRAMFS_ROLE, arch, &support)?,
     ];
     for artifact in selected.iter().flat_map(|member| &member.artifacts) {
         if manifest
@@ -819,7 +833,7 @@ pub fn check_boot_assets_for_backend(
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
     check_protocol_compatibility(&boot.image_set.manifest, host_protocols)?;
-    for role in [ImageSetRole::RuntimeOverlay, ImageSetRole::Initramfs] {
+    for role in [BOOT_ASSET_OVERLAY_ROLE, BOOT_ASSET_INITRAMFS_ROLE] {
         select_member(&boot.image_set.manifest, role, boot.arch, backend)?;
     }
     Ok(())
@@ -836,7 +850,9 @@ pub struct VerifiedEmbeddedImageSet {
 }
 
 /// Refuse an embedded set before boot unless its protocol declaration and
-/// selected workload image are both satisfiable by the chosen backend.
+/// selected workload image are both satisfiable by the chosen backend. The
+/// guest runtime is not part of the check: it comes from the CLI that boots
+/// the bundle, never from the embedded set.
 pub fn check_embedded_image_set_for_backend(
     embedded: &VerifiedEmbeddedImageSet,
     arch: GuestArch,
@@ -847,12 +863,6 @@ pub fn check_embedded_image_set_for_backend(
     select_workload_image(
         &embedded.manifest,
         WorkloadImageProfile::DefaultTenant,
-        arch,
-        backend,
-    )?;
-    select_member(
-        &embedded.manifest,
-        ImageSetRole::RuntimeOverlay,
         arch,
         backend,
     )?;
@@ -1338,17 +1348,17 @@ mod tests {
                 None,
                 vec![VirtioBlk, DmVerity],
             ),
-            ImageSetRole::RuntimeOverlay => (
+            ImageSetRole::RetiredGuestRuntime(retired) => (
                 vec![(
-                    format!("runtime-overlay{suffix}.tar.gz"),
-                    ArtifactFormat::TarGz,
-                )],
-                None,
-                vec![],
-            ),
-            ImageSetRole::SdkSidecar(libc) => (
-                vec![(
-                    format!("sdk-sidecar{suffix}-{libc}.tar.gz"),
+                    match retired {
+                        RetiredGuestRuntimeRole::RuntimeOverlay => {
+                            format!("runtime-overlay{suffix}.tar.gz")
+                        }
+                        RetiredGuestRuntimeRole::SdkSidecar(libc) => {
+                            format!("sdk-sidecar{suffix}-{libc}.tar.gz")
+                        }
+                        RetiredGuestRuntimeRole::Initramfs => format!("initramfs{suffix}.tar.gz"),
+                    },
                     ArtifactFormat::TarGz,
                 )],
                 None,
@@ -1358,11 +1368,6 @@ mod tests {
                 vec![(format!("stage0-vmlinux{suffix}"), kernel)],
                 Some(BootProtocol::LinuxDirect),
                 vec![VirtioVsock],
-            ),
-            ImageSetRole::Initramfs => (
-                vec![(format!("initramfs{suffix}.tar.gz"), ArtifactFormat::TarGz)],
-                None,
-                vec![],
             ),
             ImageSetRole::QemuWasmSmokePack => (
                 vec![("qemu-wasm-smoke.tar.gz".to_string(), ArtifactFormat::TarGz)],
@@ -1398,11 +1403,26 @@ mod tests {
         )
     }
 
+    /// A complete set as the image repository still publishes it: the
+    /// Linux layer plus the retired overlay and initramfs members a bundle's
+    /// boot assets are selected from.
     fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
         let mut members = Vec::new();
         let mut bytes = Vec::new();
-        for required in ImageSetRequirement::current_train().members() {
-            let (member, member_bytes) = image_member(required.role, required.target);
+        let retired = [GuestArch::X86_64, GuestArch::Aarch64]
+            .into_iter()
+            .flat_map(|arch| {
+                [BOOT_ASSET_OVERLAY_ROLE, BOOT_ASSET_INITRAMFS_ROLE]
+                    .into_iter()
+                    .map(move |role| (role, MemberTarget::Arch(arch)))
+            });
+        let required = ImageSetRequirement::current_train()
+            .members()
+            .iter()
+            .map(|required| (required.role, required.target))
+            .collect::<Vec<_>>();
+        for (role, target) in required.into_iter().chain(retired) {
+            let (member, member_bytes) = image_member(role, target);
             members.push(member);
             bytes.extend(member_bytes);
         }
@@ -1601,7 +1621,7 @@ mod tests {
             .members
             .iter_mut()
             .find(|member| {
-                member.role == ImageSetRole::Initramfs && member.target.admits(GuestArch::Aarch64)
+                member.role == BOOT_ASSET_INITRAMFS_ROLE && member.target.admits(GuestArch::Aarch64)
             })
             .unwrap();
         initramfs.artifacts[0].name = name;
@@ -1614,8 +1634,7 @@ mod tests {
             .members
             .iter_mut()
             .find(|member| {
-                member.role == ImageSetRole::RuntimeOverlay
-                    && member.target.admits(GuestArch::Aarch64)
+                member.role == BOOT_ASSET_OVERLAY_ROLE && member.target.admits(GuestArch::Aarch64)
             })
             .unwrap();
         overlay.artifacts[0].format = ArtifactFormat::Text;
@@ -1673,7 +1692,7 @@ mod tests {
         let mut missing = image_set.clone();
         missing
             .members
-            .retain(|member| member.role != ImageSetRole::Initramfs);
+            .retain(|member| member.role != BOOT_ASSET_INITRAMFS_ROLE);
         assert!(matches!(
             read_and_verify_bundle(
                 &boot_bundle(&sk, &missing, "aarch64", &payload),
@@ -1700,7 +1719,7 @@ mod tests {
     fn partial_embedded_image_set_is_refused_before_boot() {
         let sk = fresh_key();
         let (mut image_set, mut bytes) = complete_image_set();
-        let removed = image_set.members.pop().expect("complete set has members");
+        let removed = image_set.members.remove(0);
         let removed_names: BTreeSet<String> = removed
             .artifacts
             .iter()

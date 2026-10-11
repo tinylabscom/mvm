@@ -13,7 +13,7 @@ use mvm_core::image_set::{
     IMAGE_SET_SCHEMA_VERSION, ImageSetCompatibility, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRequirement, ImageSetRole, ImageSetVersion, MemberArtifact,
     MemberTarget, NixInputs, ProtocolRange, ReleaseProducer, ReleaseTag, RepositorySlug,
-    RevocationChannel, WorkflowPath,
+    RetiredGuestRuntimeRole, RevocationChannel, WorkflowPath,
 };
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
@@ -81,13 +81,12 @@ fn member(role: ImageSetRole, target: MemberTarget) -> (ImageSetMember, Vec<(Str
             None,
             vec![VirtioBlk, DmVerity],
         ),
-        ImageSetRole::RuntimeOverlay => (
-            vec![archive(&format!("runtime-overlay{suffix}"))],
-            None,
-            vec![],
-        ),
-        ImageSetRole::SdkSidecar(libc) => (
-            vec![archive(&format!("sdk-sidecar{suffix}-{libc}"))],
+        ImageSetRole::RetiredGuestRuntime(retired) => (
+            vec![archive(&match retired {
+                RetiredGuestRuntimeRole::RuntimeOverlay => format!("runtime-overlay{suffix}"),
+                RetiredGuestRuntimeRole::SdkSidecar(libc) => format!("sdk-sidecar{suffix}-{libc}"),
+                RetiredGuestRuntimeRole::Initramfs => format!("initramfs{suffix}"),
+            })],
             None,
             vec![],
         ),
@@ -96,7 +95,6 @@ fn member(role: ImageSetRole, target: MemberTarget) -> (ImageSetMember, Vec<(Str
             Some(BootProtocol::LinuxDirect),
             vec![VirtioVsock],
         ),
-        ImageSetRole::Initramfs => (vec![archive(&format!("initramfs{suffix}"))], None, vec![]),
         ImageSetRole::QemuWasmSmokePack => (vec![archive("qemu-wasm-smoke")], None, vec![]),
     };
     let (artifacts, bytes): (Vec<_>, Vec<_>) = specs

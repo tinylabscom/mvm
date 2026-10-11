@@ -13,8 +13,8 @@ export const AGENT_SKILL = `<!-- mvm skill for coding agents. Also served at /ag
 
 mvm runs a command inside a real Linux microVM on the machine you are already
 on: one CLI, no account, no control plane, nothing leaves the host unless a
-policy admits it. \`mvmctl run --image alpine -- uname -a\` pulls the image,
-boots a VM, runs the command, and tears the VM down.
+policy admits it. \`mvmctl run --image alpine -- uname -a\` claims a VM
+prepared from that image, runs the command, and tears the VM down.
 
 What separates it from a process sandbox is the shape of the boundary. A
 workload microVM boots with **no network interface at all** — the guest has a
@@ -67,9 +67,15 @@ actually needs.
 
 ## Run something
 
-The shortest path — a transient VM, one command, torn down after:
+The shortest path — a transient VM, one command, torn down after. An unnamed
+run claims a prepared warm standby of the same image and sizing and refuses
+rather than cold-booting without one, so prepare it first (\`--name\` boots cold
+instead):
 
 \`\`\`bash
+mvmctl image pull alpine
+export MVM_RESIDENCY=warm            # Linux defaults to parked: no claims
+mvmctl pool warm --image alpine
 mvmctl run --image alpine -- uname -a
 mvmctl image inspect alpine          # what was pulled, and its provenance
 \`\`\`
@@ -87,7 +93,7 @@ From a Nix flake, which is the reproducible path:
 
 \`\`\`bash
 mvmctl machine build --flake . --profile minimal
-mvmctl machine run --flake .
+mvmctl machine run --name app --flake .            # named: no standby to claim
 mvmctl machine run --flake . --mount .:/work -- ls /work
 \`\`\`
 

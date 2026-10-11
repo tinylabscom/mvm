@@ -18,6 +18,9 @@ pub mod boot_asset_fixture;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
+/// The uid a builder guest runs its guest agent under, chosen from the
+/// identities the booted image names.
+pub mod builder_agent_uid;
 /// The builder boot contract: the payload of mvm's own builder binaries every
 /// builder boot carries beside its image, the image's boot ABI, and the one
 /// kernel command line every builder backend boots with.
@@ -179,10 +182,6 @@ pub mod builder_backend_select;
 /// its VM here).
 pub mod builder_health;
 
-/// Which arm prepares an image that is otherwise pair-built from an image
-/// checkout: adopt the pinned set's verified members (when they were built
-/// from this tree, or unconditionally on request), or build locally.
-pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
 pub mod guest_agent_build;
@@ -211,6 +210,9 @@ pub mod release_signature;
 /// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
 /// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// The overlay, initramfs and SDK sidecars assembled from one guest runtime,
+/// and the archive digest each records as its origin.
+pub mod runtime_pieces;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
 /// Fetches the per-arch, per-libc member of the signed image set, proves it
 /// against the verified root and its own manifest, and installs it under

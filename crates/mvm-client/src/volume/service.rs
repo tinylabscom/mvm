@@ -22,19 +22,23 @@ use super::lifecycle;
 
 /// Verifies that a host path lives on encrypted backing storage.
 ///
-/// mvm-managed volumes carry their own encryption lifecycle, so they never
-/// consult the probe. An ad-hoc source directory is plaintext while being
-/// snapshotted and must sit on encrypted host storage. The check is diagnostic
-/// work (platform tooling like `diskutil` / `lsblk`), so the presentation
-/// surface that owns those diagnostics injects it.
+/// Consulted wherever plaintext sits on the host: an unlocked managed volume
+/// (sealed while locked, plaintext from unlock until the next lock) and an
+/// ad-hoc source directory being snapshotted. The service layers the audited
+/// development override over this probe's refusal. The check is diagnostic
+/// work (platform tooling like `diskutil` / `lsblk`), so the composition root
+/// injects it; [`LocalVolumeService::with_system_host_encryption_probe`] binds
+/// the shared detector.
 pub trait HostEncryptionProbe: Send + Sync {
     /// Return `Ok(())` only when `path` is confirmed to live on encrypted
     /// backing storage; unknown must fail closed.
     fn require_encrypted(&self, path: &Path) -> Result<()>;
 }
 
-/// Fail-closed default probe: refuses every host-backed path, keeping
-/// consumers without host diagnostics restricted to mvm-managed volumes.
+/// Fail-closed default probe: verifies nothing. A service built on it can
+/// still list, recover, lock, and release, but creating, unlocking,
+/// attaching, or launching a managed volume needs a real probe (or the
+/// development override).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DenyAllHostEncryptionProbe;
 
@@ -42,7 +46,7 @@ impl HostEncryptionProbe for DenyAllHostEncryptionProbe {
     fn require_encrypted(&self, path: &Path) -> Result<()> {
         bail!(
             "cannot verify encrypted host backing for {}: this consumer has no host \
-             encryption probe; use an mvm-managed encrypted volume instead",
+             encryption probe; build the volume service with the system probe",
             path.display()
         )
     }
@@ -158,8 +162,9 @@ impl Default for LocalVolumeService {
 }
 
 impl LocalVolumeService {
-    /// Service with the fail-closed host-encryption probe: managed encrypted
-    /// volumes only.
+    /// Service with the fail-closed host-encryption probe: metadata, recovery,
+    /// sealing, and lease release work; anything that places plaintext on the
+    /// host is refused.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -167,11 +172,20 @@ impl LocalVolumeService {
         }
     }
 
-    /// Service with a caller-supplied host-encryption probe, enabling ad-hoc
-    /// directory snapshotting.
+    /// Service with a caller-supplied host-encryption probe.
     #[must_use]
     pub fn with_host_encryption_probe(probe: Box<dyn HostEncryptionProbe>) -> Self {
         Self { probe }
+    }
+
+    /// Service bound to the platform's real backing-storage detector, the one
+    /// `mvmctl doctor` reports from. Unsupported or inconclusive detection
+    /// still refuses.
+    #[must_use]
+    pub fn with_system_host_encryption_probe() -> Self {
+        Self::with_host_encryption_probe(probe_from_fn(
+            mvm_core::host_storage_encryption::require_host_path_encryption,
+        ))
     }
 
     /// Run the host-encryption policy against a path.
@@ -182,7 +196,19 @@ impl LocalVolumeService {
     /// Dropping that check silently would be a posture change hiding inside a
     /// refactor.
     pub fn require_host_encryption(&self, path: &Path) -> Result<()> {
-        self.probe.require_encrypted(path)
+        self.admit_host_storage(path)
+    }
+
+    /// The probe's verdict on a host directory snapshot, or the audited
+    /// development override when the probe refuses.
+    fn admit_host_storage(&self, path: &Path) -> Result<()> {
+        self.probe.require_encrypted(path).or_else(|refusal| {
+            mvm_core::host_storage_encryption::admit_unverified_storage(
+                path,
+                "host directory snapshot",
+                refusal,
+            )
+        })
     }
 
     /// Register an already-materialized host-directory snapshot.
@@ -302,6 +328,7 @@ impl VolumeService for LocalVolumeService {
             request.name(),
             request.root.as_deref(),
             request.capacity_mib,
+            self.probe.as_ref(),
         )?;
         volume_record(&entry, &AttachmentLeaseCatalog::load()?)
     }
@@ -311,7 +338,7 @@ impl VolumeService for LocalVolumeService {
             .with_context(|| format!("invalid volume name: {name:?}"))?;
         let _lock = lifecycle::acquire_volume_lifecycle_lock()?;
         let mut catalog = lifecycle::recover_local_volume_catalog()?;
-        lifecycle::unlock_volume_locked(&mut catalog, name)?;
+        lifecycle::unlock_volume_locked(&mut catalog, name, self.probe.as_ref())?;
         let entry = catalog
             .get(name)
             .with_context(|| format!("volume {name:?} disappeared after unlock"))?;
@@ -359,6 +386,10 @@ impl VolumeService for LocalVolumeService {
         let host_path = Path::new(&entry.host_path);
         if !host_path.is_absolute() {
             bail!("host path must be absolute, got {:?}", entry.host_path);
+        }
+        if matches!(entry.encryption, LocalVolumeEncryption::MvmManaged(_)) && host_path.is_file() {
+            lifecycle::admit_materialized_volume(host_path, self.probe.as_ref())
+                .with_context(|| format!("attaching volume {:?}", request.volume.as_str()))?;
         }
         match &entry.kind {
             LocalVolumeKind::BlockImage { .. } if !host_path.is_file() => {
@@ -424,24 +455,27 @@ impl VolumeService for LocalVolumeService {
         // Just-in-time unlock: decrypt locked managed volumes this launch
         // references, remembering them so the final lease release re-seals
         // them. Any later refusal in this resolution re-seals immediately.
+        //
+        // The unlocks run inside the resolution, so a refusal on the second
+        // volume (its storage, its key) also re-seals the first.
         let mut jit_unlocked: Vec<String> = Vec::new();
-        if request.unlock == UnlockPolicy::JustInTime {
-            for (_, mount) in registry.iter() {
-                let Some(entry) = catalog.get(&mount.volume_name) else {
-                    continue;
-                };
-                if let LocalVolumeEncryption::MvmManaged(enc) = &entry.encryption
-                    && enc.state == LocalVolumeState::Locked
-                {
-                    let name = entry.volume_name.clone();
-                    lifecycle::unlock_volume_locked(&mut catalog, &name)
-                        .with_context(|| format!("just-in-time unlock of volume {name:?}"))?;
-                    jit_unlocked.push(name);
+        let resolution = (|| -> Result<LaunchPreparation> {
+            if request.unlock == UnlockPolicy::JustInTime {
+                for (_, mount) in registry.iter() {
+                    let Some(entry) = catalog.get(&mount.volume_name) else {
+                        continue;
+                    };
+                    if let LocalVolumeEncryption::MvmManaged(enc) = &entry.encryption
+                        && enc.state == LocalVolumeState::Locked
+                    {
+                        let name = entry.volume_name.clone();
+                        lifecycle::unlock_volume_locked(&mut catalog, &name, self.probe.as_ref())
+                            .with_context(|| format!("just-in-time unlock of volume {name:?}"))?;
+                        jit_unlocked.push(name);
+                    }
                 }
             }
-        }
 
-        let resolution = (|| -> Result<LaunchPreparation> {
             let resolved = registry.resolve_for_launch(&catalog)?;
 
             let mut guest_paths = request
@@ -465,18 +499,32 @@ impl VolumeService for LocalVolumeService {
                          volumes"
                     );
                 }
-                if matches!(
-                    attachment.source,
-                    ResolvedVolumeSource::HostBackedCatalog | ResolvedVolumeSource::AdHocHost
-                ) {
-                    self.probe
-                        .require_encrypted(&attachment.host_path)
-                        .with_context(|| {
-                            format!(
-                                "registered volume {:?} no longer has encrypted host backing",
-                                attachment.volume_name
-                            )
-                        })?;
+                match attachment.source {
+                    // Unlocked just now by this launch: its storage was
+                    // admitted a moment ago, under the same lock.
+                    ResolvedVolumeSource::MvmManaged
+                        if relock_by_name.contains_key(attachment.volume_name.as_str()) => {}
+                    // Unlocked earlier, possibly on storage or with a mode
+                    // that has changed since: admit it again.
+                    ResolvedVolumeSource::MvmManaged => lifecycle::admit_materialized_volume(
+                        &attachment.host_path,
+                        self.probe.as_ref(),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "registered volume {:?} no longer satisfies the storage policy",
+                            attachment.volume_name
+                        )
+                    })?,
+                    ResolvedVolumeSource::HostBackedCatalog | ResolvedVolumeSource::AdHocHost => {
+                        self.admit_host_storage(&attachment.host_path)
+                            .with_context(|| {
+                                format!(
+                                    "registered volume {:?} no longer has encrypted host backing",
+                                    attachment.volume_name
+                                )
+                            })?
+                    }
                 }
                 let vm_volume = attachment.as_vm_volume();
                 let mut runtime_volume = RuntimeVolume::from(&vm_volume);

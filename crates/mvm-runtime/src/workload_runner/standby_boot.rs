@@ -421,11 +421,17 @@ mod tests {
         })
     }
 
+    /// Drop the tokens that legitimately differ between a parent and the cold
+    /// boot it stands in for: the per-boot hostname and clock, and the
+    /// admitted plan's seccomp tier. A parent boots before any workload is
+    /// admitted, so it holds no plan and names no tier.
     fn without_per_boot_tokens(cmdline: &str) -> String {
         cmdline
             .split_whitespace()
             .filter(|token| {
-                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+                !token.starts_with("mvm.hostname=")
+                    && !token.starts_with("mvm.hostepoch=")
+                    && !token.starts_with("mvm.seccomp=")
             })
             .collect::<Vec<_>>()
             .join(" ")

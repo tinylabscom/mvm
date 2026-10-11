@@ -1580,8 +1580,8 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // Workspace-apply forms need a live workspace fixture. Pack `pull`, `search`,
 // `pack search`, and `pack registry update` need a reachable registry; their fail-closed
 // paths are exercised by tests/cli.rs against a file:// registry. Image
-// `dev ensure` likewise needs a signed release endpoint; its selection,
-// verification, and fetch-when-unchanged behavior have focused CLI tests.
+// `dev ensure` likewise needs a signed release endpoint; its selection and
+// verification have focused tests in `mvm-build`.
 // `build guest-bins` cross-compiles every guest binary for both guest
 // architectures; its archive and verification logic have unit tests.
 // `secret login` waits for a human to consent in a browser at a real OAuth

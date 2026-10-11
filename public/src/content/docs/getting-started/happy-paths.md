@@ -64,9 +64,12 @@ macOS, GPU, and architecture limits, see
 You have a `flake.nix` (or want to scaffold one) and want a microVM
 booted from it.
 
+The run is named: an unnamed run must claim a prepared warm standby, and
+`pool warm` prepares only OCI and default images, so a named flake run boots cold.
+
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
-mvmctl machine run --flake . --cpus 2 --memory 1024      # build + boot
+mvmctl machine run --name my-app --flake . --cpus 2 --memory 1024   # build + boot
 mvmctl machine stop --all                                     # tear down
 ```
 
@@ -181,8 +184,14 @@ builder VM is headless (it only exists to run `nix build` on your
 behalf), so an interactive shell means booting a dev-tier *workload*
 and attaching your terminal to it.
 
+An unnamed `-it` run claims a prepared warm standby like any other unnamed
+transient run, and refuses without one:
+
 ```bash
 mvmctl doctor --workflow dev-shell              # preflight (no host rust needed)
+mvmctl image pull alpine
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -it -- /bin/sh  # boot + drop into shell
 # inside the shell: do work; exit / Ctrl+D tears the VM down
 ```

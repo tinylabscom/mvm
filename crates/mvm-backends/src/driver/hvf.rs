@@ -873,14 +873,30 @@ fn wait_for_agent_socket(
     }
 }
 
+/// How long a factory parent's guest agent has to start answering.
+const STANDBY_AGENT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Do not capture a factory parent until its guest agent has completed init.
 /// The child resumes from the captured CPU/device state rather than rebooting,
 /// so a parent captured before the agent listener is serving would make every
 /// later post-restore identity handshake impossible.
 fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
-    let socket = hvf_agent_socket(state_dir);
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    wait_for_standby_agent(&hvf_agent_socket(state_dir), STANDBY_AGENT_READY_TIMEOUT)
+}
+
+/// Poll `socket` until a guest agent answers the authenticated readiness probe
+/// in either serving state.
+///
+/// A parent booted with the universal initramfs is still waiting for
+/// `ActivateEnvironment` here — the runner activates it only after this
+/// returns — and that agent answers every `Ping` with `NotActivated`. That
+/// answer is the agent serving, so it counts. Requiring `Pong` instead waits
+/// for a reply the guest cannot give until the caller's next step, and fails
+/// every such parent at the deadline.
+fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
+    let mut last_error: Option<anyhow::Error> = None;
     while Instant::now() < deadline {
         if socket.exists() {
             // The HVF agent socket is the bridge's direct stream endpoint. It
@@ -889,19 +905,27 @@ fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
             // the first four bytes of an RPC frame. Probe the authenticated
             // RPC stream directly; this waits for a real guest response rather
             // than treating the host-side listener as readiness.
-            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-                if mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok() {
-                    return Ok(());
+            match std::os::unix::net::UnixStream::connect(socket) {
+                Ok(mut stream) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                    match mvm_agentd::vsock::probe_agent_serving(&mut stream) {
+                        Ok(_) => return Ok(()),
+                        Err(error) => last_error = Some(error),
+                    }
                 }
+                Err(error) => last_error = Some(error.into()),
             }
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
+    let reason = last_error.map_or_else(
+        || "the socket was never bound".to_string(),
+        |error| format!("last probe: {error:#}"),
+    );
     anyhow::bail!(
-        "guest agent socket {} was not responsive within 10s",
+        "guest agent socket {} was not responsive within {timeout:?} ({reason})",
         socket.display()
     )
 }
@@ -1260,6 +1284,87 @@ mod tests {
     /// with `HVF parent rejected live handoff: ERR` and nothing else, on a path
     /// where the parent is a paused process you cannot attach to and the reply
     /// is the only account of what it refused.
+    /// Serve one connection on `socket` as an authenticated guest agent that
+    /// answers the readiness `Ping` with `answer`. The host signer key the probe
+    /// authenticates with is seeded under the isolated `MVM_HOME`.
+    fn serve_one_agent_answer(
+        socket: &Path,
+        answer: mvm_agentd::vsock::GuestResponse,
+    ) -> std::thread::JoinHandle<()> {
+        let host_seed = [7u8; 32];
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).expect("create keys dir");
+        std::fs::write(keys.join("host-signer.ed25519"), host_seed).expect("seed host signer");
+        let anchor = ed25519_dalek::SigningKey::from_bytes(&host_seed).verifying_key();
+        let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind agent socket");
+        std::thread::spawn(move || {
+            let (mut guest, _) = listener.accept().expect("accept probe");
+            guest
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("guest read timeout");
+            let mut session = mvm_agentd::vsock::AuthenticatedSession::guest(
+                &mut guest,
+                ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let request: mvm_agentd::vsock::GuestRequest =
+                session.read(&mut guest).expect("read probe request");
+            assert!(
+                matches!(request, mvm_agentd::vsock::GuestRequest::Ping),
+                "got {request:?}"
+            );
+            session.write(&mut guest, &answer).expect("write answer");
+        })
+    }
+
+    /// The regression: a standby parent booted with the universal initramfs is
+    /// waited on before the runner activates it, so its agent can only answer
+    /// `NotActivated`. Requiring `Pong` failed every HVF `pool warm` at the
+    /// 10 s deadline while cold boots — which activate first — worked.
+    #[test]
+    fn standby_readiness_accepts_an_agent_awaiting_activation() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let guest = serve_one_agent_answer(&socket, mvm_agentd::vsock::GuestResponse::NotActivated);
+
+        wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
+            .expect("a pre-activation agent is serving and must read as ready");
+        guest.join().expect("guest thread");
+    }
+
+    #[test]
+    fn standby_readiness_accepts_an_activated_agent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let guest = serve_one_agent_answer(&socket, mvm_agentd::vsock::GuestResponse::Pong);
+
+        wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
+            .expect("a ponging agent is ready");
+        guest.join().expect("guest thread");
+    }
+
+    /// A bound socket with nothing serving behind it is still not readiness,
+    /// and the deadline error says what the last probe saw.
+    #[test]
+    fn standby_readiness_times_out_on_a_socket_nothing_serves() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind agent socket");
+
+        let error = wait_for_standby_agent(&socket, std::time::Duration::from_millis(200))
+            .expect_err("nothing answered the probe");
+        let message = format!("{error:#}");
+        assert!(message.contains("not responsive within"), "{message}");
+        assert!(message.contains("last probe"), "{message}");
+    }
+
     #[test]
     fn a_refused_handoff_reports_the_parents_whole_reason() {
         let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");

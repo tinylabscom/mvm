@@ -643,6 +643,7 @@ fn spawn_worker(
             Ok(())
         });
     }
+    crate::workload_seccomp::confine(&mut cmd);
 
     let mut child = cmd.spawn()?;
     let pid = child.id();

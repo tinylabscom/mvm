@@ -157,10 +157,9 @@ fn consumed_inputs(
             }
             Ok(Some(Sha256Hex::from_bytes(&hasher.finalize())))
         }
-        ImageBuildRole::DefaultTenant
-        | ImageBuildRole::RootlessTenant
-        | ImageBuildRole::RuntimeOverlay
-        | ImageBuildRole::Initramfs => image_role_consumed_inputs(images_root, mvm_root, target),
+        ImageBuildRole::DefaultTenant | ImageBuildRole::RootlessTenant => {
+            image_role_consumed_inputs(images_root, mvm_root, target)
+        }
         ImageBuildRole::Kernel => Ok(None),
     }
 }
@@ -401,7 +400,7 @@ mod tests {
 
         for role in [
             ImageBuildRole::DefaultTenant,
-            ImageBuildRole::RuntimeOverlay,
+            ImageBuildRole::RootlessTenant,
         ] {
             let target = fixture_target(role, images.path());
             let digest = consumed_inputs(images.path(), &workspace, &target);
@@ -414,7 +413,7 @@ mod tests {
     fn an_image_role_with_real_read_shapes_resolves_to_a_digest() {
         let mvm = tempfile::tempdir().expect("tempdir");
         let images = tempfile::tempdir().expect("tempdir");
-        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+        let target = fixture_target(ImageBuildRole::DefaultTenant, images.path());
 
         let digest = consumed_inputs(images.path(), mvm.path(), &target);
 
@@ -429,7 +428,7 @@ mod tests {
     fn an_image_role_reading_outside_the_workspace_filter_falls_back() {
         let mvm = tempfile::tempdir().expect("tempdir");
         let images = tempfile::tempdir().expect("tempdir");
-        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+        let target = fixture_target(ImageBuildRole::DefaultTenant, images.path());
         let source = images
             .path()
             .join("images")
@@ -455,7 +454,7 @@ mod tests {
     fn an_image_role_with_no_recognisable_read_falls_back() {
         let mvm = tempfile::tempdir().expect("tempdir");
         let images = tempfile::tempdir().expect("tempdir");
-        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+        let target = fixture_target(ImageBuildRole::DefaultTenant, images.path());
         let source = images
             .path()
             .join("images")

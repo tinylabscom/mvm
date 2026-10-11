@@ -19,8 +19,9 @@ use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
 use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
+use mvm_vmm::driver::traits::{PreloadChildRequest, PreloadedChild};
 use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
-use mvm_vmm::post_restore::PostRestoreOutcome;
+use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
 
@@ -38,6 +39,8 @@ pub struct DeliveredChildIdentity {
     pub token: [u8; GENID_BYTES],
     /// Optional signed agent authority delivered in the same handshake.
     pub grant_envelope: Option<VerbGrantEnvelope>,
+    /// Seccomp tier the child was told to admit.
+    pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
 }
 
 /// A clean post-restore answer: the guest acknowledged, rotated its generation
@@ -50,6 +53,7 @@ fn rotated_child_identity() -> PostRestoreOutcome {
         reseeded: true,
         clock_resynced: true,
         reseed_shortfall: None,
+        seccomp_tier: None,
     }
 }
 
@@ -87,6 +91,9 @@ pub struct MockDriver {
     /// child, so a test can drive the claim's fresh-identity gate — including
     /// the refusal arms — with no live guest.
     child_identity: ScriptedChildIdentity,
+    /// Set once a test scripts the answer, so the mock stops echoing back the
+    /// seccomp tier it was handed and reports the scripted one instead.
+    child_identity_scripted: bool,
     /// Every identity and grant this driver was asked to deliver, so a test can
     /// prove the claim handed the guest the same values it minted.
     delivered_identities: Arc<Mutex<Vec<DeliveredChildIdentity>>>,
@@ -107,6 +114,9 @@ pub struct MockDriver {
     /// Whether claims should use the resident-handoff path instead of the
     /// saved-state materialization path.
     resident_handoff: bool,
+    /// Whether pool refill may preload a paused child that a claim resumes,
+    /// as a saved-state backend with a long-lived VMM does.
+    preloaded_standby: bool,
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
@@ -130,11 +140,13 @@ impl MockDriver {
             vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
             vm_full_calls: Arc::new(Mutex::new(Vec::new())),
             child_identity: Some(rotated_child_identity()),
+            child_identity_scripted: false,
             delivered_identities: Arc::new(Mutex::new(Vec::new())),
             killed: Arc::new(Mutex::new(Vec::new())),
             dying_console_output: Vec::new(),
             refuse_attach: false,
             resident_handoff: false,
+            preloaded_standby: false,
             unrestorable_fork: None,
         }
     }
@@ -158,6 +170,14 @@ impl MockDriver {
     /// hypervisor, so the runner's no-materialization contract can be tested.
     pub fn with_resident_handoff(mut self) -> Self {
         self.resident_handoff = true;
+        self
+    }
+
+    /// Make claims resume a child preloaded at pool refill instead of forking
+    /// one, so the runner's preloaded-claim contract can be tested.
+    #[must_use]
+    pub fn with_preloaded_standby(mut self) -> Self {
+        self.preloaded_standby = true;
         self
     }
 
@@ -214,6 +234,7 @@ impl MockDriver {
     /// acknowledgement that did not rotate the generation identity.
     pub fn with_child_identity(mut self, outcome: PostRestoreOutcome) -> Self {
         self.child_identity = Some(outcome);
+        self.child_identity_scripted = true;
         self
     }
 
@@ -270,6 +291,36 @@ impl VmmDriver for MockDriver {
 
     fn supports_resident_handoff(&self) -> bool {
         self.resident_handoff
+    }
+    fn supports_preloaded_standby(&self) -> bool {
+        self.preloaded_standby
+    }
+    fn preload_standby_child(
+        &self,
+        req: &PreloadChildRequest<'_>,
+    ) -> std::result::Result<PreloadedChild, StandbyError> {
+        if !self.preloaded_standby {
+            return Err(StandbyError::Unsupported {
+                backend: self.name().to_string(),
+            });
+        }
+        Ok(PreloadedChild {
+            pid: std::process::id(),
+            control_socket: req.child_dir.join("mock.sock").display().to_string(),
+        })
+    }
+    fn resume_preloaded_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        if !self.preloaded_standby {
+            return Err(StandbyError::Unsupported {
+                backend: self.name().to_string(),
+            });
+        }
+        // The paused child already holds its parent's content; resuming wires
+        // the same channels and token a fork does.
+        self.fork_standby_child(req)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.booted.lock().unwrap().push(spec.clone());
@@ -364,20 +415,27 @@ impl VmmDriver for MockDriver {
     fn deliver_child_identity(
         &self,
         child_vm_name: &str,
-        token: [u8; GENID_BYTES],
-        grant_envelope: Option<VerbGrantEnvelope>,
+        identity: ChildIdentity,
     ) -> Result<PostRestoreOutcome> {
+        let seccomp_tier = identity.seccomp_tier;
         self.delivered_identities
             .lock()
             .unwrap()
             .push(DeliveredChildIdentity {
                 child_vm_name: child_vm_name.to_string(),
-                token,
-                grant_envelope,
+                token: identity.token,
+                grant_envelope: identity.grant_envelope,
+                seccomp_tier,
             });
-        self.child_identity.clone().ok_or_else(|| {
+        let mut outcome = self.child_identity.clone().ok_or_else(|| {
             anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
-        })
+        })?;
+        // An unscripted guest is a current agent: it admits the tier it was
+        // handed and says so. A scripted answer is reported exactly as written.
+        if !self.child_identity_scripted {
+            outcome.seccomp_tier = seccomp_tier;
+        }
+        Ok(outcome)
     }
 
     fn vm_full_control(

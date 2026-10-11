@@ -53,7 +53,9 @@ mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -
 
 `bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
 fetches and unpacks an OCI image. `pool warm` boots a standby VM, and
-`MVM_RESIDENCY=warm` lets the next matching run claim it. A `machine run
+`MVM_RESIDENCY=warm` lets the next matching run claim it. An unnamed run must
+claim one: with no standby of the same image and sizing it refuses rather than
+cold-booting, while a run given `--name` always boots cold. A `machine run
 --image` launch reads only the local cache and never downloads anything. A run
 that claims a standby must be ready in under 300 ms, or `mvmctl` reports the
 launch as failed.
@@ -127,8 +129,11 @@ mvmctl machine rm web
 
 ```bash
 mvmctl machine build --flake .
-mvmctl machine run --flake . -- ./app
+mvmctl machine run --name app --flake . -- ./app
 ```
+
+The run is named because `pool warm` prepares only OCI and default images, so
+an unnamed flake run would have no standby to claim.
 
 `nix build` runs inside a headless builder VM that mvm manages, so the host
 never needs Nix. Sealed images boot from a dm-verity-protected root and have no

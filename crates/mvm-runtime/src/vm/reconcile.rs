@@ -519,22 +519,54 @@ pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     let report = converge_at(&registry_path, &vms_root, opts);
     if !opts.dry_run {
         emit_audit(&report);
-        remove_abandoned_restore_staging(&registry_path);
+        for (machine, action) in reconcile_snapshot_staging(&mvm_core::config::instances_root()) {
+            mvm_core::audit_emit!(RegistryReconcile, vm: machine.as_str(), "action={action}");
+        }
     }
     report
 }
 
-/// Remove restore staging abandoned by a process that died mid-restore, for
-/// every registered machine: each holds decrypted guest memory.
-fn remove_abandoned_restore_staging(registry_path: &Path) {
-    let Ok(registry) = VmNameRegistry::load(registry_path) else {
-        return;
+/// Reconcile the snapshot staging of every machine under `instances_root`,
+/// registered or not: finish a publication a pause was interrupted in, and
+/// remove capture and restore staging whose owning process died, each of which
+/// holds plaintext guest memory.
+///
+/// A machine whose lifecycle lock is held is skipped, because a pause or
+/// resume in progress owns its staging. Nothing else in the instance
+/// directory is touched. Returns `(machine, action)` for each change, for the
+/// caller to audit. Fail-open: an error is logged and the machine skipped.
+pub fn reconcile_snapshot_staging(instances_root: &Path) -> Vec<(String, &'static str)> {
+    let Ok(entries) = std::fs::read_dir(instances_root) else {
+        return Vec::new();
     };
-    for name in registry.vms.keys() {
-        crate::vm::instance_snapshot::remove_abandoned_staging(&mvm_core::config::instance_dir(
-            name,
-        ));
+    let mut changes = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let machine = entry.file_name().to_string_lossy().into_owned();
+        let instance_dir = entry.path();
+        let lock = match crate::vm::instance_snapshot::try_lock_resume_in(&instance_dir) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(machine, error = %format!("{error:#}"), "could not reconcile snapshot staging");
+                continue;
+            }
+        };
+        match crate::vm::instance_snapshot::recover_publication(&instance_dir.join("snapshot")) {
+            Ok(Some(recovery)) => changes.push((machine.clone(), recovery.action())),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(machine, error = %format!("{error:#}"), "could not recover an interrupted snapshot publication");
+            }
+        }
+        for _ in crate::vm::instance_snapshot::reclaim_abandoned_staging(&instance_dir) {
+            changes.push((machine.clone(), "snapshot_staging_reclaimed"));
+        }
+        drop(lock);
     }
+    changes
 }
 
 /// Reap only *orphan* state dirs under the default `vms` root: dirs with no
@@ -1426,6 +1458,61 @@ mod tests {
             audit.contains("registry_reconcile") && audit.contains("dead_process_left_state"),
             "expected a registry_reconcile audit line, got: {audit}"
         );
+    }
+
+    #[test]
+    fn converge_reconciles_snapshot_staging_of_every_machine_and_audits_it() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("mvm-root");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", root.to_str().unwrap());
+        let instances = mvm_core::config::instances_root();
+
+        // Not registered: a crashed capture's plaintext, and a pause that died
+        // between its two renames.
+        let crashed = instances.join("crashed");
+        let abandoned = crashed.join(format!(".capture-{}-x", i32::MAX));
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(abandoned.join("mem.bin"), b"plaintext").unwrap();
+        let torn = instances.join("torn");
+        std::fs::create_dir_all(torn.join(".snapshot.previous")).unwrap();
+        std::fs::write(torn.join(".snapshot.previous/mem.bin"), b"sealed").unwrap();
+        // A pause in progress holds its lifecycle lock; its staging is its own.
+        let busy = instances.join("busy");
+        let busy_staging = busy.join(format!(".capture-{}-x", i32::MAX));
+        std::fs::create_dir_all(&busy_staging).unwrap();
+        let _held = crate::vm::instance_snapshot::try_lock_resume_in(&busy)
+            .unwrap()
+            .unwrap();
+        // User data in an instance directory is never staging.
+        std::fs::write(crashed.join("ports.json"), b"{}").unwrap();
+
+        let report = converge(&ConvergeOpts::default());
+        assert!(report.is_clean(), "{report:?}");
+        assert!(
+            !abandoned.exists(),
+            "the crashed capture's plaintext is removed"
+        );
+        assert!(
+            torn.join("snapshot/mem.bin").exists(),
+            "the set-aside snapshot is published again"
+        );
+        assert!(busy_staging.exists(), "a locked machine is left alone");
+        assert!(crashed.join("ports.json").exists());
+
+        let audit = std::fs::read_to_string(root.join("state/log/audit.jsonl")).unwrap_or_default();
+        assert!(audit.contains("snapshot_staging_reclaimed"), "{audit}");
+        assert!(audit.contains("snapshot_previous_restored"), "{audit}");
+
+        // Dry runs change nothing.
+        let again = instances.join("again");
+        let staged = again.join(format!(".restore-{}-x", i32::MAX));
+        std::fs::create_dir_all(&staged).unwrap();
+        converge(&ConvergeOpts { dry_run: true });
+        assert!(staged.exists());
     }
 
     #[test]

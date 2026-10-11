@@ -23,8 +23,8 @@ use mvm_core::vm_backend::VmStartConfig;
 use crate::host::boot_config::booted_with_universal_initramfs;
 use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
-    host_signer_pub_cmdline_token, require_grant_cmdline_token, telemetry_cmdline_token,
-    verb_grant_cmdline_token,
+    host_signer_pub_cmdline_token, require_grant_cmdline_token, seccomp_cmdline_token,
+    telemetry_cmdline_token, verb_grant_cmdline_token,
 };
 
 /// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
@@ -160,6 +160,7 @@ fn workload_cmdline_for_hostname(
         require_grant_cmdline_token(&config.name),
         host_signer_pub_cmdline_token(&config.name),
         telemetry_cmdline_token(&config.name),
+        seccomp_cmdline_token(config),
     ]
     .into_iter()
     .flatten()
@@ -517,6 +518,64 @@ mod tests {
             cmdline.contains("mvm.hostname=build-worker-7"),
             "all workload backends consume this shared cmdline: {cmdline}"
         );
+    }
+
+    fn config_admitted_under(tier: mvm_core::plan::PlanSeccompTier) -> VmStartConfig {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.admission_profile.seccomp_tier = tier;
+        VmStartConfig {
+            name: "vm-test".to_string(),
+            plan_json: Some(serde_json::to_string(&plan).expect("plan serializes")),
+            ..Default::default()
+        }
+    }
+
+    /// The guest applies the admitted tier to every workload process, and the
+    /// cmdline is how the tier reaches it. Every tier is checked, because a
+    /// token hardcoded to the default would pass a test that only tried the
+    /// default.
+    #[test]
+    fn workload_cmdline_carries_the_admitted_seccomp_tier() {
+        use mvm_core::plan::PlanSeccompTier;
+        let dir = tempfile::tempdir().unwrap();
+        for tier in [
+            PlanSeccompTier::Essential,
+            PlanSeccompTier::Minimal,
+            PlanSeccompTier::Standard,
+            PlanSeccompTier::Network,
+            PlanSeccompTier::Unrestricted,
+        ] {
+            let cmdline = workload_cmdline(
+                &config_admitted_under(tier),
+                dir.path(),
+                hvf_like_workload_bootargs,
+            )
+            .expect("cmdline");
+            let expected = format!("mvm.seccomp={tier}");
+            assert_eq!(
+                cmdline
+                    .split_whitespace()
+                    .filter(|token| token.starts_with("mvm.seccomp="))
+                    .collect::<Vec<_>>(),
+                vec![expected.as_str()],
+                "{cmdline}"
+            );
+        }
+    }
+
+    /// No admitted plan, no tier: a standby parent boots before any workload
+    /// is admitted, and must not be handed a tier nobody chose.
+    #[test]
+    fn workload_cmdline_names_no_seccomp_tier_without_an_admitted_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "vm-test".to_string(),
+            ..Default::default()
+        };
+        let cmdline =
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).unwrap_or_default();
+        assert!(!cmdline.contains("mvm.seccomp="), "{cmdline}");
+        assert_eq!(seccomp_cmdline_token(&config), None);
     }
 
     #[test]

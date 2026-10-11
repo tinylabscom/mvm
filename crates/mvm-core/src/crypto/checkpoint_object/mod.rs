@@ -423,6 +423,31 @@ pub fn open(
     Ok(std::mem::take(&mut *plaintext))
 }
 
+/// Authenticate a sealed object at rest without decrypting its payload.
+///
+/// Succeeds only if the frame matches `expected` and its wrapped data key
+/// opens under `keys`. The wrapped key's associated data binds the binding
+/// header and the [`PayloadFingerprint`] of the payload bytes as they are now,
+/// so a change to the header, the wrapped key or any payload byte refuses
+/// here exactly as it would in [`open`]. What this leaves out is the payload
+/// decryption and the reference recomputation, which prove that the plaintext
+/// a key holder sealed matches its reference; [`open`] checks those whenever
+/// the plaintext is needed. Without the domain's wrapping key nobody can
+/// produce an object that passes.
+///
+/// The cost is one hash of the payload and a 32-byte AEAD open, where [`open`]
+/// adds a full decryption and a keyed hash of the plaintext.
+pub fn authenticate(
+    keys: &DomainKeys,
+    expected: &ObjectExpectation,
+    bytes: &[u8],
+) -> Result<(), CheckpointObjectError> {
+    let frame = ObjectFrame::parse(bytes)?;
+    expected.check(keys, &frame)?;
+    // Only the fact that the data key unwraps matters; dropping it zeroizes it.
+    unwrap_data_key(&keys.wrapping, &frame).map(drop)
+}
+
 /// Re-wrap an object's data key under `new_wrapping`, keeping the header and
 /// payload bytes — and so the payload fingerprint — exactly as they were.
 ///

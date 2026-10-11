@@ -56,8 +56,11 @@ VMs. Use `mvmctl manifest *` for build slots and registry state.
 
 ```sh
 mvmctl machine run --manifest . -d
-mvmctl machine run --manifest ./my-worker -- uname -a
+mvmctl machine run --name my-worker --manifest ./my-worker -- uname -a
 ```
+
+The one-shot run is named so it boots cold; an unnamed one must claim a
+prepared warm standby, which `pool warm` cannot prepare for a manifest image.
 
 If there is no built revision for the manifest, `mvmctl machine run` should fail with a
 hint to run `mvmctl machine build`.

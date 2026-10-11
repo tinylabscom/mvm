@@ -62,6 +62,14 @@ pub const WARM_CLAIM_P50_BUDGET_MS: f64 = 30.0;
 /// Warm-claim dispatch-window p99 budget, in milliseconds.
 pub const WARM_CLAIM_P99_BUDGET_MS: f64 = 50.0;
 
+/// Every warm claim must reach command dispatch strictly below this ceiling.
+///
+/// The same limit the CLI holds each warm launch to, so a benchmark cannot
+/// publish a warm claim the launch itself would have refused. Like the
+/// prepared-cold ceiling it is per sample: one slow claim fails the report
+/// whatever its percentiles say.
+pub const WARM_CLAIM_HARD_MAX_MS: f64 = crate::commands::vm::phase_timing::WARM_START_MAX_MS;
+
 /// The dispatch-window budgets one lane publishes, by percentile.
 ///
 /// `None` is "this lane deliberately publishes no budget at this percentile",
@@ -181,7 +189,7 @@ impl LaunchLane {
                 p50_ms: Some(WARM_CLAIM_P50_BUDGET_MS),
                 p95_ms: None,
                 p99_ms: Some(WARM_CLAIM_P99_BUDGET_MS),
-                hard_max_ms: None,
+                hard_max_ms: Some(WARM_CLAIM_HARD_MAX_MS),
             },
             Self::MountMiss | Self::ArtifactMiss => LaneBudgets {
                 p50_ms: None,
@@ -194,15 +202,25 @@ impl LaunchLane {
 }
 
 impl LaunchLane {
-    /// Whether every measured dispatch in this lane must be strictly under
-    /// [`PREPARED_COLD_HARD_MAX_MS`]. Read by the report builder and both
-    /// report gates, so a lane cannot be ceilinged in one and not the others.
+    /// Whether every measured dispatch in this lane must be strictly under a
+    /// per-sample ceiling: [`PREPARED_COLD_HARD_MAX_MS`] for the prepared
+    /// lanes, [`WARM_CLAIM_HARD_MAX_MS`] for a warm claim. Read by the report
+    /// builder and both report gates, so a lane cannot be ceilinged in one and
+    /// not the others.
     #[must_use]
     pub const fn has_hard_boot_ceiling(self) -> bool {
-        matches!(
-            self,
-            Self::PreparedCold | Self::PreparedColdMountHit | Self::PreparedColdArtifact
-        )
+        self.budgets().hard_max_ms.is_some()
+    }
+
+    /// What the per-sample ceiling promises, in the words the report and the
+    /// summary print beside it.
+    const fn hard_ceiling_remark(self) -> &'static str {
+        match self {
+            Self::WarmClaim => {
+                "Every warm claim must reach authenticated command dispatch in under"
+            }
+            _ => "Every prepared boot must reach authenticated command dispatch in under",
+        }
     }
 }
 
@@ -264,7 +282,8 @@ pub enum LaneViolation {
         found_ms: f64,
         budget_ms: f64,
     },
-    /// A prepared boot reached or crossed the strict per-sample ceiling.
+    /// A prepared boot or a warm claim reached or crossed its lane's strict
+    /// per-sample ceiling.
     HardMaximumExceeded {
         lane: LaunchLane,
         found_ms: f64,
@@ -416,10 +435,7 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
     if report.stats.dispatch_window_ms.max != observed_max_ms {
         return Err(LaneViolation::NonCanonicalSummary);
     }
-    let expected = report
-        .lane
-        .has_hard_boot_ceiling()
-        .then(|| HardBootRequirement::prepared(observed_max_ms));
+    let expected = HardBootRequirement::for_lane(report.lane, observed_max_ms);
     if report.hard_requirement != expected {
         return Err(LaneViolation::NonCanonicalSummary);
     }
@@ -433,14 +449,15 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
 }
 
 /// Validate one observed dispatch duration against the lane's per-boot rule.
-/// Acquisition and warm-claim lanes have different contracts and are left to
-/// their own gates.
+/// The acquisition lanes have no ceiling and pass.
 pub fn validate_hard_boot_timing(lane: LaunchLane, found_ms: f64) -> Result<(), LaneViolation> {
-    if lane.has_hard_boot_ceiling() && found_ms >= PREPARED_COLD_HARD_MAX_MS {
+    if let Some(limit_ms) = lane.budgets().hard_max_ms
+        && found_ms >= limit_ms
+    {
         return Err(LaneViolation::HardMaximumExceeded {
             lane,
             found_ms,
-            limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            limit_ms,
         });
     }
     Ok(())
@@ -797,7 +814,7 @@ impl SpanStats {
     }
 }
 
-/// Machine-readable statement and verdict for the prepared-boot invariant.
+/// Machine-readable statement and verdict for a lane's per-sample ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TimingMetric {
@@ -822,17 +839,18 @@ pub struct HardBootRequirement {
 }
 
 impl HardBootRequirement {
-    fn prepared(observed_max_ms: Option<f64>) -> Self {
-        Self {
+    /// The requirement `lane` is held to, or `None` for a lane with no
+    /// per-sample ceiling.
+    fn for_lane(lane: LaunchLane, observed_max_ms: Option<f64>) -> Option<Self> {
+        let limit_ms = lane.budgets().hard_max_ms?;
+        Some(Self {
             metric: TimingMetric::DispatchWindowMs,
             comparison: RequirementComparison::LessThan,
-            limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            limit_ms,
             observed_max_ms,
-            met: observed_max_ms.is_some_and(|value| value < PREPARED_COLD_HARD_MAX_MS),
-            remark: format!(
-                "Every prepared boot must reach authenticated command dispatch in under {PREPARED_COLD_HARD_MAX_MS:.0} ms."
-            ),
-        }
+            met: observed_max_ms.is_some_and(|value| value < limit_ms),
+            remark: format!("{} {limit_ms:.0} ms.", lane.hard_ceiling_remark()),
+        })
     }
 }
 
@@ -896,7 +914,7 @@ pub struct ColdLaunchReport {
     pub lane: LaunchLane,
     pub warmup: u32,
     pub stats: LaneStats,
-    /// Present on lanes governed by the strict prepared-boot ceiling.
+    /// Present on lanes governed by a strict per-sample ceiling.
     #[serde(default)]
     pub hard_requirement: Option<HardBootRequirement>,
     pub raw: Vec<ColdLaunchSample>,
@@ -943,9 +961,7 @@ pub fn build_cold_launch_report(
         SpanStats::from_samples(&values)
     };
     let dispatch_window_ms = col(|s| s.phases.dispatch_window_ms());
-    let hard_requirement = lane
-        .has_hard_boot_ceiling()
-        .then(|| HardBootRequirement::prepared(dispatch_window_ms.max));
+    let hard_requirement = HardBootRequirement::for_lane(lane, dispatch_window_ms.max);
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
@@ -1548,6 +1564,78 @@ mod tests {
                 limit_ms: PREPARED_COLD_HARD_MAX_MS,
             })
         );
+    }
+
+    #[test]
+    fn every_warm_claim_is_held_under_the_launch_ceiling() {
+        assert!(LaunchLane::WarmClaim.has_hard_boot_ceiling());
+        assert_eq!(
+            LaunchLane::WarmClaim.budgets().hard_max_ms,
+            Some(crate::commands::vm::phase_timing::WARM_START_MAX_MS),
+            "the bench ceiling is the one the CLI enforces on every warm launch"
+        );
+        assert_eq!(
+            validate_hard_boot_timing(LaunchLane::WarmClaim, WARM_CLAIM_HARD_MAX_MS - 0.1),
+            Ok(())
+        );
+        assert_eq!(
+            validate_hard_boot_timing(LaunchLane::WarmClaim, WARM_CLAIM_HARD_MAX_MS),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::WarmClaim,
+                found_ms: WARM_CLAIM_HARD_MAX_MS,
+                limit_ms: WARM_CLAIM_HARD_MAX_MS,
+            })
+        );
+        for lane in [LaunchLane::MountMiss, LaunchLane::ArtifactMiss] {
+            assert!(!lane.has_hard_boot_ceiling());
+            assert_eq!(validate_hard_boot_timing(lane, 10_000.0), Ok(()));
+        }
+    }
+
+    /// One slow claim among fast ones fails the report, below the publication
+    /// floor and whatever the percentiles say.
+    #[test]
+    fn one_warm_claim_at_the_ceiling_fails_the_report() {
+        let warm = |number: u32, dispatch_ms: f64| {
+            let mut sample = cold_sample(number, 90.0);
+            sample.lane = LaunchLane::WarmClaim;
+            sample.launch_mode = LaunchMode::Warm;
+            sample.work.warm_claim = true;
+            sample.warm_first_command_memory = Some(warm_memory());
+            sample.phases.backend_start_ms = dispatch_ms;
+            sample.phases.vsock_wait_ms = 0.0;
+            sample
+        };
+        let fast = build_cold_launch_report(
+            LaunchLane::WarmClaim,
+            0,
+            vec![warm(1, 40.0), warm(2, 299.9)],
+        );
+        assert_eq!(validate_hard_boot_requirement(&fast), Ok(()));
+        let requirement = fast
+            .hard_requirement
+            .as_ref()
+            .expect("warm claims are ceilinged");
+        assert!(requirement.met);
+        assert_eq!(requirement.limit_ms, WARM_CLAIM_HARD_MAX_MS);
+        assert!(
+            requirement.remark.contains("warm claim"),
+            "{}",
+            requirement.remark
+        );
+
+        let mut raw: Vec<ColdLaunchSample> = (1..=19).map(|n| warm(n, 40.0)).collect();
+        raw.push(warm(20, WARM_CLAIM_HARD_MAX_MS));
+        let slow = build_cold_launch_report(LaunchLane::WarmClaim, 0, raw);
+        assert_eq!(
+            validate_hard_boot_requirement(&slow),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::WarmClaim,
+                found_ms: WARM_CLAIM_HARD_MAX_MS,
+                limit_ms: WARM_CLAIM_HARD_MAX_MS,
+            })
+        );
+        assert!(!slow.hard_requirement.as_ref().is_some_and(|r| r.met));
     }
 
     #[test]

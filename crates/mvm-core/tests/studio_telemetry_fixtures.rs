@@ -5,8 +5,12 @@
 //! line is one `TelemetryRecord` in exactly the JSON the collector's records
 //! output carries, produced by the real builders and serde — never typed by
 //! hand, so a fixture cannot drift from the contract without this test going
-//! red. The companion contract document is
-//! `specs/telemetry/studio-contract.md`.
+//! red. Beside them sit the served shapes: one `.json` per status and page,
+//! `records-page.json` (the first page of a stream that has more), and
+//! `collector-status.jsonl` (the typed status for every collector label).
+//! `crates/mvm-client/tests/studio_telemetry_fixtures.rs` replays the served
+//! fixtures through the real local reader. The companion contract document
+//! is `specs/telemetry/studio-contract.md`.
 //!
 //! The streams are deterministic (fixed epochs, sequences and monotonic
 //! timestamps), so the comparison is byte-exact. Regenerate after a
@@ -29,12 +33,20 @@ const SCENARIOS: [&str; 3] = ["healthy-boot", "lossy-flood", "restored-generatio
 /// The served shapes the read seam answers with, frozen beside the streams:
 /// three status snapshots and one page of the healthy-boot stream as a
 /// consumer receives it.
-const SERVED: [&str; 4] = [
+const SERVED: [&str; 5] = [
     "status-not-provisioned",
     "status-collecting",
     "status-degraded",
     "page-healthy-boot",
+    "records-page",
 ];
+
+/// The records `records-page.json` holds: a first page that stops short of
+/// the end of the healthy-boot stream, so the cursor visibly continues.
+const RECORDS_PAGE_LIMIT: usize = 3;
+
+/// The status fixture: one served status per line, covering every state.
+const STATUS_FIXTURE: &str = "collector-status";
 
 fn attr(key: &str, value: AttributeValue) -> Attribute {
     Attribute {
@@ -262,29 +274,70 @@ fn received_at_ms(index: usize) -> u64 {
 /// start of the stream: every record in its envelope, the cursor one byte
 /// past the last persisted line, nothing undecodable, and the end reached.
 fn healthy_boot_page() -> TelemetryReadResponse {
-    let records = healthy_boot();
+    healthy_boot_page_of(usize::MAX)
+}
+
+/// The first `limit` records of the healthy-boot stream as the seam serves
+/// them from the start: the cursor sits one byte past the last line served,
+/// and `exhausted` says whether that was the end of the stream.
+fn healthy_boot_page_of(limit: usize) -> TelemetryReadResponse {
+    let all = healthy_boot();
+    let total = all.len();
+    let records: Vec<ReceivedRecord> = all
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(index, record)| ReceivedRecord {
+            received_at_ms: Some(received_at_ms(index)),
+            record,
+        })
+        .collect();
     let persisted: u64 = records
         .iter()
-        .enumerate()
-        .map(|(index, record)| {
-            ReceivedRecord::encode_line(received_at_ms(index), record)
+        .map(|r| {
+            ReceivedRecord::encode_line(r.received_at_ms.unwrap(), &r.record)
                 .unwrap()
                 .len() as u64
         })
         .sum();
     TelemetryReadResponse {
-        records: records
-            .into_iter()
-            .enumerate()
-            .map(|(index, record)| ReceivedRecord {
-                received_at_ms: Some(received_at_ms(index)),
-                record,
-            })
-            .collect(),
+        exhausted: records.len() == total,
+        records,
         next_cursor: TelemetryCursor { offset: persisted },
         undecodable: 0,
-        exhausted: true,
     }
+}
+
+/// Every collector status label with the generation it carries, typed
+/// through the same conversion the local reader applies to the snapshot.
+/// Not-provisioned comes first: it has no label, it is the absence of one.
+/// The snapshot age is measured at read time, so these lines omit it.
+fn collector_statuses() -> Vec<TelemetryStatus> {
+    let provisioned =
+        |label: &str, generation: Option<u64>, shed: u64| TelemetryStatus::Provisioned {
+            vm_name: "web".into(),
+            state: CollectorState::from_label(label, generation).expect("a collector label"),
+            shed,
+            snapshot_age_ms: None,
+            records_bytes: 0,
+        };
+    vec![
+        TelemetryStatus::NotProvisioned,
+        provisioned("connecting", None, 0),
+        provisioned("collecting", Some(3), 0),
+        provisioned("collecting", Some(3), 37),
+        provisioned("degraded:authentication-failed", None, 37),
+        provisioned("stopped", None, 37),
+    ]
+}
+
+fn render_statuses() -> String {
+    let mut out = String::new();
+    for status in collector_statuses() {
+        out.push_str(&serde_json::to_string(&status).unwrap());
+        out.push('\n');
+    }
+    out
 }
 
 fn served(name: &str) -> serde_json::Value {
@@ -307,6 +360,7 @@ fn served(name: &str) -> serde_json::Value {
             records_bytes: 0,
         }),
         "page-healthy-boot" => serde_json::to_value(healthy_boot_page()),
+        "records-page" => serde_json::to_value(healthy_boot_page_of(RECORDS_PAGE_LIMIT)),
         other => panic!("unknown served fixture {other}"),
     }
     .unwrap()
@@ -367,6 +421,58 @@ fn every_committed_served_fixture_decodes_through_the_contract() {
     let page: TelemetryReadResponse = serde_json::from_str(&committed).unwrap();
     let stream: Vec<TelemetryRecord> = page.records.into_iter().map(|r| r.record).collect();
     assert_eq!(stream, healthy_boot());
+
+    // The partial page is a prefix of the full one, its cursor lands inside
+    // the full stream, and it says there is more.
+    let committed = std::fs::read_to_string(served_path("records-page")).unwrap();
+    let partial: TelemetryReadResponse = serde_json::from_str(&committed).unwrap();
+    let full = healthy_boot_page();
+    assert_eq!(partial.records, full.records[..RECORDS_PAGE_LIMIT]);
+    assert!(partial.next_cursor.offset < full.next_cursor.offset);
+    assert!(!partial.exhausted);
+}
+
+#[test]
+fn studio_status_fixture_covers_every_collector_state_and_matches_the_vector() {
+    let committed = std::fs::read_to_string(vector_path(STATUS_FIXTURE))
+        .unwrap_or_else(|e| panic!("reading {STATUS_FIXTURE}.jsonl: {e}"));
+    assert_eq!(
+        committed,
+        render_statuses(),
+        "{STATUS_FIXTURE}.jsonl drifted from the generator; regenerate deliberately \
+         with MVM_REGENERATE_VECTORS=1 (module docs)"
+    );
+    let decoded: Vec<TelemetryStatus> = committed
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("{STATUS_FIXTURE}.jsonl line {}: {e}", index + 1))
+        })
+        .collect();
+    let kinds: std::collections::BTreeSet<&str> = decoded
+        .iter()
+        .map(|status| match status {
+            TelemetryStatus::NotProvisioned => "not_provisioned",
+            TelemetryStatus::Provisioned { state, .. } => match state {
+                CollectorState::Connecting => "connecting",
+                CollectorState::Collecting { .. } => "collecting",
+                CollectorState::Degraded { .. } => "degraded",
+                CollectorState::Stopped => "stopped",
+            },
+        })
+        .collect();
+    assert_eq!(
+        kinds.into_iter().collect::<Vec<_>>(),
+        [
+            "collecting",
+            "connecting",
+            "degraded",
+            "not_provisioned",
+            "stopped"
+        ],
+        "the status fixture names every state a consumer must render"
+    );
 }
 
 /// Every fixture line must decode back through the real contract — the same
@@ -396,4 +502,5 @@ fn regenerate_the_frozen_fixture_streams() {
     for name in SERVED {
         std::fs::write(served_path(name), render_served(&served(name))).unwrap();
     }
+    std::fs::write(vector_path(STATUS_FIXTURE), render_statuses()).unwrap();
 }

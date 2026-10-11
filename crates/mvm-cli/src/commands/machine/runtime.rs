@@ -617,11 +617,7 @@ pub(in crate::commands) fn run_dispatch(
     // was started in builds machines nobody chose.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     crate::commands::vm::run_policy::select_pack_image(&mut args.run)?;
-    let inference = if args.persistent() {
-        crate::commands::vm::exec::Inference::ExplicitOnly
-    } else {
-        crate::commands::vm::exec::Inference::Enabled
-    };
+    let inference = args.source_inference();
     crate::commands::vm::exec::resolve_run_source(&mut args.run, &cwd, inference)?.announce();
     // Before policy is read: a `--manifest` naming a `.mvmpkg` (written as a
     // flag or as the positional source) becomes the installed bundle's sha256

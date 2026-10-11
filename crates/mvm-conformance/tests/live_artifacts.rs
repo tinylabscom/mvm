@@ -4,7 +4,7 @@ mod live_artifacts;
 use mvm_build::guest_libc::GuestLibc;
 use mvm_build::published_image_set::{MemberVersion, SetMemberCache};
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
+use mvm_core::image_set::{ImageSetRole, MemberTarget, RetiredGuestRuntimeRole};
 use mvm_fs::sdk_sidecar::SdkSidecarLayout;
 
 #[test]
@@ -85,43 +85,17 @@ fn sdk_gate_resolves_current_cli_cache_and_rejects_tampering() {
     assert!(!live_artifacts::sdk_sidecar_cached_in(cache.path()));
 }
 
+/// A sidecar an older CLI installed from the pinned image set does not
+/// satisfy the gate: a launch never attaches it.
 #[test]
-fn sdk_gate_resolves_only_recorded_members_of_the_pinned_set() {
+fn an_image_set_sidecar_does_not_satisfy_the_gate() {
     let cache = tempfile::tempdir().unwrap();
     let set = SetMemberCache::locked();
-    let version = MemberVersion::parse("1.2.3").unwrap();
-    let layout = install_fixture(&set.cache_root(cache.path()), version.as_str());
-    assert!(
-        !live_artifacts::sdk_sidecar_cached_in(cache.path()),
-        "unrecorded install"
-    );
-    set.record(
-        cache.path(),
-        ImageSetRole::SdkSidecar(GuestLibc::Glibc),
-        MemberTarget::Arch(GuestArch::host()),
-        &version,
-    )
-    .unwrap();
-    assert!(
-        live_artifacts::sdk_sidecar_cached_in(cache.path()),
-        "pinned member"
-    );
-    std::fs::write(&layout.image, b"tampered").unwrap();
-    assert!(
-        !live_artifacts::sdk_sidecar_cached_in(cache.path()),
-        "invalid member"
-    );
-}
-
-#[test]
-fn another_image_sets_sidecar_does_not_satisfy_the_gate() {
-    let cache = tempfile::tempdir().unwrap();
-    let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"other set"));
-    let version = MemberVersion::parse("1.2.3").unwrap();
+    let version = MemberVersion::parse(env!("CARGO_PKG_VERSION")).unwrap();
     install_fixture(&set.cache_root(cache.path()), version.as_str());
     set.record(
         cache.path(),
-        ImageSetRole::SdkSidecar(GuestLibc::Glibc),
+        ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc)),
         MemberTarget::Arch(GuestArch::host()),
         &version,
     )

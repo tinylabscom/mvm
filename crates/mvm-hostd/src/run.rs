@@ -229,6 +229,16 @@ pub fn admit_and_boot_local(
         })
         .transpose()?;
 
+    // With no egress grant the deny-all default stands; a granted allow-list
+    // is projected onto it, so the policy the gate enforces, and the seccomp
+    // tier the guest installs, derive from the grants the plan is signed for.
+    let network_policy = match req.grants.as_ref() {
+        Some(grants) if grants.egress.is_some() => {
+            mvm_contract::grants::projection::network_policy_from_grants(grants)
+        }
+        _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
+    };
+
     let synthesis = SynthesisInput {
         outputs: Vec::new(),
         grants: req.grants.clone(),
@@ -243,7 +253,12 @@ pub fn admit_and_boot_local(
         image_sha256: &sha,
         image_cosign_bundle: None,
         intent: None,
-        seccomp_tier: PlanSeccompTier::Standard,
+        seccomp_tier: mvm_core::plan::workload_seccomp_tier(
+            PlanSeccompTier::Standard,
+            &network_policy,
+            &[],
+            &[],
+        ),
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
@@ -285,15 +300,7 @@ pub fn admit_and_boot_local(
         memory_mib: req.mem_mib,
         volumes: req.volumes.clone(),
         tenant_id: Some(LOCAL_TENANT.to_string()),
-        // With no egress grant the deny-all default from `VmStartConfig` stands;
-        // a granted allow-list is projected onto it, so the policy the gate
-        // enforces is derived from the same grants the plan was signed for.
-        network_policy: match req.grants.as_ref() {
-            Some(grants) if grants.egress.is_some() => {
-                mvm_contract::grants::projection::network_policy_from_grants(grants)
-            }
-            _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
-        },
+        network_policy,
         ..Default::default()
     };
     attach_guest_runtime(&mut config, &req.backend_name)?;

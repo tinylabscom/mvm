@@ -110,18 +110,18 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             ],
             vec![VirtioBlk, DmVerity],
         ),
-        ImageSetRole::RuntimeOverlay => (
+        ImageSetRole::RetiredGuestRuntime(retired) => (
             None,
             vec![artifact(
-                &format!("runtime-overlay{suffix}.tar.gz"),
-                ArtifactFormat::TarGz,
-            )],
-            vec![],
-        ),
-        ImageSetRole::SdkSidecar(libc) => (
-            None,
-            vec![artifact(
-                &format!("sdk-sidecar{suffix}-{libc}.tar.gz"),
+                &match retired {
+                    RetiredGuestRuntimeRole::RuntimeOverlay => {
+                        format!("runtime-overlay{suffix}.tar.gz")
+                    }
+                    RetiredGuestRuntimeRole::SdkSidecar(libc) => {
+                        format!("sdk-sidecar{suffix}-{libc}.tar.gz")
+                    }
+                    RetiredGuestRuntimeRole::Initramfs => format!("initramfs{suffix}.tar.gz"),
+                },
                 ArtifactFormat::TarGz,
             )],
             vec![],
@@ -130,14 +130,6 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             boot,
             vec![artifact(&format!("stage0-vmlinux{suffix}"), kernel)],
             vec![VirtioVsock],
-        ),
-        ImageSetRole::Initramfs => (
-            None,
-            vec![artifact(
-                &format!("initramfs{suffix}.tar.gz"),
-                ArtifactFormat::TarGz,
-            )],
-            vec![],
         ),
         ImageSetRole::QemuWasmSmokePack => (
             None,
@@ -647,9 +639,14 @@ mod serde_shape {
                 ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
                 r#"{"workload_rootfs":"rootless_tenant"}"#,
             ),
-            (ImageSetRole::RuntimeOverlay, r#""runtime_overlay""#),
             (
-                ImageSetRole::SdkSidecar(GuestLibc::Musl),
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::RuntimeOverlay),
+                r#""runtime_overlay""#,
+            ),
+            (
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                    GuestLibc::Musl,
+                )),
                 r#"{"sdk_sidecar":"musl"}"#,
             ),
             (
@@ -657,7 +654,10 @@ mod serde_shape {
                 r#""stage0_bootstrap_kernel""#,
             ),
             (ImageSetRole::QemuWasmSmokePack, r#""qemu_wasm_smoke_pack""#),
-            (ImageSetRole::Initramfs, r#""initramfs""#),
+            (
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::Initramfs),
+                r#""initramfs""#,
+            ),
         ];
         for (role, json) in roles {
             assert_eq!(serde_json::to_string(&role).unwrap(), json);
@@ -778,48 +778,107 @@ mod structure {
         validate_structure(manifest).unwrap_err()
     }
 
-    #[test]
-    fn a_set_carrying_per_arch_initramfs_members_is_well_formed_and_complete() {
-        let manifest = manifest();
-        for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-            assert!(manifest.members.iter().any(|member| {
-                member.role == ImageSetRole::Initramfs && member.target == MemberTarget::Arch(arch)
-            }));
+    const RETIRED: [RetiredGuestRuntimeRole; 4] = [
+        RetiredGuestRuntimeRole::RuntimeOverlay,
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+        RetiredGuestRuntimeRole::Initramfs,
+    ];
+
+    /// The set as image sets published before the guest runtime moved to the
+    /// CLI release lay it out: every Linux-layer member plus an overlay, both
+    /// sidecars and an initramfs per architecture.
+    fn manifest_with_retired_members() -> ImageSetManifest {
+        let mut manifest = manifest();
+        for arch in [X86, ARM] {
+            for retired in RETIRED {
+                manifest
+                    .members
+                    .push(member(ImageSetRole::RetiredGuestRuntime(retired), arch));
+            }
         }
+        manifest
+    }
+
+    /// The guest runtime ships with the CLI, so a set is complete without any
+    /// of its members, on either architecture.
+    #[test]
+    fn the_current_train_requires_no_guest_runtime_member() {
+        let manifest = manifest();
+        assert!(
+            !manifest
+                .members
+                .iter()
+                .any(|member| member.role.is_retired())
+        );
+        assert!(
+            !ImageSetRequirement::current_train()
+                .members()
+                .iter()
+                .any(|required| required.role.is_retired())
+        );
         validate_structure(&manifest).unwrap();
         require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
-        let selected = select_member(
-            &manifest,
-            ImageSetRole::Initramfs,
+    }
+
+    /// A set the image repository published before it stopped building the
+    /// guest runtime still parses, passes every structural and completeness
+    /// check, and keeps its Linux-layer selection; its guest-runtime members
+    /// are carried as retired roles in their original wire spelling.
+    #[test]
+    fn a_set_still_carrying_guest_runtime_members_is_accepted_with_them_retired() {
+        let manifest = manifest_with_retired_members();
+        let json = serde_json::to_string(&manifest).unwrap();
+        for spelling in [
+            r#""role":"runtime_overlay""#,
+            r#""role":{"sdk_sidecar":"glibc"}"#,
+            r#""role":{"sdk_sidecar":"musl"}"#,
+            r#""role":"initramfs""#,
+        ] {
+            assert!(json.contains(spelling), "{spelling} in {json}");
+        }
+        let parsed: ImageSetManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, manifest);
+        validate_structure(&parsed).unwrap();
+        require_complete(&parsed, &ImageSetRequirement::current_train()).unwrap();
+        check_protocol_compatibility(&parsed, &host()).unwrap();
+        assert_eq!(
+            parsed
+                .members
+                .iter()
+                .filter(|member| member.role.is_retired())
+                .count(),
+            2 * RETIRED.len()
+        );
+        let workload = select_workload_image(
+            &parsed,
+            WorkloadImageProfile::DefaultTenant,
             GuestArch::Aarch64,
             &backend(),
         )
         .unwrap();
-        assert_eq!(
-            selected.artifacts[0].name.as_str(),
-            "initramfs-aarch64.tar.gz"
-        );
+        assert!(!workload.kernel.role.is_retired());
+        assert!(!workload.rootfs.role.is_retired());
     }
 
-    /// The initramfs is a required member on both architectures: a set that
-    /// omits it is refused as incomplete, naming each missing member.
+    /// The SDK sidecar members of those sets publish a source fingerprint. It
+    /// still parses, so the set's signed bytes stay readable, and nothing else
+    /// about the member changes.
     #[test]
-    fn the_current_train_requires_an_initramfs_on_both_arches() {
-        let mut manifest = manifest();
-        manifest
-            .members
-            .retain(|member| member.role != ImageSetRole::Initramfs);
-        match require_complete(&manifest, &ImageSetRequirement::current_train()) {
-            Err(ImageSetError::Incomplete { missing }) => {
-                for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-                    assert!(missing.contains(&RequiredMember {
-                        role: ImageSetRole::Initramfs,
-                        target: MemberTarget::Arch(arch),
-                    }));
-                }
-            }
-            other => panic!("a set without an initramfs must be incomplete, got {other:?}"),
-        }
+    fn a_retired_sidecar_member_with_a_source_fingerprint_still_parses() {
+        let mut manifest = manifest_with_retired_members();
+        let sidecar = member_mut(
+            &mut manifest,
+            ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                GuestLibc::Glibc,
+            )),
+            ARM,
+        );
+        sidecar.source_fingerprint = Some(sha("sdk-cdylib-sources"));
+        let parsed: ImageSetManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(parsed, manifest);
+        validate_structure(&parsed).unwrap();
     }
 
     #[test]
@@ -908,12 +967,12 @@ mod structure {
     #[test]
     fn refuses_a_member_with_no_artifacts() {
         let mut manifest = manifest();
-        member_mut(&mut manifest, ImageSetRole::RuntimeOverlay, ARM)
+        member_mut(&mut manifest, ImageSetRole::Stage0BootstrapKernel, ARM)
             .artifacts
             .clear();
         assert!(matches!(
             refused(&manifest),
-            ImageSetError::MemberHasNoArtifacts { role: ImageSetRole::RuntimeOverlay, target }
+            ImageSetError::MemberHasNoArtifacts { role: ImageSetRole::Stage0BootstrapKernel, target }
                 if target == ARM
         ));
     }
@@ -1001,21 +1060,6 @@ mod structure {
     }
 
     #[test]
-    fn refuses_an_sdk_sidecar_for_an_unknown_libc() {
-        let mut manifest = manifest();
-        member_mut(
-            &mut manifest,
-            ImageSetRole::SdkSidecar(GuestLibc::Musl),
-            X86,
-        )
-        .role = ImageSetRole::SdkSidecar(GuestLibc::Unknown);
-        assert!(matches!(
-            refused(&manifest),
-            ImageSetError::UnknownSidecarLibc { target } if target == X86
-        ));
-    }
-
-    #[test]
     fn refuses_a_release_tag_naming_another_version() {
         let mut manifest = manifest();
         release_mut(&mut manifest).release_tag = ReleaseTag::new("v1.0.1").unwrap();
@@ -1066,7 +1110,7 @@ mod completeness {
     fn current_train_requires_every_role_on_both_arches_plus_the_smoke_pack() {
         let requirement = ImageSetRequirement::current_train();
         let members = requirement.members();
-        assert_eq!(members.len(), 21);
+        assert_eq!(members.len(), 13);
         for arch in [X86, ARM] {
             for profile in [
                 WorkloadImageProfile::DefaultTenant,
@@ -1087,11 +1131,7 @@ mod completeness {
                 ImageSetRole::BuilderVm,
                 ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
-                ImageSetRole::RuntimeOverlay,
-                ImageSetRole::SdkSidecar(GuestLibc::Glibc),
-                ImageSetRole::SdkSidecar(GuestLibc::Musl),
                 ImageSetRole::Stage0BootstrapKernel,
-                ImageSetRole::Initramfs,
             ] {
                 assert!(members.contains(&RequiredMember { role, target: arch }));
             }
@@ -1164,11 +1204,14 @@ mod completeness {
     #[test]
     fn member_build_mode_and_source_fingerprint_round_trip() {
         let mut changed = manifest();
-        for m in &mut changed.members {
-            if m.role == ImageSetRole::SdkSidecar(GuestLibc::Glibc) && m.target == ARM {
-                m.source_fingerprint = Some(sha("sdk-cdylib-sources"));
-            }
-        }
+        let mut sidecar = member(
+            ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                GuestLibc::Glibc,
+            )),
+            ARM,
+        );
+        sidecar.source_fingerprint = Some(sha("sdk-cdylib-sources"));
+        changed.members.push(sidecar);
         let dev_rootfs = changed
             .members
             .iter_mut()
@@ -1501,7 +1544,7 @@ mod selection {
         // take it.
         select_member(
             &manifest,
-            ImageSetRole::RuntimeOverlay,
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
             GuestArch::Aarch64,
             &backend,
         )
@@ -1824,7 +1867,7 @@ mod verification {
         let mut incomplete = manifest();
         incomplete
             .members
-            .retain(|m| m.role != ImageSetRole::RuntimeOverlay);
+            .retain(|m| m.role != ImageSetRole::Stage0BootstrapKernel);
         let set = stage(incomplete);
         verify_root_checked(&set.request(), accept_signature).unwrap();
         assert!(matches!(
@@ -2104,7 +2147,7 @@ mod verification {
         let mut manifest = manifest();
         manifest
             .members
-            .retain(|member| member.role != ImageSetRole::RuntimeOverlay);
+            .retain(|member| member.role != ImageSetRole::Stage0BootstrapKernel);
         let set = stage(manifest);
 
         verify_checked(&set.request(), accept_signature)

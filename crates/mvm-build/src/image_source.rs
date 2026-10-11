@@ -61,15 +61,15 @@ pub use local_set::{LocalSetError, LocalSetRequest};
 pub const MVM_IMAGES_DIR_ENV: &str = "MVM_IMAGES_DIR";
 
 /// Files every `mvm-images` checkout carries at its root, relative paths. A
-/// directory missing any of them is not one, whatever else it holds.
+/// directory missing any of them is not one, whatever else it holds. Only
+/// Linux-layer definitions are markers: the guest runtime's image definitions
+/// leave that repository, so a checkout without them is still one.
 pub const IMAGES_CHECKOUT_MARKERS: &[&str] = &[
     "flake.nix",
     "flake.lock",
     "kernel/flake.nix",
     "images/builder-vm/image.nix",
     "images/default-tenant/image.nix",
-    "images/runtime-overlay/image.nix",
-    "images/initramfs/image.nix",
 ];
 
 /// Why an image source was refused.

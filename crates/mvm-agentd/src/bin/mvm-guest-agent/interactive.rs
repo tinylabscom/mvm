@@ -155,6 +155,7 @@ fn do_run_detached_with(
             Ok(())
         });
     }
+    mvm_agentd::workload_seccomp::confine(&mut cmd);
 
     let child = match cmd.spawn() {
         Ok(c) => c,

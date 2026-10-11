@@ -197,6 +197,56 @@ mod published_root;
 mod tests {
     use super::*;
 
+    /// The pinned set was published while the image repository still built
+    /// the guest runtime, so it lists an overlay, two sidecars and an
+    /// initramfs per architecture. A CLI that no longer requires them must
+    /// still read that signed set: every one parses as a retired role, the set
+    /// is complete without them, and the Linux layer selects as before.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn the_pinned_set_still_listing_the_guest_runtime_parses_complete_with_it_retired() {
+        use crate::arch::GuestArch;
+        use crate::image_set::{
+            BackendImageSupport, ImageSetManifest, ImageSetRole, RetiredGuestRuntimeRole,
+            WorkloadImageProfile, require_complete, select_workload_image, validate_structure,
+        };
+        use crate::vm_backend::BackendKind;
+        use mvm_contract::guest_libc::GuestLibc;
+
+        let manifest: ImageSetManifest = serde_json::from_slice(published_root::MANIFEST).unwrap();
+        validate_structure(&manifest).unwrap();
+        require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
+        for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+            for retired in [
+                RetiredGuestRuntimeRole::RuntimeOverlay,
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+                RetiredGuestRuntimeRole::Initramfs,
+            ] {
+                assert!(
+                    manifest.members.iter().any(|member| member.role
+                        == ImageSetRole::RetiredGuestRuntime(retired)
+                        && member.target.admits(arch)),
+                    "{retired} for {arch}"
+                );
+            }
+            let support = BackendImageSupport::for_backend(BackendKind::Firecracker).unwrap();
+            let workload = select_workload_image(
+                &manifest,
+                WorkloadImageProfile::DefaultTenant,
+                arch,
+                &support,
+            )
+            .unwrap();
+            assert!(!workload.kernel.role.is_retired() && !workload.rootfs.role.is_retired());
+        }
+        // The signed bytes re-serialize to an equal manifest, so nothing about
+        // reading the retired members loses what the root digest covers.
+        let again: ImageSetManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(again, manifest);
+    }
+
     /// Reads only vendored public release files. No network is used by the
     /// test or cache APIs; this witnesses root authentication, not member boot.
     #[cfg(feature = "manifest-verify")]
