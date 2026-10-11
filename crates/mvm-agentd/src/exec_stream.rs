@@ -296,7 +296,10 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         // is Linux-only), so the relay degrades to an ordinary process-group
         // spawn and the host-decided semantics are unchanged.
         #[cfg(not(any(target_os = "linux", test)))]
-        Leader::MediatedRelay => builder.spawn().map(|child| (child, None)),
+        Leader::MediatedRelay => {
+            crate::workload_seccomp::confine(&mut builder);
+            builder.spawn().map(|child| (child, None))
+        }
     };
     let (mut child, _registration) = match spawned {
         Ok(spawned) => spawned,

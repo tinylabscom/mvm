@@ -685,11 +685,16 @@ pub fn admit_plan_for_boot_configured_ingress(
         hex::encode(hasher.finalize())
     };
 
+    // The tool-decision binding is added before the tier is derived: the
+    // in-guest shim reaches the tool helper over a socket from inside the
+    // workload process, so a launch whose only service is `host.tool.v1`
+    // needs the socket-granting tier as much as one that binds it by hand.
+    let services = services_with_tool_decision(p.services.clone(), &p.tools);
     let seccomp_tier = mvm_core::plan::workload_seccomp_tier(
         p.seccomp_tier,
         &p.network_policy,
         &ingress,
-        &p.services,
+        &services,
     );
     let input = SynthesisInput {
         outputs: p.outputs.clone(),
@@ -757,7 +762,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         // here (before signing) means an authored `[tools]` section always
         // carries its enforcement channel; an author cannot forget it, and
         // dropping it while tools remain is not expressible.
-        services: services_with_tool_decision(p.services.clone(), &p.tools),
+        services,
         extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent
@@ -2382,6 +2387,74 @@ pub(crate) mod admit_plan_tests {
         assert!(!content.contains("slots_mode"), "{content}");
         // Sanity: plan_id matches.
         assert!(content.contains(&ctx.admitted.plan_id().0));
+    }
+
+    #[test]
+    fn declared_tools_alone_raise_the_admitted_seccomp_tier_to_network() {
+        let keys_dir = tempfile::tempdir().unwrap();
+        let audit_dir = tempfile::tempdir().unwrap();
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"declared-tools-payload");
+        let ledger = InMemoryNonceLedger::new();
+        let tools = mvm_contract::policy::tool_rules::ToolRules {
+            allow: vec!["git".to_string()],
+            ..Default::default()
+        };
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
+            outputs: Vec::new(),
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name: "vm-declared-tools",
+            backend_name: "libkrun",
+            configured_images_dir: None,
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            tools,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: None,
+            entrypoint: ResolvedEntrypoint::unresolved("this test does not resolve one"),
+            assets: Vec::new(),
+        })
+        .expect("admission");
+
+        // No egress, ingress or caller-bound service: the only socket the
+        // workload needs is the shim's connection to the tool helper, which
+        // rides on the injected `host.tool.v1` binding.
+        let plan = ctx.admitted.plan();
+        assert!(
+            plan.services
+                .iter()
+                .any(|service| service.as_str()
+                    == mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE),
+            "declared tools must bind host.tool.v1"
+        );
+        assert_eq!(
+            plan.admission_profile.seccomp_tier,
+            mvm_core::plan::PlanSeccompTier::Network
+        );
+        assert_eq!(plan.audit_labels["seccomp_tier"], "network");
     }
 
     #[test]

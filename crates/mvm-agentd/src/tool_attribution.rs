@@ -292,6 +292,9 @@ fn spawn_attributed_in_group(
 /// its pid, so the shim it may turn out to be consults the marker instead of
 /// paying for a second decision. Mirrors [`spawn_attributed`]'s lock order.
 pub fn spawn_decided_relay(command: &mut Command) -> io::Result<Child> {
+    // The relay is a workload process like any other exec: it runs under the
+    // admitted tier.
+    crate::workload_seccomp::confine(command);
     let _live = live();
     let child = command.spawn()?;
     if let Ok(start_ticks) = process_start_ticks(child.id()) {
