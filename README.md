@@ -45,17 +45,20 @@ few extra steps, covered in
 ```bash
 mvmctl doctor
 mvmctl bootstrap
-mvmctl image pull alpine
 export MVM_RESIDENCY=warm
-mvmctl pool warm 1 --image alpine
+mvmctl image pull alpine --warm
 mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
 ```
 
 `bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
-fetches and unpacks an OCI image. `pool warm` boots a standby VM, and
-`MVM_RESIDENCY=warm` lets the next matching run claim it. An unnamed run must
-claim one: with no standby of the same image and sizing it refuses rather than
-cold-booting, while a run given `--name` always boots cold. A `machine run
+fetches and unpacks an OCI image, and `--warm` then boots a standby VM of it at
+the default sizing; `mvmctl pool warm 1 --image alpine` does the same for an
+image already pulled. `MVM_RESIDENCY=warm` lets the next matching run claim the
+standby. An unnamed run must claim one: with no standby of the same image and
+sizing it refuses rather than cold-booting, while a run given `--name` always
+boots cold. Run at a terminal, a refused run prints the `pool warm` command that
+fixes it and offers to run it; answer `y` and it prepares the standby and tries
+the launch once more. Nothing is warmed unless you ask. A `machine run
 --image` launch reads only the local cache and never downloads anything. A run
 that claims a standby must be ready in under 300 ms, or `mvmctl` reports the
 launch as failed.

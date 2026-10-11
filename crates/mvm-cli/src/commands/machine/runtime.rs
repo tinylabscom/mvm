@@ -693,13 +693,7 @@ pub(in crate::commands) fn run_dispatch(
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            crate::commands::vm::exec::run_secure_started(
-                cli,
-                run_args,
-                cfg,
-                source,
-                startup_started,
-            )
+            run_transient_with_warm_offer(cli, cfg, run_args, source, startup_started)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -733,15 +727,45 @@ pub(in crate::commands) fn run_dispatch(
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            crate::commands::vm::exec::run_secure_started(
-                cli,
-                run_args,
-                cfg,
-                source,
-                startup_started,
-            )
+            run_transient_with_warm_offer(cli, cfg, run_args, source, startup_started)
         }
     }
+}
+
+/// Launch a transient run, and when strict startup refuses it on an
+/// interactive terminal, offer to prepare the standby and retry once.
+///
+/// The retry restarts the startup clock: the time spent warming is not the
+/// launch's, and the claim it then makes is measured from its own start.
+fn run_transient_with_warm_offer(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    run_args: crate::commands::vm::exec::RunArgs,
+    source: Option<crate::exec::ImageSource>,
+    startup_started: std::time::Instant,
+) -> Result<()> {
+    let terminal = crate::commands::pool::RefusalTerminal::detect(run_args.json);
+    let offer = crate::commands::pool::WarmOffer::for_run(&run_args, source.is_some())
+        .filter(|_| terminal.can_prompt());
+    // Only a run that could be retried keeps a second copy of its arguments,
+    // so a scripted run pays nothing for the offer.
+    let mut retry_args = offer.as_ref().map(|_| (run_args.clone(), source.clone()));
+    let mut first = Some((run_args, source, startup_started));
+    crate::commands::pool::launch_with_warm_offer(offer, terminal, |warm_target| {
+        let (mut args, source, started) = match first.take() {
+            Some(attempt) => attempt,
+            None => {
+                let (args, source) = retry_args
+                    .take()
+                    .context("a refused launch is retried at most once")?;
+                (args, source, std::time::Instant::now())
+            }
+        };
+        if let Some(target) = warm_target {
+            args.warm_pool_size = target;
+        }
+        crate::commands::vm::exec::run_secure_started(cli, args, cfg, source, started)
+    })
 }
 
 pub(in crate::commands) fn boot_persistent_by_name(

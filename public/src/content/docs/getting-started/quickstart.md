@@ -18,17 +18,22 @@ Prepare the runtime, image, and matching standby explicitly, then launch:
 
 ```bash
 mvmctl bootstrap
-mvmctl image pull alpine
 export MVM_RESIDENCY=warm
-mvmctl pool warm 1 --image alpine
+mvmctl image pull alpine --warm
 mvmctl machine run --image alpine -- uname -a
 ```
 
-`bootstrap` also creates the host snapshot key that warm standbys are
-encrypted under, at `~/.mvm/keys/local.key`, when the host has none; keep a
-copy of it. `MVM_RESIDENCY=warm` enables prepared claims in this shell. Linux otherwise
-defaults to `parked` with a zero warm target; `pool warm` alone does not change
-that policy.
+`image pull --warm` pulls the image and then prepares one standby of it at the
+default sizing, the same as `mvmctl pool warm 1 --image alpine` for an image
+already pulled. `bootstrap` also creates the host snapshot key that warm
+standbys are encrypted under, at `~/.mvm/keys/local.key`, when the host has
+none; keep a copy of it. `MVM_RESIDENCY=warm` enables prepared claims in this
+shell. Linux otherwise defaults to `parked` with a zero warm target; warming
+alone does not change that policy.
+
+If you skip the warm, an unnamed run at a terminal is refused and offers to
+prepare the standby for you (`[y/N]`, default no) and retry. Scripts and CI get
+the refusal and its fix command without a prompt.
 
 Preparation owns downloads and materialization. `machine run` is cache-only and
 claims the prepared standby, keeping every successful warm-eligible startup

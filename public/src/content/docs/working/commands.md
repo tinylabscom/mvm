@@ -20,7 +20,7 @@ needs a standby of that image:
 
 ```sh
 export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
-mvmctl pool warm                              # the bundled default image
+mvmctl pool warm --default                    # the bundled default image
 mvmctl pool warm --image python:3.12-alpine   # the image python commands infer
 mvmctl run -- uname -a
 mvmctl run --profile restrictive -- python -c 'print("hello")'

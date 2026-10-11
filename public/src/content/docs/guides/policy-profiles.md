@@ -59,7 +59,7 @@ host files or host-provided environment values:
 ```sh
 export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
 mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
-mvmctl pool warm                              # the default image, for ./debug-script.sh below
+mvmctl pool warm --default                    # the default image, for ./debug-script.sh below
 mvmctl run --profile restrictive -- python task.py
 ```
 

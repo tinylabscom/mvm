@@ -530,14 +530,14 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl catalog info <name>`                                                                                      | Show catalog entry details (JSON)                                                                                                                                                                                                                                                                                  |
 | `mvmctl init <DIR> --catalog <name>`                                                                              | Scaffold a project from a catalog entry                                                                                                                                                                                                                                                                            |
 | `mvmctl image build-layer --source ./staged-root --output ./app-assets`                                           | Given a complete staged root filesystem, write unsigned ext4, dm-verity, root-hash, and digest-report assets into a new directory; this does not sign or publish a pack.                                                                                 |
-| `mvmctl image pull <ref> [--prod]`                                                                                | Pull an OCI image, unpack its layers, scan the base image's OS packages (dpkg/apk) and any in-image kernel against OSV, materialize a bootable `rootfs.ext4`, and record the image plus provenance, `cve.json`, and CycloneDX SBOM sidecars in the local OCI cache. `--prod` requires a digest-pinned reference, an OCI policy file, cosign verification, and a completed CVE scan                                                                               |
+| `mvmctl image pull <ref> [--prod] [--warm]`                                                                       | Pull an OCI image, unpack its layers, scan the base image's OS packages (dpkg/apk) and any in-image kernel against OSV, materialize a bootable `rootfs.ext4`, and record the image plus provenance, `cve.json`, and CycloneDX SBOM sidecars in the local OCI cache. `--prod` requires a digest-pinned reference, an OCI policy file, cosign verification, and a completed CVE scan. `--warm` then prepares one warm standby of the image at the default sizing, exactly as `mvmctl pool warm --image <ref>` does; a failed pull, or a rootfs directory with no provenance to verify, warms nothing                                                                               |
 | `mvmctl image ls [--registry <host>] [--json]`                                                                    | List cached OCI images by reference, resolved digest, fetched timestamp, and size                                                                                                                                                                                                                                  |
 | `mvmctl image inspect <ref-or-digest> [--json]`                                                                   | Print cached OCI manifest/config metadata, layer digests, and any claims/provenance sidecar                                                                                                                                                                                                                        |
 | `mvmctl image rm <ref-or-digest>`                                                                                 | Remove a cached OCI image and garbage-collect unreferenced layer files                                                                                                                                                                                                                                             |
 | `mvmctl image boot status [--json]`                                                                               | Report each cached default boot image variant (`dev`, `prod`): tag, source (`built-local` / `fetched`), acquisition time, protocol version, on-disk size, and whether the next run would use it. Cache only, no network                                                                                            |
 | `mvmctl image boot check [--json]`                                                                                | Compare the cached boot image tag against the latest published `boot-image/v*` release. Read-only; exits nonzero only when behind, so a script can gate on the exit code                                                                                                                                           |
 | `mvmctl image boot update [--tag <t>] [--force]`                                                                  | Fetch and hash-verify a published boot image into a staging directory, then atomically swap it into the cache. `--tag` pins a release; `--force` is required in a source checkout, where the local build is authoritative                                                                                          |
-| `mvmctl image dev ensure`                                                                                          | Ensure the writable dev default-tenant image is installed in the local cache: pair-build it from the selected mvm-images checkout, or, with none selected, install the pinned image set's `dev` members, verified against its signed root |
+| `mvmctl image dev ensure [--warm]`                                                                                 | Ensure the writable dev default-tenant image is installed in the local cache: pair-build it from the selected mvm-images checkout, or, with none selected, install the pinned image set's `dev` members, verified against its signed root. `--warm` then prepares one standby of the image a bare `machine run` boots, as `mvmctl pool warm --default` does |
 | `mvmctl image boot verify --manifest <f> --bundle <f> [--lock <f>] --artifacts <dir> [--artifact <name> ...] [--require-complete] [--check-revocations] [--json]` | Verify a published image set offline. Without `--artifact`, verify every member artifact. With repeatable `--artifact`, verify only the named declared artifact bytes while still checking the signed manifest against the lock, its producer, structure, and signature; output explicitly marks unselected artifacts as unverified. The omitted lock uses the pin compiled into `mvmctl`. With `--check-revocations`, also refuse a revoked set or member under the signed image-set revocation list applied with `mvmctl image revocations update`; a missing, expired, or modified list fails the command rather than being treated as empty. Without it, revocation status is not checked. No network or cache writes; a refusal names its stage and exits nonzero. |
 | `mvmctl image revocations update --document <revocations.json> --bundle <revocations.json.bundle>` | Apply the signed image-set revocation list published at `https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json`. The bundle must name the mvm-images `revocations.yml` workflow at a `revocation-list/v<N>` tag under the GitHub Actions issuer; any other signer, including the registry-pack revocation authority, is refused. The list must be inside its own validity window (at most 62 days), and neither the publication number `N` nor `issued_at` may go back from the last applied list. Two different lists at the same `N` or `issued_at` are refused. A refused list leaves the local copy unchanged. No network. |
 | `mvmctl image revocations status [--json]` | Re-verify the applied image-set revocation list and report its publication, validity window, digest, signer, and entry count. A missing, expired, incomplete, or modified local copy exits nonzero and names the command that fixes it. |
@@ -628,7 +628,7 @@ for the image you will run — or give the run a `--name`, which boots it cold:
 
 ```sh
 export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
-mvmctl pool warm                         # a standby of the bundled default image
+mvmctl pool warm --default               # a standby of the bundled default image
 mvmctl run -- uname -a                   # claims it
 mvmctl run --name scratch -- uname -a    # named: boots cold, no standby needed
 ```
@@ -1619,7 +1619,7 @@ prepares OCI and default images only, and a named run boots cold.
 
 ```bash
 export MVM_RESIDENCY=warm                             # Linux defaults to parked
-mvmctl pool warm                                      # default-image standby
+mvmctl pool warm --default                            # default-image standby
 mvmctl run -- uname -a                                # default image
 mvmctl run --name tpl --manifest minimal -- /bin/true # named template, cold boot
 mvmctl run --mount .:/work:ro -- ls /work            # snapshot current dir into an image, RO
@@ -1837,7 +1837,7 @@ running microVM.
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
-| `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
+| `mvmctl pool warm [COUNT] [--image REF \| --default]`                | Pre-spawn standby microVMs so the next run claims a warm one. `--image` warms that image, `--default` the image a bare run boots; with neither, the most recently pulled images (at most the residency warm target, at least one), or the default image when nothing has been pulled                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
 For a built-image pack, `pull` authenticates its descriptor before fetching the
@@ -1858,9 +1858,33 @@ enable claims explicitly:
 
 ```bash
 export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
+mvmctl image pull alpine --warm
 mvmctl machine run --image alpine -- /bin/true
 ```
+
+```bash
+mvmctl pool warm                  # the most recently pulled image(s), else the default
+mvmctl pool warm --default        # the image a bare run boots
+```
+
+`image pull --warm` is `image pull` followed by `pool warm --image` for the
+same reference at the default sizing; use `pool warm --image` directly for an
+image already in the cache, or for another `--cpus`/`--memory`. With no
+`--image` and no `--default`, `pool warm` warms the images most recently pulled
+into the local OCI cache, newest first and at most as many as the residency
+warm target (at least one); a host with nothing pulled warms the default image.
+Running an image that is already cached does not count as a pull. Nothing is
+warmed in the background.
+
+When strict startup refuses an unnamed run at a terminal, the run prints the
+`pool warm` command that prepares the matching standby and asks
+`Prepare a standby for <image> now? [y/N]`. The answer defaults to no. Yes warms
+one standby and retries the launch once; on a host whose default residency is
+`parked` that retry claims as `MVM_RESIDENCY=warm` would, and the prompt says to
+export it for later runs. An `MVM_RESIDENCY` you set to `parked` or `cold` is
+left alone, and the refusal stands. The run never prompts under `CI`, with
+`--json`, or when stdin, stdout or stderr is not a terminal; there the refusal
+text is unchanged.
 
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared

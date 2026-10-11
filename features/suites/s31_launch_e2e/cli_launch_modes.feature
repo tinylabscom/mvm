@@ -21,6 +21,8 @@ Feature: every README-documented CLI launch mode boots a real guest
   Scenario: the documented preparation commands populate images and standbys explicitly
     When I prepare launch artifacts with "image pull alpine"
     Then the launch succeeds
+    When I prepare launch artifacts with "image pull alpine --warm"
+    Then the launch succeeds
     When I prepare launch artifacts with "image pull python:3.12"
     Then the launch succeeds
     When I prepare launch artifacts with "pool warm 1 --image alpine"

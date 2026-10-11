@@ -22,15 +22,11 @@
 # ── Transient machines ───────────────────────────────────────────────────────
 
 [[example]]
-command = "mvmctl image pull alpine"
-witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
-
-[[example]]
 command = "mvmctl image pull python:3.12"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
 
 [[example]]
-command = "mvmctl pool warm 1 --image alpine"
+command = "mvmctl image pull alpine --warm"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
 
 [[example]]
