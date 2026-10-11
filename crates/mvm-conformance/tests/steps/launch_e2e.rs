@@ -57,6 +57,16 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The residency the README's quick start exports before it launches.
+///
+/// An unnamed launch must claim a prepared warm standby, and only a warm
+/// residency lets it: Linux otherwise resolves to `parked`, whose warm target
+/// is zero, and refuses every unnamed launch even after `pool warm`. These
+/// scenarios run the documented shell, so they set what it sets. A launch that
+/// means to boot cold is named.
+const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
+const DOCUMENTED_RESIDENCY: &str = "warm";
+
 pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
         .map(PathBuf::from)
@@ -138,6 +148,7 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
         .args(argv)
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1")
+        .env(RESIDENCY_ENV, DOCUMENTED_RESIDENCY)
         // Same setting as `mvmctl_command`, restated because an `extra_env`
         // entry below may override it.
         .env("MVM_COLD_BUILD", "auto");
@@ -311,6 +322,7 @@ fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
         .args(shell_split(args))
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1")
+        .env(RESIDENCY_ENV, DOCUMENTED_RESIDENCY)
         // A terminal the guest shell can actually address. Without it the
         // shell falls back to `dumb` and some images print nothing at all,
         // which would read as a console failure.

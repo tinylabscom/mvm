@@ -1385,6 +1385,19 @@ mod tests {
             "the exit-code fixture must bake a shebang marker at mode 0755 — \
              the only shape the guest agent's sealed-marker policy accepts"
         );
+        // The guest agent builds the dm-verity table at the data device's ext4
+        // block size, read from its superblock; it has no other source for it.
+        // The published default rootfs is a 1 KiB-block filesystem, so a hash
+        // tree formatted at a literal 4096 covers a quarter of the blocks the
+        // guest hashes, and activation refuses it as "hash device too small".
+        // The fixture has to format at the block size of the rootfs it edits.
+        assert!(
+            build.contains(r#"dumpe2fs -h "$revision_dir/rootfs.ext4""#)
+                && build.contains(r#"--data-block-size="$data_block_size""#)
+                && !build.contains("--data-block-size=4096"),
+            "the exit-code fixture must format verity at the rootfs's own ext4 \
+             block size, the size the guest agent pairs the hash device with"
+        );
         // The published builder boots first; source compilation only starts
         // after the mvm-images checkout and host boot inputs are in place.
         let published_builder = bootstrap

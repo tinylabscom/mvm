@@ -1072,10 +1072,21 @@ jobs:
             "$revision_dir/mvm-meta.json" > "$revision_dir/mvm-meta.json.next"
           mv "$revision_dir/mvm-meta.json.next" "$revision_dir/mvm-meta.json"
 
+          # The guest agent builds its dm-verity table at the rootfs's ext4
+          # block size, read from the superblock, so the hash tree has to be
+          # formatted at that size. The published default rootfs uses 1 KiB
+          # blocks; a tree formatted at 4096 covers a quarter of the blocks the
+          # guest hashes and activation refuses it as "hash device too small".
+          data_block_size=$(dumpe2fs -h "$revision_dir/rootfs.ext4" 2>/dev/null \
+            | sed -n 's/^Block size:[[:space:]]*//p')
+          case "$data_block_size" in
+            1024|2048|4096) ;;
+            *) echo "::error::cannot read the rootfs ext4 block size (got '$data_block_size')" >&2; exit 1 ;;
+          esac
           : > "$revision_dir/rootfs.verity"
           veritysetup_out=$(
             veritysetup format \
-              --data-block-size=4096 \
+              --data-block-size="$data_block_size" \
               --hash-block-size=4096 \
               --salt=0000000000000000000000000000000000000000000000000000000000000000 \
               --uuid=00000000-0000-0000-0000-000000000003 \
