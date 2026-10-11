@@ -1263,7 +1263,11 @@ pub fn record_transient_outcome<T>(
             emit_launched(ctx, backend, false);
             emit_boot_posture(ctx, strategy);
         }
-        Err(e) => emit_failed(ctx, "launch", e),
+        Err(e) => emit_failed(
+            ctx,
+            crate::launch::startup_budget::failure_class(e, "launch"),
+            e,
+        ),
     }
 }
 

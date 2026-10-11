@@ -14,8 +14,7 @@ pub(super) fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
 pub(super) fn dispatch_baked_entrypoint(
     vm_name: &str,
     req: &ExecRequest,
-    startup_started: std::time::Instant,
-    launch_mode: crate::commands::vm::phase_timing::LaunchMode,
+    startup: &super::StartupClock,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<(mvm_core::vm_backend::VmExitStatus, std::time::Instant)> {
     if !wait_for_agent_timed(vm_name, 30, sub) {
@@ -23,8 +22,10 @@ pub(super) fn dispatch_baked_entrypoint(
         anyhow::bail!("guest agent did not become reachable within 30s");
     }
     let ready = std::time::Instant::now();
-    super::enforce_startup_slo(startup_started, ready, launch_mode)?;
     use crate::commands::vm::invoke::{DispatchStdin, EntrypointDispatch, dispatch};
+    // The last host-side point before the entrypoint is started: a launch
+    // already over its startup ceiling is refused here and nothing runs.
+    startup.gate_dispatch(ready, sub)?;
     let code = dispatch(EntrypointDispatch {
         vm_name,
         stdin: DispatchStdin::OneShot(req.stdin.clone()),
