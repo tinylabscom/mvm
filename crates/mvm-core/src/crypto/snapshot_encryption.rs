@@ -142,7 +142,7 @@ pub fn encrypt_file_in_place_using_chunk_size(
             }
             // `seal` prepends a fresh nonce, so a sealed chunk is exactly
             // the `nonce ‖ ct ‖ tag` the decoder reads back below.
-            let chunk = aead::seal(&key, &buf[..n]);
+            let chunk = aead::seal(&key, &buf[..n], &[]);
             writer
                 .write_all(&chunk)
                 .with_context(|| format!("writing encrypted chunk to {}", tmp_path.display()))?;
@@ -243,7 +243,7 @@ pub fn decrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
                     NONCE_SIZE + TAG_SIZE
                 );
             }
-            let pt = aead::open(&key, &framed[..n]).map_err(|_| {
+            let pt = aead::open(&key, &framed[..n], &[]).map_err(|_| {
                 anyhow::anyhow!(
                     "AES-256-GCM authentication failure — wrong key or tampered ciphertext"
                 )

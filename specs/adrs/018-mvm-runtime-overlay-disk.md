@@ -16,10 +16,9 @@ disagree. The rest of the Decision is kept as written.
   `ActivateEnvironment` over vsock;
   `crates/mvm-runtime/src/microvm/activation.rs` builds that message on the
   host. The agent sets up and checks both verity devices, mounts the overlay
-  at `/mvm/runtime`, and pivots in-process. The `mvm.roothash=` /
-  `mvm.runtime_roothash=` command-line builder left in the libkrun process
-  driver has no caller. `mkGuest`'s `/init` still runs for dev boots and for
-  the chained builder boot, and reads its own command-line tokens.
+  at `/mvm/runtime`, and pivots in-process. The unused legacy roothash
+  command-line builders have been removed. `mkGuest`'s `/init` still runs for
+  dev boots and the chained builder boot, and reads its own command-line tokens.
 - **There is no `mvm-verity-init`.** The initramfs agent took over its job of
   checking verity before anything beyond the initramfs is mounted, and no
   binary of that name is built. The name survives only in source comments
@@ -34,11 +33,13 @@ disagree. The rest of the Decision is kept as written.
   the digests the verified root declares. The set's root is what is signed,
   under the `mvm-images` release workflow identity; the per-archive
   `.sha256` file and per-archive signature this ADR describes are not how
-  either is authenticated now. A source checkout builds the overlay on the
-  host (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_binaries`),
-  but the sidecar has no host build path: `mvmctl build sdk-sidecar build`
-  builds it from a selected `mvm-images` checkout in the builder VM, and a
-  selected checkout also pair-builds the overlay.
+  either is authenticated now. A source checkout assembles both on the
+  host from one guest-runtime archive built from this tree
+  (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime`,
+  `mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime`), with or
+  without a selected `mvm-images` checkout; only the explicit
+  `mvmctl build sdk-sidecar build` still builds the sidecar from that
+  checkout.
 - **The two glibc CI gates do not exist.** No workflow in this repository
   defines either check named in the size paragraph. The only build-backed
   glibc check here is `guest-rootfs-no-glibc` in the `nix-flake-check` CI

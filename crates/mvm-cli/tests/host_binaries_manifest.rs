@@ -6,12 +6,13 @@ use mvm_cli::host_binaries::manifest::{BOOTSTRAP_SUPPORT_BINARIES, HOST_BINARIES
 fn manifest_lists_expected_host_binaries() {
     let names: Vec<&str> = HOST_BINARIES.iter().map(|b| b.name).collect();
     assert!(names.contains(&"mvm-host-vm-init"));
-    // The resident builder control daemon, baked into the builder/dev rootfs.
+    // The resident builder control daemon travels in the boot payload.
     assert!(names.contains(&"mvm-builderd"));
+    assert!(names.contains(&"mvm-setpriv"));
     assert_eq!(
         HOST_BINARIES.len(),
-        2,
-        "expected exactly two rootfs-installed host binaries"
+        3,
+        "expected the two builder binaries and their privilege helper"
     );
 }
 
@@ -20,11 +21,16 @@ fn manifest_install_paths_match_adr_064() {
     let by_name = |n: &str| -> &HostBinary { HOST_BINARIES.iter().find(|b| b.name == n).unwrap() };
     assert_eq!(
         by_name("mvm-host-vm-init").install_path,
-        "/sbin/mvm-host-vm-init"
+        Some("/sbin/mvm-host-vm-init")
     );
     assert_eq!(by_name("mvm-host-vm-init").mode, 0o755);
-    assert_eq!(by_name("mvm-builderd").install_path, "/sbin/mvm-builderd");
+    assert_eq!(
+        by_name("mvm-builderd").install_path,
+        Some("/sbin/mvm-builderd")
+    );
     assert_eq!(by_name("mvm-builderd").mode, 0o755);
+    assert_eq!(by_name("mvm-setpriv").package, "mvm-setpriv");
+    assert_eq!(by_name("mvm-setpriv").install_path, None);
 }
 
 /// The other tests here are about the manifest constants and hold in every

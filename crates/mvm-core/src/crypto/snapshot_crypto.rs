@@ -21,7 +21,7 @@ pub use crate::crypto::aead::{KEY_SIZE, NONCE_SIZE, TAG_SIZE};
 /// same key. Thin `anyhow` shim over [`aead::seal`].
 pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
-    Ok(aead::seal(&key, plaintext))
+    Ok(aead::seal(&key, plaintext, &[]))
 }
 
 /// Decrypt `encrypted` under `key`.
@@ -32,7 +32,7 @@ pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>> {
 /// `anyhow` shim over [`aead::open`].
 pub fn decrypt(encrypted: &[u8], key: &[u8]) -> Result<Vec<u8>> {
     let key = aead::Key::from_slice(key).map_err(|e| anyhow::anyhow!("{e}"))?;
-    aead::open(&key, encrypted).map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))
+    aead::open(&key, encrypted, &[]).map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))
 }
 
 #[cfg(test)]

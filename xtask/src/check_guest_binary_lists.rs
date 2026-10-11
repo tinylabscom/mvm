@@ -18,14 +18,15 @@
 //!
 //! A second section ([`check_overlay_parity`]) holds the runtime overlay's
 //! own binary lists — the two overlay build lists (sealed bins, and the
-//! `addons` bins built in their own invocation), the `install_one` pairs, and
-//! the Rust staging array — in the same lockstep, and rejects an orphaned
-//! `--bin` flag left behind by a removed binary name. It also holds the split
-//! itself: the `addons` list must be exactly the overlay bins whose `[[bin]]`
-//! requires `addons`, and only that invocation may enable the feature, so
-//! cargo's feature unification cannot hand the sealed agent an async runtime.
-//! The published overlay is built in mvm-images, which stages from these same
-//! bins through its `mvm` input and guards its own flake.
+//! `addons` bins built in their own invocation), the `install_one` pairs, the
+//! guest-runtime archive's member names (`artifacts()`), and the table that
+//! stages archive members into the overlay — in the same lockstep, and rejects
+//! an orphaned `--bin` flag left behind by a removed binary name. It also
+//! holds the split itself: the `addons` list must be exactly the overlay bins
+//! whose `[[bin]]` requires `addons`, and only that invocation may enable the
+//! feature, so cargo's feature unification cannot hand the sealed agent an
+//! async runtime. The initramfs agent is the same split's third leg: it must
+//! be a sealed overlay bin, built in its own invocation with no features.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -36,6 +37,8 @@ const GUEST_AGENT_BUILD: &str = "crates/mvm-build/src/guest_agent_build.rs";
 const CLI_BUILD_RS: &str = "crates/mvm-cli/build.rs";
 const OCI_INJECT: &str = "crates/mvm-build/src/oci_runtime_inject.rs";
 const RUNTIME_OVERLAY_RS: &str = "crates/mvm-build/src/runtime_overlay.rs";
+const GUEST_BINS_EXTRAS: &str = "crates/mvm-build/src/guest_bins/extras.rs";
+const GUEST_BINS_MEMBER: &str = "crates/mvm-build/src/guest_bins/member.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
@@ -106,10 +109,11 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The read-only runtime overlay's binary set is maintained in two places:
-/// the overlay `cargo zigbuild` bin list plus its `install_one` pairs
-/// (`guest_agent_build.rs`), and the staging array that writes the overlay
-/// root (`runtime_overlay.rs`). Lists like these drifted once — an image
+/// The read-only runtime overlay's binary set is maintained in three places:
+/// the overlay `cargo zigbuild` bin list plus its `install_one` pairs and the
+/// archive member names (`guest_agent_build.rs`), and the table that stages
+/// those archive members into the overlay root (`runtime_overlay.rs`). Lists
+/// like these drifted once — an image
 /// shipped `display-bridge` but not `ping` while the Rust builder did the
 /// reverse, so `/bin/ping` mediation silently no-oped — and an orphaned
 /// `--bin` flag survived a bin removal because cargo happened to absorb the
@@ -160,19 +164,29 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         .map(|c| (c[1].to_string(), c[2].to_string()))
         .collect();
 
-    // Rust staging: `(&bins.field, root.join("staged"))` — field ↔ staged name.
+    // The archive's member names: `("mvm-x", self.field.as_path())`.
+    let artifacts_re =
+        Regex::new(r#"\(\s*"(mvm-[a-z0-9-]+)",\s*self\.([a-z_]+)\.as_path\(\),?\s*\)"#).unwrap();
+    let artifacts_block = slice_between(&gab, ARTIFACTS_FN, "\n    }\n", GUEST_AGENT_BUILD)?;
+    let archived: BTreeMap<String, String> = artifacts_re
+        .captures_iter(artifacts_block)
+        .map(|c| (c[1].to_string(), c[2].to_string()))
+        .collect();
+
+    // Overlay staging: `("mvm-x", "staged")` — archive member ↔ overlay name.
     let overlay_rs = read(workspace, RUNTIME_OVERLAY_RS)?;
-    let staging_re =
-        Regex::new(r#"\(\s*&bins\.([a-z_]+),\s*root\.join\("([a-z0-9-]+)"\),?\s*\)"#).unwrap();
-    let field_to_staged: BTreeMap<String, String> = staging_re
-        .captures_iter(&overlay_rs)
+    let staging_re = Regex::new(r#"\(\s*"(mvm-[a-z0-9-]+)",\s*"([a-z0-9-]+)",?\s*\)"#).unwrap();
+    let staging_block = slice_between(&overlay_rs, STAGING_TABLE, "];", RUNTIME_OVERLAY_RS)?;
+    let bin_to_staged: BTreeMap<String, String> = staging_re
+        .captures_iter(staging_block)
         .map(|c| (c[1].to_string(), c[2].to_string()))
         .collect();
 
     for (label, len) in [
         ("overlay build lists", overlay_bins.len()),
         ("install_one pairs", bin_to_field.len()),
-        ("runtime_overlay.rs staging array", field_to_staged.len()),
+        ("archive member names", archived.len()),
+        ("runtime_overlay.rs staging table", bin_to_staged.len()),
     ] {
         if len == 0 {
             bail!(
@@ -181,31 +195,43 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         }
     }
 
-    let install_bins: BTreeSet<String> = bin_to_field.keys().cloned().collect();
-    if install_bins != overlay_bins {
-        bail!(
-            "runtime-overlay binary lists drift:\n  overlay build lists = {overlay_bins:?}\n  install_one bin set = {install_bins:?}"
-        );
-    }
-    let installed_fields: BTreeSet<&String> = bin_to_field.values().collect();
-    let staged_fields: BTreeSet<&String> = field_to_staged.keys().collect();
-    if installed_fields != staged_fields {
-        bail!(
-            "runtime-overlay staged-name sets drift:\n  install_one fields = {installed_fields:?}\n  runtime_overlay.rs stages = {staged_fields:?}"
-        );
-    }
-
-    // Every installed field must be staged, under the name the field spells.
-    for (bin, field) in &bin_to_field {
-        let via_rust = field_to_staged.get(field).with_context(|| {
-            format!("overlay bin {bin} installs into layout field {field}, which the runtime_overlay.rs staging array never stages")
-        })?;
-        if field.replace('_', "-") != *via_rust {
+    for (label, set) in [
+        (
+            "install_one bin set",
+            bin_to_field.keys().cloned().collect::<BTreeSet<_>>(),
+        ),
+        (
+            "archive member names",
+            archived.keys().cloned().collect::<BTreeSet<_>>(),
+        ),
+        (
+            "runtime_overlay.rs staging table",
+            bin_to_staged.keys().cloned().collect::<BTreeSet<_>>(),
+        ),
+    ] {
+        if set != overlay_bins {
             bail!(
-                "overlay layout field {field} stages as {via_rust:?}; field and staged name must correspond"
+                "runtime-overlay binary lists drift:\n  overlay build lists = {overlay_bins:?}\n  {label} = {set:?}"
             );
         }
     }
+    if archived != bin_to_field {
+        bail!(
+            "archive member names map to other layout fields than install_one:\n  artifacts() = {archived:?}\n  install_one = {bin_to_field:?}"
+        );
+    }
+
+    // Every bin stages under the name its compile-cache field spells.
+    for (bin, field) in &bin_to_field {
+        let staged = &bin_to_staged[bin];
+        if field.replace('_', "-") != *staged {
+            bail!(
+                "overlay bin {bin} is cached as layout field {field} but staged as {staged:?}; field and staged name must correspond"
+            );
+        }
+    }
+
+    check_initramfs_agent_is_sealed(workspace, &sealed_bins)?;
 
     let invalid: BTreeSet<&String> = overlay_bins.difference(universe).collect();
     if !invalid.is_empty() {
@@ -217,10 +243,46 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
     Ok(overlay_bins.len())
 }
 
+const ARTIFACTS_FN: &str = "pub fn artifacts(&self)";
+const STAGING_TABLE: &str = "const GUEST_RUNTIME_OVERLAY_BINARIES:";
+const INITRAMFS_AGENT_FN: &str = "fn initramfs_agent_build(";
 const SEALED_BINS_CONST: &str = "RUNTIME_OVERLAY_SEALED_BINS";
 const ADDON_BINS_CONST: &str = "RUNTIME_OVERLAY_ADDON_BINS";
 const ADDONS_FEATURE_CONST: &str = "MVM_AGENTD_ADDONS_FEATURE";
 const OVERLAY_ARGS_FN: &str = "fn runtime_overlay_zigbuild_args";
+
+/// The initramfs agent is PID 1 of every rootfs boot and has to be the sealed,
+/// tokio-free build: its `[[bin]]` must be one of the sealed overlay bins, and
+/// the extra build that compiles it must enable no feature at all.
+fn check_initramfs_agent_is_sealed(workspace: &Path, sealed: &BTreeSet<String>) -> Result<()> {
+    let member = read(workspace, GUEST_BINS_MEMBER)?;
+    let name_re =
+        Regex::new(r#"pub const INITRAMFS_AGENT_NAME: &str = "(mvm-[a-z0-9-]+)";"#).unwrap();
+    let name = name_re
+        .captures(&member)
+        .map(|c| c[1].to_string())
+        .with_context(|| format!("INITRAMFS_AGENT_NAME not found in {GUEST_BINS_MEMBER}"))?;
+    if !sealed.contains(&name) {
+        bail!(
+            "the initramfs agent builds [[bin]] {name}, which is not in {SEALED_BINS_CONST}; \
+             the initramfs agent must be the sealed, tokio-free build"
+        );
+    }
+    let extras = read(workspace, GUEST_BINS_EXTRAS)?;
+    let body = slice_between(&extras, INITRAMFS_AGENT_FN, "\n}\n", GUEST_BINS_EXTRAS)?;
+    if !body.contains("INITRAMFS_AGENT_NAME") {
+        bail!("{INITRAMFS_AGENT_FN} no longer selects INITRAMFS_AGENT_NAME — update this check");
+    }
+    for feature_token in ["--features", "\"addons\"", ADDONS_FEATURE_CONST] {
+        if body.contains(feature_token) {
+            bail!(
+                "{INITRAMFS_AGENT_FN} enables a feature ({feature_token}); the initramfs agent \
+                 is built with none, so cargo cannot unify an async runtime into PID 1"
+            );
+        }
+    }
+    Ok(())
+}
 
 /// The quoted `mvm-*` names in `pub const <name>: [&str; N] = [ ... ];`.
 fn extract_const_names(src: &str, name: &str) -> Result<BTreeSet<String>> {
@@ -504,56 +566,96 @@ required-features = ["addons"]
          [release(package_bin_args(\"mvm-agentd\", &RUNTIME_OVERLAY_SEALED_BINS)), release(addons)]\n\
          }\n";
 
-    /// A `guest_agent_build.rs` with the given sealed and addon lists, the
-    /// given argument builder, and `installs`; a staging array of `staging`.
-    fn overlay_fixture_with(
-        root: &Path,
-        sealed: &str,
-        addons: &str,
-        args_fn: &str,
-        installs: &str,
-        staging: &str,
-    ) {
-        let write = |rel: &str, text: &str| {
-            let path = root.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, text).unwrap();
-        };
-        write(
-            GUEST_AGENT_BUILD,
-            &format!(
-                "pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 2] = [{sealed}];\n\
-                 pub const RUNTIME_OVERLAY_ADDON_BINS: [&str; 1] = [{addons}];\n\
-                 {args_fn}\
-                 fn build_runtime_overlay_guest_binaries_into_cache() {{\n\
-                 for args in runtime_overlay_zigbuild_args(spec.target_triple()) {{\n\
-                 run_zigbuild(&lock, &spec, &args, &[])?;\n}}\n\
-                 {installs}}}\n"
-            ),
-        );
-        write(
-            RUNTIME_OVERLAY_RS,
-            &format!("let binaries = [{staging}];\n"),
-        );
-        write("crates/mvm-agentd/Cargo.toml", FIXTURE_MANIFEST);
-    }
-
     const FIXTURE_SEALED: &str = r#""mvm-guest-agent", "mvm-ping""#;
     const FIXTURE_ADDONS: &str = r#""mvm-egress-client""#;
     const FIXTURE_INSTALLS: &str = "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
          install_one(&output_dir.join(\"mvm-ping\"), &layout.ping)?;\n\
          install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n";
-    const FIXTURE_STAGING: &str = r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping")), (&bins.egress_client, root.join("egress-client"))"#;
+    const FIXTURE_ARTIFACTS: &str = r#"("mvm-guest-agent", self.agent.as_path()), ("mvm-ping", self.ping.as_path()), ("mvm-egress-client", self.egress_client.as_path())"#;
+    const FIXTURE_STAGING: &str = r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping"), ("mvm-egress-client", "egress-client")"#;
+    const FIXTURE_INITRAMFS_AGENT: &str = "mvm-guest-agent";
+    const FIXTURE_INITRAMFS_BUILD: &str =
+        "selection: package_bin_args(\"mvm-agentd\", &[super::member::INITRAMFS_AGENT_NAME]),";
 
-    fn overlay_fixture(root: &Path) {
-        overlay_fixture_with(
-            root,
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
+    /// The sources the overlay section reads, each overridable on its own so a
+    /// test changes exactly the list it is about.
+    struct OverlayFixture {
+        sealed: &'static str,
+        addons: &'static str,
+        args_fn: String,
+        installs: &'static str,
+        artifacts: &'static str,
+        staging: &'static str,
+        initramfs_agent: &'static str,
+        initramfs_build: String,
+    }
+
+    impl Default for OverlayFixture {
+        fn default() -> Self {
+            Self {
+                sealed: FIXTURE_SEALED,
+                addons: FIXTURE_ADDONS,
+                args_fn: FIXTURE_ARGS_FN.to_string(),
+                installs: FIXTURE_INSTALLS,
+                artifacts: FIXTURE_ARTIFACTS,
+                staging: FIXTURE_STAGING,
+                initramfs_agent: FIXTURE_INITRAMFS_AGENT,
+                initramfs_build: FIXTURE_INITRAMFS_BUILD.to_string(),
+            }
+        }
+    }
+
+    impl OverlayFixture {
+        fn write(&self, root: &Path) {
+            let write = |rel: &str, text: &str| {
+                let path = root.join(rel);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            };
+            write(
+                GUEST_AGENT_BUILD,
+                &format!(
+                    "impl RuntimeOverlayGuestBinaries {{\n\
+                     pub fn artifacts(&self) -> [(&'static str, &Path); 3] {{\n\
+                     [{artifacts}]\n    }}\n}}\n\
+                     pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 2] = [{sealed}];\n\
+                     pub const RUNTIME_OVERLAY_ADDON_BINS: [&str; 1] = [{addons}];\n\
+                     {args_fn}\
+                     fn build_runtime_overlay_guest_binaries_into_cache() {{\n\
+                     for args in runtime_overlay_zigbuild_args(spec.target_triple()) {{\n\
+                     run_zigbuild(&lock, &spec, &args, &[])?;\n}}\n\
+                     {installs}}}\n",
+                    artifacts = self.artifacts,
+                    sealed = self.sealed,
+                    addons = self.addons,
+                    args_fn = self.args_fn,
+                    installs = self.installs,
+                ),
+            );
+            write(
+                RUNTIME_OVERLAY_RS,
+                &format!(
+                    "const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 3] = [{}];\n",
+                    self.staging
+                ),
+            );
+            write(
+                GUEST_BINS_MEMBER,
+                &format!(
+                    "pub const INITRAMFS_AGENT_NAME: &str = \"{}\";\n",
+                    self.initramfs_agent
+                ),
+            );
+            write(
+                GUEST_BINS_EXTRAS,
+                &format!(
+                    "fn initramfs_agent_build(arch: GuestArch) -> ExtraBuild {{\n\
+                     {}\n}}\n",
+                    self.initramfs_build
+                ),
+            );
+            write("crates/mvm-agentd/Cargo.toml", FIXTURE_MANIFEST);
+        }
     }
 
     fn fixture_universe() -> BTreeSet<String> {
@@ -564,68 +666,52 @@ required-features = ["addons"]
         ])
     }
 
-    fn parity_error(root: &Path) -> String {
-        check_overlay_parity(root, &fixture_universe())
-            .unwrap_err()
-            .to_string()
+    fn parity_result(fixture: &OverlayFixture) -> Result<usize> {
+        let tmp = tempfile::tempdir().unwrap();
+        fixture.write(tmp.path());
+        check_overlay_parity(tmp.path(), &fixture_universe())
+    }
+
+    fn parity_error(fixture: &OverlayFixture) -> String {
+        parity_result(fixture).unwrap_err().to_string()
     }
 
     #[test]
     fn rustfmt_wrapped_install_calls_are_still_extracted() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            FIXTURE_ARGS_FN,
-            "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
+        let fixture = OverlayFixture {
+            installs: "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
              install_one(\n    &output_dir.join(\"mvm-ping\"),\n    &layout.ping,\n)?;\n\
              install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n",
-            FIXTURE_STAGING,
-        );
-        assert_eq!(
-            check_overlay_parity(tmp.path(), &fixture_universe()).unwrap(),
-            3
-        );
+            ..OverlayFixture::default()
+        };
+        assert_eq!(parity_result(&fixture).unwrap(), 3);
     }
 
     #[test]
     fn overlay_parity_passes_on_agreeing_lists() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path());
-        assert_eq!(
-            check_overlay_parity(tmp.path(), &fixture_universe()).unwrap(),
-            3
-        );
+        assert_eq!(parity_result(&OverlayFixture::default()).unwrap(), 3);
     }
 
     #[test]
     fn orphaned_bin_flag_fails_by_name() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path());
-        let path = tmp.path().join(GUEST_AGENT_BUILD);
-        let mut src = std::fs::read_to_string(&path).unwrap();
-        src.push_str(r#"vec!["--bin".to_string(), "--bin".to_string(), "mvm-ping".to_string()];"#);
-        std::fs::write(&path, src).unwrap();
-        assert!(
-            parity_error(tmp.path()).contains("orphaned `--bin` flag"),
-            "{}",
-            parity_error(tmp.path())
-        );
+        let fixture = OverlayFixture {
+            installs: "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
+             install_one(&output_dir.join(\"mvm-ping\"), &layout.ping)?;\n\
+             install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n\
+             vec![\"--bin\".to_string(), \"--bin\".to_string(), \"mvm-ping\".to_string()];\n",
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("orphaned `--bin` flag"), "{error}");
     }
 
     #[test]
     fn a_built_bin_that_is_never_installed_is_drift() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            r#""mvm-guest-agent", "mvm-ping", "mvm-extra""#,
-            FIXTURE_ADDONS,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
-        let error = parity_error(tmp.path());
+        let fixture = OverlayFixture {
+            sealed: r#""mvm-guest-agent", "mvm-ping", "mvm-extra""#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(
             error.contains("runtime-overlay binary lists drift"),
             "{error}"
@@ -635,52 +721,38 @@ required-features = ["addons"]
     /// A sealed bin moved into the addon invocation would link tokio.
     #[test]
     fn a_sealed_bin_built_with_addons_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            r#""mvm-ping""#,
-            r#""mvm-egress-client", "mvm-guest-agent""#,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
-        let error = parity_error(tmp.path());
+        let fixture = OverlayFixture {
+            sealed: r#""mvm-ping""#,
+            addons: r#""mvm-egress-client", "mvm-guest-agent""#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(error.contains("requires `addons`"), "{error}");
     }
 
     #[test]
     fn an_addon_bin_in_the_sealed_list_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            r#""mvm-guest-agent", "mvm-ping", "mvm-egress-client""#,
-            r#""mvm-egress-client""#,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
-        let error = parity_error(tmp.path());
+        let fixture = OverlayFixture {
+            sealed: r#""mvm-guest-agent", "mvm-ping", "mvm-egress-client""#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(error.contains("in both"), "{error}");
     }
 
     /// One invocation building both lists is the unification this guards.
     #[test]
     fn building_both_lists_in_one_invocation_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let merged = "fn runtime_overlay_zigbuild_args(triple: &str) -> [Vec<String>; 1] {\n\
+        let fixture = OverlayFixture {
+            args_fn: "fn runtime_overlay_zigbuild_args(triple: &str) -> [Vec<String>; 1] {\n\
              let mut all = package_bin_args(\"mvm-agentd\", &RUNTIME_OVERLAY_SEALED_BINS);\n\
              all.push(MVM_AGENTD_ADDONS_FEATURE.to_string());\n\
              [release(all)]\n\
-             }\n";
-        overlay_fixture_with(
-            tmp.path(),
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            merged,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
-        let error = parity_error(tmp.path());
+             }\n"
+            .to_string(),
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(
             error.contains("must build RUNTIME_OVERLAY_ADDON_BINS exactly once"),
             "{error}"
@@ -689,54 +761,87 @@ required-features = ["addons"]
 
     #[test]
     fn enabling_addons_twice_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        let twice = FIXTURE_ARGS_FN.replace(
-            "[release(package_bin_args",
-            "let _ = MVM_AGENTD_ADDONS_FEATURE;\n[release(package_bin_args",
-        );
-        overlay_fixture_with(
-            tmp.path(),
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            &twice,
-            FIXTURE_INSTALLS,
-            FIXTURE_STAGING,
-        );
-        let error = parity_error(tmp.path());
+        let fixture = OverlayFixture {
+            args_fn: FIXTURE_ARGS_FN.replace(
+                "[release(package_bin_args",
+                "let _ = MVM_AGENTD_ADDONS_FEATURE;\n[release(package_bin_args",
+            ),
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(error.contains("2 times"), "{error}");
     }
 
     #[test]
-    fn rust_staging_missing_a_name_is_drift() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping"))"#,
+    fn a_bin_the_overlay_never_stages_is_drift() {
+        let fixture = OverlayFixture {
+            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "ping")"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(
+            error.contains("staging table = "),
+            "a bin missing from the staging table must be named: {error}"
         );
-        let error = parity_error(tmp.path());
-        assert!(error.contains("staged-name sets drift"), "{error}");
     }
 
     #[test]
-    fn a_field_staged_under_another_name_fails() {
-        let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture_with(
-            tmp.path(),
-            FIXTURE_SEALED,
-            FIXTURE_ADDONS,
-            FIXTURE_ARGS_FN,
-            FIXTURE_INSTALLS,
-            r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("icmp")), (&bins.egress_client, root.join("egress-client"))"#,
-        );
-        let error = parity_error(tmp.path());
+    fn a_bin_the_archive_never_carries_is_drift() {
+        let fixture = OverlayFixture {
+            artifacts: r#"("mvm-guest-agent", self.agent.as_path()), ("mvm-ping", self.ping.as_path())"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("archive member names = "), "{error}");
+    }
+
+    #[test]
+    fn an_archive_name_bound_to_another_field_fails() {
+        let fixture = OverlayFixture {
+            artifacts: r#"("mvm-guest-agent", self.agent.as_path()), ("mvm-ping", self.egress_client.as_path()), ("mvm-egress-client", self.ping.as_path())"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("map to other layout fields"), "{error}");
+    }
+
+    #[test]
+    fn a_bin_staged_under_another_name_fails() {
+        let fixture = OverlayFixture {
+            staging: r#"("mvm-guest-agent", "agent"), ("mvm-ping", "icmp"), ("mvm-egress-client", "egress-client")"#,
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
         assert!(
             error.contains("field and staged name must correspond"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_initramfs_agent_outside_the_sealed_set_fails() {
+        let fixture = OverlayFixture {
+            initramfs_agent: "mvm-egress-client",
+            ..OverlayFixture::default()
+        };
+        let error = parity_error(&fixture);
+        assert!(error.contains("sealed, tokio-free build"), "{error}");
+    }
+
+    #[test]
+    fn an_initramfs_agent_built_with_a_feature_fails() {
+        for feature in [
+            "args.push(\"--features\".to_string());",
+            "args.push(MVM_AGENTD_ADDONS_FEATURE.to_string());",
+            "let f = \"addons\";",
+        ] {
+            let fixture = OverlayFixture {
+                initramfs_build: format!("{FIXTURE_INITRAMFS_BUILD}\n{feature}"),
+                ..OverlayFixture::default()
+            };
+            let error = parity_error(&fixture);
+            assert!(error.contains("enables a feature"), "{feature}: {error}");
+        }
     }
 
     #[test]

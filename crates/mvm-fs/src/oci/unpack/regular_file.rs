@@ -119,14 +119,12 @@ fn write_regular_file<R: Read>(
 
     // Ensure parent directories exist. We've already verified no
     // existing parent is a symlink (safety check 5 in
-    // `unpack_layer`), so `create_dir_all` here can't escape the
+    // `unpack_layer`), so directory creation here can't escape the
     // root via a planted symlink — only previously-existing host
     // directories could, and we trust the caller to give us a
     // clean `output_root`.
     if let Some(parent) = target.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return Err(RefusalReason::MalformedHeader);
-        }
+        super::fs_ops::create_directory(parent)?;
     }
 
     let mode_from_header =

@@ -68,8 +68,8 @@ pub struct PersistentImageStartParams<'a> {
     pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
-    /// The workload kernel to boot, or `None` for a backend that carries its
-    /// own (libkrun's bundled kernel, the in-memory mock). Resolved by the
+    /// The workload kernel to boot, or `None` for the in-memory mock, which
+    /// boots nothing. Resolved by the
     /// caller: the CLI may build one through the builder VM, and a library
     /// embedder never builds.
     pub kernel_path: Option<String>,
@@ -244,6 +244,7 @@ pub fn start_persistent_oci_machine(
     let (verity_path, roothash) =
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
     let initrd_path = persistent_oci_effective_initrd(rootfs_path)?;
+    let bundle_archive = super::bundle_runtime::installed_archive_for_rootfs(rootfs_path)?;
 
     let mut start_config = VmStartParams::builder()
         .name(name.to_string())
@@ -324,7 +325,9 @@ pub fn start_persistent_oci_machine(
                     keys_dir: None,
                     audit_dir: None,
                     policy_dir: None,
-                    bundle_pin: None,
+                    bundle_pin: bundle_archive
+                        .as_deref()
+                        .map(crate::admission::BundlePin::boots),
                     bundle_posture: None,
                     deps_volume: None,
                     shares: shares_from_volume_cfg(volumes),

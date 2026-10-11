@@ -84,7 +84,7 @@ impl ReplayInputStore {
         let kek = mvm_core::transcript::load_or_init_kek(&self.keys_dir)
             .context("loading replay input key-encryption key")?;
         let data_key = aead::Key::random();
-        let ciphertext = aead::seal(&data_key, prompt);
+        let ciphertext = aead::seal(&data_key, prompt, &[]);
         let stored = StoredReplayInput {
             format_version: FORMAT_VERSION,
             binding: binding.clone(),
@@ -134,7 +134,7 @@ impl ReplayInputStore {
             .context("replay input key-encryption key is missing")?;
         let data_key = mvm_core::transcript::unwrap_data_key(&kek, &stored.wrapped_data_key_b64)
             .context("unwrapping replay input data key")?;
-        let prompt = aead::open(&data_key, &ciphertext).context("decrypting replay input")?;
+        let prompt = aead::open(&data_key, &ciphertext, &[]).context("decrypting replay input")?;
         if digest(&prompt) != stored.prompt_sha256 {
             bail!("replay input plaintext digest does not match");
         }

@@ -17,7 +17,8 @@ pub(in crate::commands) struct Args {
     /// Force re-install even if already up to date
     #[arg(long)]
     pub force: bool,
-    /// Skip release signature verification (the SHA-256 check still runs)
+    /// Skip the archive's own signature check. The checksum manifest's
+    /// signature is still verified, and the archive is still held to its digest
     #[arg(long)]
     pub skip_verify: bool,
 }

@@ -20,6 +20,8 @@
 //! that doesn't need cucumber's macros belongs in `src/lib.rs` instead,
 //! where it can be unit-tested independent of the cucumber runner.
 
+#[path = "support/live_artifacts.rs"]
+mod live_artifacts;
 mod steps;
 mod support;
 mod world;
@@ -28,6 +30,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
+use mvm_conformance::sharding::ScenarioShard;
 use mvm_conformance::{RuntimeCaps, ScenarioGate, inherited_tags, scenario_gate_for_selection};
 use world::CliWorld;
 
@@ -42,6 +45,13 @@ async fn main() {
         eprintln!("\nconformance: {problem}\n");
         std::process::exit(2);
     }
+    let shard = match configured_shard() {
+        Ok(shard) => shard,
+        Err(problem) => {
+            eprintln!("\nconformance: {problem}\n");
+            std::process::exit(2);
+        }
+    };
 
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
@@ -64,16 +74,21 @@ async fn main() {
                 }
             })
         })
-        .filter_run(features_dir(), should_run)
+        .filter_run(features_dir(), move |feature, rule, scenario| {
+            should_run(feature, rule, scenario, shard)
+        })
         .await;
 
+    report_shard(shard);
     report_skips();
     let unexpected_skips = unexpected_skips();
 
     // `execution_has_failed` comes from the `Stats` trait, which the concrete
     // writer only exposes when the trait is in scope.
     use cucumber::writer::Stats as _;
-    if writer.execution_has_failed() {
+    if writer.execution_has_failed()
+        || shard.is_some_and(|_| SHARD_SELECTED.load(std::sync::atomic::Ordering::Relaxed) == 0)
+    {
         std::process::exit(1);
     }
     if !unexpected_skips.is_empty() {
@@ -175,7 +190,23 @@ fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// supplies the real host capabilities. An absent required capability yields a
 /// clean skip, never a failure — so the suite stays green on hosts without KVM
 /// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
-fn should_run(feature: &Feature, rule: Option<&Rule>, scenario: &Scenario) -> bool {
+fn should_run(
+    feature: &Feature,
+    rule: Option<&Rule>,
+    scenario: &Scenario,
+    shard: Option<ScenarioShard>,
+) -> bool {
+    if let Some(shard) = shard {
+        if !shard.contains(
+            &feature.name,
+            rule.map(|rule| rule.name.as_str()),
+            &scenario.name,
+        ) {
+            SHARD_EXCLUDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        SHARD_SELECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let only_tag = std::env::var("MVM_BDD_ONLY_TAG").ok();
     let tags = inherited_tags(
         &feature.tags,
@@ -185,6 +216,30 @@ fn should_run(feature: &Feature, rule: Option<&Rule>, scenario: &Scenario) -> bo
     let gate = scenario_gate_for_selection(&tags, probe_caps(), only_tag.as_deref());
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
+}
+
+static SHARD_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SHARD_EXCLUDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn configured_shard() -> Result<Option<ScenarioShard>, String> {
+    match std::env::var("MVM_BDD_SHARD") {
+        Ok(value) => ScenarioShard::parse(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("MVM_BDD_SHARD is not valid Unicode".to_string())
+        }
+    }
+}
+
+fn report_shard(shard: Option<ScenarioShard>) {
+    if let Some(shard) = shard {
+        eprintln!(
+            "[bdd] shard {} selected {} scenario(s), excluded {}; this run alone is not full coverage",
+            shard.label(),
+            SHARD_SELECTED.load(std::sync::atomic::Ordering::Relaxed),
+            SHARD_EXCLUDED.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
 }
 
 /// Tally of every filter decision, so the run can say what it declined to
@@ -299,19 +354,19 @@ fn local_images_checkout_selected() -> bool {
     })
 }
 
-/// Whether the SDK sidecar image is in the version-keyed cache.
+/// Whether a verified SDK sidecar is in the CLI or pinned image-set cache.
 ///
 /// Admission refuses a workload that binds an SDK host service without it, so
 /// a scenario that binds one cannot pass on a host where the image was never
-/// built. Globbed on version rather than hardcoded so a bump does not silently
-/// turn this into "never available".
+/// prepared. Use the resolver's own layout and recorded member version rather
+/// than assuming every image was installed under the running CLI's version.
 fn sdk_sidecar_cached() -> bool {
-    let sidecar_root = mvm_core::config::mvm_cache_dir_at(live_home())
-        .join(mvm_fs::sdk_sidecar::SDK_SIDECAR_CACHE_DIR);
-    mvm_conformance::sidecar_image_cached_in(
-        &sidecar_root,
-        mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
-    )
+    // The runner prepares the live cache before starting cucumber. Verify it
+    // once, rather than hashing the same image for every scenario's tag filter.
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        live_artifacts::sdk_sidecar_cached_in(&mvm_core::config::mvm_cache_dir_at(live_home()))
+    })
 }
 
 /// The mvm home the live scenarios actually run against.

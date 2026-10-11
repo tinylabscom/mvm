@@ -6,7 +6,7 @@
 //! egress, OCI provenance, receipts) is identical to the lower-level verbs.
 //!
 //! The flagship verb is `machine run`: boot a fresh VM from an OCI image, run a
-//! command, tear down. It routes straight into `vm::exec::run_secure` (the same
+//! command, tear down. It routes straight into `vm::exec::run_secure_started` (the same
 //! code path as `mvmctl run --image`), so it inherits deny-all networking by
 //! default. Persistent machine specs (`create`/`ls`/`inspect`/`rm`) store the
 //! declarative image/network/profile shape for later lifecycle starts; `start`
@@ -53,7 +53,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::exec::{RunArgs, RunProfile, run_secure_started};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -71,7 +71,7 @@ use receipt::{
     print_machine_start_preflight_human, write_machine_start_receipt,
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
-use runtime::run_dispatch;
+pub(in crate::commands) use runtime::run_dispatch;
 use spec_ops::{
     create_machine, inspect_machine, persistent_workload_dir_for_run, remove_machine,
     run_reconfigure,
@@ -313,6 +313,12 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Apply the machine's workspace changes at exit without asking.
     #[arg(long, requires = "attach", conflicts_with = "json")]
     pub apply: bool,
+    /// Internal (not a CLI flag): a fresh boot that names no source boots the
+    /// default image. `mvmctl run` sets it, so `mvmctl run -- <cmd>` keeps
+    /// booting the default image; `machine run` leaves it unset and requires
+    /// a source.
+    #[arg(skip)]
+    pub default_image_when_sourceless: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -344,6 +350,7 @@ impl Default for MachineRunArgs {
             stdin: None,
             attach: false,
             apply: false,
+            default_image_when_sourceless: false,
         }
     }
 }
@@ -471,8 +478,10 @@ impl MachineRunArgs {
                 //     README teaches `machine run --flake examples/<name>`
                 //     with nothing after it;
                 //   - a production OCI image seals its Entrypoint/Cmd into the
-                //     guest and refuses a caller-supplied argv.
+                //     guest and refuses a caller-supplied argv;
+                //   - a `--launch-plan` document names the command itself.
                 let carries_own_entrypoint = self.run.hypervisor.as_deref() == Some("wasm")
+                    || self.run.launch_plan.is_some()
                     || self.run.flake.is_some()
                     || (self.run.prod && (self.run.image.is_some() || self.run.runtime.is_some()))
                     || image_supplies_entrypoint;
@@ -490,9 +499,11 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image, manifest, flake, or runtime pack is mandatory.
+    /// back on, so an image, manifest, flake, or runtime pack is mandatory,
+    /// unless the verb boots the default image when none is named.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.run.image.is_none()
+        if !self.default_image_when_sourceless
+            && self.run.image.is_none()
             && self.run.manifest.is_none()
             && self.run.flake.is_none()
             && self.run.deployment.is_none()
@@ -531,7 +542,7 @@ pub(super) fn local_deployment_image_source(
 /// the persistence flags is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MachineRunMode {
-    /// Default one-shot: boot, run argv, tear down. Unchanged `run_secure`.
+    /// Default one-shot: boot, run argv, tear down.
     Transient,
     /// Persistent (detached or lifecycle-managed), non-interactive.
     Persistent,
@@ -1561,7 +1572,13 @@ fn complete_revert(
         super::vm::checkpoint::RevertOutcome::Done => Ok(()),
         super::vm::checkpoint::RevertOutcome::RunImage(run) => {
             let (args, source) = run_args_for_image_revert(run);
-            run_secure(cli, args.into_run_args(), cfg, source)
+            run_secure_started(
+                cli,
+                args.into_run_args(),
+                cfg,
+                source,
+                std::time::Instant::now(),
+            )
         }
     }
 }

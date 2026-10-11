@@ -63,6 +63,7 @@ You do not need to enter a dev shell to build a flake. The dev shell is only for
 | `uids` | `{ agent; entrypoint; }` privilege-model override |
 | `extraFiles` | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs |
 | `kernel`, `bootCommand`, `builderUid`, `withAuditProbe` | Advanced overrides |
+| `withSetpriv` | Bake the static `mvm-setpriv` privilege helper (default: `true`). Only a builder image whose boot payload supplies the helper sets it `false` |
 | `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy); **required** per check |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
 | `healthChecks.<name>.healthTimeoutSecs` | Timeout for each check (default: 10) |

@@ -969,7 +969,26 @@ impl ObjectPool {
         }
 
         let digest = ChunkDigest::from_bytes(bytes);
-        let membership = membership_path(checkpoint_content, &digest);
+        self.link_named(checkpoint_content, digest.as_str(), bytes, &|path| {
+            verify_digest_file(path, &digest)
+        })?;
+        Ok(ChunkEntry::Object(digest))
+    }
+
+    /// File `bytes` in the pool under `name` — 64 lowercase hex characters
+    /// that identify the object — and hard-link it into `checkpoint_content`'s
+    /// membership tree. `verify` decides whether a file already filed under
+    /// `name` holds what the name promises; one that does not is an error,
+    /// never a reason to overwrite it.
+    pub(super) fn link_named(
+        &self,
+        checkpoint_content: &Path,
+        name: &str,
+        bytes: &[u8],
+        verify: &ObjectVerifier<'_>,
+    ) -> Result<()> {
+        validate_object_name(name)?;
+        let membership = membership_path_for(checkpoint_content, name);
         let membership_parent = membership
             .parent()
             .context("checkpoint chunk membership path has no parent")?;
@@ -984,15 +1003,15 @@ impl ObjectPool {
         // until this link lands. Writing it again is the whole recovery: the
         // bytes are in hand, and a freshly written object cannot vanish.
         for _ in 0..VANISHED_OBJECT_ATTEMPTS {
-            let object = self.ensure_object(&digest, bytes)?;
+            let object = self.ensure_object(name, bytes, verify)?;
             match std::fs::hard_link(object.link_source(), &membership) {
                 Ok(()) => {
                     mvm_core::atomic_io::sync_dir(membership_parent)?;
-                    return Ok(ChunkEntry::Object(digest));
+                    return Ok(());
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    self.verify_object(&membership, &digest)?;
-                    return Ok(ChunkEntry::Object(digest));
+                    checked_regular_file(&membership)?;
+                    return verify(&membership);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
@@ -1007,22 +1026,26 @@ impl ObjectPool {
             }
         }
         anyhow::bail!(
-            "checkpoint object {} was reclaimed by a concurrent prune on each of \
+            "checkpoint object {name} was reclaimed by a concurrent prune on each of \
              {VANISHED_OBJECT_ATTEMPTS} attempts to link it into {}",
-            digest.as_str(),
             membership.display()
         )
     }
 
-    fn ensure_object(&self, digest: &ChunkDigest, bytes: &[u8]) -> Result<PoolObject> {
-        let path = self.object_path(digest);
+    fn ensure_object(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        verify: &ObjectVerifier<'_>,
+    ) -> Result<PoolObject> {
+        let path = self.object_path_for(name);
         let parent = path
             .parent()
             .context("checkpoint object path has no parent")?;
         create_private_dir_durable(parent, &self.root)
             .with_context(|| format!("creating checkpoint object shard {}", parent.display()))?;
 
-        if self.object_is_present(&path, digest)? {
+        if object_is_present(&path, verify)? {
             return Ok(PoolObject::Existing(path));
         }
 
@@ -1032,26 +1055,26 @@ impl ObjectPool {
             .with_context(|| format!("staging checkpoint object in {}", parent.display()))?;
         staged
             .write_all(bytes)
-            .with_context(|| format!("writing checkpoint object {}", digest.as_str()))?;
+            .with_context(|| format!("writing checkpoint object {name}"))?;
         staged
             .as_file()
             .sync_all()
-            .with_context(|| format!("syncing checkpoint object {}", digest.as_str()))?;
+            .with_context(|| format!("syncing checkpoint object {name}"))?;
         make_read_only(staged.path())?;
         staged
             .as_file()
             .sync_all()
-            .with_context(|| format!("syncing checkpoint object mode {}", digest.as_str()))?;
+            .with_context(|| format!("syncing checkpoint object mode {name}"))?;
 
         match std::fs::hard_link(staged.path(), &path) {
             Ok(()) => {
                 mvm_core::atomic_io::sync_dir(parent)?;
                 Ok(PoolObject::Written(staged))
             }
-            // Another capture published the same digest first. Absent again by
+            // Another capture published the same name first. Absent again by
             // now means a prune took it; the caller's link reports that.
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.object_is_present(&path, digest)?;
+                object_is_present(&path, verify)?;
                 Ok(PoolObject::Existing(path))
             }
             Err(error) => Err(error)
@@ -1059,46 +1082,69 @@ impl ObjectPool {
         }
     }
 
-    /// Whether the pool holds `digest` at `path`. A pool entry that exists
-    /// with the wrong bytes is an error, never a reason to overwrite it.
-    fn object_is_present(&self, path: &Path, digest: &ChunkDigest) -> Result<bool> {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("reading checkpoint object {}", path.display()));
-            }
-        }
-        match self.verify_object(path, digest) {
-            Ok(()) => Ok(true),
-            Err(error) if is_not_found(&error) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
-    fn verify_object(&self, path: &Path, digest: &ChunkDigest) -> Result<()> {
-        let metadata = std::fs::symlink_metadata(path)
-            .with_context(|| format!("reading checkpoint object {}", path.display()))?;
-        anyhow::ensure!(
-            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
-            "checkpoint object {} is not a regular file",
-            path.display()
-        );
-        let actual = super::sha256_file_hex(path)
-            .with_context(|| format!("hashing checkpoint object {}", path.display()))?;
-        anyhow::ensure!(
-            actual == digest.as_str(),
-            "checkpoint object {} failed integrity: expected {}, got {actual}",
-            path.display(),
-            digest.as_str()
-        );
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(super) fn object_path(&self, digest: &ChunkDigest) -> PathBuf {
-        self.root.join(&digest.as_str()[..2]).join(digest.as_str())
+        self.object_path_for(digest.as_str())
     }
+
+    pub(super) fn object_path_for(&self, name: &str) -> PathBuf {
+        self.root.join(&name[..2]).join(name)
+    }
+}
+
+/// Decides whether the file at a path holds the object its name promises.
+pub(super) type ObjectVerifier<'a> = dyn Fn(&Path) -> Result<()> + Sync + 'a;
+
+/// Whether the pool holds a verified object at `path`. A pool entry that
+/// exists with the wrong bytes is an error, never a reason to overwrite it.
+fn object_is_present(path: &Path, verify: &ObjectVerifier<'_>) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("reading checkpoint object {}", path.display()));
+        }
+    }
+    let checked = checked_regular_file(path).and_then(|()| verify(path));
+    match checked {
+        Ok(()) => Ok(true),
+        Err(error) if is_not_found(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Refuse anything at `path` but a regular file: a symlink or directory filed
+/// under an object's name never stands in for it.
+pub(super) fn checked_regular_file(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("reading checkpoint object {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "checkpoint object {} is not a regular file",
+        path.display()
+    );
+    Ok(())
+}
+
+fn verify_digest_file(path: &Path, digest: &ChunkDigest) -> Result<()> {
+    let actual = super::sha256_file_hex(path)
+        .with_context(|| format!("hashing checkpoint object {}", path.display()))?;
+    anyhow::ensure!(
+        actual == digest.as_str(),
+        "checkpoint object {} failed integrity: expected {}, got {actual}",
+        path.display(),
+        digest.as_str()
+    );
+    Ok(())
+}
+
+fn validate_object_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        name.len() == 64 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "checkpoint object name must be 64 lowercase hexadecimal characters"
+    );
+    Ok(())
 }
 
 fn is_not_found(error: &anyhow::Error) -> bool {
@@ -1119,10 +1165,12 @@ fn create_private_dir_durable(path: &Path, parent: &Path) -> Result<()> {
 }
 
 pub(super) fn membership_path(content_dir: &Path, digest: &ChunkDigest) -> PathBuf {
-    content_dir
-        .join(MEMBERSHIP_DIR)
-        .join(&digest.as_str()[..2])
-        .join(digest.as_str())
+    membership_path_for(content_dir, digest.as_str())
+}
+
+/// Where a checkpoint links the pool object filed under `name`.
+pub(super) fn membership_path_for(content_dir: &Path, name: &str) -> PathBuf {
+    content_dir.join(MEMBERSHIP_DIR).join(&name[..2]).join(name)
 }
 
 #[cfg(test)]

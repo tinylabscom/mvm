@@ -17,6 +17,7 @@ pub mod journey;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
 pub mod prompt_fixture;
+pub mod sharding;
 pub mod source_commands;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
@@ -153,12 +154,10 @@ pub const WARM_CLAIM_TAG: &str = "warm_claim";
 /// exact variable, which is nowhere in CI.
 pub const DESTRUCTIVE_LAB_ONLY_TAG: &str = "destructive_lab_only";
 /// Scenarios whose premise is a *cached* workload kernel being the kernel
-/// source. When a local image checkout is selected (an explicit
-/// `MVM_IMAGES_DIR`, or the standard two-repo sibling layout discovered at
-/// compile time), the kernel comes from the pair build instead and the
-/// cached-kernel path — including the capability check these scenarios stage
-/// a fixture for — is never reached. Inverted gate: skips when a checkout
-/// *is* selected.
+/// source. When an explicit `MVM_IMAGES_DIR` selects a local image checkout,
+/// the kernel comes from the pair build instead and the cached-kernel path —
+/// including the capability check these scenarios stage a fixture for — is
+/// never reached. Inverted gate: skips when a checkout *is* selected.
 pub const NO_LOCAL_IMAGES_CHECKOUT_TAG: &str = "no_local_images_checkout";
 
 /// Features that read the documentation corpus itself: the README contract
@@ -245,10 +244,9 @@ pub struct RuntimeCaps {
     /// `live_opted_in` on purpose: it must be impossible for any lane that only
     /// set `MVM_BDD_LIVE` to reach a scenario that detonates an exploit.
     pub destructive_lab_opted_in: bool,
-    /// A local mvm-images checkout is selected for the mvmctl under test
-    /// (explicit `MVM_IMAGES_DIR`, or a sibling checkout discovered from the
-    /// build path), so the workload kernel resolves from the pair build and
-    /// the cached-kernel path is not exercised. Read by
+    /// An explicit `MVM_IMAGES_DIR` selects a local mvm-images checkout for
+    /// the mvmctl under test, so the workload kernel resolves from the pair
+    /// build and the cached-kernel path is not exercised. Read by
     /// [`NO_LOCAL_IMAGES_CHECKOUT_TAG`], which skips when this is *true* — an
     /// inverted gate, like `UNENFORCEABLE_WALL_CLOCK_TAG`.
     pub local_images_checkout: bool,
@@ -470,8 +468,7 @@ impl ScenarioGate {
             Self::NeedsNoLocalImagesCheckout => Some(
                 "need no selected mvm-images checkout: a local checkout routes the \
                  workload kernel through the pair build, so the cached-kernel path \
-                 this scenario stages cannot be reached (unset MVM_IMAGES_DIR, or \
-                 build mvmctl where no sibling mvm-images checkout is discovered)",
+                 this scenario stages cannot be reached (unset MVM_IMAGES_DIR)",
             ),
             Self::NeedsWarmClaim => Some(
                 "need MVM_BDD_WARM_CLAIM=1 on a host where a forked child answers \
@@ -495,8 +492,8 @@ impl ScenarioGate {
                  mvm-egress-client, mvm-oci-entrypoint)",
             ),
             Self::NeedsSdkSidecar => Some(
-                "need the SDK sidecar image in the mvm cache (build it from an \
-                 mvm-images checkout with `mvmctl build sdk-sidecar build`)",
+                "need the SDK sidecar image in the mvm cache (prepare it with \
+                 `mvmctl bootstrap`)",
             ),
             Self::NeedsPerfBudgetHost => Some(
                 "need MVM_BDD_PERF_BUDGET=1 on a host that can hold the launch \

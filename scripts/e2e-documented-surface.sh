@@ -641,7 +641,9 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 #
 # `MVM_BDD_LIVE=1` opts into the scenarios that boot a real microVM. No
 # `MVM_BDD_ONLY_TAG` here: that selector narrows to one tag's subset,
-# and narrowing is what let the macOS default backend go uncovered.
+# and narrowing is what let the macOS default backend go uncovered. The
+# release Linux matrix instead uses `MVM_BDD_SHARD`: both required jobs cover
+# disjoint partitions of this entire scenario inventory.
 # ---------------------------------------------------------------------------
 # Bounded, because a live scenario can hang rather than fail: a guest that
 # never completes its request leaves the runner waiting forever, and a release
@@ -685,7 +687,8 @@ SUITE_STARTED=""
 # deliberately absent: if one of those fires, the lane did not boot what it
 # claims to boot, and that has to be a failure rather than a footnote.
 #
-# This lane drives the whole suite, so it tolerates more than the launch lane:
+# Across the required Linux shards this lane drives the whole suite, so it
+# tolerates more than the launch lane:
 # a backend with no memory-snapshot tier (Firecracker reports `unsupported`;
 # the macOS job sets MVM_BDD_SNAPSHOT and does not skip these), and the two
 # fixtures that need material this lane does not publish.
@@ -782,13 +785,16 @@ e2e_phase_end
 if (( SUITE_STATUS == 124 )); then
   echo
   echo "!!! TIMEOUT after ${E2E_TIMEOUT_SECS}s — terminated the suite process tree."
-  echo "!!! A live scenario hung instead of failing. The last scenario printed"
-  echo "!!! above is where it stopped; raise MVM_E2E_TIMEOUT_SECS if it needs longer."
+  echo "!!! The live suite exceeded its deadline. The last scenario printed"
+  echo "!!! above is where it stopped; diagnose that step before changing the budget."
 fi
 
 echo
 echo "==> done. Read the 'did NOT run' tally above, not just the pass count:"
 echo "    a skipped @live scenario is a documented command nothing booted."
+if [[ -n "${MVM_BDD_SHARD:-}" ]]; then
+  echo "    shard ${MVM_BDD_SHARD} is not full coverage alone; all shards must pass."
+fi
 # A run that produced no scenario summary proved nothing, whatever its failure
 # count says. This is the shape that fooled a reader once already: the suite was
 # invoked, refused to start against a stale binary, and the log showed zero

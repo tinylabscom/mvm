@@ -3,7 +3,7 @@
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
 //! `run --profile dev -- <argv>` covers its interactive case. The `Args`
-//! struct + internal request machinery stay — `run_secure` reuses them.
+//! struct + internal request machinery stay — `run_secure_started` reuses them.
 
 use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
@@ -27,6 +27,7 @@ use super::host_signer::{host_signer_id, load_or_init};
 use crate::ui;
 
 pub(in crate::commands) mod detect;
+pub(in crate::commands) mod positional_source;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
@@ -134,6 +135,14 @@ const SOURCES_EXCEPT_RUNTIME_PACK: [&str; 4] = ["image", "manifest", "flake", "d
 const SOURCES_EXCEPT_DEPLOYMENT: [&str; 4] = ["image", "manifest", "flake", "runtime_pack"];
 const SOURCES_EXCEPT_RUNTIME: [&str; 5] =
     ["image", "manifest", "flake", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_POSITIONAL: [&str; 6] = [
+    "image",
+    "manifest",
+    "flake",
+    "runtime_pack",
+    "deployment",
+    "runtime",
+];
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct RunArgs {
@@ -311,9 +320,17 @@ pub(in crate::commands) struct RunArgs {
     /// Require production policy (digest-pinned, verified images).
     #[arg(long = "prod")]
     pub prod: bool,
-    /// Command to run inside the guest (after `--`).
-    // No `allow_hyphen_values` — see `Args::argv` above.
-    #[arg(trailing_var_arg = true)]
+    /// Boot this OCI image or signed `.mvmpkg` artifact.
+    // Classified by shape, never by probing the filesystem: a path-shaped
+    // `.mvmpkg` is an artifact, anything else an image reference. Under
+    // `--mode` it names the script instead. See `positional_source`.
+    #[arg(value_name = "SOURCE", conflicts_with_all = SOURCES_EXCEPT_POSITIONAL)]
+    pub source: Option<String>,
+    /// Command to run inside the guest, after `--`.
+    // `last` is what makes `--` mandatory: without it a stray word after the
+    // source would be taken as the command. No `allow_hyphen_values` either —
+    // see `Args::argv` above.
+    #[arg(last = true)]
     pub argv: Vec<String>,
     /// Allow a production-safe guest-agent verb (repeatable).
     #[arg(long = "agent-verb", value_name = "VERB")]
@@ -408,11 +425,11 @@ pub(in crate::commands) struct SdkTransportArgs {
     pub ack_divergence: Vec<String>,
 }
 
-/// `mvmctl run` — the shared execution surface plus the SDK transport.
+/// `mvmctl run` — `machine run`, plus the SDK transport only `run` carries.
 #[derive(ClapArgs, Debug, Clone, Default)]
-pub(in crate::commands) struct TransientRunArgs {
+pub(in crate::commands) struct RunVerbArgs {
     #[command(flatten)]
-    pub run: RunArgs,
+    pub machine: crate::commands::machine::MachineRunArgs,
     #[command(flatten)]
     pub sdk: SdkTransportArgs,
 }
@@ -518,53 +535,39 @@ pub(in crate::commands) fn run_receipt(
     }
 }
 
-/// `mvmctl run`: peel off the SDK transport, then fall through to the ordinary
-/// transient run every other caller uses.
+/// `mvmctl run`: `machine run`, or the SDK script runner under `--mode`/`--dev`.
 ///
-/// The peel happens here rather than inside `run_secure` so the
-/// shared execution path never sees the transport flags, which is what lets
-/// `RunArgs` be flattened into `machine run` without dragging them along.
-pub(in crate::commands) fn run_transient(
+/// The SDK transport is peeled off here, so the shared execution path never
+/// sees it and `RunArgs` flattens into `machine run` without it.
+pub(in crate::commands) fn run_verb(
     cli: &Cli,
-    mut args: TransientRunArgs,
+    mut args: RunVerbArgs,
     cfg: &MvmConfig,
 ) -> Result<()> {
-    // Before SDK dispatch too: there argv[0] is the script path, which a
-    // flag-shaped word never is.
-    detect::refuse_run_flag_after_double_dash(&args.run.argv)?;
-    if let Some(mode) = resolve_run_mode(&args.sdk, &args.run)? {
-        return super::run_plan::dispatch_sdk_mode(mode, &args.run, &args.sdk);
+    let run = &mut args.machine.run;
+    // Checked before the script is moved into argv below: a script path never
+    // looks like a flag, so it would hide a misplaced one behind it.
+    detect::refuse_run_flag_after_double_dash(&run.argv)?;
+    if let Some(mode) = resolve_run_mode(&args.sdk, run)? {
+        // Under an SDK mode the positional names the script to run, not a boot
+        // source: `mvmctl run --mode plan ./script.py`.
+        if let Some(script) = run.source.take() {
+            run.argv.insert(0, script);
+        }
+        return super::run_plan::dispatch_sdk_mode(mode, run, &args.sdk);
     }
-    // The command is required here rather than by clap: the field is shared
-    // with `machine run`, where `-d` boots with no command.
-    let cwd = std::env::current_dir().context("resolving the working directory")?;
-    super::run_policy::select_pack_image(&mut args.run)?;
-    resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
-    super::super::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
-    super::run_policy::apply_run_policy(&mut args.run)?;
-    let image_supplies_entrypoint =
-        args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
-    if args.run.argv.is_empty() && args.run.launch_plan.is_none() && !image_supplies_entrypoint {
-        anyhow::bail!(
-            "`mvmctl run` needs a command: `mvmctl run -- <cmd>`. Use `--launch-plan <path>` \
-             for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
-        );
-    }
-    if !args.run.dry_run {
-        build_flake_slot(&mut args.run)?;
-    }
-    run_secure(cli, args.run, cfg, None)
+    args.machine.default_image_when_sourceless = true;
+    crate::commands::machine::run_dispatch(cli, args.machine, cfg)
 }
 
-/// Run a transient workload through the normal admitted path, optionally
-/// overriding the user-facing image lookup with an already-verified source.
-/// The override is used only by content-addressed restore, where following a
-/// mutable template pointer would boot the wrong revision.
-pub(in crate::commands) fn run_secure(
+/// Run a transient workload through the admitted path from the instant launch
+/// resolution began, optionally overriding lookup with a content-pinned source.
+pub(in crate::commands) fn run_secure_started(
     cli: &Cli,
     mut args: RunArgs,
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
+    startup_started: std::time::Instant,
 ) -> Result<()> {
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
@@ -826,7 +829,8 @@ pub(in crate::commands) fn run_secure(
             &oci_provenance,
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let result = crate::exec::run_captured(req, Some(&admit), Some(&posture));
+        let result =
+            crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
@@ -889,6 +893,7 @@ pub(in crate::commands) fn run_secure(
             denials: &denials,
             network: network_access,
             review_source: review_source.as_ref(),
+            startup_started,
         },
     )
 }
@@ -923,6 +928,7 @@ fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
 /// (the audit emitter lives inside it) and the resolved backend name for the
 /// audit `backend` label.
 struct RunAudit<'a> {
+    startup_started: std::time::Instant,
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
     backend: &'a str,
@@ -981,7 +987,7 @@ fn run_run_args(
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
-    let result = crate::exec::run(req, audit.admit, Some(&posture));
+    let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
     let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
@@ -1909,46 +1915,73 @@ mod tests {
         let crate::commands::Commands::Run(parsed) = parsed.command else {
             panic!("expected Commands::Run");
         };
-        let expected = TransientRunArgs {
-            run: RunArgs {
-                argv: vec!["x".to_string()],
+        let expected = RunVerbArgs {
+            machine: crate::commands::machine::MachineRunArgs {
+                run: RunArgs {
+                    argv: vec!["x".to_string()],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()
         };
 
-        assert_eq!(parsed.run.cpus, expected.run.cpus, "--cpus default");
-        assert_eq!(parsed.run.memory, expected.run.memory, "--memory default");
         assert_eq!(
-            parsed.run.profile, expected.run.profile,
+            parsed.machine.run.cpus, expected.machine.run.cpus,
+            "--cpus default"
+        );
+        assert_eq!(
+            parsed.machine.run.memory, expected.machine.run.memory,
+            "--memory default"
+        );
+        assert_eq!(
+            parsed.machine.run.profile, expected.machine.run.profile,
             "--profile default"
         );
-        assert_eq!(parsed.run.net, expected.run.net, "--net default");
-        assert_eq!(parsed.run.json, expected.run.json, "--json default");
         assert_eq!(
-            parsed.run.dry_run, expected.run.dry_run,
+            parsed.machine.run.net, expected.machine.run.net,
+            "--net default"
+        );
+        assert_eq!(
+            parsed.machine.run.json, expected.machine.run.json,
+            "--json default"
+        );
+        assert_eq!(
+            parsed.machine.run.dry_run, expected.machine.run.dry_run,
             "--dry-run default"
         );
-        assert_eq!(parsed.run.prod, expected.run.prod, "--prod default");
         assert_eq!(
-            parsed.run.timeout, expected.run.timeout,
+            parsed.machine.run.prod, expected.machine.run.prod,
+            "--prod default"
+        );
+        assert_eq!(
+            parsed.machine.run.timeout, expected.machine.run.timeout,
             "--timeout default"
         );
         assert_eq!(
-            parsed.run.cpu_limit, expected.run.cpu_limit,
+            parsed.machine.run.cpu_limit, expected.machine.run.cpu_limit,
             "--cpu-limit default"
         );
         assert_eq!(
-            parsed.run.allow_host, expected.run.allow_host,
+            parsed.machine.run.allow_host, expected.machine.run.allow_host,
             "--allow-host default"
         );
-        assert_eq!(parsed.run.mounts, expected.run.mounts, "--mount default");
-        assert_eq!(parsed.run.env, expected.run.env, "--env default");
         assert_eq!(
-            parsed.run.allow_env, expected.run.allow_env,
+            parsed.machine.run.mounts, expected.machine.run.mounts,
+            "--mount default"
+        );
+        assert_eq!(
+            parsed.machine.run.env, expected.machine.run.env,
+            "--env default"
+        );
+        assert_eq!(
+            parsed.machine.run.allow_env, expected.machine.run.allow_env,
             "--allow-env default"
         );
-        assert_eq!(parsed.run.argv, expected.run.argv, "trailing argv");
+        assert_eq!(
+            parsed.machine.run.argv, expected.machine.run.argv,
+            "trailing argv"
+        );
         assert_eq!(parsed.sdk.mode, expected.sdk.mode, "--mode default");
         assert_eq!(parsed.sdk.dev, expected.sdk.dev, "--dev default");
         assert_eq!(
@@ -1976,6 +2009,7 @@ mod tests {
         };
         assert_eq!(
             parsed
+                .machine
                 .run
                 .caller_commitment
                 .as_ref()

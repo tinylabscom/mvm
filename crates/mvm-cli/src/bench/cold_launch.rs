@@ -103,6 +103,10 @@ pub enum LaunchLane {
     PreparedCold,
     /// The same launch with an unchanged cached read-only mount image.
     PreparedColdMountHit,
+    /// A prepared cold boot from a signed `.mvmpkg` that is already
+    /// installed: the archive is verified against the publisher trust store on
+    /// every run, then the installed bundle boots without being re-extracted.
+    PreparedColdArtifact,
     /// Directory fingerprint plus first mount-image materialization.
     MountMiss,
     /// Image acquisition, unpack, verification, and preparation.
@@ -114,9 +118,10 @@ pub enum LaunchLane {
 
 impl LaunchLane {
     /// Every lane, in contract order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::PreparedCold,
         Self::PreparedColdMountHit,
+        Self::PreparedColdArtifact,
         Self::MountMiss,
         Self::ArtifactMiss,
         Self::WarmClaim,
@@ -127,6 +132,7 @@ impl LaunchLane {
         match self {
             Self::PreparedCold => "prepared_cold",
             Self::PreparedColdMountHit => "prepared_cold_mount_hit",
+            Self::PreparedColdArtifact => "prepared_cold_artifact",
             Self::MountMiss => "mount_miss",
             Self::ArtifactMiss => "artifact_miss",
             Self::WarmClaim => "warm_claim",
@@ -145,6 +151,9 @@ impl LaunchLane {
             Self::PreparedColdMountHit => {
                 "The same launch with an unchanged cached read-only mount image."
             }
+            Self::PreparedColdArtifact => {
+                "A signed .mvmpkg already installed: trust-store verification on every run, then a prepared cold boot."
+            }
             Self::MountMiss => "Directory fingerprint plus first mount-image materialization.",
             Self::ArtifactMiss => "Image acquisition, unpack, verification, and preparation.",
             Self::WarmClaim => {
@@ -160,12 +169,14 @@ impl LaunchLane {
     #[must_use]
     pub const fn budgets(self) -> LaneBudgets {
         match self {
-            Self::PreparedCold | Self::PreparedColdMountHit => LaneBudgets {
-                p50_ms: Some(PREPARED_COLD_P50_BUDGET_MS),
-                p95_ms: Some(PREPARED_COLD_P95_BUDGET_MS),
-                p99_ms: Some(PREPARED_COLD_P99_BUDGET_MS),
-                hard_max_ms: Some(PREPARED_COLD_HARD_MAX_MS),
-            },
+            Self::PreparedCold | Self::PreparedColdMountHit | Self::PreparedColdArtifact => {
+                LaneBudgets {
+                    p50_ms: Some(PREPARED_COLD_P50_BUDGET_MS),
+                    p95_ms: Some(PREPARED_COLD_P95_BUDGET_MS),
+                    p99_ms: Some(PREPARED_COLD_P99_BUDGET_MS),
+                    hard_max_ms: Some(PREPARED_COLD_HARD_MAX_MS),
+                }
+            }
             Self::WarmClaim => LaneBudgets {
                 p50_ms: Some(WARM_CLAIM_P50_BUDGET_MS),
                 p95_ms: None,
@@ -179,6 +190,19 @@ impl LaunchLane {
                 hard_max_ms: None,
             },
         }
+    }
+}
+
+impl LaunchLane {
+    /// Whether every measured dispatch in this lane must be strictly under
+    /// [`PREPARED_COLD_HARD_MAX_MS`]. Read by the report builder and both
+    /// report gates, so a lane cannot be ceilinged in one and not the others.
+    #[must_use]
+    pub const fn has_hard_boot_ceiling(self) -> bool {
+        matches!(
+            self,
+            Self::PreparedCold | Self::PreparedColdMountHit | Self::PreparedColdArtifact
+        )
     }
 }
 
@@ -392,11 +416,10 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
     if report.stats.dispatch_window_ms.max != observed_max_ms {
         return Err(LaneViolation::NonCanonicalSummary);
     }
-    let expected = matches!(
-        report.lane,
-        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
-    )
-    .then(|| HardBootRequirement::prepared(observed_max_ms));
+    let expected = report
+        .lane
+        .has_hard_boot_ceiling()
+        .then(|| HardBootRequirement::prepared(observed_max_ms));
     if report.hard_requirement != expected {
         return Err(LaneViolation::NonCanonicalSummary);
     }
@@ -413,11 +436,7 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
 /// Acquisition and warm-claim lanes have different contracts and are left to
 /// their own gates.
 pub fn validate_hard_boot_timing(lane: LaunchLane, found_ms: f64) -> Result<(), LaneViolation> {
-    if matches!(
-        lane,
-        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
-    ) && found_ms >= PREPARED_COLD_HARD_MAX_MS
-    {
+    if lane.has_hard_boot_ceiling() && found_ms >= PREPARED_COLD_HARD_MAX_MS {
         return Err(LaneViolation::HardMaximumExceeded {
             lane,
             found_ms,
@@ -520,7 +539,7 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
     };
 
     match lane {
-        LaunchLane::PreparedCold => {
+        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit => {
             forbid(vec![
                 "image_pull",
                 "image_build",
@@ -528,18 +547,28 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "warm_claim",
                 "artifact_hash",
                 "process_table_scan",
+                "bundle_verify",
             ])?;
             require_cold(lane, sample)
         }
-        LaunchLane::PreparedColdMountHit => {
+        LaunchLane::PreparedColdArtifact => {
+            // Re-hashing is what verification is, so `artifact_hash` is the
+            // one acquisition kind this lane admits. Everything that would
+            // make it an acquisition launch rather than a prepared one stays
+            // forbidden.
             forbid(vec![
                 "image_pull",
                 "image_build",
                 "mount_materialize",
                 "warm_claim",
-                "artifact_hash",
                 "process_table_scan",
             ])?;
+            if work.bundle_verify_us.is_none() {
+                return Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "bundle_verify",
+                });
+            }
             require_cold(lane, sample)
         }
         LaunchLane::MountMiss => {
@@ -549,6 +578,7 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "warm_claim",
                 "artifact_hash",
                 "process_table_scan",
+                "bundle_verify",
             ])?;
             if !work.mount_materialize {
                 return Err(LaneViolation::MissingWork {
@@ -824,6 +854,12 @@ pub struct LaneStats {
     pub vsock_wait_ms: SpanStats,
     pub command_ms: SpanStats,
     pub teardown_ms: SpanStats,
+    /// Verifying a signed `.mvmpkg` against the trust store before the launch,
+    /// for the samples that named one. It precedes the launch's own buckets,
+    /// so it is reported beside `total_ms` and never inside it, and it is not
+    /// part of the dispatch window the budgets gate.
+    #[serde(default)]
+    pub bundle_verify_ms: SpanStats,
     /// One entry per sub-phase, in declaration order.
     pub sub_phases: Vec<(String, SpanStats)>,
     /// One entry per backend-recorded phase, in the order the backend reported
@@ -907,11 +943,9 @@ pub fn build_cold_launch_report(
         SpanStats::from_samples(&values)
     };
     let dispatch_window_ms = col(|s| s.phases.dispatch_window_ms());
-    let hard_requirement = matches!(
-        lane,
-        LaunchLane::PreparedCold | LaunchLane::PreparedColdMountHit
-    )
-    .then(|| HardBootRequirement::prepared(dispatch_window_ms.max));
+    let hard_requirement = lane
+        .has_hard_boot_ceiling()
+        .then(|| HardBootRequirement::prepared(dispatch_window_ms.max));
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
@@ -927,6 +961,12 @@ pub fn build_cold_launch_report(
             vsock_wait_ms: col(|s| s.phases.vsock_wait_ms),
             command_ms: col(|s| s.phases.command_ms),
             teardown_ms: col(|s| s.phases.teardown_ms),
+            bundle_verify_ms: SpanStats::from_samples(
+                &raw.iter()
+                    .filter_map(|s| s.work.bundle_verify_us)
+                    .map(|us| us as f64 / 1000.0)
+                    .collect::<Vec<f64>>(),
+            ),
             sub_phases: SUB_PHASE_NAMES
                 .iter()
                 .map(|name| ((*name).to_string(), sub(name)))
@@ -1202,6 +1242,7 @@ mod tests {
             warm_claim: true,
             artifact_bytes_hashed: 1_205_739_520,
             process_table_scans: 1,
+            bundle_verify_us: Some(4_000),
         };
         let err = validate_lane(LaunchLane::PreparedCold, &sample).unwrap_err();
         assert_eq!(
@@ -1214,7 +1255,8 @@ mod tests {
                     "mount_materialize",
                     "warm_claim",
                     "artifact_hash",
-                    "process_table_scan"
+                    "process_table_scan",
+                    "bundle_verify"
                 ],
             }
         );
@@ -1411,13 +1453,7 @@ mod tests {
         sample.build_profile = BuildProfile::Debug;
         sample.work.warm_claim = true;
         sample.launch_mode = LaunchMode::Warm;
-        for lane in [
-            LaunchLane::PreparedCold,
-            LaunchLane::PreparedColdMountHit,
-            LaunchLane::MountMiss,
-            LaunchLane::ArtifactMiss,
-            LaunchLane::WarmClaim,
-        ] {
+        for lane in LaunchLane::ALL {
             assert_eq!(
                 validate_lane(lane, &sample),
                 Err(LaneViolation::NotReleaseBuild {
@@ -1427,6 +1463,119 @@ mod tests {
                 lane.as_str()
             );
         }
+    }
+
+    /// A launch from a signed archive: verified against the trust store, and
+    /// re-hashed doing so, then booted cold from the installed bundle.
+    fn artifact_launch_sample() -> LaunchSample {
+        let mut sample = launch_sample();
+        sample.work.bundle_verify_us = Some(12_500);
+        sample.work.artifact_bytes_hashed = 48 * 1024 * 1024;
+        sample
+    }
+
+    #[test]
+    fn the_artifact_lane_admits_a_verified_cold_boot_that_re_hashed() {
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedColdArtifact, &artifact_launch_sample()),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_artifact_lane_refuses_a_launch_that_verified_no_archive() {
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedColdArtifact, &launch_sample()),
+            Err(LaneViolation::MissingWork {
+                lane: LaunchLane::PreparedColdArtifact,
+                expected: "bundle_verify",
+            })
+        );
+    }
+
+    #[test]
+    fn the_artifact_lane_refuses_acquisition_and_warm_claims() {
+        let mut pulled = artifact_launch_sample();
+        pulled.work.image_pull = true;
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedColdArtifact, &pulled),
+            Err(LaneViolation::ForbiddenWork {
+                lane: LaunchLane::PreparedColdArtifact,
+                performed: vec!["image_pull"],
+            })
+        );
+
+        let mut claimed = artifact_launch_sample();
+        claimed.launch_mode = LaunchMode::Warm;
+        assert_eq!(
+            validate_lane(LaunchLane::PreparedColdArtifact, &claimed),
+            Err(LaneViolation::WrongLaunchMode {
+                lane: LaunchLane::PreparedColdArtifact,
+                found: LaunchMode::Warm,
+            })
+        );
+    }
+
+    /// The other direction: an archive launch is not a prepared launch, so its
+    /// verification cost can never be hidden inside the headline number.
+    #[test]
+    fn prepared_lanes_refuse_an_archive_launch() {
+        for lane in [LaunchLane::PreparedCold, LaunchLane::PreparedColdMountHit] {
+            let mut sample = launch_sample();
+            sample.work.bundle_verify_us = Some(1);
+            assert_eq!(
+                validate_lane(lane, &sample),
+                Err(LaneViolation::ForbiddenWork {
+                    lane,
+                    performed: vec!["bundle_verify"],
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn the_artifact_lane_is_held_to_the_prepared_cold_budgets_and_ceiling() {
+        assert_eq!(
+            LaunchLane::PreparedColdArtifact.budgets(),
+            LaunchLane::PreparedCold.budgets()
+        );
+        assert!(LaunchLane::PreparedColdArtifact.has_hard_boot_ceiling());
+        assert_eq!(
+            validate_hard_boot_timing(LaunchLane::PreparedColdArtifact, 200.0),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::PreparedColdArtifact,
+                found_ms: 200.0,
+                limit_ms: PREPARED_COLD_HARD_MAX_MS,
+            })
+        );
+    }
+
+    #[test]
+    fn an_artifact_report_publishes_verification_beside_the_dispatch_window() {
+        let raw: Vec<ColdLaunchSample> = (1..=4)
+            .map(|i| {
+                let mut sample = cold_sample(i, 160.0);
+                sample.lane = LaunchLane::PreparedColdArtifact;
+                sample.work.bundle_verify_us = Some(u64::from(i) * 10_000);
+                sample
+            })
+            .collect();
+        let report = build_cold_launch_report(LaunchLane::PreparedColdArtifact, 2, raw);
+
+        assert_eq!(report.stats.bundle_verify_ms.samples, 4);
+        assert_eq!(report.stats.bundle_verify_ms.p50, Some(25.0));
+        assert_eq!(report.stats.bundle_verify_ms.max, Some(40.0));
+        // Verification is reported, not folded into the gated window.
+        assert_eq!(report.stats.dispatch_window_ms.p50, Some(130.0));
+        assert!(report.hard_requirement.as_ref().is_some_and(|r| r.met));
+        assert_eq!(validate_hard_boot_requirement(&report), Ok(()));
+    }
+
+    #[test]
+    fn a_report_without_archive_launches_publishes_no_verification() {
+        let raw: Vec<ColdLaunchSample> = (1..=2).map(|i| cold_sample(i, 160.0)).collect();
+        let report = build_cold_launch_report(LaunchLane::PreparedCold, 0, raw);
+        assert_eq!(report.stats.bundle_verify_ms, SpanStats::default());
     }
 
     #[test]

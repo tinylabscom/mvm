@@ -183,13 +183,14 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
         });
     }
     if let Some(slot_hash) = &spec.manifest {
-        let (_, _vmlinux, _initrd, rootfs, rev) =
+        let (_, vmlinux, _initrd, rootfs, rev) =
             mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
                 .with_context(|| {
                     format!("loading manifest slot {slot_hash:?} for machine start")
                 })?;
         return Ok(BootSource {
-            kernel: None,
+            kernel: super::bundle_runtime::installed_archive_for_rootfs(Path::new(&rootfs))?
+                .map(|_| vmlinux),
             label: format!("manifest:{slot_hash}"),
             rootfs: PathBuf::from(rootfs),
             digest: rev,
@@ -301,16 +302,15 @@ fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
 }
 
 /// The workload kernel a process that never builds one can boot on
-/// `backend`: `None` for a backend that carries its own kernel (libkrun boots
-/// libkrunfw's, the mock boots nothing), otherwise the verified kernel in the
-/// cache. A cache hit means the bytes matched their recorded digest; a miss,
+/// `backend`: `None` for the mock, which boots nothing, otherwise the verified
+/// kernel in the cache. libkrun is no exception: its workload driver boots an
+/// explicit kernel image and refuses a launch that names none. A cache hit means the bytes matched their recorded digest; a miss,
 /// or an entry that failed to verify and was evicted, is refused with the
 /// command that fills it.
 pub fn cached_workload_kernel(backend: &str) -> Result<Option<String>> {
     use mvm_core::protocol::vm_backend::BackendKind;
-    match crate::backend_kind_for(backend) {
-        BackendKind::Mock | BackendKind::Libkrun => return Ok(None),
-        _ => {}
+    if crate::backend_kind_for(backend) == BackendKind::Mock {
+        return Ok(None);
     }
     let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();

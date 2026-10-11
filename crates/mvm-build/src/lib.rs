@@ -12,6 +12,9 @@ pub mod base_image_gate;
 /// against OSV over `mvm_http::blocking` and render the app-deps-shaped
 /// `cve.json` + CycloneDX SBOM sidecar pair.
 pub mod base_image_scan;
+/// Synthetic boot archives shared by offline admission tests.
+#[cfg(any(test, feature = "test-support"))]
+pub mod boot_asset_fixture;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
@@ -34,6 +37,8 @@ pub mod builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 pub mod builder_orchestrator;
+/// What the host checks in a builder VM's output before it uses or signs it.
+pub mod builder_output;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
@@ -195,6 +200,8 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
+/// Process-lifetime memo for answers every call site of one command shares.
+mod process_memo;
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.

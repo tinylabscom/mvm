@@ -1207,8 +1207,10 @@ pub fn finalize_flake_job(
         });
     }
 
+    // Both are read without following a link: the guest chose these names,
+    // and a link would make the host read a file of the guest's choosing.
     let rootfs_path = artifact_out.join("rootfs.ext4");
-    if !rootfs_path.is_file() {
+    if crate::builder_output::regular_member_if_present(&rootfs_path)?.is_none() {
         return Err(BuilderVmError::JobFailed {
             category: crate::builder_job_contract::FailureCategory::OutputContract,
             detail: format!(
@@ -1217,12 +1219,8 @@ pub fn finalize_flake_job(
             ),
         });
     }
-    let kernel_path_out = artifact_out.join("vmlinux");
-    let kernel_path = if kernel_path_out.is_file() {
-        Some(kernel_path_out)
-    } else {
-        None
-    };
+    let kernel_path =
+        crate::builder_output::regular_member_if_present(&artifact_out.join("vmlinux"))?;
 
     Ok(BuilderArtifacts::Image {
         rootfs_path,

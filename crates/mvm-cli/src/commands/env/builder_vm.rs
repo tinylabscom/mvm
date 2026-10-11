@@ -76,11 +76,11 @@ pub(crate) fn report_recorded_boot_tier(what: &str, path: &std::path::Path) {
     }
 }
 
-/// Whether images are built from source here: a local image checkout is
-/// selected, configured or found beside this checkout. Image construction
-/// lives in `mvm-images`, so an mvm source checkout without one selects the
-/// released set like any other binary. An invalid configured path is not an
-/// answer either way — the verb that uses the selection reports it.
+/// Whether images are built from source here: an explicit local image checkout
+/// is selected. Image construction lives in `mvm-images`, so an mvm source
+/// checkout without `MVM_IMAGES_DIR` selects the released set like any other
+/// binary. An invalid configured path is not an answer either way — the verb
+/// that uses the selection reports it.
 pub(crate) fn images_built_from_source() -> bool {
     use mvm_build::image_source::resolve_current_source;
     matches!(
@@ -94,6 +94,7 @@ use default_microvm::DefaultMicrovmVariant;
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
+    prepare_workload_kernel,
 };
 #[cfg(test)]
 use default_microvm::{evict_incompatible_workload_kernel, missing_workload_kernel_message};

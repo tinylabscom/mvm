@@ -17,7 +17,9 @@ use mvm_fs::oci::{
     UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
 };
 
-use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file};
+use super::cache::{
+    find_image, layer_blob_path, load_index, read_verified_cache_file, upsert_cached_image,
+};
 use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present};
 use super::materialize::{
     RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
@@ -30,6 +32,7 @@ use super::trust::CosignCommandVerifier;
 use super::trust_policy::trust_decision_for_cached_image;
 use super::trust_policy::{enforce_oci_trust_policy_with, enforce_registry_allowlist};
 use super::trust_policy::{ensure_signature_policy_is_configured, load_oci_registry_policy};
+use super::trust_policy::{trust_decision_from_verification_receipt, write_verification_receipt};
 
 /// Refuse a mutable (non-digest-pinned) registry reference under `--prod`
 /// before any network fetch or local resource resolution. Local sources
@@ -71,14 +74,21 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 ) -> Result<ResolvedOciRunImage> {
     ensure_prod_digest_pin(reference, prod)?;
     ensure_prod_registry_reference_policy(reference, prod)?;
-    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
-    resolve_or_pull_run_image_with(
+    mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(cache_root)?;
+    resolve_run_image_with(
         cache_root,
         reference,
         prod,
         super::materialize::inject_runtime_and_materialize,
         &CosignCommandVerifier,
+        RunImageAcquisition::PreparedOnly,
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunImageAcquisition {
+    PreparedOnly,
+    Allow,
 }
 
 /// Reap helper processes a previous run orphaned, immediately before this run
@@ -94,24 +104,65 @@ fn sweep_before_builder_vm() {
     crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_before_spawn();
 }
 
-pub(super) fn resolve_or_pull_run_image_with(
+#[cfg(test)]
+fn resolve_or_pull_run_image_with(
     cache_root: &Path,
     reference: &str,
     prod: bool,
     materialize: RuntimeMaterializer,
     verifier: &dyn super::trust::CosignVerifier,
 ) -> Result<ResolvedOciRunImage> {
+    resolve_run_image_with(
+        cache_root,
+        reference,
+        prod,
+        materialize,
+        verifier,
+        RunImageAcquisition::Allow,
+    )
+}
+
+fn resolve_run_image_with(
+    cache_root: &Path,
+    reference: &str,
+    prod: bool,
+    materialize: RuntimeMaterializer,
+    verifier: &dyn super::trust::CosignVerifier,
+    acquisition: RunImageAcquisition,
+) -> Result<ResolvedOciRunImage> {
     // Local sources route to their own ingest; a registry reference falls
     // through to the cache-or-pull path below.
     match source::ImageSource::classify(reference)? {
-        source::ImageSource::OciArchive(path) => {
-            return super::ingest::ingest_local_archive(cache_root, &path, reference, prod);
+        source::ImageSource::OciArchive(path) if acquisition == RunImageAcquisition::Allow => {
+            let resolved = super::ingest::ingest_local_archive(cache_root, &path, reference, prod)?;
+            publish_local_preparation(cache_root, reference, &resolved)?;
+            return Ok(resolved);
         }
-        source::ImageSource::Stdin => {
-            return super::ingest::ingest_stdin_archive(cache_root, reference, prod);
+        source::ImageSource::Stdin if acquisition == RunImageAcquisition::Allow => {
+            let resolved = super::ingest::ingest_stdin_archive(cache_root, reference, prod)?;
+            publish_local_preparation(cache_root, reference, &resolved)?;
+            return Ok(resolved);
         }
-        source::ImageSource::RootfsDir(path) => {
-            return super::ingest::ingest_rootfs_dir(cache_root, &path, reference, prod);
+        source::ImageSource::RootfsDir(path) if acquisition == RunImageAcquisition::Allow => {
+            let resolved = super::ingest::ingest_rootfs_dir(cache_root, &path, reference, prod)?;
+            publish_local_preparation(cache_root, reference, &resolved)?;
+            return Ok(resolved);
+        }
+        source::ImageSource::OciArchive(_) | source::ImageSource::Stdin => {
+            return resolve_prepared_local_image(
+                cache_root,
+                reference,
+                prod,
+                OciTrustDecision::local_archive(),
+            );
+        }
+        source::ImageSource::RootfsDir(_) => {
+            return resolve_prepared_local_image(
+                cache_root,
+                reference,
+                prod,
+                OciTrustDecision::local_rootfs(),
+            );
         }
         source::ImageSource::Registry(_) => {}
     }
@@ -127,11 +178,29 @@ pub(super) fn resolve_or_pull_run_image_with(
     // after the fact would leave a signed, sealed image in the cache.
     let cached_trust = cached_entry
         .as_ref()
-        .map(|cached| trust_decision_for_cached_image(&image_ref, cached, prod, verifier))
+        .map(|cached| {
+            if prod && acquisition == RunImageAcquisition::PreparedOnly {
+                trust_decision_from_verification_receipt(cache_root, &image_ref, cached)
+                    .with_context(|| {
+                        format!(
+                            "production verification evidence is unusable; run `mvmctl image pull {}` first",
+                            cached.reference
+                        )
+                    })
+            } else {
+                trust_decision_for_cached_image(&image_ref, cached, prod, verifier)
+            }
+        })
         .transpose()?;
-    let (image, pulled, trust, auth_source_from_pull) = match (cached_entry, cached_trust) {
+    let (mut image, pulled, trust, auth_source_from_pull) = match (cached_entry, cached_trust) {
         (Some(cached), Some(trust)) if cached_rootfs_is_current(&cached, &runtime_tag, prod) => {
             (cached, false, trust, None)
+        }
+        (Some(cached), Some(_)) if acquisition == RunImageAcquisition::PreparedOnly => {
+            bail!(
+                "cached OCI image {} is not launch-ready; run `mvmctl image pull {reference}` first",
+                cached.reference
+            );
         }
         (Some(cached), Some(trust)) => {
             sweep_before_builder_vm();
@@ -145,6 +214,11 @@ pub(super) fn resolve_or_pull_run_image_with(
                 }
             }
         }
+        _ if acquisition == RunImageAcquisition::PreparedOnly => {
+            bail!(
+                "OCI image {reference} is not prepared; run `mvmctl image pull {reference}` first"
+            );
+        }
         _ => {
             sweep_before_builder_vm();
             let (cached, trust, auth_source) =
@@ -152,6 +226,17 @@ pub(super) fn resolve_or_pull_run_image_with(
             (cached, true, trust, Some(auth_source))
         }
     };
+    if prod && acquisition == RunImageAcquisition::Allow {
+        let policy = load_oci_registry_policy()?;
+        image.verification_receipt_path = Some(write_verification_receipt(
+            cache_root,
+            &image_ref,
+            &image.resolved_digest,
+            &policy,
+            &trust,
+        )?);
+        upsert_cached_image(cache_root, image.clone())?;
+    }
     let Some(rootfs_relative) = image.rootfs_path.as_deref() else {
         bail!(
             "cached OCI image {} has no materialized rootfs; run `mvmctl image pull {}` first",
@@ -162,6 +247,14 @@ pub(super) fn resolve_or_pull_run_image_with(
     let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
     let mut rematerialized_from = None;
     if !super::materialize::reusable_rootfs(&rootfs_path, prod)? {
+        if acquisition == RunImageAcquisition::PreparedOnly {
+            bail!(
+                "cached OCI image {} has incomplete rootfs artifacts; run \
+                 `mvmctl image pull {}` first",
+                image.reference,
+                image.reference
+            );
+        }
         // Self-heal a cache whose index still records a materialized rootfs but
         // whose sealed block-root artifacts have since drifted. That covers a
         // vanished `rootfs.ext4` (interrupted prune / manual delete) and older
@@ -232,9 +325,29 @@ pub(super) fn resolve_or_pull_run_image_with(
     // vulnerabilities: the pull-time scan must exist, name this digest,
     // and carry no high/critical finding. Dev runs warn and continue.
     super::base_image::apply_prod_base_image_gate(cache_root, &image.resolved_digest, prod)?;
-    let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest)
-        .map(|raw| prepare_rootfs_only_tree(cache_root, &raw, &image.resolved_digest))
-        .transpose()?;
+    let unpacked_root =
+        match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
+            Some(raw) if acquisition == RunImageAcquisition::Allow => Some(
+                prepare_rootfs_only_tree(cache_root, &raw, &image.resolved_digest)?,
+            ),
+            Some(_) => {
+                let prepared = super::materialize::prepared_virtiofs_root(
+                    cache_root,
+                    &image.resolved_digest,
+                    &runtime_tag,
+                );
+                if !prepared.is_dir() {
+                    bail!(
+                        "cached OCI image {} has no prepared launch tree; run \
+                     `mvmctl image pull {}` first",
+                        image.reference,
+                        image.reference
+                    );
+                }
+                Some(prepared)
+            }
+            None => None,
+        };
     Ok(ResolvedOciRunImage {
         provenance: image.provenance("run_image", reference, &trust),
         reference: image.reference,
@@ -244,6 +357,117 @@ pub(super) fn resolve_or_pull_run_image_with(
         pulled,
         auth_source: auth_source_from_pull,
     })
+}
+
+fn resolve_prepared_local_image(
+    cache_root: &Path,
+    reference: &str,
+    prod: bool,
+    trust: OciTrustDecision,
+) -> Result<ResolvedOciRunImage> {
+    anyhow::ensure!(!prod, "local OCI sources are dev-only");
+    let runtime_tag = oci_runtime_tag(cache_root);
+    let image = load_index(cache_root)
+        .ok()
+        .and_then(|index| find_image(&index, reference).cloned())
+        .with_context(|| {
+            format!(
+                "OCI source {reference:?} is not prepared; run \
+                 `mvmctl image pull {reference}` first"
+            )
+        })?;
+    let current = if image.resolved_digest.is_empty() {
+        image.runtime_tag.as_deref() == Some(runtime_tag.as_str()) && image.rootfs_path.is_some()
+    } else {
+        cached_rootfs_is_current(&image, &runtime_tag, false)
+    };
+    anyhow::ensure!(
+        current,
+        "cached OCI source {reference:?} is stale; run `mvmctl image pull {reference}` first"
+    );
+    let rootfs_relative = image.rootfs_path.as_deref().with_context(|| {
+        format!(
+            "cached OCI source {reference:?} has no rootfs; run `mvmctl image pull {reference}`"
+        )
+    })?;
+    let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
+    anyhow::ensure!(
+        super::materialize::reusable_rootfs(&rootfs_path, false)?,
+        "cached OCI source {reference:?} has incomplete rootfs artifacts; run \
+         `mvmctl image pull {reference}` first"
+    );
+    ensure_rootfs_verity_sidecars(&rootfs_path, reference, None)?;
+    let unpacked_root = match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
+        Some(_) => {
+            let prepared = super::materialize::prepared_virtiofs_root(
+                cache_root,
+                &image.resolved_digest,
+                &runtime_tag,
+            );
+            anyhow::ensure!(
+                prepared.is_dir(),
+                "cached OCI source {reference:?} has no prepared launch tree; run \
+                 `mvmctl image pull {reference}` first"
+            );
+            Some(prepared)
+        }
+        None => None,
+    };
+    Ok(ResolvedOciRunImage {
+        provenance: image.provenance("run_image", reference, &trust),
+        reference: image.reference,
+        resolved_digest: image.resolved_digest,
+        rootfs_path,
+        unpacked_root,
+        pulled: false,
+        auth_source: None,
+    })
+}
+
+pub(super) fn publish_local_preparation(
+    cache_root: &Path,
+    supplied_reference: &str,
+    resolved: &ResolvedOciRunImage,
+) -> Result<()> {
+    let rootfs_path = resolved
+        .rootfs_path
+        .strip_prefix(cache_root)
+        .with_context(|| {
+            format!(
+                "local image rootfs {} is outside cache {}",
+                resolved.rootfs_path.display(),
+                cache_root.display()
+            )
+        })?
+        .to_string_lossy()
+        .into_owned();
+    upsert_cached_image(
+        cache_root,
+        CachedOciImage {
+            reference: supplied_reference.to_string(),
+            registry: String::new(),
+            repository: String::new(),
+            tag: None,
+            resolved_digest: resolved.resolved_digest.clone(),
+            fetched_at: chrono::Utc::now().to_rfc3339(),
+            manifest_path: String::new(),
+            config_path: None,
+            rootfs_path: Some(rootfs_path),
+            runtime_tag: Some(oci_runtime_tag(cache_root)),
+            claims_path: None,
+            verification_receipt_path: None,
+            layers: resolved
+                .provenance
+                .layer_digests
+                .iter()
+                .map(|digest| CachedOciLayer {
+                    digest: digest.clone(),
+                    size_bytes: 0,
+                    path: None,
+                })
+                .collect(),
+        },
+    )
 }
 
 pub(super) fn pull_image_with_trust(
@@ -269,7 +493,11 @@ fn pull_image_with_trust_with_prepare(
     require_prod_digest_pin(&image_ref, prod, "mvmctl image pull")?;
     ensure_prod_registry_policy(&image_ref, prod)?;
     prepare_guest_runtime(cache_root)?;
-    pull_image_ref(cache_root, image_ref, reference, prod)
+    let pulled = pull_image_ref(cache_root, image_ref, reference, prod)?;
+    if let Some(raw) = unpacked_dir_if_present(cache_root, &pulled.0.resolved_digest) {
+        prepare_rootfs_only_tree(cache_root, &raw, &pulled.0.resolved_digest)?;
+    }
+    Ok(pulled)
 }
 
 fn ensure_prod_registry_reference_policy(reference: &str, prod: bool) -> Result<()> {
@@ -503,6 +731,16 @@ fn pull_image_ref(
         },
     )?;
 
+    let verification_receipt_path = match &prod_policy {
+        Some(policy) => Some(write_verification_receipt(
+            cache_root,
+            &image_ref,
+            &manifest.digest,
+            policy,
+            &trust,
+        )?),
+        None => None,
+    };
     let cached = CachedOciImage {
         reference: image_ref.canonical(),
         registry: image_ref.registry.clone(),
@@ -515,6 +753,7 @@ fn pull_image_ref(
         rootfs_path: Some(rootfs_path),
         runtime_tag: Some(runtime_tag),
         claims_path: Some(claims_path),
+        verification_receipt_path,
         layers: cached_layers,
     };
     super::cache::upsert_cached_image(cache_root, cached.clone())?;
@@ -741,6 +980,7 @@ mod tests {
             rootfs_path: None,
             runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
+            verification_receipt_path: None,
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
                 size_bytes: 4,
@@ -801,16 +1041,17 @@ mod tests {
         // guest agent. That is what made these tests take fifty-five seconds
         // each while appearing to work from a seeded cache.
         let source = guest_binary_source().expect("resolve the guest-binary cache key");
-        let guest_layout =
-            GuestAgentLayout::under(cache_root, source.cache_key(), GuestArch::host());
-        std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
-        for path in [
-            &guest_layout.agent,
-            &guest_layout.netinit,
-            &guest_layout.egress_client,
-            &guest_layout.entrypoint_runner,
-        ] {
-            std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
+        for key in [source.cache_key(), env!("CARGO_PKG_VERSION")] {
+            let guest_layout = GuestAgentLayout::under(cache_root, key, GuestArch::host());
+            std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
+            for path in [
+                &guest_layout.agent,
+                &guest_layout.netinit,
+                &guest_layout.egress_client,
+                &guest_layout.entrypoint_runner,
+            ] {
+                std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
+            }
         }
     }
 
@@ -1312,6 +1553,26 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
     }
 
     #[test]
+    fn an_unprepared_run_image_fails_within_the_startup_budget_without_network() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let started = std::time::Instant::now();
+        let err =
+            resolve_or_pull_run_image(tmp.path(), "127.0.0.1:1/library/not-cached:latest", false)
+                .expect_err("a launch must not pull an unprepared image");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "cache refusal exceeded the startup budget"
+        );
+        let message = err.to_string();
+        assert!(message.contains("mvmctl image pull"), "{message}");
+        assert!(
+            !message.contains("connect") && !message.contains("registry request"),
+            "launch attempted registry access: {message}"
+        );
+    }
+
+    #[test]
     fn resolve_run_image_uses_cached_rootfs() {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Seed before reading the tag: the runtime tag is derived from the
@@ -1364,6 +1625,273 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             resolved.provenance.layer_digests,
             vec!["sha256:layer".to_string()]
         );
+    }
+
+    #[test]
+    fn pulling_a_local_rootfs_publishes_the_entry_launch_requires() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("local-root");
+        std::fs::create_dir_all(source.join("etc")).expect("create local root");
+        std::fs::write(source.join("etc/issue"), b"prepared locally\n").expect("write fixture");
+        let reference = format!("rootfs-dir:{}", source.display());
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+
+        let prepared = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::Allow,
+        )
+        .expect("explicit pull prepares local rootfs");
+        assert!(prepared.pulled);
+        std::fs::remove_dir_all(&source).expect("prove launch does not read source again");
+
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("prepared-only launch resolves indexed local rootfs");
+        assert_eq!(resolved.reference, reference);
+        assert_eq!(resolved.rootfs_path, prepared.rootfs_path);
+        assert!(!resolved.pulled);
+        assert!(
+            load_index(tmp.path())
+                .expect("load index")
+                .images
+                .iter()
+                .any(|image| image.reference == reference),
+            "explicit preparation must publish the supplied local reference"
+        );
+    }
+
+    /// Seed an indexed dev image whose rootfs set is current for the seeded
+    /// guest runtime, returning the rootfs path relative to `cache_root`.
+    fn seed_current_dev_image(cache_root: &Path, digest: &str) -> String {
+        seed_guest_runtime_cache(cache_root);
+        let rel = dev_rootfs_rel(cache_root, digest);
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some(rel.clone());
+        image.runtime_tag = Some(oci_runtime_tag(cache_root));
+        write_index(
+            cache_root,
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        let dir = Path::new(&rel).parent().expect("rootfs dir");
+        write_file(cache_root, &rel, b"rootfs");
+        write_file(
+            cache_root,
+            &dir.join("rootfs.verity").to_string_lossy(),
+            b"verity",
+        );
+        write_file(
+            cache_root,
+            &dir.join("rootfs.roothash").to_string_lossy(),
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        );
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("alpine", false, true)
+            .write_to_dir(&cache_root.join(dir))
+            .expect("publish the sidecar that marks the set complete");
+        rel
+    }
+
+    /// A local archive or stdin is read only by an explicit pull. A launch
+    /// resolves the entry that pull published and never ingests the source
+    /// itself. `--prod` makes each path refuse with its own message before
+    /// touching the archive or stdin, which tells the two paths apart.
+    #[test]
+    fn local_sources_are_ingested_only_when_acquisition_allows_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        for (reference, ingest_refusal) in [
+            (
+                "oci-archive:/nonexistent/image.tar",
+                "local OCI archives are dev-only",
+            ),
+            ("-", "stdin OCI archives are dev-only"),
+        ] {
+            let pull = resolve_run_image_with(
+                tmp.path(),
+                reference,
+                true,
+                fake_runtime_materialize,
+                &verifier,
+                RunImageAcquisition::Allow,
+            )
+            .expect_err("a prod pull of a local source is refused");
+            assert!(
+                pull.to_string().contains(ingest_refusal),
+                "{reference}: an explicit pull must reach ingest, got {pull:#}"
+            );
+
+            let launch = resolve_run_image_with(
+                tmp.path(),
+                reference,
+                true,
+                fake_runtime_materialize,
+                &verifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("a prod launch of a local source is refused");
+            let launch = launch.to_string();
+            assert!(
+                launch.contains("local OCI sources are dev-only")
+                    && !launch.contains(ingest_refusal),
+                "{reference}: a launch must not ingest the source, got {launch}"
+            );
+        }
+    }
+
+    /// A cached image whose rootfs is not current for this runtime is repaired
+    /// by an explicit pull, never by a launch.
+    #[test]
+    fn a_launch_refuses_a_cached_image_that_is_not_launch_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![sample_image(
+                    "docker.io/library/alpine:3.20",
+                    digest,
+                    "blobs/a",
+                )],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+
+        let err = resolve_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch must not rematerialize a stale cached image");
+        assert!(err.to_string().contains("not launch-ready"), "{err:#}");
+        assert!(
+            !tmp.path().join(dev_rootfs_rel(tmp.path(), digest)).exists(),
+            "a launch materialized a rootfs"
+        );
+    }
+
+    /// The other side of the launch refusal: an explicit pull of an image
+    /// the cache has never seen goes to the registry rather than refusing.
+    #[test]
+    fn an_explicit_pull_of_an_uncached_image_reaches_the_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let err = resolve_run_image_with(
+            tmp.path(),
+            "127.0.0.1:1/library/not-cached:latest",
+            false,
+            fake_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::Allow,
+        )
+        .expect_err("nothing listens on the registry port");
+        assert!(
+            !err.to_string().contains("is not prepared"),
+            "an explicit pull was refused as a launch: {err:#}"
+        );
+    }
+
+    /// A production pull writes the verification receipt a later production
+    /// launch admits the image on.
+    #[test]
+    fn a_prod_pull_records_its_verification_receipt() {
+        let fixture = prod_fixture();
+        resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
+        let index = load_index(&fixture.cache).expect("load index");
+        let image = index.images.first().expect("indexed image");
+        let receipt = image
+            .verification_receipt_path
+            .as_deref()
+            .expect("a prod pull records a verification receipt");
+        assert!(fixture.cache.join(receipt).is_file(), "{receipt}");
+    }
+
+    /// A launch boots the launch tree an explicit pull prepared, and refuses
+    /// rather than preparing one itself from the raw unpacked layers.
+    #[test]
+    fn a_launch_boots_only_a_prepared_launch_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        seed_current_dev_image(tmp.path(), digest);
+        create_unpacked_root(tmp.path(), digest);
+        let prepared = super::super::materialize::prepared_virtiofs_root(
+            tmp.path(),
+            digest,
+            &oci_runtime_tag(tmp.path()),
+        );
+
+        let err = resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+            .expect_err("a launch must not prepare a launch tree");
+        assert!(
+            err.to_string().contains("no prepared launch tree"),
+            "{err:#}"
+        );
+        assert!(!prepared.exists(), "a launch prepared the tree itself");
+
+        std::fs::create_dir_all(&prepared).expect("prepare the launch tree");
+        let resolved =
+            resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+                .expect("a prepared launch tree resolves");
+        assert_eq!(resolved.unpacked_root.as_deref(), Some(prepared.as_path()));
+    }
+
+    /// A local source prepared for another guest runtime is stale, even when
+    /// its index entry still names a rootfs.
+    #[test]
+    fn a_launch_refuses_a_local_source_prepared_for_another_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("local-root");
+        std::fs::create_dir_all(source.join("etc")).expect("create local root");
+        std::fs::write(source.join("etc/issue"), b"prepared locally\n").expect("write fixture");
+        let reference = format!("rootfs-dir:{}", source.display());
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::Allow,
+        )
+        .expect("explicit pull prepares local rootfs");
+
+        let mut index = load_index(tmp.path()).expect("load index");
+        let entry = index
+            .images
+            .iter_mut()
+            .find(|image| image.reference == reference)
+            .expect("the pull published the local reference");
+        assert!(entry.rootfs_path.is_some());
+        entry.runtime_tag = Some("another-runtime".to_string());
+        write_index(tmp.path(), &index);
+
+        let err = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a local source prepared for another runtime is stale");
+        assert!(err.to_string().contains("is stale"), "{err:#}");
     }
 
     #[test]
@@ -1646,14 +2174,11 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             msg.contains("mvmctl image pull"),
             "error should tell the user to re-pull: {msg}"
         );
-        assert!(
-            msg.contains("unpacked"),
-            "error should explain the unpacked layers are gone: {msg}"
-        );
+        assert!(msg.contains("incomplete rootfs artifacts"), "{msg}");
     }
 
     #[test]
-    fn resolve_run_image_reseals_cached_rootfs_when_verity_sidecars_are_missing() {
+    fn resolve_run_image_refuses_to_reseal_cached_rootfs_during_launch() {
         let tmp = tempfile::tempdir().expect("tempdir");
         // Seed before reading the tag: the runtime tag is derived from the
         // guest artifacts, so a tag taken before seeding is the cold-cache
@@ -1686,28 +2211,16 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         )
         .expect("record layer owners");
 
-        let resolved =
-            resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
-                .expect("stale verity-free cached rootfs must be re-sealed");
-
-        assert!(resolved.rootfs_path.ends_with(&rel));
-        assert!(resolved.rootfs_path.is_file());
-        assert!(
-            resolved
-                .rootfs_path
-                .parent()
-                .unwrap()
-                .join("rootfs.verity")
-                .is_file()
+        let error = resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+            .expect_err("launch must not re-seal stale cached rootfs artifacts");
+        assert!(error.to_string().contains("mvmctl image pull"), "{error}");
+        let rootfs = tmp.path().join(&rel);
+        assert_eq!(
+            std::fs::read(&rootfs).expect("stale rootfs remains"),
+            b"stale-rootfs"
         );
-        assert!(
-            resolved
-                .rootfs_path
-                .parent()
-                .unwrap()
-                .join("rootfs.roothash")
-                .is_file()
-        );
+        assert!(!rootfs.parent().unwrap().join("rootfs.verity").exists());
+        assert!(!rootfs.parent().unwrap().join("rootfs.roothash").exists());
     }
 
     #[test]

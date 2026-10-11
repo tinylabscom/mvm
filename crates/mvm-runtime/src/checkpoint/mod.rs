@@ -1,6 +1,7 @@
 //! Host-side checkpoint store + the fs_quick capture/fork operations.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::{
@@ -12,15 +13,24 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
 mod chunks;
+mod custody;
 mod diff;
 #[cfg(test)]
 mod durability_tests;
 mod gc;
 mod params;
+#[cfg(test)]
+mod protected_tests;
+mod protection;
 mod restore_content;
 mod retention;
+mod sealed;
 mod staging;
 
+pub use custody::{
+    CheckpointKeyCustody, CheckpointKeyError, HostKeyCustody, TenantKeyFailure, derive_domain_keys,
+    tenant_of,
+};
 pub use diff::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation, diff_checkpoints};
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
@@ -42,19 +52,32 @@ pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_N
 /// Filesystem-backed registry over `config::checkpoints_dir()` (or any root,
 /// for tests). Layout: `<root>/<id>/meta.json` + `<root>/<id>/content/`, plus
 /// `<root>/.staging/` for captures still being written (see `staging`).
+///
+/// A store with key custody seals every capture and opens protected records;
+/// one without it captures the legacy unprotected layout and refuses to open a
+/// protected record. Either reads a legacy record as legacy: a record's
+/// protection is stated in its own digest-sealed metadata, never inferred.
 pub struct CheckpointStore {
     root: PathBuf,
+    custody: Option<Arc<dyn CheckpointKeyCustody>>,
 }
 
 impl CheckpointStore {
-    /// Production constructor — uses the canonical `~/.mvm/checkpoints` path.
+    /// Production constructor — the canonical `~/.mvm/checkpoints` path, under
+    /// the host's key custody, so every capture is protected.
     pub fn open() -> Self {
-        Self::at(mvm_core::config::checkpoints_dir())
+        Self::at(mvm_core::config::checkpoints_dir()).with_key_custody(Arc::new(HostKeyCustody))
     }
 
-    /// Test/explicit-root constructor.
+    /// An explicit root with no key custody: captures are unprotected and
+    /// protected records cannot be opened until custody is attached with
+    /// [`Self::with_key_custody`]. The compatibility constructor, for tests
+    /// and embedders that hold no keys.
     pub fn at(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            custody: None,
+        }
     }
 
     pub fn dir_for(&self, id: &CheckpointId) -> PathBuf {
@@ -171,23 +194,34 @@ pub fn materialized_blob_sha256(
     meta: &CheckpointMeta,
     name: &str,
 ) -> Result<String> {
-    chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
     let blob = meta
         .content
         .iter()
         .find(|blob| blob.name == name)
         .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
+    if let Some(keys) = store.keys_for(meta)? {
+        return sealed::materialized_sha256(&keys, &store.content_dir(&meta.id), blob);
+    }
+    chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
     chunks::materialized_sha256(&store.content_dir(&meta.id), blob)
 }
 
 /// Rebuild every chunked blob in `destination_dir` from the authenticated
 /// checkpoint index. Existing materialized copies are replaced so a snapshot
 /// copy cannot bypass chunk verification.
+///
+/// A protected checkpoint has no plaintext anywhere a mirror could have
+/// copied it from: every blob is opened from the store into
+/// `destination_dir`, and the opaque copies a mirror left there are removed.
 pub fn materialize_chunked_blobs(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
     destination_dir: &Path,
 ) -> Result<()> {
+    if let Some(keys) = store.keys_for(meta)? {
+        protection::open_all_blobs(store, meta, &keys, destination_dir)?;
+        return protection::remove_mirrored_sealed_content(meta, destination_dir);
+    }
     let content_dir = store.content_dir(&meta.id);
     for blob in &meta.content {
         chunks::validate_blob_name(&blob.name)?;
@@ -225,8 +259,23 @@ pub fn materialize_checkpoint_blobs(
     meta: &CheckpointMeta,
     destination_dir: &Path,
 ) -> Result<()> {
+    materialize_checkpoint_manifest(store, meta, destination_dir).map(drop)
+}
+
+/// [`materialize_checkpoint_blobs`], returning the manifest of what was
+/// written: the record's own content for a legacy checkpoint, and for a
+/// protected one each blob's digest over the plaintext just opened, which is
+/// what a backend verifying on load compares against.
+pub(super) fn materialize_checkpoint_manifest(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    destination_dir: &Path,
+) -> Result<Vec<ContentBlob>> {
     for blob in &meta.content {
         chunks::validate_blob_name(&blob.name)?;
+    }
+    if let Some(keys) = store.keys_for(meta)? {
+        return protection::open_all_blobs(store, meta, &keys, destination_dir);
     }
     chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
 
@@ -249,7 +298,7 @@ pub fn materialize_checkpoint_blobs(
         }
         clone_or_materialize_blob(store, meta, blob, &destination)?;
     }
-    Ok(())
+    Ok(meta.content.clone())
 }
 
 /// [`verify_content`], leaving the digest of each whole-file blob named in
@@ -267,6 +316,15 @@ fn verify_content_except(
     deferred: &[&str],
 ) -> Result<()> {
     let dir = store.content_dir(&meta.id);
+    if let Some(keys) = store.keys_for(meta)? {
+        // Every byte of protected content is authenticated as it opens, so
+        // nothing is deferred to a restorer.
+        let results = mvm_fs::parallel::par_map(meta.content.iter().collect(), |blob| {
+            sealed::verify_blob(&keys, &dir, blob)
+                .with_context(|| format!("verifying checkpoint '{}' blob {:?}", meta.id, blob.name))
+        });
+        return results.into_iter().collect();
+    }
     chunks::ensure_chunked_layout(&dir, meta)?;
     let tasks: Vec<_> = meta
         .content
@@ -574,6 +632,7 @@ pub fn fork_checkpoint(
     .created_unix(params.created_unix)
     .content(parent.content.clone())
     .key_domain(parent.key_domain.clone())
+    .protection(parent.protection)
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
     // An fs_quick branch presents no plan of its own, so the child inherits
@@ -649,7 +708,7 @@ pub fn fork_vm_full(
 
     // Clone the captured triple into the child's state dir, then boot the child
     // from its OWN copies — never the parent's live blobs.
-    materialize_checkpoint_blobs(store, &parent, &params.dest_dir)?;
+    let materialized = materialize_checkpoint_manifest(store, &parent, &params.dest_dir)?;
 
     // A fork branches a new VM identity, so it must never boot on the parent's
     // FlowMux signing key. The captured identity drive was just cloned into the
@@ -662,10 +721,14 @@ pub fn fork_vm_full(
     // check is what the restorer starts the child's VMM under. Without this the
     // check would decide only what may be *recorded* for the child, and a child
     // admitted to 1.5 cores would restore with no quota at all.
-    let content = content_with_load_memory_digest(
-        &parent.content,
-        &params.dest_dir.join(mvm_core::checkpoint::MEMORY_BLOB),
-    )?;
+    let content = if parent.protection.is_sealed() {
+        materialized
+    } else {
+        content_with_load_memory_digest(
+            &parent.content,
+            &params.dest_dir.join(mvm_core::checkpoint::MEMORY_BLOB),
+        )?
+    };
     restore.restore(&RestoredChild {
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
@@ -682,6 +745,7 @@ pub fn fork_vm_full(
     .created_unix(params.created_unix)
     .content(parent.content.clone())
     .key_domain(parent.key_domain.clone())
+    .protection(parent.protection)
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
     // The child's OWN grants, already checked to sit inside the parent's. A
@@ -844,6 +908,9 @@ fn capture_vm_full_inner(
     trusted_backend: Option<&dyn TrustedSnapshotBackend>,
 ) -> Result<CheckpointMeta> {
     validate_step_lineage(store, params.parent.as_ref(), params.session.as_ref())?;
+    // Keys and staging are admitted before the VM is paused or anything is
+    // written, so a capture that cannot be protected never starts.
+    let protection = protection::CaptureProtection::admit(store, &params.key_domain)?;
     // Everything is written under a private staging name and appears under
     // the checkpoint's own name only once it is complete and durable.
     let staged = staging::StagedCapture::begin_for_vm(store, &params.id, &params.vm_name)?;
@@ -894,10 +961,17 @@ fn capture_vm_full_inner(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
-    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
+    let domain = &params.key_domain;
     let mut content = vec![
-        chunks::chunk_blob(&object_pool, &content_dir, "rootfs.ext4", &rootfs_dst, true)?,
-        chunks::chunk_blob(&object_pool, &content_dir, "memory.bin", &memory, false)?,
+        protection.store_chunked(
+            store,
+            domain,
+            &content_dir,
+            "rootfs.ext4",
+            &rootfs_dst,
+            true,
+        )?,
+        protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?,
     ];
 
     for (blob, _) in &workspace {
@@ -996,6 +1070,10 @@ fn capture_vm_full_inner(
         });
     }
 
+    // A protected capture is sealed in full here, before any mirror sees the
+    // content dir, so a mirror only ever copies opaque objects.
+    let content = protection.finish(store, &content_dir, content)?;
+
     let snapshot_id = if let Some(backend) = trusted_backend {
         if snapshot_store.is_some() {
             anyhow::bail!("capture configured with both snapshot backends");
@@ -1060,10 +1138,8 @@ fn capture_vm_full_inner(
     // large files through that staging step, then remove only these redundant
     // private staging copies. Their synced chunk objects and canonical indexes
     // are the checkpoint representation published below.
-    std::fs::remove_file(&rootfs_dst)
-        .with_context(|| format!("removing chunked source {}", rootfs_dst.display()))?;
-    std::fs::remove_file(&memory)
-        .with_context(|| format!("removing chunked source {}", memory.display()))?;
+    protection::remove_source(&rootfs_dst)?;
+    protection::remove_source(&memory)?;
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
         .tag(params.tag)
@@ -1076,6 +1152,7 @@ fn capture_vm_full_inner(
         .grants(params.grants)
         .session(params.session)
         .key_domain(params.key_domain)
+        .protection(protection.kind())
         .build();
     staged.commit(&meta)?;
     Ok(meta)
@@ -1214,6 +1291,15 @@ pub fn restore_checkpoint(
         .prefix(".restore-")
         .tempdir_in(store.root())
         .context("creating checkpoint restore materialization")?;
+    if meta.protection.is_sealed() {
+        return protection::restore_protected(
+            store,
+            &meta,
+            &params.target_vm,
+            restore,
+            materialized.path(),
+        );
+    }
     let rootfs = materialized_source(store, &meta, "rootfs.ext4", materialized.path())?;
     let memory = materialized_source(store, &meta, "memory.bin", materialized.path())?;
     let dir = store.content_dir(&meta.id);
@@ -1269,13 +1355,18 @@ pub fn materialized_source(
     scratch: &Path,
 ) -> Result<PathBuf> {
     let content_dir = store.content_dir(&meta.id);
-    chunks::ensure_chunked_layout(&content_dir, meta)?;
     let blob = meta
         .content
         .iter()
         .find(|blob| blob.name == name)
         .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
     let destination = scratch.join(name);
+    if let Some(keys) = store.keys_for(meta)? {
+        sealed::materialize_blob(&keys, &content_dir, blob, &destination)
+            .with_context(|| format!("opening protected checkpoint blob {name}"))?;
+        return Ok(destination);
+    }
+    chunks::ensure_chunked_layout(&content_dir, meta)?;
     chunks::materialize_blob_cached(
         store.root(),
         &meta.key_domain,
@@ -1354,6 +1445,7 @@ pub fn capture_fs_quick(
             params.vm_name
         );
     }
+    let protection = protection::CaptureProtection::admit(store, &params.key_domain)?;
     let staged = staging::StagedCapture::begin_for_vm(store, &params.id, &params.vm_name)?;
     let content_dir = staged.content_dir();
 
@@ -1366,16 +1458,15 @@ pub fn capture_fs_quick(
         .context("cloning rootfs into checkpoint content")?;
 
     let name = file_name.to_string_lossy().into_owned();
-    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
-    let mut content = vec![chunks::chunk_blob(
-        &object_pool,
+    let mut content = vec![protection.store_chunked(
+        store,
+        &params.key_domain,
         &content_dir,
         &name,
         &dst,
         true,
     )?];
-    std::fs::remove_file(&dst)
-        .with_context(|| format!("removing chunked source {}", dst.display()))?;
+    protection::remove_source(&dst)?;
 
     // When the source rootfs directory carries guest sidecars (mvm-meta.json,
     // rootfs.verity, rootfs.roothash), include them so that any
@@ -1384,6 +1475,7 @@ pub fn capture_fs_quick(
     for sidecar_blob in copy_guest_sidecars_if_present(&params.rootfs, &content_dir)? {
         content.push(sidecar_blob);
     }
+    let content = protection.finish(store, &content_dir, content)?;
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::FsQuick, params.vm_name)
         .tag(params.tag)
@@ -1393,6 +1485,7 @@ pub fn capture_fs_quick(
         .runtime_overlay_version(params.runtime_overlay_version)
         .grants(params.grants)
         .key_domain(params.key_domain)
+        .protection(protection.kind())
         .build();
     staged.commit(&meta)?;
     Ok(meta)

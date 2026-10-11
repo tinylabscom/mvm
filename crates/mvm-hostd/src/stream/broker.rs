@@ -108,6 +108,9 @@ pub fn stream_capture_config(identity: StreamCaptureIdentity) -> TranscriptWrite
         binding: identity.binding,
         bounds: DEFAULT_CAPTURE_BOUNDS,
         retention: DEFAULT_STREAM_RETENTION,
+        at_rest: None,
+        generation_budget: None,
+        payload_encoding: Default::default(),
         created_unix_secs: identity.created_unix_secs,
         recipient: identity.recipient,
         wrapped_data_key_b64: identity.wrapped_data_key_b64,
@@ -179,6 +182,7 @@ pub struct StreamBroker {
     redaction: StreamRedaction,
     audit: Option<StreamAudit>,
     reader_bounds: CaptureBounds,
+    replay: Option<ReaderHandle>,
     readers: Vec<Weak<Mutex<ReaderQueue>>>,
     next_reader_id: u64,
     next_seq: u64,
@@ -225,6 +229,7 @@ impl StreamBroker {
             redaction,
             audit: None,
             reader_bounds: DEFAULT_READER_BOUNDS,
+            replay: None,
             readers: Vec::new(),
             next_reader_id: 0,
             next_seq: 0,
@@ -331,6 +336,34 @@ impl StreamBroker {
         self.step_samples.get(step_id).copied()
     }
 
+    /// Keep a bounded RAM-only window for late supervisor-owned live readers.
+    pub(super) fn with_replay(mut self) -> Self {
+        self.replay = Some(
+            ReaderHandle::new(
+                ReaderStart {
+                    id: 0,
+                    from_seq: self.next_seq,
+                    anchor: self.prev_hash,
+                },
+                DEFAULT_READER_BOUNDS,
+            )
+            .with_max_age(mvm_core::transcript::AtRestRetention::default().payload_after_seal_secs),
+        );
+        self
+    }
+
+    /// Retired generations must not remain readable through RAM queues. Purge
+    /// conservatively, including any newer live records, with a live-window gap.
+    pub(super) fn purge_replay(&self) {
+        for queue in self.readers.iter().filter_map(Weak::upgrade).chain(
+            self.replay
+                .as_ref()
+                .and_then(|reader| reader.weak_queue().upgrade()),
+        ) {
+            lock_queue(&queue).discard_all();
+        }
+    }
+
     /// Attach a follower. It receives every record ingested from now on;
     /// earlier records live in the transcript, not in its queue.
     pub fn subscribe(&mut self) -> ReaderHandle {
@@ -341,10 +374,13 @@ impl StreamBroker {
             from_seq: self.next_seq,
             anchor: self.prev_hash,
         };
-        let handle = ReaderHandle::new(start, self.reader_bounds);
+        let handle = match &self.replay {
+            Some(replay) => replay.replay(start, self.reader_bounds),
+            None => ReaderHandle::new(start, self.reader_bounds),
+        };
         self.readers.push(handle.weak_queue());
         self.counters.subscribers = self.counters.subscribers.saturating_add(1);
-        self.audit_subscribe(id);
+        self.audit_subscribe(id, handle.from_seq());
         handle
     }
 
@@ -423,6 +459,28 @@ impl StreamBroker {
     /// zero-length artifact.
     pub fn seal(self) -> Option<TranscriptManifest> {
         self.durable.map(DurableSink::seal)
+    }
+
+    /// Rotate only storage, preserving the live sequence, chain and followers.
+    /// Called by the capture owner, never the vCPU producer.
+    pub(super) fn replace_writer(
+        &mut self,
+        writer: Option<TranscriptWriter>,
+        reservations: Option<super::protected_budget::SharedReservations>,
+    ) -> Option<TranscriptManifest> {
+        let next =
+            writer.map(|writer| DurableSink::new(&self.vm, writer).with_reservations(reservations));
+        std::mem::replace(&mut self.durable, next).map(DurableSink::seal)
+    }
+
+    pub(super) fn note_unwritten(&self, chunks: u64, bytes: u64) {
+        if let Some(durable) = &self.durable {
+            durable.note_unwritten(chunks, bytes);
+        }
+    }
+
+    pub(super) fn durable_ready(&self) -> bool {
+        self.durable.as_ref().is_some_and(DurableSink::ready)
     }
 
     /// Run the chunk through the seam and count what it decided.
@@ -506,6 +564,13 @@ impl StreamBroker {
     /// the dangling reference goes with it on the next record rather than
     /// accumulating for the life of the VM.
     fn fan_out(&mut self, record: Arc<StreamRecord>) {
+        if let Some(queue) = self
+            .replay
+            .as_ref()
+            .and_then(|replay| replay.weak_queue().upgrade())
+        {
+            lock_queue(&queue).push(Arc::clone(&record));
+        }
         self.readers.retain(|reader| match reader.upgrade() {
             Some(queue) => {
                 lock_queue(&queue).push(Arc::clone(&record));
@@ -518,8 +583,7 @@ impl StreamBroker {
     /// Record the attach in the chain-signed log. Failing to audit degrades
     /// the trace, never the stream — same posture the rest of the emitter
     /// takes.
-    fn audit_subscribe(&mut self, reader_id: u64) {
-        let from_seq = self.next_seq;
+    fn audit_subscribe(&mut self, reader_id: u64, from_seq: u64) {
         let Some(audit) = self.audit.as_ref() else {
             return;
         };
@@ -626,7 +690,7 @@ mod tests {
     fn writer_at(dir: &Path, vm: &str, bounds: CaptureBounds) -> TranscriptWriter {
         let mut config = stream_capture_config(identity(vm));
         config.bounds = bounds;
-        TranscriptWriter::new(dir, test_key(), config)
+        TranscriptWriter::new(dir, test_key(), config).unwrap()
     }
 
     /// A writer that refuses at its bound — the forensic-capture policy, kept
@@ -635,7 +699,7 @@ mod tests {
         let mut config = stream_capture_config(identity(vm));
         config.bounds = bounds;
         config.retention = RetentionPolicy::FailClosed;
-        TranscriptWriter::new(dir, test_key(), config)
+        TranscriptWriter::new(dir, test_key(), config).unwrap()
     }
 
     /// A broker configured the way production configures one: the shipped
@@ -686,6 +750,25 @@ mod tests {
     }
 
     // --- the required behaviours -----------------------------------------
+
+    #[test]
+    fn supervisor_replay_splices_atomically_into_live_records() {
+        let mut broker = StreamBroker::live_only(
+            "replay",
+            StreamRedaction::curated(&mvm_core::policy::RedactionPolicy::default()),
+        )
+        .with_replay();
+        broker.ingest(StreamSource::Console, StreamKind::Stdout, b"before");
+        let mut reader = broker.subscribe();
+        broker.ingest(StreamSource::Console, StreamKind::Stdout, b"after");
+        let before = reader.recv().unwrap();
+        let after = reader.recv().unwrap();
+        assert_eq!(before.payload, b"before");
+        assert_eq!(after.payload, b"after");
+        assert_eq!(after.seq, before.seq + 1);
+        assert_eq!(after.prev_hash, before.hash());
+        assert!(reader.recv().is_none());
+    }
 
     #[test]
     fn every_subscriber_sees_every_record() {

@@ -113,20 +113,21 @@ and cite #4100 for the direction, never the reverse.
   mounts the SDK sidecar and volumes, and pivots in-process.
   `mkGuest`'s `/init` still runs for dev boots, for the chained builder boot,
   and for `mvm-images`' own e2e boots.
-- In a source checkout with no `mvm-images` checkout selected, `mvmctl`
-  already builds the runtime overlay on the host
-  (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_binaries`:
-  cargo-zigbuild binaries, the pure-Rust ext4 writer, in-process verity) and
-  the initramfs (`mvm_build::initramfs::initramfs_cpio`). The host-built
-  overlay lacks the GPU shims and the Python SDK tree the published one
-  carries.
-- The SDK sidecar has no host build path. `mvmctl build sdk-sidecar build`
-  builds it from a selected `mvm-images` checkout in the builder VM. The
-  loader and `libc.so.6` the published sidecar bundles are never loaded: the
-  workload process that loads the library already has its own.
-- With an `mvm-images` checkout selected, a source build pair-builds the
-  overlay and sidecars from that checkout. A release build acquires all three
-  pieces from the pinned image set.
+- A source checkout builds one guest-runtime archive from this tree
+  (`mvm_build::guest_runtime::resolve_or_build_source_guest_runtime`), keyed
+  by its digest, and assembles all three pieces from it on the host, whether
+  or not an `mvm-images` checkout is selected: the runtime overlay with the
+  GPU shims and the Python SDK tree
+  (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime`:
+  the pure-Rust ext4 writer and in-process verity), the initramfs from the
+  archive's sealed initramfs agent (`mvm_build::initramfs::initramfs_cpio`),
+  and the SDK sidecar without a bundled loader or libc
+  (`mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime`). The Wasm
+  tier preopens the same overlay files as a directory. A selected checkout
+  pair-builds only workload images and kernels.
+- The explicit `mvmctl build sdk-sidecar build` still builds from a selected
+  `mvm-images` checkout in the builder VM, and a release build acquires all
+  three pieces from the pinned image set.
 - The builder boot payload (builder boot ABI 1) already hands the builder
   `mvm-host-vm-init` and `mvm-builderd` per boot. `mvm-setpriv` is the one mvm
   binary the builder image still bakes, and `mvm-host-vm-init` runs it from

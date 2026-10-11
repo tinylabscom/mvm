@@ -505,6 +505,7 @@ mod tests {
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
             runtime_overlay_version: None,
+            bundle_boot_assets: None,
             revision_hash: "abc".to_string(),
             flake_ref: ".".to_string(),
             profile: Some("default".to_string()),

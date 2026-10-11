@@ -96,6 +96,50 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
     wait_for_agent_timed(vm_name, timeout_secs, &mut untimed)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReadinessProbePhase {
+    SelectTransport,
+    Connect,
+    AuthenticatedPing,
+}
+
+/// Keep useful failure classification, never guest frames or key/session data.
+#[derive(Debug)]
+struct ReadinessFailure {
+    phase: ReadinessProbePhase,
+    io_kind: Option<std::io::ErrorKind>,
+    os_error: Option<i32>,
+}
+
+impl ReadinessFailure {
+    fn at(phase: ReadinessProbePhase, error: impl Into<anyhow::Error>) -> Self {
+        let error = error.into();
+        let io = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>());
+        Self {
+            phase,
+            io_kind: io.map(std::io::Error::kind),
+            os_error: io.and_then(std::io::Error::raw_os_error),
+        }
+    }
+}
+
+fn probe_agent_once(vm_name: &str) -> std::result::Result<(), ReadinessFailure> {
+    let transport = vsock_transport::for_vm(vm_name)
+        .map_err(|e| ReadinessFailure::at(ReadinessProbePhase::SelectTransport, e))?;
+    let mut stream = transport
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+        .map_err(|e| ReadinessFailure::at(ReadinessProbePhase::Connect, e))?;
+    // This is a throwaway probe, not an RPC data stream. Bound the handshake
+    // read so a bound endpoint that is not serving does not wait forever.
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+        .map_err(|e| ReadinessFailure::at(ReadinessProbePhase::Connect, e))?;
+    mvm_agentd::vsock::probe_agent_ready(&mut stream)
+        .map_err(|e| ReadinessFailure::at(ReadinessProbePhase::AuthenticatedPing, e))
+}
+
 /// [`wait_for_agent`], recording where the readiness wait went.
 ///
 /// Two spans come out of it. `GuestKernelEntry` — opened when the VMM started
@@ -112,6 +156,7 @@ pub(super) fn wait_for_agent_timed(
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let mut attempt = 0u32;
+    let mut last_failure = None;
     while std::time::Instant::now() < deadline {
         // Each attempt re-opens the handshake span, so a failed probe leaves
         // no partial span behind and the reported cost is the one that worked.
@@ -126,24 +171,12 @@ pub(super) fn wait_for_agent_timed(
         // booting or that panicked before userspace. `probe_agent_ready`
         // handshakes and pings, so returning true here means the caller's next
         // RPC reaches a live agent instead of reading EOF.
-        if let Ok(transport) = vsock_transport::for_vm(vm_name)
-            && let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-            && {
-                // Bound each probe: a transport whose socket is bound but whose
-                // guest agent hasn't replied yet (e.g. still booting, or an
-                // hvf VMM whose relay isn't answering) must not block the
-                // whole handshake read forever — otherwise this loop never gets
-                // back to the deadline check and hangs instead of timing out. A
-                // short per-attempt read timeout lets the probe fail fast so
-                // the outer loop retries and ultimately honours `timeout_secs`.
-                // The stream is a throwaway probe (dropped below), so the timeout
-                // never touches a real agent-RPC data stream.
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
+        match probe_agent_once(vm_name) {
+            Ok(()) => {
+                sub.finish(SubPhase::AgentAuth);
+                return true;
             }
-        {
-            sub.finish(SubPhase::AgentAuth);
-            return true;
+            Err(error) => last_failure = Some(error),
         }
         // Adaptive, not fixed: readiness is only observed on a tick, so the
         // cadence is a floor under the reported wait. A flat 50ms tick put
@@ -155,5 +188,46 @@ pub(super) fn wait_for_agent_timed(
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
+    if let Some(failure) = last_failure {
+        tracing::warn!(
+            vm = vm_name,
+            socket_directory = %mvm_core::config::vm_socket_dir(vm_name).display(),
+            phase = ?failure.phase,
+            io_kind = ?failure.io_kind,
+            os_error = ?failure.os_error,
+            "last guest readiness probe failed at the deadline"
+        );
+    }
     false
+}
+
+#[cfg(test)]
+mod readiness_diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn readiness_failure_keeps_io_classification_without_payloads() {
+        let error = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "private diagnostic payload",
+        ))
+        .context("sensitive context");
+        let failure = ReadinessFailure::at(ReadinessProbePhase::Connect, error);
+        assert_eq!(failure.phase, ReadinessProbePhase::Connect);
+        assert_eq!(failure.io_kind, Some(std::io::ErrorKind::NotFound));
+        let diagnostic = format!("{failure:?}");
+        assert!(!diagnostic.contains("private"));
+        assert!(!diagnostic.contains("sensitive"));
+    }
+
+    #[test]
+    fn readiness_protocol_failure_does_not_log_guest_response_data() {
+        let failure = ReadinessFailure::at(
+            ReadinessProbePhase::AuthenticatedPing,
+            anyhow::anyhow!("untrusted response payload"),
+        );
+        assert_eq!(failure.io_kind, None);
+        assert_eq!(failure.os_error, None);
+        assert!(!format!("{failure:?}").contains("untrusted"));
+    }
 }

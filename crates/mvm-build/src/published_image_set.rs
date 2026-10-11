@@ -136,6 +136,7 @@ pub enum ImageSetMemberError {
 /// [`Self::fetch_artifact`] checks them against their declaration.
 pub struct PublishedImageSet {
     manifest: ImageSetManifest,
+    manifest_bytes: Vec<u8>,
     root: Sha256Hex,
     release_tag: ReleaseTag,
     base_url: String,
@@ -171,7 +172,7 @@ impl PublishedImageSet {
             );
         }
 
-        crate::release_signature::verify_release_archive_signature(
+        let signature_bundle = crate::release_signature::verify_release_archive_signature(
             &crate::release_signature::ReleaseSignatureRequest {
                 base_url: &base_url,
                 asset: lock.manifest_asset.as_str(),
@@ -197,8 +198,20 @@ impl PublishedImageSet {
             );
         }
 
+        if let Some(bundle) = signature_bundle {
+            let requirement = ImageSetRequirement::current_train();
+            let proof_cache = mvm_core::image_set::image_set_root_proof_cache();
+            let request =
+                mvm_core::image_set::ImageSetVerification::new(&bytes, &bundle, lock, &proof_cache)
+                    .require(&requirement)
+                    .with_host_protocols(&host);
+            mvm_core::image_set::cache_image_set_root(&proof_cache, &request)
+                .context("retain authenticated image-set root for offline admission")?;
+        }
+
         Ok(Self {
             manifest,
+            manifest_bytes: bytes,
             root: actual,
             release_tag: lock.release_tag.clone(),
             base_url,
@@ -213,6 +226,14 @@ impl PublishedImageSet {
     /// rules (build mode, target) live in one place.
     pub fn manifest(&self) -> &ImageSetManifest {
         &self.manifest
+    }
+
+    /// Original authenticated manifest bytes, preserving the pinned digest.
+    ///
+    /// Portable bundles must embed these bytes rather than serialize the parsed
+    /// manifest again: even a whitespace change would create a different root.
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
     }
 
     pub fn member_cache(&self) -> SetMemberCache {

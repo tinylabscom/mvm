@@ -62,8 +62,15 @@ pub fn run_with_stream_deadline<T>(
 }
 
 /// Path to the Firecracker vsock UDS for an instance.
+///
+/// Uses the shared per-VM socket namespace, including deterministic shortening
+/// for deep state directories. The driver and RPC clients must resolve the same
+/// endpoint without relying on a compatibility symlink or socket existence.
 pub fn vsock_uds_path(instance_dir: &str) -> String {
-    format!("{}/runtime/v.sock", instance_dir)
+    mvm_core::config::vm_socket_dir_at(std::path::Path::new(instance_dir))
+        .join("runtime/v.sock")
+        .display()
+        .to_string()
 }
 
 /// Check if an IO error is a timeout (EAGAIN/EWOULDBLOCK or TimedOut).
@@ -558,6 +565,21 @@ mod tests {
         );
         assert!(format!("{error:#}").contains("deadline"), "{error:#}");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn test_vsock_uds_path_relocates_deep_state_dirs() {
+        for dir in [
+            "/tmp/mvm-firecracker-bundle-wwnt4g18/recipient/mvm/vms/bundle-wwnt4g18-first"
+                .to_string(),
+            format!("/tmp/{}/vm", "deep".repeat(40)),
+        ] {
+            let expected = mvm_core::config::vm_socket_dir_at(std::path::Path::new(&dir))
+                .join("runtime/v.sock");
+            assert!(!expected.starts_with(&dir));
+            assert!(mvm_core::config::fits_unix_socket_path(&expected));
+            assert_eq!(vsock_uds_path(&dir), expected.to_string_lossy());
+        }
     }
 
     #[test]

@@ -125,6 +125,9 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
     let mut cmd = mvmctl_command();
     cmd.args(mvm_conformance::doc_examples::tokenize(&args))
         .isolated_home(home.path());
+    if super::live_home::is_prepared_live_home(home.path()) {
+        super::live_home::use_seeded_runtime(&mut cmd);
+    }
     apply_encrypted_volume_probe_path(world, &mut cmd);
     if world.kernel_reacquisition_must_fail {
         cmd.env("MVM_KERNEL_SOURCE", "download")
@@ -169,6 +172,22 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
         .isolated_home(home.path())
         .output()
         .expect("failed to spawn mvmctl");
+    world.last_run = Some(output);
+}
+
+#[when(expr = "I trust the isolated home's bundle signer")]
+fn trust_isolated_bundle_signer(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    let pubkey = mvm_core::config::mvm_keys_dir_at(home.path()).join("host-signer.pub");
+    let output = mvmctl_command()
+        .args(["trust", "add"])
+        .arg(pubkey)
+        .isolated_home(home.path())
+        .output()
+        .expect("failed to spawn mvmctl trust add");
     world.last_run = Some(output);
 }
 
@@ -251,8 +270,8 @@ fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     world.kernel_reacquisition_must_fail = true;
 }
 
-#[then(expr = "the incompatible workload kernel cache is evicted")]
-fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
+#[then(expr = "the incompatible workload kernel cache remains unchanged")]
+fn incompatible_workload_kernel_cache_remains_unchanged(world: &mut CliWorld) {
     let home = world
         .isolated_home
         .as_ref()
@@ -264,8 +283,8 @@ fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
     );
     for name in ["vmlinux", "vmlinux.sha256", "config"] {
         assert!(
-            !kernel_dir.join(name).exists(),
-            "incompatible cache member {name} survived"
+            kernel_dir.join(name).exists(),
+            "prepared-only launch mutated incompatible cache member {name}"
         );
     }
 }
@@ -353,6 +372,25 @@ fn run_mvmctl_isolated_live_home_without_terminal(world: &mut CliWorld, args: St
     );
 }
 
+/// Pull an image into the live home the next launch boots from. A launch only
+/// boots an image already prepared in its own home, so a scenario that boots
+/// one prepares it first, through the same verb an operator runs.
+#[given(expr = "the image {string} is prepared in the live home")]
+fn image_prepared_in_live_home(world: &mut CliWorld, image: String) {
+    run_live_home(
+        world,
+        vec!["image".into(), "pull".into(), image.clone()],
+        Terminal::Inherited,
+    );
+    let output = world.last_run.take().expect("image pull ran");
+    assert!(
+        output.status.success(),
+        "prepare {image} in the live home\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// Whether a live-home run keeps the controlling terminal of the process
 /// running the suite.
 enum Terminal {
@@ -360,7 +398,7 @@ enum Terminal {
     Detached,
 }
 
-fn seed_live_guest_runtime(home: &Path) {
+pub(crate) fn seed_live_guest_runtime(home: &Path) -> mvm_build::guest_runtime::GuestRuntime {
     use mvm_build::guest_runtime::{
         resolve_or_build_source_guest_runtime, seed_source_guest_runtime,
     };
@@ -386,7 +424,7 @@ fn seed_live_guest_runtime(home: &Path) {
     });
     seed_source_guest_runtime(&home.join("cache"), seed, version, arch, &workspace)
         .expect("verify and copy the live guest runtime into the scenario home")
-        .expect("prewarmed guest runtime must match the current source");
+        .expect("prewarmed guest runtime must match the current source")
 }
 
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
@@ -404,12 +442,18 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // then assert on it, and honouring the warm home over that put `machine
     // create` and `machine start` in two different directories.
     let home = selected_live_home(world);
-    seed_live_guest_runtime(&home);
+    super::live_home::prepare_live_home(&home);
     let mut command = mvmctl_command();
+    super::live_home::use_seeded_runtime(&mut command);
     command
         .current_dir(workspace_root())
         .args(&argv)
         .isolated_home(&home);
+    if argv.first().is_some_and(|arg| arg == "machine")
+        && argv.get(1).is_some_and(|arg| arg == "start")
+    {
+        command.env("MVM_COLD_BUILD", "refuse");
+    }
     apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
@@ -1245,44 +1289,22 @@ fn trust_the_fixture_publisher(world: &mut CliWorld) {
     );
 }
 
-/// The template slot a `machine build --flake <flake_dir>` registered in
-/// `home`, found by the flake it was built from rather than by recency: a live
-/// home may be the shared warm one, holding other builds.
-fn flake_slot_in(home: &Path, flake_dir: &str) -> Option<String> {
-    let suffix = format!("/{}", flake_dir.trim_end_matches('/'));
-    fs::read_dir(home.join("templates"))
-        .ok()?
-        .filter_map(Result::ok)
-        .find_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            if name.len() != 64 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
-                return None;
-            }
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&fs::read(entry.path().join("manifest.json")).ok()?).ok()?;
-            let flake_ref = manifest.get("flake_ref")?.as_str()?;
-            flake_ref
-                .trim_end_matches('/')
-                .ends_with(&suffix)
-                .then_some(name)
-        })
-}
-
 /// Seal what the last live `machine build` produced into a `.mvmpkg`, on the
 /// host that ran the build and under that host's signer. The builder VM that
 /// produced the image never held the key; this is the step that uses it.
-#[when(expr = "I seal the live build of {string} into a bundle")]
-fn seal_live_build(world: &mut CliWorld, flake_dir: String) {
+#[when("I seal the live manifest build into a bundle")]
+fn seal_live_build(world: &mut CliWorld) {
     let home = world
         .last_live_home
         .clone()
         .expect("a live build step runs before the seal");
-    let slot = flake_slot_in(&home, &flake_dir).unwrap_or_else(|| {
-        panic!(
-            "no template slot built from {flake_dir} under {}",
-            home.join("templates").display()
-        )
-    });
+    let build = world
+        .last_run
+        .as_ref()
+        .expect("a build ran before the seal");
+    assert!(build.status.success(), "the manifest build must succeed");
+    let slot = crate::live_artifacts::built_manifest_slot(&build.stdout)
+        .expect("the live manifest build must report its completed slot in JSON");
     let dir = tempfile::tempdir().expect("create the sealed-bundle directory");
     let bundle = dir.path().join("build.mvmpkg");
     let output = mvmctl_command()

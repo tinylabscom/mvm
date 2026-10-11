@@ -38,18 +38,26 @@ pub enum DefaultAcquisition {
     Download,
 }
 
-/// Resolve the no-override default. Release distributions always download;
-/// contributor distributions build only when that artifact's source exists.
+/// Explicit opt-in for compiling the guest runtime from the current checkout.
+pub const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
+
+/// Whether the operator explicitly selected local guest-runtime compilation.
+#[must_use]
+pub fn local_guest_runtime_build_requested() -> bool {
+    std::env::var(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV).as_deref() == Ok("build")
+}
+
+/// Resolve the no-override default.
+///
+/// Launches never infer permission to compile from the presence of a source
+/// checkout. Both distribution channels use published artifacts unless the
+/// caller selects a build arm explicitly.
 #[must_use]
 pub const fn default_acquisition(
-    channel: DistributionChannel,
-    source_available: bool,
+    _channel: DistributionChannel,
+    _source_available: bool,
 ) -> DefaultAcquisition {
-    if channel.permits_automatic_builds() && source_available {
-        DefaultAcquisition::Build
-    } else {
-        DefaultAcquisition::Download
-    }
+    DefaultAcquisition::Download
 }
 
 #[cfg(test)]
@@ -69,15 +77,26 @@ mod tests {
     }
 
     #[test]
-    fn source_channel_builds_only_when_source_is_available() {
+    fn source_channel_never_infers_permission_to_build() {
         assert_eq!(
             default_acquisition(DistributionChannel::Source, true),
-            DefaultAcquisition::Build
+            DefaultAcquisition::Download
         );
         assert_eq!(
             default_acquisition(DistributionChannel::Source, false),
             DefaultAcquisition::Download
         );
+    }
+
+    #[test]
+    fn guest_runtime_build_requires_the_explicit_build_value() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        assert!(!local_guest_runtime_build_requested());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+        assert!(!local_guest_runtime_build_requested());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "build");
+        assert!(local_guest_runtime_build_requested());
     }
 
     #[test]

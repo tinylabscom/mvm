@@ -104,9 +104,9 @@ tag VERSION:
 build-target TARGET:
     cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
-# Dry-run crates.io publish (all crates in dependency order)
+# Dry-run crates.io publish (the public crates only)
 publish-dry-run:
-    ./scripts/release-dry-run.sh
+    cargo package $(cargo run --quiet --package xtask -- publish-plan | sed 's/^/--package /')
 
 # Pre-publish verification (version, tag, clippy)
 deploy-guard:

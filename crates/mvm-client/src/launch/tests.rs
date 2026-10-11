@@ -1008,12 +1008,16 @@ fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
     );
     assert!(!cached.exists(), "the rejected entry is evicted");
 
-    // Bundled-kernel backends need no host kernel path: libkrun boots the
-    // libkrunfw kernel, the hermetic mock boots nothing.
+    // libkrun boots an explicit kernel too. `None` became a bundled-kernel
+    // spec that its workload driver refuses, so an embedder launch on libkrun
+    // could never boot; it gets the same verified kernel as every other
+    // backend. Only the hermetic mock boots nothing.
+    std::fs::write(&cached, b"kernel-bytes").unwrap();
+    mvm_build::kernel_fetch::record_kernel_digest(&cached).unwrap();
     let libkrun = mvm_runtime::AnyBackend::from_hypervisor("libkrun");
     assert_eq!(
         LocalBackend::resolve_workload_kernel(&libkrun).unwrap(),
-        None
+        Some(cached.clone())
     );
     let mock = mvm_runtime::AnyBackend::from_hypervisor("mock");
     assert_eq!(LocalBackend::resolve_workload_kernel(&mock).unwrap(), None);

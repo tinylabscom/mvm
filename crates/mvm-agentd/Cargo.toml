@@ -1,5 +1,6 @@
 [package]
 name = "mvm-agentd"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "in-guest agent: vsock protocol, entrypoint runtime, and the addon/egress helper bins for mvm microVMs"

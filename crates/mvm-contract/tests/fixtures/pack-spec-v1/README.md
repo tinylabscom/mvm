@@ -84,6 +84,8 @@ provenance, SBOM, revocation and admission bindings; no credentials or signing
 authority belong in authored input.
 
 Downstream work must lower into `mvm-contract` Workload IR and use the existing
-`mvm-sdk` compiler, `mvm-build` jobs, `mvm-client` and `mvm-bundler`. This slice
-does not implement that lowering, launch behavior, scenarios, OCI materialization,
+`mvm-sdk` compiler, `mvm-build` jobs, `mvm-client` and `mvm-bundler`.
+`mvm_compiler::pack` lowers the subset the IR can carry and checks a
+`mvm.pack-lock/v1` record (`mvm_contract::pack_lock`) before compiling. This
+contract does not implement launch behavior, scenarios, OCI materialization,
 network policy, secrets, SDK language bindings, or new lightweight-pack behavior.

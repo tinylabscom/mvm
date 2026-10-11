@@ -84,23 +84,30 @@ mod tests {
     fn a_marker_inside_the_range_is_accepted() {
         assert_eq!(decide(Some("0\n")).unwrap(), BuilderBootAbi::LEGACY);
         assert_eq!(decide(Some("1\n")).unwrap(), BuilderBootAbi::PAYLOAD);
+        assert_eq!(decide(Some("2\n")).unwrap(), BuilderBootAbi::NO_MVM_BINARY);
     }
 
     #[test]
     fn a_marker_above_the_range_is_refused_naming_both_numbers() {
-        let err = decide(Some("2")).unwrap_err();
+        let err = decide(Some("3")).unwrap_err();
         assert_eq!(
             err,
             BootAbiError::Unsupported {
-                image: BuilderBootAbi::new(2),
+                image: BuilderBootAbi::new(3),
                 supported: payload_supported_abis(),
             }
         );
         let message = err.to_string();
         assert!(
-            message.contains("ABI 2") && message.contains("0..=1"),
+            message.contains("ABI 3") && message.contains("0..=2"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn an_image_without_mvm_binaries_is_refused_without_a_payload() {
+        let err = check_image_abi(BuilderBootAbi::NO_MVM_BINARY, baked_only_abis()).unwrap_err();
+        assert!(err.to_string().contains("ABI 2"), "{err}");
     }
 
     #[test]

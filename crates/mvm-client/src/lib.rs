@@ -66,6 +66,7 @@ pub mod launch;
 pub mod local;
 pub mod manifest;
 pub mod notices;
+pub mod oci_bundle;
 pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
@@ -125,6 +126,10 @@ pub use launch::{
     RemoveOptions,
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
+pub use oci_bundle::{
+    MaterializedOciBundle, OciBundleRequest, OciBundleResult, export_materialized_oci_bundle,
+    materialize_and_export_oci_bundle, materialize_oci_bundle,
+};
 pub use readiness::{readiness_of, record_readiness, touch_activity};
 pub use registration::{
     MachineRegistration, StaleRegistration, gc_stale_registrations, name_registry_path,

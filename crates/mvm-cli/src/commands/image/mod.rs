@@ -26,6 +26,7 @@ mod materialize;
 mod oci_types;
 mod pull;
 mod pull_core;
+mod revocations;
 mod rm;
 mod source;
 mod trust;
@@ -102,6 +103,8 @@ pub(in crate::commands) enum ImageAction {
         #[command(subcommand)]
         action: dev::DevAction,
     },
+    /// Apply and inspect the signed image-set revocation list admission reads
+    Revocations(revocations::Args),
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -114,6 +117,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
         ImageAction::Boot { action } => boot::run(action),
         ImageAction::Dev { action } => dev::run(action),
+        ImageAction::Revocations(args) => revocations::run(args.action),
     }
 }
 

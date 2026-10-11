@@ -52,11 +52,14 @@ concurrency:
 jobs:
   report:
     name: Report failing security lanes
-    # Manual dispatch has an operator watching the run; the cron and the
-    # release-tag gate do not.
+    # A feature-branch dispatch is exploratory and must not reconcile the
+    # repository-wide alert. A default-branch dispatch is the supported
+    # recovery run after a fix lands, so it carries the same authority as the
+    # schedule and release-tag gate.
     if: >-
       github.event.workflow_run.event == 'schedule' ||
-      github.event.workflow_run.event == 'push'
+      github.event.workflow_run.event == 'push' ||
+      github.event.workflow_run.event == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       # `workflow_run` checks out the default branch, not the triggering
@@ -71,10 +74,20 @@ jobs:
           RUN_URL: ${{ github.event.workflow_run.html_url }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           WATCHED: ${{ github.event.workflow_run.name }}
           TITLE: "${{ github.event.workflow_run.name }} lane is red"
         run: |
           set -euo pipefail
+
+          # Actions expressions compare strings without case sensitivity, but
+          # Git refs are case-sensitive. Keep this trust decision in the shell:
+          # `Main` must not gain the authority of default branch `main`.
+          if [ "$RUN_EVENT" = workflow_dispatch ] && [ "$HEAD_BRANCH" != "$DEFAULT_BRANCH" ]; then
+            echo "$WATCHED manual run on non-default branch $HEAD_BRANCH; not reconciling the repository alert."
+            exit 0
+          fi
 
           # Per-job conclusions, not the run's aggregate. Two reasons, and
           # the second cost this lane a fortnight of silence:

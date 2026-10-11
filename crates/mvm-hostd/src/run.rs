@@ -51,8 +51,8 @@ pub struct LocalRunRequest {
     /// Absolute path to the already-materialized ext4 rootfs. Hashed for the
     /// plan's `image_sha256`, so it must exist and be readable.
     pub rootfs_path: PathBuf,
-    /// Kernel image path. `None` for backends that carry their own kernel
-    /// (libkrun's bundled kernel, the mock backend); `Some` for Firecracker.
+    /// Kernel image path. `None` only for the mock backend, which boots no
+    /// kernel; every VMM backend needs one.
     pub kernel_path: Option<PathBuf>,
     /// dm-verity Merkle-tree sidecar, paired with `roothash`. Both `Some` for a
     /// verified-boot rootfs; both `None` otherwise.
@@ -153,7 +153,10 @@ pub(crate) fn attach_runtime_overlay_from_cache(
     backend_name: &str,
 ) -> Result<()> {
     use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_cached_runtime_overlay};
-    if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
+    // Every backend that boots a kernel boots the universal initramfs, and
+    // that initramfs mounts the overlay. `apple-container` is the HVF runner
+    // with another kernel image, so it needs the overlay exactly as HVF does.
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
         return Ok(());
     }
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -753,7 +756,9 @@ mod tests {
         crate::test_fixtures::install_runtime_overlay(data.path());
         mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(data.path());
 
-        for backend in ["firecracker", "hvf"] {
+        // Every kernel-booting backend, so one that boots the initramfs
+        // without the overlay it mounts cannot slip in again.
+        for backend in mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS {
             let mut config = VmStartConfig {
                 rootfs_path: "/rootfs.ext4".into(),
                 kernel_path: Some("/vmlinux".into()),

@@ -8,7 +8,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -230,6 +229,8 @@ fn relay_supervisor_config_with_handoff(
     };
 
     Ok(HvfSupervisorConfig {
+        console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
+        vm_name: spec.name.clone(),
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
@@ -341,7 +342,6 @@ fn boot_with_handoff(
     let state_dir = vm_state_dir(&spec.name);
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-    let _ = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("console.log"));
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -361,12 +361,11 @@ fn boot_with_handoff(
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
-    let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-            &paths.state_dir,
-        ))
+    let mut command = bounded_supervisor_command(&supervisor, spec, &paths.state_dir);
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
     child
@@ -386,17 +385,15 @@ fn boot_with_handoff(
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor exited before writing its PID file (status: {status}); {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
@@ -412,9 +409,8 @@ fn boot_with_handoff(
     }) {
         let _ = child.kill();
         return Err(error).context(format!(
-            "HVF supervisor failed readiness; see {}{}",
-            paths.console_log.display(),
-            mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+            "HVF supervisor failed readiness; {}",
+            mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
         ));
     }
 
@@ -756,6 +752,20 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
     Ok(HandoffReply::parse(&response))
 }
 
+/// How much longer than the parent's own capture handoff bound the claimant
+/// waits for a reply.
+const HANDOFF_RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the claimant stops waiting for the parent's handoff reply.
+///
+/// The parent may spend up to [`mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT`]
+/// preparing protected capture before it answers, and then answers with its
+/// reason. Giving up at or before that bound would replace the parent's
+/// account of a refusal with a bare local timeout.
+fn handoff_response_deadline(now: Instant) -> Instant {
+    now + mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+}
+
 /// Read the parent's one-line handoff reply: `OK`, `RETRY <reason>`, or
 /// `ERR <reason>`.
 ///
@@ -764,7 +774,7 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
 /// with no account of what the parent had refused.
 fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = handoff_response_deadline(Instant::now());
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while response.len() < HANDOFF_RESPONSE_MAX_BYTES && response.last() != Some(&b'\n') {
@@ -1213,6 +1223,25 @@ mod tests {
     }
 
     #[test]
+    fn a_valid_capture_handoff_ack_may_arrive_after_the_old_deadline() {
+        use std::io::Write;
+        let (mut client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            // Model bounded capture preparation, not a readiness polling loop.
+            let (_timer, elapsed) = std::sync::mpsc::channel::<()>();
+            assert!(matches!(
+                elapsed.recv_timeout(std::time::Duration::from_millis(2100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            peer.write_all(mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED)
+                .unwrap();
+        });
+        let response = read_handoff_response(&mut client).unwrap();
+        assert_eq!(response, mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED);
+        writer.join().unwrap();
+    }
+
+    #[test]
     fn handoff_response_reader_handles_a_ready_unix_stream() {
         let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
         let writer = std::thread::spawn(move || {
@@ -1268,6 +1297,16 @@ mod tests {
         let response = read_handoff_response(&mut stream).expect("read available refusal reason");
         writer.join().expect("join handoff writer");
         assert_eq!(response, b"ERR parent stopped");
+    }
+
+    #[test]
+    fn the_claimant_outwaits_the_parents_capture_handoff_bound() {
+        let now = Instant::now();
+        assert_eq!(
+            handoff_response_deadline(now) - now,
+            mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+        );
+        assert!(!HANDOFF_RESPONSE_GRACE.is_zero());
     }
 
     /// Whatever the parent sends, the host stops at a bound rather than reading

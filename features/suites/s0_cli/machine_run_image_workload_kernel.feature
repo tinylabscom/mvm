@@ -2,14 +2,13 @@ Feature: machine run --image workload-kernel precondition
 
   Booting an OCI image needs a dm-verity-capable workload kernel. When a
   verified cache entry carries an explicit non-verity config, `machine run
-  --image` must discard the whole entry and start verified reacquisition before
-  pulling the image. This hermetic scenario points reacquisition at a closed
-  local endpoint so it proves the transition without network or Stage 0.
+  --image` must refuse it without repairing or mutating the cache. Explicit
+  bootstrap owns reacquisition.
 
   @no_local_images_checkout
-  Scenario: machine run --image evicts an incompatible workload kernel and reacquires it
+  Scenario: machine run --image refuses an incompatible prepared workload kernel
     Given an isolated mvm home with a cached non-verity workload kernel
     When I run mvmctl in the isolated mvm home with "machine run --image alpine -- /bin/true"
     Then the command exits with code 1
-    And the error output contains "discarding it and preparing a correct kernel"
-    And the incompatible workload kernel cache is evicted
+    And the error output contains "config without CONFIG_BLK_DEV_DM=y and CONFIG_DM_VERITY=y"
+    And the incompatible workload kernel cache remains unchanged

@@ -6,7 +6,7 @@
 //! virtio-blk slot layout produced by [`mvm_vmm::host::spec_map::workload_blocks`],
 //! then sends it over the agent vsock channel.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -387,12 +387,20 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
 /// Translate configured volumes into the exact devices the runner attached.
 fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
     let block_devices = mvm_vmm::host::spec_map::workload_volume_devices(config);
+    let extension_mountpoints = config
+        .extensions
+        .iter()
+        .map(|binding| format!("/run/mvm/extensions/{}", hex::encode(binding.pack_digest)))
+        .collect::<BTreeSet<_>>();
 
     config
         .volumes
         .iter()
         .zip(block_devices)
-        .filter(|(volume, _)| !mvm_vmm::host::spec_map::is_sdk_sidecar_volume(volume))
+        .filter(|(volume, _)| {
+            !mvm_vmm::host::spec_map::is_sdk_sidecar_volume(volume)
+                && !extension_mountpoints.contains(&volume.guest)
+        })
         .enumerate()
         .map(|(idx, (volume, device))| {
             if device.is_none() {
@@ -430,6 +438,9 @@ pub fn read_verb_grant_envelope(vm_name: &str) -> Result<Option<VerbGrantEnvelop
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::protocol::extension_pack::{
+        ExtensionBudgets, ExtensionId, ExtensionPlacement, ExtensionPlanBinding, ExtensionVersion,
+    };
 
     fn grant_until(not_after: chrono::DateTime<chrono::Utc>) -> VerbGrantEnvelope {
         VerbGrantEnvelope {
@@ -545,6 +556,29 @@ mod tests {
         VmStartConfig {
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
+        }
+    }
+
+    fn extension_binding() -> ExtensionPlanBinding {
+        ExtensionPlanBinding {
+            extension_id: ExtensionId::parse("org.example.extension").expect("extension id"),
+            version: ExtensionVersion::parse("1.0.0").expect("extension version"),
+            pack_digest: [1; 32],
+            contract_digest: [2; 32],
+            placement: ExtensionPlacement::GuestWorkload,
+            artifact: "extension.ext4".into(),
+            entrypoint: "bin/extension".into(),
+            capabilities: Vec::new(),
+            budgets: ExtensionBudgets {
+                cpu_millis: 100,
+                memory_bytes: 1024,
+                duration_ms: 1000,
+                max_steps: 1,
+                max_concurrency: 1,
+                max_payload_bytes: 1024,
+                max_output_bytes: 1024,
+                max_artifact_bytes: 1024,
+            },
         }
     }
 
@@ -774,6 +808,30 @@ mod tests {
         assert_eq!(env.volumes[0].tag, "uvol0");
         assert_eq!(env.volumes[0].mountpoint, "/data");
         assert_eq!(env.volumes[0].device.as_deref(), Some("/dev/vdb"));
+    }
+
+    #[test]
+    fn build_env_projects_an_extension_only_as_an_extension() {
+        let (_env, _dir) = test_env();
+        let binding = extension_binding();
+        let mountpoint = format!("/run/mvm/extensions/{}", hex::encode(binding.pack_digest));
+        let config = VmStartConfig {
+            name: "test-vm".into(),
+            extension_plan_id: Some("plan-1".into()),
+            extensions: vec![binding],
+            volumes: vec![VmVolumeKind::Disk.into_volume(
+                "/host/extension.ext4",
+                &mountpoint,
+                true,
+            )],
+            ..base_config()
+        };
+
+        let env = build_activation_environment(&config).unwrap();
+        assert!(env.volumes.is_empty());
+        assert_eq!(env.extensions.len(), 1);
+        assert_eq!(env.extensions[0].mountpoint, mountpoint);
+        assert_eq!(env.extensions[0].device, "/dev/vdb");
     }
 
     #[test]

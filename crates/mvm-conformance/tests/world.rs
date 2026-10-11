@@ -401,10 +401,10 @@ pub struct CliWorld {
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
 
-    /// RAII guard that keeps a scenario-local `MVM_HOME` override active
-    /// across the warm-restore steps. Dropping it restores the previous
-    /// value so later scenarios see a clean environment.
-    pub warm_restore_home_guard: Option<MvmHomeGuard>,
+    /// RAII guard that keeps a scenario-local `MVM_HOME` and snapshot key
+    /// active across the warm-restore steps. Dropping it restores the
+    /// previous values so later scenarios see a clean environment.
+    pub warm_restore_home_guard: Option<ScenarioEnvGuard>,
 
     /// Outcome of the most recent warm-restore guard step.
     pub warm_restore_result: Option<Result<String, String>>,

@@ -10,6 +10,11 @@ use crate::image_set::{ArtifactName, ImageLock, ReleaseTag, RepositorySlug};
 use crate::packs::Sha256Hex;
 use crate::registry_pack::PackReference;
 
+/// Resource ceilings independent of publisher-controlled declared lengths.
+pub(crate) const MAX_BUILT_IMAGE_METADATA_BYTES: u64 = 1024 * 1024;
+const MAX_BUILT_ROOTFS_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_BUILT_VERITY_BYTES: u64 = 1024 * 1024 * 1024;
+
 /// The supported guest architecture of one published image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuiltImagePlatform {
@@ -81,7 +86,9 @@ pub enum BuiltImageDescriptorError {
     BaseSetMismatch,
     #[error("built pack image release does not match its pack reference")]
     ReleaseMismatch,
-    #[error("built pack image asset {role} must be named {expected} and have positive size")]
+    #[error(
+        "built pack image asset {role} must be named {expected} and have a positive size within its resource limit"
+    )]
     InvalidAsset {
         role: &'static str,
         expected: &'static str,
@@ -178,6 +185,19 @@ fn invalid_provenance(reason: impl Into<String>) -> BuiltImageDescriptorError {
 }
 
 impl BuiltPackImageDescriptor {
+    /// The complete signed release inventory, in stable role order.
+    pub fn assets(&self) -> [&BuiltImageAsset; 7] {
+        [
+            &self.assets.rootfs,
+            &self.assets.verity,
+            &self.assets.roothash,
+            &self.assets.mvm_meta,
+            &self.assets.rootfs_signature_bundle,
+            &self.assets.provenance_statement,
+            &self.assets.provenance_signature_bundle,
+        ]
+    }
+
     /// Validate the metadata before any external asset is fetched or trusted.
     /// This does not verify the asset bytes or their signatures.
     pub fn validate_pin(
@@ -230,7 +250,12 @@ impl BuiltPackImageDescriptor {
                 &self.assets.provenance_signature_bundle,
             ),
         ] {
-            if asset.name.as_str() != expected || asset.size == 0 {
+            let limit = match role {
+                "rootfs" => MAX_BUILT_ROOTFS_BYTES,
+                "verity" => MAX_BUILT_VERITY_BYTES,
+                _ => MAX_BUILT_IMAGE_METADATA_BYTES,
+            };
+            if asset.name.as_str() != expected || asset.size == 0 || asset.size > limit {
                 return Err(BuiltImageDescriptorError::InvalidAsset { role, expected });
             }
         }
@@ -382,11 +407,11 @@ impl BuiltPackImageDescriptor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::image_set::image_train_lock;
 
-    fn descriptor() -> BuiltPackImageDescriptor {
+    pub(crate) fn descriptor() -> BuiltPackImageDescriptor {
         let lock = &image_train_lock().image_set;
         let digest = Sha256Hex::from_bytes(b"test asset");
         let asset = |name: &str| BuiltImageAsset {
@@ -422,7 +447,7 @@ mod tests {
         "runtime/python@1.0.0".parse().expect("valid reference")
     }
 
-    fn provenance() -> serde_json::Value {
+    pub(crate) fn provenance() -> serde_json::Value {
         let image = descriptor();
         let base = &image.base_set;
         serde_json::json!({
@@ -459,6 +484,35 @@ mod tests {
                 }
             }
         })
+    }
+
+    #[test]
+    fn built_asset_limits_accept_boundaries_and_refuse_zero_or_overflow() {
+        for (role, limit) in [
+            ("rootfs", MAX_BUILT_ROOTFS_BYTES),
+            ("verity", MAX_BUILT_VERITY_BYTES),
+            ("roothash", MAX_BUILT_IMAGE_METADATA_BYTES),
+            ("mvm_meta", MAX_BUILT_IMAGE_METADATA_BYTES),
+            ("rootfs_signature_bundle", MAX_BUILT_IMAGE_METADATA_BYTES),
+            ("provenance_statement", MAX_BUILT_IMAGE_METADATA_BYTES),
+            (
+                "provenance_signature_bundle",
+                MAX_BUILT_IMAGE_METADATA_BYTES,
+            ),
+        ] {
+            for size in [0, limit, limit + 1, u64::MAX] {
+                let mut value = serde_json::to_value(descriptor()).unwrap();
+                value["assets"][role]["size"] = serde_json::json!(size);
+                let image: BuiltPackImageDescriptor = serde_json::from_value(value).unwrap();
+                assert_eq!(
+                    image
+                        .validate_pin(&reference(), &image_train_lock().image_set)
+                        .is_ok(),
+                    size == limit,
+                    "{role}: {size}"
+                );
+            }
+        }
     }
 
     #[test]

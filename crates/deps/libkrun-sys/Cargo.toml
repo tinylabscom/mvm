@@ -1,5 +1,6 @@
 [package]
 name = "libkrun-sys"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Rust bindings for the Red Hat libkrun C library (Linux KVM, macOS HVF)"

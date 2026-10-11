@@ -30,6 +30,9 @@ pub(in crate::commands) enum LaneArg {
     PreparedCold,
     /// The same launch with an unchanged cached read-only mount image.
     PreparedColdMountHit,
+    /// A signed `.mvmpkg` already installed: verified on every run, then a
+    /// prepared cold boot. Name the archive in the launch after `--`.
+    PreparedColdArtifact,
     /// Directory fingerprint plus first mount-image materialization.
     MountMiss,
     /// Image acquisition, unpack, verification, and preparation.
@@ -43,6 +46,7 @@ impl From<LaneArg> for LaunchLane {
         match arg {
             LaneArg::PreparedCold => LaunchLane::PreparedCold,
             LaneArg::PreparedColdMountHit => LaunchLane::PreparedColdMountHit,
+            LaneArg::PreparedColdArtifact => LaunchLane::PreparedColdArtifact,
             LaneArg::MountMiss => LaunchLane::MountMiss,
             LaneArg::ArtifactMiss => LaunchLane::ArtifactMiss,
             LaneArg::WarmClaim => LaunchLane::WarmClaim,
@@ -122,11 +126,7 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
         }
     }
 
-    let launch: Vec<String> = if args.launch.is_empty() {
-        DEFAULT_LAUNCH.iter().map(|s| s.to_string()).collect()
-    } else {
-        args.launch.clone()
-    };
+    let launch = launch_for(lane, &args.launch)?;
 
     if !args.json {
         ui::info(&format!("Launch: mvmctl {}", launch.join(" ")));
@@ -167,6 +167,25 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
     // is the report a user most needs to inspect, not a reason to discard it.
     bench.validate_report(&report)?;
     Ok(())
+}
+
+/// The launch to measure: the caller's, or the reproducible baseline.
+///
+/// The artifact lane has no baseline. Its subject is a signed archive, and
+/// there is no archive every host has, so it asks for one rather than
+/// measuring a launch that would only be refused as not belonging in the lane.
+fn launch_for(lane: LaunchLane, launch: &[String]) -> Result<Vec<String>> {
+    if !launch.is_empty() {
+        return Ok(launch.to_vec());
+    }
+    if lane == LaunchLane::PreparedColdArtifact {
+        anyhow::bail!(
+            "the `prepared-cold-artifact` lane measures a signed archive and has no default \
+             launch; name one after `--`, e.g. \
+             `mvmctl bench --lane prepared-cold-artifact -- run ./app.mvmpkg -- /bin/true`"
+        );
+    }
+    Ok(DEFAULT_LAUNCH.iter().map(|s| s.to_string()).collect())
 }
 
 /// Render the benchmark as labelled tables with plain-text verdicts.
@@ -255,7 +274,7 @@ fn format_ms(value: Option<f64>) -> String {
 
 fn timing_rows(
     report: &crate::bench::cold_launch::ColdLaunchReport,
-) -> [(&'static str, SpanStats, &'static str); 10] {
+) -> [(&'static str, SpanStats, &'static str); 11] {
     let stats = &report.stats;
     [
         (
@@ -272,6 +291,11 @@ fn timing_rows(
             "  Agent ready",
             stats.vsock_wait_ms,
             "Reach the authenticated guest agent and dispatch boundary.",
+        ),
+        (
+            "Artifact verify",
+            stats.bundle_verify_ms,
+            "Verify a signed .mvmpkg against the trust store, before the run begins.",
         ),
         (
             "Resolve",
@@ -428,6 +452,24 @@ mod tests {
         assert!(
             !DEFAULT_LAUNCH.contains(&"--image"),
             "the baseline must not depend on a registry pull"
+        );
+    }
+
+    #[test]
+    fn the_artifact_lane_has_no_default_launch_and_names_the_form() {
+        let err = launch_for(LaunchLane::PreparedColdArtifact, &[]).unwrap_err();
+        assert!(
+            err.to_string().contains("run ./app.mvmpkg -- /bin/true"),
+            "{err}"
+        );
+        let named = vec!["run".to_string(), "./app.mvmpkg".to_string()];
+        assert_eq!(
+            launch_for(LaunchLane::PreparedColdArtifact, &named).expect("named"),
+            named
+        );
+        assert_eq!(
+            launch_for(LaunchLane::PreparedCold, &[]).expect("baseline"),
+            DEFAULT_LAUNCH.to_vec()
         );
     }
 

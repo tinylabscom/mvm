@@ -1,5 +1,6 @@
 [package]
 name = "mvm-build"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Nix builder pipeline and artifact cache for mvm"

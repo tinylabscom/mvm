@@ -25,7 +25,9 @@ pub fn guest_host_binary(name: &str) -> PathBuf {
     )
 }
 
-fn guest_host_binary_in(runtime_dir: &Path, legacy_dir: &Path, name: &str) -> PathBuf {
+/// [`guest_host_binary`] over explicit directories, so a caller can test the
+/// resolution it relies on without a guest.
+pub fn guest_host_binary_in(runtime_dir: &Path, legacy_dir: &Path, name: &str) -> PathBuf {
     let from_payload = runtime_dir.join(name);
     if from_payload.is_file() {
         from_payload
