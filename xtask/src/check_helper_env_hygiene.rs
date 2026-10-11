@@ -371,12 +371,6 @@ const RAW_SITES: &[RawSite] = &[
     ),
     builder(
         "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
-        "fork_vsock_egress_client_if_requested",
-        "Command::new(&egress_client)",
-        "the builder VM's init",
-    ),
-    builder(
-        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
         "spawn_builderd",
         "Command::new(mvm_build::builder_boot::guest_host_binary(\"mvm-builderd\"))",
         "the builder VM's init",
@@ -481,12 +475,6 @@ const RAW_SITES: &[RawSite] = &[
         "crates/mvm-build/src/bin/stage0-init.rs",
         "best_effort_raise_loopback",
         "Command::new(busybox)",
-        "Stage 0's init, inside the bootstrap VM",
-    ),
-    builder(
-        "crates/mvm-build/src/bin/stage0-init.rs",
-        "fork_vsock_egress_client",
-        "Command::new(egress_client)",
         "Stage 0's init, inside the bootstrap VM",
     ),
     builder(

@@ -18,6 +18,9 @@ pub mod boot_asset_fixture;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
+/// The uid a builder guest runs its guest agent under, chosen from the
+/// identities the booted image names.
+pub mod builder_agent_uid;
 /// The builder boot contract: the payload of mvm's own builder binaries every
 /// builder boot carries beside its image, the image's boot ABI, and the one
 /// kernel command line every builder backend boots with.

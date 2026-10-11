@@ -2527,6 +2527,17 @@ mod privilege_tests {
         );
     }
 
+    /// The builder inits start the client through this command, so it is the
+    /// one place their identity is bound.
+    #[test]
+    fn the_shared_egress_client_command_assumes_the_egress_identity() {
+        let body = bootstrap_body_of("egress_client_command");
+        assert!(
+            body.contains("guest_helper_command(") && body.contains("EGRESS_CLIENT_IDENTITY"),
+            "{body}"
+        );
+    }
+
     /// The addon resolver keeps a port-53 capability, so it is started under
     /// its own identity, never as PID 1's root; and it starts after the egress
     /// client, whose resolver seeding would otherwise replace its own.
