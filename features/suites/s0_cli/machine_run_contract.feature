@@ -20,6 +20,14 @@ Feature: machine run request contract
     And the error output contains "--manifest"
     And the error output contains "--flake"
 
+  # The `run` alias carries the opposite contract: with no source named it
+  # boots the bundled default image. The refusal above is `machine run`'s
+  # alone, and a dry run proves the plan resolves without booting anything.
+  Scenario: run without a source falls through to the bundled default
+    When I run mvmctl with "run --no-detect --dry-run -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the error output does not contain "--image <ref>"
+
   # A machine that outlives the command never takes its image from the working
   # directory, even inside a project that would select one for a transient run.
   Scenario: a persistent machine run is never given an inferred image
