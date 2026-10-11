@@ -35,7 +35,7 @@ scale with a disk.
 
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, even below the publication sample floor.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, and the warm-claim lane every measured claim to be strictly under 300 ms, even below the publication sample floor.
 
 | Lane | What it measures | p50 | p95 | p99 | Every boot |
 | --- | --- | --- | --- | --- | --- |
@@ -44,7 +44,7 @@ A lane result is publishable only when it carries at least 20 measured samples t
 | `prepared_cold_artifact` | A signed .mvmpkg already installed: trust-store verification on every run, then a prepared cold boot. | 200 ms | 250 ms | 300 ms | < 200 ms |
 | `mount_miss` | Directory fingerprint plus first mount-image materialization. | — | — | — | — |
 | `artifact_miss` | Image acquisition, unpack, verification, and preparation. | — | — | — | — |
-| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | — |
+| `warm_claim` | A claimed warm standby — a comparison point, never folded into a cold number. | 30 ms | — | 50 ms | < 300 ms |
 
 <!-- generated:launch-budgets:end -->
 

@@ -238,8 +238,14 @@ pub fn cached_source_guest_runtime(
 
 /// The digest of the archive this source tree's runtime is cached under, read
 /// from its pointer alone: nothing is hashed, extracted or verified. For
-/// diagnostics that must stay cheap. Anything that uses the runtime goes
-/// through [`cached_source_guest_runtime`], which verifies the object.
+/// diagnostics, and for provenance decisions that consume nothing the archive
+/// holds, such as whether an artifact built from some runtime is still the one
+/// this tree builds; both must stay cheap, and the launch path makes the
+/// second on every run. Verifying the object would prove nothing there: the
+/// pointer is what maps a tree to an archive, and
+/// [`cached_source_guest_runtime`] trusts it the same way before checking the
+/// object against it. Anything that uses the runtime's bytes goes through
+/// [`cached_source_guest_runtime`], which verifies the object.
 pub fn source_guest_runtime_digest(
     cache_root: &Path,
     version: &str,

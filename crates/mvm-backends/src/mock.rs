@@ -19,6 +19,7 @@ use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 
 use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
+use mvm_vmm::driver::traits::{PreloadChildRequest, PreloadedChild};
 use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
 use mvm_vmm::post_restore::PostRestoreOutcome;
 
@@ -107,6 +108,9 @@ pub struct MockDriver {
     /// Whether claims should use the resident-handoff path instead of the
     /// saved-state materialization path.
     resident_handoff: bool,
+    /// Whether pool refill may preload a paused child that a claim resumes,
+    /// as a saved-state backend with a long-lived VMM does.
+    preloaded_standby: bool,
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
@@ -135,6 +139,7 @@ impl MockDriver {
             dying_console_output: Vec::new(),
             refuse_attach: false,
             resident_handoff: false,
+            preloaded_standby: false,
             unrestorable_fork: None,
         }
     }
@@ -158,6 +163,14 @@ impl MockDriver {
     /// hypervisor, so the runner's no-materialization contract can be tested.
     pub fn with_resident_handoff(mut self) -> Self {
         self.resident_handoff = true;
+        self
+    }
+
+    /// Make claims resume a child preloaded at pool refill instead of forking
+    /// one, so the runner's preloaded-claim contract can be tested.
+    #[must_use]
+    pub fn with_preloaded_standby(mut self) -> Self {
+        self.preloaded_standby = true;
         self
     }
 
@@ -270,6 +283,36 @@ impl VmmDriver for MockDriver {
 
     fn supports_resident_handoff(&self) -> bool {
         self.resident_handoff
+    }
+    fn supports_preloaded_standby(&self) -> bool {
+        self.preloaded_standby
+    }
+    fn preload_standby_child(
+        &self,
+        req: &PreloadChildRequest<'_>,
+    ) -> std::result::Result<PreloadedChild, StandbyError> {
+        if !self.preloaded_standby {
+            return Err(StandbyError::Unsupported {
+                backend: self.name().to_string(),
+            });
+        }
+        Ok(PreloadedChild {
+            pid: std::process::id(),
+            control_socket: req.child_dir.join("mock.sock").display().to_string(),
+        })
+    }
+    fn resume_preloaded_child(
+        &self,
+        req: &ChildForkRequest<'_>,
+    ) -> std::result::Result<(), StandbyError> {
+        if !self.preloaded_standby {
+            return Err(StandbyError::Unsupported {
+                backend: self.name().to_string(),
+            });
+        }
+        // The paused child already holds its parent's content; resuming wires
+        // the same channels and token a fork does.
+        self.fork_standby_child(req)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
         self.booted.lock().unwrap().push(spec.clone());

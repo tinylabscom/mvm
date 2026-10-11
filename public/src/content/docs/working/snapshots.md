@@ -221,6 +221,15 @@ snapshot backend — receive the sealed objects only; a claim from a mirror open
 each blob from the checkpoint store, which authenticates every byte it
 releases.
 
+A warm-pool child is opened from its parent when the pool is refilled, not
+when it is claimed. The claim still refuses a parent whose sealed objects
+changed since: it checks every object where it lies by unwrapping its data
+key under the domain's wrapping key, which binds the object's header and a
+hash of its encrypted payload. That catches a changed, missing, swapped or
+foreign object without decrypting any of them, so a claim produces no
+plaintext and costs a hash of the parent's sealed bytes rather than a
+decryption.
+
 Restore and fork verify the record against the signed chain, then open each
 blob into a private file beside its destination, renamed into place only once
 every chunk has authenticated; on any failure — wrong key, another domain's

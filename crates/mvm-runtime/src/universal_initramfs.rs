@@ -10,7 +10,7 @@ const UNCACHED_SOURCE_RUNTIME_FINGERPRINT: &str = "source-runtime-cache-missing"
 
 /// Discard a cached universal initramfs whose recorded source fingerprint no
 /// longer matches the checkout it would be attached from. Returns true when a
-/// stale artifact was evicted; rejects a corrupt source-runtime cache.
+/// stale artifact was evicted; rejects a source pointer that is not a digest.
 ///
 /// A source checkout rebuilds its guest binaries when they change, but the
 /// initramfs cache is keyed only on `(version, arch)` — so without this it
@@ -28,15 +28,17 @@ fn evict_stale_universal_initramfs(
     let Some(shared_cache_root) = cache_root.parent() else {
         return Ok(false);
     };
-    let fingerprint = match mvm_build::guest_runtime::cached_source_guest_runtime(
+    // Provenance only: the cached initramfs is kept when it was built from
+    // the runtime this tree records, and nothing is read from that runtime
+    // here, so its archive is not opened. Verifying it on every launch cost
+    // a contributor build more than a third of the warm-launch budget.
+    let fingerprint = mvm_build::guest_runtime::source_guest_runtime_digest(
         shared_cache_root,
         version,
         arch,
         &workspace_root,
-    )? {
-        Some(runtime) => runtime.digest,
-        None => UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string(),
-    };
+    )?
+    .unwrap_or_else(|| UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string());
     Ok(mvm_build::initramfs::evict_if_source_changed(
         cache_root,
         version,

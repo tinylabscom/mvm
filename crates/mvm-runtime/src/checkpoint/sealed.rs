@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::ContentBlob;
 use mvm_core::crypto::checkpoint_object::{
-    DomainKeys, ObjectExpectation, ObjectFrame, ObjectKind, ObjectRef, open, seal,
+    DomainKeys, ObjectExpectation, ObjectFrame, ObjectKind, ObjectRef, authenticate, open, seal,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -222,6 +222,70 @@ pub(super) fn verify_blob(keys: &DomainKeys, content_dir: &Path, blob: &ContentB
     for_each_chunk(keys, content_dir, &index, |_, _| Ok(()))
 }
 
+/// Authenticate every sealed object of `blobs` as it sits at rest, decrypting
+/// only their indexes.
+///
+/// Each chunk object must match what its authenticated index expects of it,
+/// and its data key must unwrap under the domain's wrapping key, which binds
+/// the object's header and the fingerprint of its payload bytes. A changed,
+/// missing, swapped or foreign object refuses here as it would in
+/// [`verify_blob`]. No chunk payload is decrypted, so no plaintext exists even
+/// in memory. This is the check for a caller that must know the content is
+/// intact but will not read it, such as a warm claim whose child was opened
+/// from this content when its standby was prepared.
+///
+/// Every object of every blob is one work item, so a large memory image and a
+/// handful of small sidecars spread evenly across the workers.
+pub(super) fn verify_blobs_at_rest(
+    keys: &DomainKeys,
+    content_dir: &Path,
+    blobs: &[ContentBlob],
+) -> Result<()> {
+    let indexes = blobs
+        .iter()
+        .map(|blob| open_index(keys, content_dir, blob))
+        .collect::<Result<Vec<_>>>()?;
+    let objects: Vec<(&SealedIndex, usize)> = indexes
+        .iter()
+        .flat_map(|index| {
+            index
+                .chunks
+                .iter()
+                .enumerate()
+                .filter(|(_, chunk)| matches!(chunk, SealedChunk::Object(_)))
+                .map(move |(position, _)| (index, position))
+        })
+        .collect();
+    mvm_fs::parallel::par_map(objects, |(index, position)| {
+        authenticate_chunk(keys, content_dir, index, position)
+    })
+    .into_iter()
+    .collect()
+}
+
+fn authenticate_chunk(
+    keys: &DomainKeys,
+    content_dir: &Path,
+    index: &SealedIndex,
+    position: usize,
+) -> Result<()> {
+    let SealedChunk::Object(reference) = &index.chunks[position] else {
+        return Ok(());
+    };
+    let expectation = ObjectExpectation::new(ObjectKind::Chunk, *reference)
+        .plaintext_len(index.chunk_len(position) as u64);
+    let path = membership_path_for(content_dir, &reference.to_string());
+    let bytes = read_regular(&path)
+        .with_context(|| format!("chunk {position} of checkpoint blob {:?}", index.blob))?;
+    authenticate(keys, &expectation, &bytes).with_context(|| {
+        format!(
+            "checkpoint object {} (chunk {position} of blob {:?}) did not authenticate",
+            path.display(),
+            index.blob
+        )
+    })
+}
+
 /// The whole-file digest the capture recorded for `blob`.
 pub(super) fn materialized_sha256(
     keys: &DomainKeys,
@@ -353,6 +417,8 @@ fn open_chunk(
     let SealedChunk::Object(reference) = &index.chunks[position] else {
         return Ok(None);
     };
+    #[cfg(test)]
+    chunk_opens::record(content_dir);
     let expectation = ObjectExpectation::new(ObjectKind::Chunk, *reference)
         .plaintext_len(index.chunk_len(position) as u64);
     let path = membership_path_for(content_dir, &reference.to_string());
@@ -401,4 +467,31 @@ fn read_chunk(source: &Path, position: usize, length: u64) -> Result<Zeroizing<V
     file.read_exact(&mut bytes)
         .with_context(|| format!("reading {}", source.display()))?;
     Ok(bytes)
+}
+
+/// Which content directories had a chunk payload decrypted, so a test can
+/// show that a path it drives decrypts none.
+#[cfg(test)]
+pub(crate) mod chunk_opens {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    static OPENED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+    pub(in crate::checkpoint) fn record(content_dir: &Path) {
+        OPENED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(content_dir.to_path_buf());
+    }
+
+    /// Chunk payloads decrypted from any content directory under `root`.
+    pub(crate) fn under(root: &Path) -> usize {
+        OPENED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|dir| dir.starts_with(root))
+            .count()
+    }
 }

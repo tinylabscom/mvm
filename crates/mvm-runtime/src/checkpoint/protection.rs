@@ -207,3 +207,25 @@ pub(super) fn restore_protected(
         &content,
     )
 }
+
+/// [`verify_content`](super::verify_content) for a caller that will not read
+/// the content.
+///
+/// A protected checkpoint's objects are authenticated where they lie without
+/// decrypting a chunk payload: any tampered, missing, swapped or foreign
+/// object still refuses, but no plaintext is produced, even in memory, and the
+/// cost is a hash of the sealed bytes rather than a decryption and a keyed hash
+/// of every chunk. An unprotected checkpoint is verified exactly as
+/// `verify_content` verifies it.
+///
+/// A warm claim uses this for a parent whose child was opened from the same
+/// content when its standby was prepared: the claim must still refuse a parent
+/// that has been tampered with since, but decrypting it again would buy
+/// nothing the claim uses.
+pub fn verify_content_at_rest(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
+    let Some(keys) = store.keys_for(meta)? else {
+        return super::verify_content(store, meta);
+    };
+    sealed::verify_blobs_at_rest(&keys, &store.content_dir(&meta.id), &meta.content)
+        .with_context(|| format!("verifying checkpoint '{}' at rest", meta.id))
+}

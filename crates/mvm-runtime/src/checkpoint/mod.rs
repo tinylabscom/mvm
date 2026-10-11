@@ -42,10 +42,15 @@ use restore_content::{
 };
 
 pub use gc::{ContentPruneReport, prune_unreferenced_content};
+pub use protection::verify_content_at_rest;
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
     retention_verdicts,
 };
+/// Chunk payloads decrypted from content directories under a root, for tests
+/// that must show a path decrypts nothing.
+#[cfg(test)]
+pub(crate) use sealed::chunk_opens;
 
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
 
