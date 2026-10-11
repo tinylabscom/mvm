@@ -57,8 +57,11 @@ From your project directory:
 
 ```sh
 mvmctl machine build                      # reads mvm.toml; builds the named flake target
-mvmctl machine run --manifest . -- <cmd>  # boots the built image and runs <cmd>
+mvmctl machine run --name app --manifest . -- <cmd>  # boots the built image and runs <cmd>
 ```
+
+The run is named because an unnamed run must claim a prepared warm standby,
+and `pool warm` prepares only OCI and default images; a named run boots cold.
 
 A bare `mvmctl run` refuses with "needs a command" — it takes a trailing argv
 (or `--launch-plan`), and it never inspects `flake.nix` to decide what to
@@ -69,8 +72,8 @@ build.
 `mvmctl` selects the runtime backend automatically when you boot the finished image. Use `--hypervisor` on runtime commands when you want to force a specific runtime backend:
 
 ```sh
-mvmctl machine run --flake . --hypervisor hvf
-mvmctl machine run --flake . --hypervisor firecracker
+mvmctl machine run --name app --flake . --hypervisor hvf
+mvmctl machine run --name app --flake . --hypervisor firecracker
 ```
 
 If you want to drive `nix build` directly without `mvmctl` in the loop:
@@ -134,7 +137,7 @@ Independent of the sealed/accessible distinction, mvm exposes two **runtime life
 The default is `attached`. Pass `-d` to detach:
 
 ```sh
-mvmctl machine run --flake .      # attached (default); Ctrl-C stops the VM
+mvmctl machine run --name my-app --flake .   # attached (default); Ctrl-C stops the VM
 mvmctl machine run --flake . -d   # detached; the VM outlives this command
 mvmctl machine wait my-app        # block until the guest reports ready (hidden verb)
 mvmctl machine stop my-app        # terminate a detached VM

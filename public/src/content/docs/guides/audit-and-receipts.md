@@ -29,8 +29,14 @@ stream that lets an operator inspect lifecycle history on the host.
 ## Write a run receipt
 
 ```sh
+export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
+mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
 mvmctl run --receipt /tmp/run-receipt.json -- python task.py
 ```
+
+An unnamed run claims a prepared warm standby of the image it boots — here the
+`python:3.12-alpine` image a `python` command infers — and refuses rather than
+cold-booting without one, so the standby is warmed first; `--name` boots cold.
 
 The receipt contains hashes and result metadata. It does not store raw argv,
 environment values, stdout, stderr, or host paths.

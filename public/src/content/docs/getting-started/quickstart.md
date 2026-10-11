@@ -104,10 +104,12 @@ mvmctl machine attach vm # Interactive shell into a running VM (PTY-over-vsock)
 
 ## 4. Build and Run
 
-Build a microVM image and run it in one command:
+Build a microVM image and run it in one command. A flake or manifest run is named here because an unnamed run must claim a
+prepared warm standby, and `pool warm` prepares only OCI and default images;
+a named run boots cold.
 
 ```bash
-mvmctl machine run --flake . --cpus 2 --memory 1024
+mvmctl machine run --name my-app --flake . --cpus 2 --memory 1024
 ```
 
 Run persistently with signed ingress:
@@ -120,7 +122,7 @@ Or build separately:
 
 ```bash
 mvmctl machine build --flake . --profile minimal
-mvmctl machine run --flake .
+mvmctl machine run --name my-app --flake .
 ```
 
 ## 5. Manifests
@@ -133,7 +135,7 @@ mvmctl init base-worker --preset worker
 cd base-worker
 $EDITOR mvm.toml
 mvmctl machine build
-mvmctl machine run --manifest .
+mvmctl machine run --name base-worker --manifest .
 ```
 
 Use `mvmctl manifest ls` and `mvmctl manifest info` to inspect built
@@ -159,7 +161,7 @@ Browse the bundled catalog and scaffold from a curated entry:
 mvmctl catalog list                       # Browse available entries
 mvmctl init my-app --catalog minimal      # Scaffold from a catalog entry
 mvmctl machine build my-app                       # Build the manifest
-mvmctl machine run --manifest my-app                          # Boot the VM
+mvmctl machine run --name my-app --manifest my-app            # Boot the VM
 ```
 
 ## 7. Interactive Console
@@ -176,13 +178,15 @@ mvmctl machine console myvm --command "ls -la" # One-shot command
 `mvmctl machine run -- <cmd>` boots a fresh transient microVM, runs a single
 command, and tears it down on exit -- like `docker run --rm`, but with a
 Firecracker microVM as the sandbox. Name a source with `--image`, `--flake`,
-or `--manifest`.
+or `--manifest`. The unnamed `alpine` runs claim the standby prepared in
+[step 1](#1-run-an-oci-image) and refuse without one; the template run is named,
+so it boots cold.
 
 ```bash
 mvmctl machine run --image alpine -- uname -a                    # OCI image, one-shot
 mvmctl machine run --flake . --mount .:/work -- ls /work         # share host dir, read-only
 mvmctl machine run --image alpine -e DEBUG=1 -- sh -c 'env | grep DEBUG' # inject env vars
-mvmctl machine run --manifest my-tpl -- /bin/true                # registered template
+mvmctl machine run --name tpl --manifest my-tpl -- /bin/true     # registered template
 ```
 
 When you reuse a registered template that has a captured snapshot, exec
@@ -196,7 +200,7 @@ Create isolated networks for different projects:
 
 ```bash
 mvmctl network create myproject
-mvmctl machine run --flake .
+mvmctl machine run --name my-app --flake .
 mvmctl network list
 ```
 
