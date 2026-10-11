@@ -280,7 +280,7 @@ mod tests {
         "source_commit": "0000000000000000000000000000000000000000"
       },
       "mvm_source_commit": "0000000000000000000000000000000000000000",
-      "compatibility": {"guest_agent_protocol": {"min": 1, "max": 1}, "builder_cache_contract": 1},
+      "compatibility": {"builder_cache_contract": 1},
       "nix_inputs": {
         "flake_locks": [{"reference": "smoke", "lock_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}],
         "source_revisions": []

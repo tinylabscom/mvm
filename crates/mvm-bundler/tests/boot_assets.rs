@@ -137,9 +137,10 @@ fn manifest() -> ImageSetManifest {
         }),
         mvm_source_commit: GitCommit::new("b".repeat(40)).unwrap(),
         compatibility: ImageSetCompatibility {
-            guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
+            guest_agent_protocol: Some(ProtocolRange::new(2, 2).unwrap()),
             builder_cache_contract: 4,
             builder_boot_abi: None,
+            base_image_contract: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {

@@ -253,8 +253,8 @@ mod tests {
     #[test]
     fn published_root_roundtrips_offline_and_reverifies_collisions() {
         use crate::image_set::{
-            ArtifactName, BuilderBootAbiRange, ProtocolRange, ReleaseTag, RepositorySlug,
-            SigningIdentity, TagRef, WorkflowPath,
+            ArtifactName, BuilderBootAbiRange, ReleaseTag, RepositorySlug, SigningIdentity, TagRef,
+            WorkflowPath,
         };
         use crate::packs::Sha256Hex;
 
@@ -286,7 +286,7 @@ mod tests {
             },
         };
         let host = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
+            base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
             builder_cache_contract: 5,
             builder_boot_abi: BuilderBootAbiRange::WITH_PAYLOAD,
         };
@@ -341,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let train = crate::image_set::image_train_lock();
         let host = HostProtocolSupport {
-            guest_agent_protocol: train.compatibility.guest_agent_protocol,
+            base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
             builder_cache_contract: train.compatibility.builder_cache_contract,
             builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
         };

@@ -62,6 +62,53 @@ fn a_set_without_any_guest_runtime_member_is_acquired() {
     assert!(!set.manifest().members.iter().any(|m| m.role.is_retired()));
 }
 
+/// The pinned `image-set/v0.2.4` records a guest-agent protocol range and no
+/// base-image contract. The lock copies neither, the range decides nothing,
+/// and the absent contract is checked as the legacy contract 0, which this
+/// CLI boots.
+#[test]
+fn a_set_recording_only_the_retired_guest_agent_range_is_acquired_as_the_legacy_contract() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_retired_guest_runtime()
+        .with_retired_guest_agent_protocol(mvm_core::image_set::ProtocolRange::new(9, 9).unwrap())
+        .with_base_image_contract(None);
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .expect("a legacy set must be acquired");
+    assert_eq!(
+        set.manifest().compatibility.base_image_contract_or_legacy(),
+        mvm_core::image_set::BaseImageContract::LEGACY
+    );
+}
+
+#[test]
+fn a_set_declaring_the_linux_layer_contract_is_acquired() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER));
+    PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .expect("a set declaring the Linux-layer contract must be acquired");
+}
+
+/// A base-image contract this CLI does not boot is refused at acquisition,
+/// before any member is fetched, so nothing from the set can boot.
+#[test]
+fn a_set_declaring_a_base_image_contract_this_cli_does_not_boot_is_refused() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(2)));
+    let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .err()
+        .expect("an unknown base-image contract must be refused");
+    assert!(
+        format!("{err:#}").contains("base-image contract 2"),
+        "{err:#}"
+    );
+}
+
 #[test]
 fn development_signature_bypass_cannot_seed_an_authenticated_root_cache() {
     let mut env = unsigned_env();
