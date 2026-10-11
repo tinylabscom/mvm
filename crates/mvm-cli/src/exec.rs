@@ -784,6 +784,7 @@ fn run_inner(
     ) {
         let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
             launch_mode,
+            invoked: startup_started,
             start,
             image_resolved,
             drives_ready,
