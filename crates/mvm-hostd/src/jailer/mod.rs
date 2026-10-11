@@ -217,7 +217,13 @@ impl ConfinementSpec {
         // and appends to the per-tenant log (audit_dir). Without these grants a
         // confined endpoint with a recorder attached couldn't sign — so the
         // key is readable and the audit dir is read-write.
-        let mut readable_paths = vec![secret_store_dir, binding_store_dir, keys_dir];
+        //
+        // The resolver re-reads the secret-store key on every secret `get`,
+        // after confinement; the key sits beside the store dir, so a grant on
+        // the store alone leaves every substitution EACCES on Linux.
+        let store_key =
+            mvm_core::crypto::secret_store::file_store_key_path_for_base(&secret_store_dir);
+        let mut readable_paths = vec![secret_store_dir, binding_store_dir, keys_dir, store_key];
         readable_paths.extend(tls_dns_paths);
 
         let mut read_write_paths = existing_paths(vec![audit_dir]);
@@ -505,6 +511,29 @@ mod tests {
         assert!(
             spec.read_write_paths.iter().any(|p| p == &audit),
             "audit dir is the only write grant: {:?}",
+            spec.read_write_paths
+        );
+
+        // The resolver re-reads the store key per `get`, post-confinement: it
+        // must be readable, and it must never be writable (a compromised
+        // endpoint replacing it would silently re-key the store).
+        let store_key = tmp.path().join(".secret-store.key");
+        std::fs::write(&store_key, b"k".repeat(32)).expect("store key fixture");
+        let spec = ConfinementSpec::network_endpoint(
+            secrets.clone(),
+            bindings.clone(),
+            audit.clone(),
+            keys.clone(),
+            None,
+        );
+        assert!(
+            spec.readable_paths.iter().any(|p| p == &store_key),
+            "store key must be readable post-confinement: {:?}",
+            spec.readable_paths
+        );
+        assert!(
+            !spec.read_write_paths.iter().any(|p| p == &store_key),
+            "store key must NOT be writable: {:?}",
             spec.read_write_paths
         );
     }

@@ -370,7 +370,7 @@ fn workload_origin_scoped_secret_argv() -> Vec<String> {
         "--",
         "/bin/sh",
         "-c",
-        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbin.org/bearer "Bearer $TOOL_LIVE""#,
+        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbingo.org/bearer "Bearer $TOOL_LIVE""#,
     ]
     .into_iter()
     .map(str::to_string)

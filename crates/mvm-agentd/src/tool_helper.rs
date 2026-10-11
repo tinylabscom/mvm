@@ -1275,10 +1275,12 @@ fn peer_process(stream: &std::os::unix::net::UnixStream) -> io::Result<(u32, u32
     Ok((cred.pid as u32, cred.uid, cred.gid))
 }
 
-/// Read procfs metadata with the peer's filesystem IDs. Linux gates
-/// `/proc/<pid>/exe` and `/proc/<pid>/fd` on both filesystem IDs; the helper
-/// retains only the UID/GID transition capabilities needed for its tool
-/// child, rather than a process-inspection capability.
+/// Read procfs metadata under one filesystem identity. Linux gates
+/// `/proc/<pid>/exe` and `/proc/<pid>/fd` on the filesystem IDs; the helper
+/// transitions rather than holding a broader identity. The descriptor-link
+/// read additionally needs the helper's `CAP_SYS_PTRACE`: a tool child is
+/// non-dumpable after its identity transition, and `ptrace_may_access` —
+/// which gates those links — answers a uid-matched reader no for one.
 #[cfg(target_os = "linux")]
 fn with_filesystem_ids<T>(uid: u32, gid: u32, read: impl FnOnce() -> T) -> io::Result<T> {
     struct Restore {
@@ -1315,7 +1317,7 @@ fn with_filesystem_ids<T>(uid: u32, gid: u32, read: impl FnOnce() -> T) -> io::R
     if current_uid != expected_uid || current_gid != expected_gid {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "tool helper could not adopt the peer's filesystem IDs",
+            "tool helper could not adopt the requested filesystem IDs",
         ));
     }
     let result = read();
@@ -1380,79 +1382,83 @@ fn owns_socket_in_live_tool(question: &crate::tool_map::ToolSocketQuestion) -> b
     if !active.iter().any(|active| active.matches(question)) {
         return false;
     }
-    with_filesystem_ids(
-        crate::guest_mount::TOOL_UID,
-        crate::guest_mount::TOOL_GID,
-        || {
-            if crate::tool_attribution::process_session_start(question.session).ok()
-                != Some((question.session, question.start_ticks))
-            {
+    // The fd scan runs under filesystem root, not the tool's identity: the
+    // helper's uid transition at spawn cleared the tool's dumpable flag, so
+    // the kernel owns the tool's `/proc/<pid>/fd` to root and even the tool's
+    // own uid cannot open it, while the fd links answer only a
+    // `ptrace_may_access` holder (`CAP_SYS_PTRACE` on the helper identity) for
+    // a non-dumpable target. The /proc/<pid>/status uid filter below still
+    // scopes the answer to tool processes, and the session check still binds
+    // the socket to the recorded invocation.
+    with_filesystem_ids(0, 0, || {
+        if crate::tool_attribution::process_session_start(question.session).ok()
+            != Some((question.session, question.start_ticks))
+        {
+            return false;
+        }
+        let target = format!("socket:[{}]", question.inode);
+        let Ok(processes) = std::fs::read_dir("/proc") else {
+            return false;
+        };
+        let mut owned = false;
+        for (index, process) in processes.enumerate() {
+            if index >= 4096 {
                 return false;
             }
-            let target = format!("socket:[{}]", question.inode);
-            let Ok(processes) = std::fs::read_dir("/proc") else {
+            let Ok(process) = process else {
                 return false;
             };
-            let mut owned = false;
-            for (index, process) in processes.enumerate() {
-                if index >= 4096 {
+            let Some(pid) = process
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse().ok())
+            else {
+                continue;
+            };
+            let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+                Ok(status) => status,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return false,
+            };
+            let uid = status
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("Uid:")
+                        .and_then(|ids| ids.split_whitespace().next())
+                })
+                .and_then(|value| value.parse::<u32>().ok());
+            if uid != Some(crate::guest_mount::TOOL_UID) {
+                continue;
+            }
+            let descriptors = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+                Ok(descriptors) => descriptors,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => return false,
+            };
+            let mut holds = false;
+            for descriptor in descriptors {
+                let Ok(descriptor) = descriptor else {
                     return false;
-                }
-                let Ok(process) = process else {
-                    return false;
                 };
-                let Some(pid) = process
-                    .file_name()
-                    .to_str()
-                    .and_then(|name| name.parse().ok())
-                else {
-                    continue;
-                };
-                let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
-                    Ok(status) => status,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                match std::fs::read_link(descriptor.path()) {
+                    Ok(path) if path.to_str() == Some(target.as_str()) => holds = true,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                     Err(_) => return false,
-                };
-                let uid = status
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("Uid:")
-                            .and_then(|ids| ids.split_whitespace().next())
-                    })
-                    .and_then(|value| value.parse::<u32>().ok());
-                if uid != Some(crate::guest_mount::TOOL_UID) {
-                    continue;
-                }
-                let descriptors = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
-                    Ok(descriptors) => descriptors,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => return false,
-                };
-                let mut holds = false;
-                for descriptor in descriptors {
-                    let Ok(descriptor) = descriptor else {
-                        return false;
-                    };
-                    match std::fs::read_link(descriptor.path()) {
-                        Ok(path) if path.to_str() == Some(target.as_str()) => holds = true,
-                        Ok(_) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(_) => return false,
-                    }
-                }
-                if holds {
-                    if crate::tool_attribution::process_session_start(pid)
-                        .ok()
-                        .is_none_or(|(session, _)| session != question.session)
-                    {
-                        return false;
-                    }
-                    owned = true;
                 }
             }
-            owned
-        },
-    )
+            if holds {
+                if crate::tool_attribution::process_session_start(pid)
+                    .ok()
+                    .is_none_or(|(session, _)| session != question.session)
+                {
+                    return false;
+                }
+                owned = true;
+            }
+        }
+        owned
+    })
     .unwrap_or(false)
 }
 

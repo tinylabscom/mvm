@@ -1,9 +1,9 @@
 [overrides.network]
-allow = ["httpbin.org:443"]
+allow = ["httpbingo.org:443"]
 
 [[overrides.secrets.bind]]
 name = "tool-live"
-hosts = ["httpbin.org"]
+hosts = ["httpbingo.org"]
 
 [overrides.tools]
 allow = ["python"]
@@ -12,5 +12,5 @@ allow = ["python"]
 executable = "/usr/local/bin/python3"
 argv = ["/usr/local/bin/python3 -c *", "/usr/local/bin/python3 -h"]
 deny = ["/usr/local/bin/python3 -h"]
-routes = ["httpbin.org:443"]
+routes = ["httpbingo.org:443"]
 secrets = ["tool-live"]

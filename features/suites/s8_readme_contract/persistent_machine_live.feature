@@ -73,7 +73,7 @@ Feature: README persistent machine lifecycle works end to end
   Scenario: a workload-origin tool receives only its scoped route and secret
     Given an isolated mvm home on encrypted backing storage
     And the image "python:3.12" is prepared in the live home
-    When I run mvmctl in the isolated mvm home with "secret set tool-live --host httpbin.org --type bearer --value tool-live-credential"
+    When I run mvmctl in the isolated mvm home with "secret set tool-live --host httpbingo.org --type bearer --value tool-live-credential"
     Then the command exits with code 0
     # /bin/sh is not declared. The python process it starts is workload-origin,
     # so its route and secret work only after the broker returns a bound allow.
@@ -91,7 +91,7 @@ Feature: README persistent machine lifecycle works end to end
     And the output contains "host.tool.decision"
     And the output contains "guest_broker"
     And the output contains "secret.substituted"
-    And the output contains "httpbin.org"
+    And the output contains "httpbingo.org"
     And the output does not contain "tool-live-credential"
     When I run mvmctl in the isolated mvm home with "trust audit verify"
     Then the command exits with code 0

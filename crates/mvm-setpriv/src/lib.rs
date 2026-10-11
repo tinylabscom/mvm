@@ -318,6 +318,8 @@ pub const CAP_SETGID: u32 = 6;
 pub const CAP_SETUID: u32 = 7;
 /// `CAP_NET_BIND_SERVICE` in `linux/capability.h`.
 pub const CAP_NET_BIND_SERVICE: u32 = 10;
+/// `CAP_SYS_PTRACE` in `linux/capability.h`.
+pub const CAP_SYS_PTRACE: u32 = 19;
 /// `CAP_SYS_ADMIN` in `linux/capability.h`.
 pub const CAP_SYS_ADMIN: u32 = 21;
 /// `CAP_SYS_TIME` in `linux/capability.h`.

@@ -11,8 +11,9 @@
 //! The egress client asks, for each loopback connection it accepts, which
 //! binding the connection belongs to. The agent finds the client socket in
 //! `/proc/net/tcp{,6}` and checks readable descriptor holders. A tool child
-//! under a distinct uid has descriptors the agent cannot inspect, so the
-//! restricted helper checks that socket under the tool's filesystem identity
+//! runs non-dumpable after its identity transition, so the kernel owns its
+//! `/proc/<pid>/fd` to root and neither the agent nor the tool's own uid can
+//! open it; the restricted helper checks that socket under filesystem root
 //! against an active, recorded session. Unknown ownership, holders in other
 //! sessions, or a replaced leader answer no binding; the endpoint treats the
 //! flow as belonging to no tool.
@@ -333,7 +334,7 @@ fn process_start_ticks(pid: u32) -> io::Result<u64> {
 }
 
 /// Session and start time of a live process, for the helper's narrow socket
-/// ownership check under the tool's filesystem identity.
+/// ownership check under filesystem root.
 #[cfg(target_os = "linux")]
 pub(crate) fn process_session_start(pid: u32) -> io::Result<(u32, u64)> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
@@ -513,10 +514,12 @@ impl ProcSource for Procfs {
     }
 
     fn fd_targets(&self, pid: u32) -> Vec<String> {
-        // A tool under the distinct tool uid hides its descriptor links from
-        // the agent. The helper verifies those sockets under that uid when
-        // no readable holder exists. The saved tool gid fallback covers
-        // host-initiated commands that differ only by group.
+        // A helper-spawned tool's descriptor links are root-owned in /proc
+        // (its identity transition cleared the dumpable flag), so neither the
+        // agent nor the saved-gid fallback can inspect them; the helper
+        // verifies those sockets under filesystem root when no readable holder
+        // exists. The fallback still covers any holder that differs only by
+        // group.
         let found = read_fd_targets(pid);
         if !found.is_empty() {
             return found;
