@@ -23,9 +23,11 @@ Feature: the launch budget stays observable on every run
   Background:
     Given an artifact-warm mvm home
 
+  # Named, because only a named launch boots cold: an unnamed one has to claim
+  # a prepared warm standby.
   @live
   Scenario: a cold transient launch reports its dispatch window
-    When I launch "machine run --image alpine -- true"
+    When I launch "machine run --name e2e-cold-dispatch-window --image alpine -- true"
     Then the launch succeeds
     And the guest control plane came up
     And the dispatch window is recorded

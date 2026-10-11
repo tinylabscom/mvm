@@ -478,7 +478,9 @@ if [[ "$(uname -s)" == Linux ]]; then
   echo "==> preparing the dev default image"
   env "${E2E_IMAGE_ENV[@]}" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
-  MVM_HOME="$E2E_HOME" "$MVMCTL" run --no-detect -- /bin/true
+  # Named, so it takes the cold path. An unnamed launch has to claim a
+  # prepared warm standby, and nothing has warmed one for the dev image.
+  MVM_HOME="$E2E_HOME" "$MVMCTL" run --name e2e-dev-image-warm --no-detect -- /bin/true
 fi
 
 # ---------------------------------------------------------------------------
