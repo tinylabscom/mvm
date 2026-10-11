@@ -1020,8 +1020,7 @@ fn materialize_tree(
             .owners(layers.owners)
             .build(),
     )
-    .map_err(|e| backend_err(format!("{e:#}")))?;
-    Ok(())
+    .map_err(|e| backend_err(format!("{e:#}")))
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
