@@ -111,6 +111,8 @@ pub enum ImageSetMemberError {
     },
     #[error("download {url}: {reason}")]
     Download { url: String, reason: String },
+    #[error(transparent)]
+    RuntimeArchive(#[from] mvm_fs::runtime_archive_cache::RuntimeArchiveError),
     #[error("downloaded {name} is {actual} bytes, not the signed manifest's {expected}")]
     SizeMismatch {
         name: String,
@@ -428,7 +430,18 @@ impl PublishedImageSet {
         dest: &Path,
     ) -> Result<(), ImageSetMemberError> {
         let artifact = self.artifact(role, MemberTarget::Arch(arch), name)?;
-        self.fetch_artifact(artifact, dest)
+        self.fetch_artifact(artifact, dest)?;
+        if matches!(
+            role,
+            ImageSetRole::RuntimeOverlay | ImageSetRole::Initramfs | ImageSetRole::SdkSidecar(_)
+        ) {
+            mvm_fs::runtime_archive_cache::retain_runtime_archive(
+                &mvm_fs::runtime_archive_cache::runtime_archive_cache(),
+                dest,
+                artifact,
+            )?;
+        }
+        Ok(())
     }
 
     /// Download one declared artifact and hold both its size and digest to the

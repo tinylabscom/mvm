@@ -155,6 +155,35 @@ pub fn read_initramfs_artifact_from_dir(dir: &Path) -> Result<InitramfsArtifact,
     })
 }
 
+/// Hash the uncompressed cpio with a fixed expansion ceiling. Shared by
+/// preparation and authenticated offline materialization.
+pub fn gunzipped_sha256(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    const MAX_CPIO_BYTES: u64 = 512 * 1024 * 1024;
+    let file = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut decoder = flate2::read::GzDecoder::new(file).take(MAX_CPIO_BYTES + 1);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    let mut count = 0u64;
+    loop {
+        let read = decoder.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        count += read as u64;
+    }
+    if count > MAX_CPIO_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "initramfs cpio exceeds expansion limit",
+        ));
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

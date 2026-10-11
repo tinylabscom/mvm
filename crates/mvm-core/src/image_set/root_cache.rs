@@ -190,8 +190,7 @@ fn read_proof(path: &Path) -> Result<RootProof> {
 }
 
 #[cfg(all(test, feature = "manifest-verify"))]
-#[path = "fixtures/published_root.rs"]
-mod published_root;
+use crate::image_set::published_root_fixture as published_root;
 
 #[cfg(test)]
 mod tests {

@@ -30,6 +30,7 @@ serde_json.workspace = true
 secrecy.workspace = true
 sha2 = { workspace = true }
 tar = { workspace = true }
+tempfile = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time"] }
 tracing.workspace = true
@@ -40,11 +41,14 @@ xattr = { workspace = true }
 am-fs-ext4 = "0.4"
 base64.workspace = true
 criterion = { version = "0.5", features = ["async_tokio"] }
+mvm-core = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
 
 [features]
 default = []
+# Enable offline image-set publisher verification for runtime attachment consumers.
+manifest-verify = ["mvm-core/manifest-verify"]
 # Opt-in Apple APFS read-only snapshot provider. The provider is deliberately
 # not part of the default build until its host privilege and live mount tests
 # are run on the target machine.

@@ -34,6 +34,34 @@ image set `mvmctl` pins, verified against that set's own signature.
 
 ---
 
+## Retained image-set runtime sources
+
+Preparation of a published image-set runtime overlay, initramfs or SDK sidecar
+retains the exact downloaded archive under
+`$MVM_HOME/cache/image-set-runtime-archives`, keyed by its SHA-256 digest.
+Archives are limited to 512 MiB each and published atomically without replacing
+an existing entry. A conflicting, partial or unsafe entry is refused, not
+silently repaired.
+
+This storage is not an authority database. The offline authenticated-runtime
+resolver first re-verifies the cached signed root against the accepted image
+lock and a required revocation checker, then selects the production role,
+architecture and archive format and checks the archive's signed size and digest.
+It extracts into private temporary directories with flat regular-file-only
+allow-lists, duplicate rejection, a 4 GiB aggregate expansion limit and 64 KiB
+metadata limits. Final attachment paths and contents are bound to those
+archive-derived files; replacing an installed file and its writable checksum
+record does not establish provenance.
+
+Missing publisher proof or source archives require preparation of the accepted
+published image set before offline use. The offline resolver has no network,
+build or developer fallback. It is a library building block, not a claim that
+every boot path already uses it: the host admission boundary must compose its
+runtime check with image/plan admission and keep the temporary-file owner alive
+while the backend uses the attachments. This authority is specific to today's
+image-set runtime roles; it does not authorize a future independently published
+CLI runtime train.
+
 ## Prerequisites
 
 Install cosign:

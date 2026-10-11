@@ -25,6 +25,7 @@
 //! required to invoke `clonefile(2)` and `FICLONE`. Everywhere else in this
 //! crate remains unsafe-free.
 
+pub mod authenticated_runtime;
 pub mod clone;
 pub mod elf;
 pub mod ext4;
@@ -47,7 +48,9 @@ pub mod output;
 pub mod overlay;
 pub mod ownership;
 pub mod parallel;
+pub mod release_archive;
 pub mod rootfs;
+pub mod runtime_archive_cache;
 pub mod sdk_sidecar;
 pub mod snapshot_store;
 pub mod tree_diff;

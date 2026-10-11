@@ -1042,17 +1042,7 @@ fn stage_runtime_overlay_archive(
 const RELEASE_GUEST_RUNTIME_FILES: [&str; 4] =
     crate::guest_agent_build::OCI_GUEST_RUNTIME_BINARY_NAMES;
 
-const OVERLAY_ARCHIVE_MEMBERS: [&str; 9] = [
-    "overlay.ext4",
-    "overlay.verity",
-    "overlay.roothash",
-    "VERSION",
-    "mvm-guest-agent",
-    "mvm-guest-netinit",
-    "mvm-egress-client",
-    "mvm-oci-entrypoint",
-    CHECKSUM_MANIFEST_FILE,
-];
+const OVERLAY_ARCHIVE_MEMBERS: [&str; 9] = mvm_fs::release_archive::OVERLAY_MEMBERS;
 
 fn verify_release_guest_runtime(stage: &Path) -> Result<(), RuntimeOverlayError> {
     let manifest_path = stage.join(CHECKSUM_MANIFEST_FILE);
@@ -1087,169 +1077,21 @@ pub(crate) fn extract_release_archive(
 ) -> Result<(), RuntimeOverlayError> {
     // Release bundles contain several executables, unlike the single initramfs
     // image. Bound expansion while leaving room for larger runtime binaries.
-    extract_release_archive_with_limits(
+    const OVERLAY_ARCHIVE_LIMITS: mvm_fs::release_archive::ReleaseArchiveLimits =
+        mvm_fs::release_archive::ReleaseArchiveLimits {
+            file_bytes: 128 * 1024 * 1024,
+            total_bytes: 512 * 1024 * 1024,
+        };
+    mvm_fs::release_archive::extract_release_archive_with_limits(
         archive_path,
         stage,
         expected,
-        ExpandedArchiveLimits {
-            file_bytes: 128 * 1024 * 1024,
-            total_bytes: 512 * 1024 * 1024,
-        },
+        OVERLAY_ARCHIVE_LIMITS,
     )
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct ExpandedArchiveLimits {
-    pub(crate) file_bytes: u64,
-    pub(crate) total_bytes: u64,
-}
-
-impl ExpandedArchiveLimits {
-    // Canonical bundles have only a handful of flat files. 64 KiB covers
-    // their headers, block padding and optional GNU/PAX metadata generously.
-    const TAR_FRAMING_BYTES: u64 = 64 * 1024;
-
-    pub(crate) fn archive_reader<R: std::io::Read>(&self, reader: R) -> std::io::Take<R> {
-        reader.take(self.total_bytes.saturating_add(Self::TAR_FRAMING_BYTES))
-    }
-
-    /// Account for bytes after tar's end marker too. `Take` bounds metadata
-    /// consumed internally by tar; probing its underlying reader distinguishes
-    /// a real EOF from a stream truncated at the expansion ceiling.
-    pub(crate) fn finish_archive<R: std::io::Read>(
-        mut reader: std::io::Take<R>,
-    ) -> std::io::Result<()> {
-        std::io::copy(&mut reader, &mut std::io::sink())?;
-        if reader.limit() == 0 && reader.get_mut().read(&mut [0u8; 1])? != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "expanded tar stream budget exceeded",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Copy at most the per-file and remaining aggregate budgets. The probe
-    /// reads one extra byte but never writes it, including at an exact fit.
-    pub(crate) fn copy_entry(
-        &self,
-        entry: &mut impl std::io::Read,
-        out: &mut impl std::io::Write,
-        remaining: &mut u64,
-    ) -> std::io::Result<()> {
-        let copied = std::io::copy(
-            &mut std::io::Read::take(&mut *entry, self.file_bytes.min(*remaining)),
-            out,
-        )?;
-        *remaining -= copied;
-        if entry.read(&mut [0u8; 1])? != 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "expanded archive budget exceeded",
-            ));
-        }
-        Ok(())
-    }
-}
-
-fn extract_release_archive_with_limits(
-    archive_path: &Path,
-    stage: &Path,
-    expected: &[&'static str],
-    limits: ExpandedArchiveLimits,
-) -> Result<(), RuntimeOverlayError> {
-    let file = std::fs::File::open(archive_path)?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(limits.archive_reader(decoder));
-    let mut seen = std::collections::BTreeSet::new();
-    let mut remaining = limits.total_bytes;
-
-    for entry in archive
-        .entries()
-        .map_err(|e| RuntimeOverlayError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("read tar entries: {e}"),
-        })?
-    {
-        let mut entry = entry.map_err(|e| RuntimeOverlayError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("read tar entry: {e}"),
-        })?;
-        let path = entry
-            .path()
-            .map_err(|e| RuntimeOverlayError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("read tar path: {e}"),
-            })?
-            .into_owned();
-        let Some(name) = canonical_archive_member_name(&path, expected) else {
-            return Err(RuntimeOverlayError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("unsafe or unexpected path {:?}", path.display()),
-            });
-        };
-        match entry.header().entry_type() {
-            tar::EntryType::Regular => {
-                if !seen.insert(name.to_string()) {
-                    return Err(RuntimeOverlayError::InvalidArchive {
-                        archive_path: archive_path.to_path_buf(),
-                        reason: format!("duplicate archive member {name}"),
-                    });
-                }
-                let dest = stage.join(name);
-                let mut out = std::fs::File::create(&dest)?;
-                limits
-                    .copy_entry(&mut entry, &mut out, &mut remaining)
-                    .map_err(|e| RuntimeOverlayError::InvalidArchive {
-                        archive_path: archive_path.to_path_buf(),
-                        reason: format!("extract {name}: {e}"),
-                    })?;
-                set_cache_perms(&dest)?;
-            }
-            other => {
-                return Err(RuntimeOverlayError::InvalidArchive {
-                    archive_path: archive_path.to_path_buf(),
-                    reason: format!(
-                        "unsupported tar entry type {other:?} for {:?}",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    }
-
-    ExpandedArchiveLimits::finish_archive(archive.into_inner()).map_err(|e| {
-        RuntimeOverlayError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("finish tar stream: {e}"),
-        }
-    })?;
-    for required in expected {
-        if !seen.contains(*required) {
-            return Err(RuntimeOverlayError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("missing required archive member {required}"),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Map a tar member path to the canonical filename it may be written as, or
-/// `None` when it must be refused. Only a single unprefixed component that
-/// appears in `expected` is accepted, so `../x`, `/x`, and `dir/x` are all
-/// rejected by construction rather than by string inspection.
-fn canonical_archive_member_name(path: &Path, expected: &[&'static str]) -> Option<&'static str> {
-    let mut components = path.components();
-    let component = match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(name)), None) => name,
-        _ => return None,
-    };
-    let name = component.to_str()?;
-    expected
-        .iter()
-        .copied()
-        .find(|candidate| *candidate == name)
+    .map_err(|error| RuntimeOverlayError::InvalidArchive {
+        archive_path: archive_path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 /// HTTP GET the per-release `sha256sum`-format checksums file and
@@ -1355,50 +1197,6 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tar_stream_budget_bounds_hidden_metadata_and_trailing_bytes() {
-        let limits = super::ExpandedArchiveLimits {
-            file_bytes: 16,
-            total_bytes: 32,
-        };
-        let cap = limits.total_bytes + super::ExpandedArchiveLimits::TAR_FRAMING_BYTES;
-        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
-            let mut builder = tar::Builder::new(Vec::new());
-            let bytes = vec![b'a'; 1024 * 1024];
-            let mut header = tar::Header::new_gnu();
-            header.set_entry_type(kind);
-            header.set_size(bytes.len() as u64);
-            header.set_mode(0o644);
-            header.set_cksum();
-            builder
-                .append_data(&mut header, "metadata", bytes.as_slice())
-                .unwrap();
-            let mut cursor = std::io::Cursor::new(builder.into_inner().unwrap());
-            {
-                let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
-                assert!(archive.entries().unwrap().next().unwrap().is_err());
-            }
-            assert_eq!(
-                cursor.position(),
-                cap,
-                "metadata cannot read beyond the raw cap"
-            );
-        }
-
-        let mut cursor = std::io::Cursor::new(vec![0; 1024 * 1024]);
-        let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
-        assert!(
-            archive.entries().unwrap().next().is_none(),
-            "tar stops at its end marker"
-        );
-        let error = super::ExpandedArchiveLimits::finish_archive(archive.into_inner()).unwrap_err();
-        assert!(error.to_string().contains("stream budget"), "{error}");
-        assert_eq!(cursor.position(), cap + 1, "only one excess byte is probed");
-
-        let cursor = std::io::Cursor::new(vec![0; cap as usize]);
-        super::ExpandedArchiveLimits::finish_archive(limits.archive_reader(cursor)).unwrap();
-    }
-
-    #[test]
     fn release_archive_rejects_redundant_directory_entries() {
         let tmp = tempfile::tempdir().unwrap();
         let archive = tmp.path().join("directories.tar.gz");
@@ -1416,11 +1214,11 @@ mod tests {
         std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
         let stage = tmp.path().join("stage");
         std::fs::create_dir(&stage).unwrap();
-        let error = super::extract_release_archive_with_limits(
+        let error = mvm_fs::release_archive::extract_release_archive_with_limits(
             &archive,
             &stage,
             &["VERSION"],
-            super::ExpandedArchiveLimits {
+            mvm_fs::release_archive::ReleaseArchiveLimits {
                 file_bytes: 16,
                 total_bytes: 32,
             },
@@ -1429,77 +1227,70 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported tar entry type Directory"),
+                .contains("non-regular or duplicate member"),
             "{error}"
         );
         assert_eq!(std::fs::read_dir(stage).unwrap().count(), 0);
     }
 
     #[test]
-    fn expanded_archive_copy_accepts_exact_limits_and_bounds_actual_writes() {
-        let limits = super::ExpandedArchiveLimits {
-            file_bytes: 4,
-            total_bytes: 6,
-        };
-        let mut remaining = limits.total_bytes;
-        let mut out = Vec::new();
-        limits
-            .copy_entry(&mut b"1234".as_slice(), &mut out, &mut remaining)
-            .unwrap();
-        assert_eq!(remaining, 2);
-        limits
-            .copy_entry(&mut b"56".as_slice(), &mut out, &mut remaining)
-            .unwrap();
-        assert_eq!(remaining, 0);
-        assert!(
-            limits
-                .copy_entry(&mut b"7".as_slice(), &mut out, &mut remaining)
-                .is_err()
-        );
-        assert_eq!(out, b"123456");
-        let mut remaining = limits.total_bytes;
-        let mut out = Vec::new();
-        assert!(
-            limits
-                .copy_entry(&mut b"12345".as_slice(), &mut out, &mut remaining)
-                .is_err()
-        );
-        assert_eq!(out, b"1234");
-    }
-
-    #[test]
     fn release_archive_rejects_duplicate_members_and_expansion_over_budget() {
-        for (entries, expected_error) in [
-            (vec![b"first".as_slice(), b"second".as_slice()], "duplicate"),
-            (vec![&[0; 4096][..]], "budget"),
-        ] {
-            let tmp = tempfile::tempdir().unwrap();
-            let archive = tmp.path().join("release.tar.gz");
-            let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-            let mut tar = tar::Builder::new(gzip);
-            for bytes in entries {
-                let mut header = tar::Header::new_gnu();
-                header.set_size(bytes.len() as u64);
-                header.set_mode(0o644);
-                header.set_cksum();
-                tar.append_data(&mut header, "VERSION", bytes).unwrap();
-            }
-            std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
-            let stage = tmp.path().join("stage");
-            std::fs::create_dir(&stage).unwrap();
-            let error = super::extract_release_archive_with_limits(
-                &archive,
-                &stage,
-                &["VERSION"],
-                super::ExpandedArchiveLimits {
-                    file_bytes: 16,
-                    total_bytes: 32,
-                },
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains(expected_error), "{error}");
-            assert!(std::fs::metadata(stage.join("VERSION")).unwrap().len() <= 16);
+        let tmp = tempfile::tempdir().unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let archive = tmp.path().join("release.tar.gz");
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut tar = tar::Builder::new(gzip);
+        for bytes in [b"first".as_slice(), b"second".as_slice()] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, "VERSION", bytes).unwrap();
         }
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let error = mvm_fs::release_archive::extract_release_archive_with_limits(
+            &archive,
+            &stage,
+            &["VERSION"],
+            mvm_fs::release_archive::ReleaseArchiveLimits {
+                file_bytes: 16,
+                total_bytes: 32,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("non-regular or duplicate member"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(stage.join("VERSION")).unwrap(), b"first");
+
+        let stage = tmp.path().join("stage-over");
+        std::fs::create_dir(&stage).unwrap();
+        let archive = tmp.path().join("over.tar.gz");
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut tar = tar::Builder::new(gzip);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(4096);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "VERSION", &[0; 4096][..])
+            .unwrap();
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let error = mvm_fs::release_archive::extract_release_archive_with_limits(
+            &archive,
+            &stage,
+            &["VERSION"],
+            mvm_fs::release_archive::ReleaseArchiveLimits {
+                file_bytes: 16,
+                total_bytes: 32,
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("expansion budget"), "{error}");
+        assert!(!stage.join("VERSION").exists());
     }
 
     use super::*;
@@ -2367,6 +2158,16 @@ mod tests {
         assert_eq!(installed.arch, "aarch64");
         assert_eq!(installed.version, "9.9.9");
         assert_eq!(installed.roothash, FAKE_ROOTHASH);
+        let source = set
+            .artifact(
+                ImageSetRole::RuntimeOverlay,
+                MemberTarget::Arch(GuestArch::Aarch64),
+                OVERLAY_ARCHIVE,
+            )
+            .unwrap();
+        let retained =
+            mvm_fs::runtime_archive_cache::runtime_archive_cache().join(source.sha256.as_str());
+        assert_eq!(std::fs::read(retained).unwrap(), fixture_overlay_archive());
         let cache_dir = set
             .member_cache()
             .cache_root(cache.path())

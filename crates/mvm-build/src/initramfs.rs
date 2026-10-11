@@ -19,8 +19,8 @@ use thiserror::Error;
 use crate::published_image_set::{
     ImageSetMemberError, MemberVersion, PublishedImageSet, SetMemberCache, SetMemberCacheError,
 };
-use crate::runtime_overlay::ExpandedArchiveLimits as InitramfsArchiveLimits;
 use mvm_core::image_set::{ImageSetRole, MemberTarget};
+use mvm_fs::release_archive::ReleaseArchiveLimits as InitramfsArchiveLimits;
 
 /// Failure modes for universal initramfs resolution/build.
 #[derive(Debug, Error)]
@@ -531,21 +531,7 @@ fn verify_staged_image_hash(staging: &Path) -> Result<(), InitramfsBuildError> {
 /// SHA-256 over the gunzipped contents of `path`, streamed so a large
 /// initramfs never lands in memory whole.
 fn sha256_of_gunzipped(path: &Path) -> Result<String, InitramfsBuildError> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read as _;
-
-    let file = std::io::BufReader::new(std::fs::File::open(path)?);
-    let mut decoder = flate2::read::GzDecoder::new(file);
-    let mut hasher = Sha256::new();
-    let mut buf = [0u8; 65536];
-    loop {
-        let read = decoder.read(&mut buf)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buf[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+    Ok(mvm_fs::initramfs::gunzipped_sha256(path)?)
 }
 
 #[cfg(unix)]
@@ -829,102 +815,17 @@ fn extract_initramfs_archive(
     stage: &Path,
     limits: InitramfsArchiveLimits,
 ) -> Result<(), InitramfsBuildError> {
-    let file = std::fs::File::open(archive_path)?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(limits.archive_reader(decoder));
-    let mut seen = std::collections::BTreeSet::new();
-    let mut remaining = limits.total_bytes;
-
-    for entry in archive
-        .entries()
-        .map_err(|e| InitramfsBuildError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("read tar entries: {e}"),
-        })?
-    {
-        let mut entry = entry.map_err(|e| InitramfsBuildError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("read tar entry: {e}"),
-        })?;
-        let path = entry
-            .path()
-            .map_err(|e| InitramfsBuildError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("read tar path: {e}"),
-            })?;
-        let Some(name) = canonical_archive_member_name(&path) else {
-            return Err(InitramfsBuildError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("unsafe or unexpected path {:?}", path.display()),
-            });
-        };
-        match entry.header().entry_type() {
-            tar::EntryType::Regular => {
-                if !seen.insert(name.to_string()) {
-                    return Err(InitramfsBuildError::InvalidArchive {
-                        archive_path: archive_path.to_path_buf(),
-                        reason: format!("duplicate archive member {name}"),
-                    });
-                }
-                let dest = stage.join(name);
-                let mut out = std::fs::File::create(&dest)?;
-                limits
-                    .copy_entry(&mut entry, &mut out, &mut remaining)
-                    .map_err(|e| InitramfsBuildError::InvalidArchive {
-                        archive_path: archive_path.to_path_buf(),
-                        reason: format!("extract {name}: {e}"),
-                    })?;
-                set_cache_perms(&dest)?;
-            }
-            other => {
-                return Err(InitramfsBuildError::InvalidArchive {
-                    archive_path: archive_path.to_path_buf(),
-                    reason: format!(
-                        "unsupported tar entry type {other:?} for {:?}",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    }
-
-    InitramfsArchiveLimits::finish_archive(archive.into_inner()).map_err(|e| {
-        InitramfsBuildError::InvalidArchive {
-            archive_path: archive_path.to_path_buf(),
-            reason: format!("finish tar stream: {e}"),
-        }
-    })?;
-    for required in [
-        mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
-        mvm_fs::initramfs::INITRAMFS_HASH_FILE,
-        mvm_fs::initramfs::INITRAMFS_SIZE_FILE,
-        mvm_fs::initramfs::VERSION_FILE,
-        mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
-    ] {
-        if !seen.contains(required) {
-            return Err(InitramfsBuildError::InvalidArchive {
-                archive_path: archive_path.to_path_buf(),
-                reason: format!("missing required archive member {required}"),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn canonical_archive_member_name(path: &Path) -> Option<&'static str> {
-    let mut components = path.components();
-    let component = match (components.next(), components.next()) {
-        (Some(std::path::Component::Normal(name)), None) => name,
-        _ => return None,
-    };
-    match component.to_str()? {
-        "initramfs.cpio.gz" => Some("initramfs.cpio.gz"),
-        "initramfs.hash" => Some("initramfs.hash"),
-        "initramfs.size" => Some("initramfs.size"),
-        "VERSION" => Some("VERSION"),
-        "checksums-sha256.txt" => Some("checksums-sha256.txt"),
-        _ => None,
-    }
+    let expected = mvm_fs::release_archive::INITRAMFS_MEMBERS;
+    mvm_fs::release_archive::extract_release_archive_with_limits(
+        archive_path,
+        stage,
+        &expected,
+        limits,
+    )
+    .map_err(|error| InitramfsBuildError::InvalidArchive {
+        archive_path: archive_path.to_path_buf(),
+        reason: error.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -1487,15 +1388,21 @@ mod tests {
     #[test]
     fn expanded_initramfs_budgets_bound_writes_and_never_publish() {
         let large = vec![0; 1024 * 1024];
-        for (entries, limits, expected_written) in [
+        for (entries, limits, expected_written, expected_error) in [
+            // An over-budget member is refused before any of its bytes are
+            // written.
             (
                 vec![("initramfs.cpio.gz", large.as_slice())],
                 InitramfsArchiveLimits {
                     file_bytes: 1024,
                     total_bytes: 4096,
                 },
-                1024,
+                0,
+                "budget",
             ),
+            // Only complete, in-budget members are written; the over-budget
+            // one leaves nothing behind. A metadata member trips its own
+            // fixed ceiling ahead of the per-file budget.
             (
                 vec![
                     ("initramfs.cpio.gz", &large[..700]),
@@ -1505,7 +1412,8 @@ mod tests {
                     file_bytes: 1024,
                     total_bytes: 1024,
                 },
-                1024,
+                700,
+                "exceeds limit",
             ),
         ] {
             let tmp = tempfile::tempdir().unwrap();
@@ -1516,7 +1424,7 @@ mod tests {
             let stage = tmp.path().join("stage");
             std::fs::create_dir(&stage).unwrap();
             let error = extract_initramfs_archive(&archive, &stage, limits).unwrap_err();
-            assert!(error.to_string().contains("budget"), "{error}");
+            assert!(error.to_string().contains(expected_error), "{error}");
             let written: u64 = std::fs::read_dir(stage)
                 .unwrap()
                 .map(|file| file.unwrap().metadata().unwrap().len())

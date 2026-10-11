@@ -61,11 +61,7 @@ impl SdkSidecarArtifactNames {
 /// [`SdkSidecarResolver::resolve`] verifies, and nothing else. Doubles as the
 /// extraction allow-list, the completeness check, and the install file set, so
 /// the transport can neither widen nor narrow what the resolver will check.
-const SIDECAR_ARCHIVE_MEMBERS: [&str; 3] = [
-    SDK_SIDECAR_IMAGE_FILE,
-    SDK_SIDECAR_VERSION_FILE,
-    CHECKSUM_MANIFEST_FILE,
-];
+const SIDECAR_ARCHIVE_MEMBERS: [&str; 3] = mvm_fs::release_archive::SIDECAR_MEMBERS;
 
 /// Failure acquiring or installing a published SDK-sidecar artifact.
 #[derive(Debug, Error)]

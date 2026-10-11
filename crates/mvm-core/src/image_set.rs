@@ -32,6 +32,13 @@ mod trust_tier;
 mod validate;
 mod verify;
 
+/// Vendored public publisher-proof bytes for cross-crate verification tests.
+/// No member bytes or synthetic signing authority are exposed. The single
+/// load site for this file: every consumer imports this module.
+#[cfg(any(feature = "test-support", all(test, feature = "manifest-verify")))]
+#[path = "image_set/fixtures/published_root.rs"]
+pub mod published_root_fixture;
+
 pub use boot_abi::{BuilderBootAbi, BuilderBootAbiRange};
 pub use checkout::{LocalCheckouts, RepoIdentity, WorktreeState};
 pub use error::{ImageSetError, ImageSetStage};

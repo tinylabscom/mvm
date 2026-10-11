@@ -159,6 +159,13 @@ fn is_rename_flag_unsupported(err: &std::io::Error) -> bool {
 /// final name.
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = synced_temp_in(path, data)?;
+    atomic_persist_new(tmp, path)
+}
+
+/// Sync and publish a streamed temporary file without replacing an existing
+/// destination. The temporary file must be on the destination filesystem.
+pub fn atomic_persist_new(tmp: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    tmp.as_file().sync_all()?;
     match persist_noclobber(tmp, path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -486,6 +493,28 @@ impl Drop for FileLock {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn streamed_publication_never_exposes_a_partial_or_overwrites_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive");
+        let partial = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        fs::write(partial.path(), b"partial").unwrap();
+        drop(partial);
+        assert!(!path.exists());
+        let complete = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        fs::write(complete.path(), b"complete").unwrap();
+        atomic_persist_new(complete, &path).unwrap();
+        let collision = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let collision_path = collision.path().to_owned();
+        fs::write(collision.path(), b"replacement").unwrap();
+        assert!(is_already_exists(
+            &atomic_persist_new(collision, &path).unwrap_err()
+        ));
+        assert!(!collision_path.exists());
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn test_atomic_write_creates_file() {
