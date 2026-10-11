@@ -17,6 +17,18 @@ on:
         required: false
         type: string
         default: ''
+      # The hosted runner architecture. `aarch64` runs the shard on the arm64
+      # pool against the aarch64 archive; the self-hosted pool is x86_64 only.
+      arch:
+        required: false
+        type: string
+        default: x86_64
+      # How many hash partitions the caller fans the archive out over. The
+      # caller's matrix and this number must agree, or tests go unrun.
+      shard_count:
+        required: false
+        type: string
+        default: '2'
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -48,12 +60,15 @@ permissions:
 
 jobs:
   test:
-    name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
-    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-latest' }}
+    name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }}${{ inputs.arch == 'aarch64' && ', aarch64' || '' }})
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || inputs.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     # Archive workers on one persistent host share the build-time source path.
     # Serialize that pool; GitHub-hosted workers have separate filesystems.
+    # The architecture is part of the hosted key: x86_64 and aarch64 shards
+    # with the same number run in the same workflow run, and sharing a group
+    # would queue one behind the other (or cancel a pending one).
     concurrency:
-      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}-{1}', github.run_id, inputs.shard) }}
+      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}-{1}-{2}', github.run_id, inputs.arch || 'x86_64', inputs.shard) }}
       cancel-in-progress: false
     timeout-minutes: 55
     steps:
@@ -85,7 +100,7 @@ jobs:
       - uses: ./.github/actions/apt-deps
         if: inputs.runner_kind == 'github'
         with:
-          packages: attr cryptsetup-bin lld
+          packages: ${{ inputs.arch == 'aarch64' && 'attr cryptsetup-bin libcap-ng-dev lld' || 'attr cryptsetup-bin lld' }}
 
       - name: Verify provisioned self-hosted dependencies
         if: inputs.runner_kind == 'hetzner'
@@ -110,7 +125,7 @@ jobs:
           SHARD: ${{ inputs.shard }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[12]$ ]]
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]
           base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
@@ -148,7 +163,7 @@ jobs:
         if: inputs.archive_run_id != ''
         uses: actions/download-artifact@v8
         with:
-          name: workspace-tests
+          name: ${{ inputs.arch == 'aarch64' && 'workspace-tests-aarch64' || 'workspace-tests' }}
           run-id: ${{ inputs.archive_run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}
@@ -157,15 +172,21 @@ jobs:
         if: inputs.archive_run_id != ''
         env:
           ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+          SHARD: ${{ inputs.shard }}
+          SHARD_COUNT: ${{ inputs.shard_count || '2' }}
         run: |
           set -euo pipefail
+          [[ "$SHARD" =~ ^[1-9]$ && "$SHARD_COUNT" =~ ^[1-9]$ && "$SHARD" -le "$SHARD_COUNT" ]] || {
+            echo "Invalid shard $SHARD of $SHARD_COUNT" >&2
+            exit 1
+          }
           archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           cd "$archive_root"
           cargo nextest run \
             --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
             --workspace-remap "$archive_root" \
             --extract-to "$archive_root" \
-            --partition hash:${{ inputs.shard }}/2 || {
+            --partition "hash:${SHARD}/${SHARD_COUNT}" || {
               status=$?
               ls -ld "$archive_root" "$archive_root/target" \
                 "$archive_root/target/debug/build" \
@@ -193,7 +214,7 @@ jobs:
           if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
             printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
           fi
-          if [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[12]$ ]]; then
+          if [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]; then
             base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
             if [ -d "$base" ] && [ ! -L "$base" ]; then
               chmod -R u+rwX -- "$base"
