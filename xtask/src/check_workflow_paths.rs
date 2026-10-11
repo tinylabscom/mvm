@@ -1912,33 +1912,38 @@ mod tests {
     }
 
     /// Claim 3's `ci:` witness and its no-SSH companion assert properties of
-    /// the image every installed mvmctl boots, which is built in mvm-images.
-    /// So each must fetch the runtime overlay the lock pins and verify it the
-    /// way the CLI does before asserting anything; building an overlay here
-    /// would witness bytes no user receives. The verity lane also has to
-    /// check the seal, not only that three files exist.
+    /// the runtime overlay every microVM attaches. `mvmctl` assembles that
+    /// overlay on the host from its guest runtime — a source build's from its
+    /// tree, a release binary's from the signed archive its release ships, one
+    /// assembler for both — and no launch reads the image set's copy. So each
+    /// lane assembles the overlay from this tree, in a home of its own, and
+    /// asserts on those bytes; fetching the set's member would witness bytes
+    /// no launch attaches. The verity lane also has to check the seal, not
+    /// only that three files exist. The merge queue's `boot-latency` lane
+    /// boots the same assembled overlay over its published base image.
     #[test]
-    fn image_witnesses_assert_on_the_locked_image_set() {
+    fn overlay_witnesses_assert_on_the_cli_assembled_overlay() {
         let security = workflow("security.yml");
         for lane in ["verified-boot-artifacts", "sealed-prod-no-ssh"] {
             let body = job_body(&security, lane)
                 .unwrap_or_else(|| panic!("{lane} must stay in security.yml under its name"));
-            for fetch in [
-                "./scripts/locked-image-tag.sh image_set manifest_sha256",
-                "sha256sum -c -",
-                "cosign verify-blob",
-                "runtime-overlay-x86_64.tar.gz",
-                "sha256sum -c expected.txt",
+            for assembled in [
+                "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build",
+                "build runtime-overlay build --source build --arch x86_64",
                 "sha256sum -c checksums-sha256.txt",
             ] {
                 assert!(
-                    body.contains(fetch),
-                    "{lane} must verify the locked overlay before asserting on it: missing {fetch:?}"
+                    body.contains(assembled),
+                    "{lane} must assert on the overlay mvmctl assembles: missing {assembled:?}"
                 );
             }
             assert!(
+                !body.contains("runtime-overlay-x86_64.tar.gz"),
+                "{lane} must not assert on the image set's overlay member, which no launch attaches"
+            );
+            assert!(
                 !body.contains("nix build"),
-                "{lane} must not build an image in-tree; images are built in mvm-images"
+                "{lane} must not build an image through Nix"
             );
         }
         let verity = job_body(&security, "verified-boot-artifacts").expect("checked above");
@@ -1948,6 +1953,19 @@ mod tests {
         );
         let no_ssh = job_body(&security, "sealed-prod-no-ssh").expect("checked above");
         assert!(no_ssh.contains("mount -o ro,loop"));
+
+        let ci = workflow("ci.yml");
+        let latency = job_body(&ci, "boot-latency").expect("boot-latency must stay in ci.yml");
+        assert!(
+            latency.contains("build runtime-overlay build --source build --arch x86_64")
+                && !latency.contains("runtime-overlay-x86_64.tar.gz"),
+            "boot-latency must boot the overlay mvmctl assembles, not the set's member"
+        );
+        assert!(
+            latency.contains("./scripts/locked-image-tag.sh")
+                && latency.contains("cosign verify-blob"),
+            "boot-latency's base image stays the signed set images.lock pins"
+        );
     }
 
     #[test]

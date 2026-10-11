@@ -1704,6 +1704,10 @@ jobs:
         with:
           packages: lld
 
+      # The guest binaries are static musl, cross-compiled with the pinned
+      # toolchain the build script and `mvmctl` both use.
+      - uses: ./.github/actions/install-zigbuild
+
       # This lane anchors on a checksum manifest it downloads. Whoever could
       # swap the artifact could swap its recorded digest too, so the manifest
       # is only worth anchoring on once its signature is checked — which is the
@@ -1778,8 +1782,7 @@ jobs:
             .compatibility.guest_agent_protocol.max >= 2 and
             .compatibility.builder_cache_contract == $contract
           ' image-set.json >/dev/null
-          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4 \
-                   runtime-overlay-x86_64.tar.gz; do
+          for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4; do
             curl -fL --retry 3 -o "$f" "$base/$f"
             jq -r --arg name "$f" '
               .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
@@ -1792,10 +1795,27 @@ jobs:
             --argjson protocol "$(jq .compatibility.guest_agent_protocol.max image-set.json)" \
             '{name:"mvm-default-microvm",accessible:false,sealed:true,entrypointKind:"command",entrypointArgv:[],initSystem:"busybox",expectedBootMs:300,agentBinary:"real",rootlessEntrypoint:true,hypervisor:"firecracker",overlayAware:true,runtimeLean:true,imageTag:"",source:"fetched",builtAt:"",protocolVersion:$protocol,generatorRev:$rev,libc:"unknown"}' \
             > mvm-meta.json
-          mkdir -p overlay && tar -C overlay -xzf runtime-overlay-x86_64.tar.gz
-          ( cd overlay && sha256sum -c checksums-sha256.txt )
-          ls -la overlay
           ls -la
+
+      - name: Assemble the runtime overlay from this tree
+        # The base image is the published control variable; the overlay is
+        # not an image-set member a launch reads. Every `mvmctl` assembles it
+        # on the host from its guest runtime, so this lane assembles it from
+        # this tree, in a home of the step's own so no cache stands in for it.
+        env:
+          MVM_HOME: ${{ github.workspace }}/.boot-latency-overlay-home
+          MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
+        run: |
+          set -euo pipefail
+          mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
+          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          test "${#dirs[@]}" -eq 1
+          mkdir -p /tmp/boot-image/overlay
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
+            cp -L "${dirs[0]}/$f" "/tmp/boot-image/overlay/$f"
+          done
+          ls -la /tmp/boot-image/overlay
 
       - name: Boot within the ceiling
         # The budget is a ceiling, not a target. A dedicated KVM host measures
