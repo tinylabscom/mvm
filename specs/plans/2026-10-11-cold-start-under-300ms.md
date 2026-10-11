@@ -1,12 +1,17 @@
+---
+kind: design
+issue: https://github.com/tinylabscom/mvm/issues/4308
+status: accepted
+---
+
 # Cold workload start under 300 ms
 
 Backing: preview
 Validation: none
 
-Issue: tinylabscom/mvm#4308. This note ranks the ways to bring a launch that
+This note ranks the ways to bring a launch that
 does not claim a warm standby under the 300 ms startup limit, from measurements
-taken on 2026-10-11. The issues linked below own status and scope; the
-checkboxes are a reading aid, not a tracker.
+taken on 2026-10-11. The issues linked below own status and scope.
 
 ## The window
 
@@ -131,13 +136,13 @@ follow each other.
 
 ## Follow-ups
 
-- [ ] Identity drive written without fsync — #4350
-- [ ] Admission root joins the admission flush — #4351
-- [ ] Duplicate virtio-mmio registrations on the serial console — #4343
-- [ ] Overlap admission with VMM start — #4344
-- [ ] Pre-spawned Firecracker processes with their scopes — #4345
-- [ ] Agent diagnostics off the serial console during activation — #4346
-- [ ] Prepared-cold samples held to 300 ms from invocation — #4347
-- [ ] Exit-path fsyncs and the full-history seal read — #4348
-- [ ] Warm parents for the shapes the pool refuses today, and a verified-content
+- Identity drive written without fsync — #4350
+- Admission root joins the admission flush — #4351
+- Duplicate virtio-mmio registrations on the serial console — #4343
+- Overlap admission with VMM start — #4344
+- Pre-spawned Firecracker processes with their scopes — #4345
+- Agent diagnostics off the serial console during activation — #4346
+- Prepared-cold samples held to 300 ms from invocation — #4347
+- Exit-path fsyncs and the full-history seal read — #4348
+- Warm parents for the shapes the pool refuses today, and a verified-content
       cache for claims without a preloaded child — #4338
