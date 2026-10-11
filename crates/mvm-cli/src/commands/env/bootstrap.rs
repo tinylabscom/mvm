@@ -91,127 +91,88 @@ where
 }
 
 fn prepare_launch_runtime_artifacts() -> Result<()> {
-    use mvm_client::launch::runtime_overlay::{
-        RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-        runtime_overlay_acquire_mode,
-    };
-
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let oci_cache_root = cache_root.join("oci");
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&oci_cache_root)?;
-    let mode = runtime_overlay_acquire_mode();
-    match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-                &cache_root,
-                version,
-                arch,
-            )?;
-        }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            let resolver = mvm_fs::overlay::RuntimeOverlayResolver::new(
-                cache_root.clone(),
-                version.to_string(),
-            );
-            let overlay_ready =
-                mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_ok();
-            if !overlay_ready {
-                acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-                    cache_root: &cache_root,
-                    expected_version: version,
-                    arch,
-                    source_checkout_root: None,
-                })?;
-            }
-        }
+    mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&cache_root.join("oci"))?;
+    prepare_runtime_pieces_for_mode_with(
+        mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode(),
+        || prewarm_pieces_from_source(&cache_root, version, arch),
+        || prewarm_pieces_from_image_set(&cache_root, version, arch),
+    )
+}
+
+/// Assemble the overlay, the initramfs and both SDK sidecars from this
+/// checkout's guest-runtime archive, resolved once.
+fn prewarm_pieces_from_source(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    let workspace_root =
+        mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
+            .context("the source guest runtime needs an mvm source checkout")?;
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        &workspace_root,
+    )
+    .context("resolving the shared guest runtime")?;
+    mvm_build::runtime_pieces::assemble_runtime_pieces(cache_root, version, arch, &runtime)?;
+    ui::info(&format!(
+        "Runtime overlay, initramfs and SDK sidecars assembled from guest runtime archive {}.",
+        mvm_build::runtime_pieces::short_digest(&runtime.digest)
+    ));
+    Ok(())
+}
+
+/// Install whichever of the overlay, the initramfs and the SDK sidecars the
+/// cache lacks from the image set this build pins.
+fn prewarm_pieces_from_image_set(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    use mvm_client::launch::runtime_overlay::{
+        RuntimeOverlayAcquireParams, acquire_runtime_overlay,
+    };
+
+    let resolver =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
+    if mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_err() {
+        acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+            cache_root,
+            expected_version: version,
+            arch,
+            source_checkout_root: None,
+        })?;
     }
 
-    prepare_initramfs_for_mode_with(
-        mode,
-        || {
-            let workspace_root =
-                mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
-                    .context("source guest runtime checkout is unavailable for initramfs")?;
-            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
-                &cache_root,
-                version,
-                arch,
-                &workspace_root,
-            )
-            .context("resolving shared guest runtime for initramfs")?;
-            mvm_build::initramfs::build_initramfs_from_guest_runtime(
-                &cache_root.join("initramfs"),
-                version,
-                arch,
-                &runtime,
-            )
-            .context("assembling initramfs from shared guest runtime")?;
-            Ok(())
-        },
-        || {
-            let initramfs_cache = cache_root.join("initramfs");
-            let set = mvm_build::published_image_set::SetMemberCache::locked();
-            if mvm_build::initramfs::resolve_image_set_initramfs(&initramfs_cache, &set, arch)
-                .is_err()
-            {
-                mvm_build::initramfs::download_initramfs(arch, &initramfs_cache)?;
-            }
-            Ok(())
-        },
-    )?;
-    let libcs = [
-        mvm_contract::guest_libc::GuestLibc::Musl,
-        mvm_contract::guest_libc::GuestLibc::Glibc,
-    ];
-    match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            let workspace_root =
-                mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
-                    .context("source guest runtime checkout is unavailable for SDK sidecars")?;
-            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
-                &cache_root,
-                version,
-                arch,
-                &workspace_root,
-            )
-            .context("resolving shared guest runtime for SDK sidecars")?;
-            for libc in libcs {
-                mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime(
-                    &cache_root,
-                    version,
-                    arch,
-                    libc,
-                    &runtime,
-                )?;
-            }
-        }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            let set = mvm_build::published_image_set::SetMemberCache::locked();
-            for libc in libcs {
-                let ready = mvm_build::sdk_sidecar::image_set_sidecar_resolver(
-                    &cache_root,
-                    &set,
-                    arch,
-                    libc,
-                )
+    let set = mvm_build::published_image_set::SetMemberCache::locked();
+    let initramfs_cache = mvm_build::runtime_pieces::initramfs_cache_root(cache_root);
+    if mvm_build::initramfs::resolve_image_set_initramfs(&initramfs_cache, &set, arch).is_err() {
+        mvm_build::initramfs::download_initramfs(arch, &initramfs_cache)?;
+    }
+    for libc in mvm_build::runtime_pieces::SDK_SIDECAR_LIBCS {
+        let ready =
+            mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache_root, &set, arch, libc)
                 .and_then(|resolver| {
                     resolver
                         .resolve(&arch.to_string(), libc)
                         .map_err(mvm_build::sdk_sidecar::SdkSidecarBuildError::from)
                 })
                 .is_ok();
-                if !ready {
-                    mvm_build::sdk_sidecar::download_sdk_sidecar(arch, libc, &cache_root)?;
-                }
-            }
+        if !ready {
+            mvm_build::sdk_sidecar::download_sdk_sidecar(arch, libc, cache_root)?;
         }
     }
     Ok(())
 }
 
-fn prepare_initramfs_for_mode_with<S, P>(
+/// Run exactly one of the two acquisitions for `mode`: a source build never
+/// downloads, and a published acquisition never compiles.
+fn prepare_runtime_pieces_for_mode_with<S, P>(
     mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
     source: S,
     published: P,
@@ -358,43 +319,43 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_bootstrap_artifacts_with, launch_helper_specs, prepare_initramfs_for_mode_with,
-        prewarm_host_aux_helpers_for,
+        acquire_bootstrap_artifacts_with, launch_helper_specs,
+        prepare_runtime_pieces_for_mode_with, prewarm_host_aux_helpers_for,
     };
     use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
     use std::cell::RefCell;
 
     #[test]
-    fn source_bootstrap_uses_archive_initramfs_without_legacy_builder() {
+    fn source_bootstrap_assembles_from_the_archive_and_downloads_nothing() {
         let calls = RefCell::new(Vec::new());
-        prepare_initramfs_for_mode_with(
+        prepare_runtime_pieces_for_mode_with(
             RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
             || {
-                calls.borrow_mut().push("archive initramfs");
+                calls.borrow_mut().push("archive pieces");
                 Ok(())
             },
             || {
-                calls.borrow_mut().push("legacy cargo builder");
-                anyhow::bail!("legacy initramfs builder must not run for source checkout")
+                calls.borrow_mut().push("image set");
+                anyhow::bail!("a source bootstrap must not download from the image set")
             },
         )
         .unwrap();
-        assert_eq!(calls.into_inner(), ["archive initramfs"]);
+        assert_eq!(calls.into_inner(), ["archive pieces"]);
     }
 
     #[test]
-    fn published_bootstrap_retains_published_initramfs_resolution() {
+    fn published_bootstrap_acquires_from_the_image_set_and_builds_nothing() {
         let calls = RefCell::new(Vec::new());
-        prepare_initramfs_for_mode_with(
+        prepare_runtime_pieces_for_mode_with(
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
             || anyhow::bail!("source guest runtime must not build in published mode"),
             || {
-                calls.borrow_mut().push("published initramfs");
+                calls.borrow_mut().push("image set");
                 Ok(())
             },
         )
         .unwrap();
-        assert_eq!(calls.into_inner(), ["published initramfs"]);
+        assert_eq!(calls.into_inner(), ["image set"]);
     }
 
     #[test]

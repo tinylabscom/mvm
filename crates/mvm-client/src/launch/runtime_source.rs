@@ -96,47 +96,6 @@ pub struct PairArtifactSource<'a> {
     ) -> anyhow::Result<mvm_build::image_source::CachedImageSet>,
 }
 
-/// Where the pair fingerprint for one overlay install is recorded: a sibling
-/// of the installed `<arch>` directory, outside the artifact set the resolver
-/// reads.
-fn overlay_pair_stamp(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: &str,
-) -> std::path::PathBuf {
-    cache_root
-        .join("runtime-overlay")
-        .join(version)
-        .join(format!("{arch}.pair"))
-}
-
-/// Record the pair fingerprint for the overlay installed at
-/// (`cache_root`, `version`, `arch`), so a later launch under the same pair
-/// trusts the install without rebuilding. `mvmctl build runtime-overlay
-/// build` calls this after a pair install; the launch path records its own.
-pub fn record_overlay_install_pair_fingerprint(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: &str,
-    fingerprint: &str,
-) -> Result<()> {
-    record_overlay_pair_fingerprint(cache_root, version, arch, fingerprint)
-}
-
-fn record_overlay_pair_fingerprint(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: &str,
-    fingerprint: &str,
-) -> Result<()> {
-    let stamp = overlay_pair_stamp(cache_root, version, arch);
-    if let Some(parent) = stamp.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&stamp, format!("{fingerprint}\n"))?;
-    Ok(())
-}
-
 /// Ordinary starts always re-resolve the overlay for the current host build.
 /// Callers that need same-version continuity across lifecycle state must use
 /// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
@@ -409,8 +368,8 @@ fn sidecar_provenance_warning(origin: &str, marker: &std::path::Path) -> String 
         "SDK sidecar {origin}, so `libmvm_host_services.so` does not carry changes to \
          crates/mvm-host-services in this checkout. Host-service calls from the guest use \
          the verbs it shipped with; one added here answers `unknown method`. Run \
-         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`, which repacks both libc \
-         variants from this checkout's guest runtime. Provenance marker: {}.",
+         `mvmctl build sdk-sidecar build`, which repacks both libc variants on the host from \
+         this checkout's guest runtime. Provenance marker: {}.",
         marker.display()
     )
 }
@@ -441,12 +400,13 @@ mod sdk_sidecar_host_resolution_tests {
         assert!(warning.contains("crates/mvm-host-services"), "{warning}");
         assert!(!warning.contains("changes to crates/mvm-sdk"), "{warning}");
         assert!(warning.contains("both libc variants"), "{warning}");
-        // The remedy is the one a checkout without an image checkout can run.
+        // The remedy packs on the host from the guest runtime, so it needs
+        // neither an image checkout nor the builder VM.
         assert!(
-            warning.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap"),
+            warning.contains("`mvmctl build sdk-sidecar build`"),
             "{warning}"
         );
-        assert!(!warning.contains("sdk-sidecar build"), "{warning}");
+        assert!(!warning.contains("MVM_IMAGES_DIR"), "{warning}");
         assert!(warning.contains(&marker.display().to_string()), "{warning}");
     }
 

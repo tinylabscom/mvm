@@ -293,10 +293,14 @@ pub fn build_runtime_overlay_from_guest_runtime(
         });
     }
     let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
-    if local_source_cache_is_fresh(&resolver.layout(&arch.to_string()), &runtime.digest)?
+    let layout = resolver.layout(&arch.to_string());
+    if local_source_cache_is_fresh(&layout, &runtime.digest)?
         && let Ok(cached) = resolver.resolve(&arch.to_string())
         && verify_guest_runtime_overlay_verity(&cached).is_ok()
     {
+        // The slot was assembled from this digest; a slot written before
+        // pieces recorded their origin gains the record here.
+        crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
         return Ok(cached);
     }
     let staging = tempfile::tempdir()?;
@@ -307,6 +311,7 @@ pub fn build_runtime_overlay_from_guest_runtime(
     verify_guest_runtime_overlay_verity(&artifact)?;
     write_local_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
     write_local_build_epoch(cache_root, version, arch)?;
+    crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
     Ok(artifact)
 }
 
@@ -1576,6 +1581,11 @@ mod tests {
             &runtime,
         )
         .unwrap();
+        assert_eq!(
+            crate::runtime_pieces::archive_origin(a.overlay_ext4.parent().unwrap()).unwrap(),
+            Some(runtime.digest.clone()),
+            "the assembled overlay names the archive it came from"
+        );
         let fs = ext4_view::Ext4::load_from_path(&a.overlay_ext4).unwrap();
         let names_in = |path: &str| {
             let mut names: Vec<Vec<u8>> = fs

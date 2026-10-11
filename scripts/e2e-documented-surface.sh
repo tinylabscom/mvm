@@ -451,8 +451,8 @@ E2E_IMAGE_ENV=(MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES="$E2E_FETCH_MODE"
 if [[ "$E2E_FETCH_MODE" != pinned ]]; then
   E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
   if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
-    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
-    echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
+    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the dev default image is built" >&2
+    echo "!!! from its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
     echo "!!! or MVM_FETCH_UNCHANGED_IMAGES=pinned to boot the pinned set's members." >&2
     exit 1
   fi
