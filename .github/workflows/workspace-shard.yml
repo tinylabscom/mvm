@@ -168,6 +168,19 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           path: ${{ runner.temp }}
 
+      # Dependency-boundary tests run `cargo tree --offline`, which needs the
+      # registry sources the build job had. The archive carries only test
+      # binaries, so fetch the locked sources onto this runner first.
+      - name: Fetch locked dependency sources
+        if: inputs.archive_run_id != ''
+        env:
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          cd "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cargo fetch --locked
+
       - name: Run archived workspace tests
         if: inputs.archive_run_id != ''
         env:
