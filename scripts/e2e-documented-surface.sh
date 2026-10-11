@@ -552,17 +552,35 @@ warm_launch_artifacts() {
 # A launch is cache-only: it boots an image `image pull` already prepared and
 # refuses one that was not ("cached OCI image ... is not launch-ready"). The
 # live scenarios boot these in this home, through `machine run --image`, a
-# detected runtime (`rust` from Cargo.toml, `python` from the command), or the
-# warm-up below, so the home is prepared here, the way an operator prepares
-# one. Best-effort like the warm-up: a pull that fails surfaces as the
-# scenarios that needed it failing, naming the image.
+# detected runtime (`rust` from Cargo.toml, `python` from the command), the
+# machine journey (`nginx`), or the warm-up below, so the home is prepared
+# here, the way an operator prepares one.
+#
+# A prepared rootfs is keyed by the guest runtime injected into it, and the
+# suite launches under two runtime sources in this one home: the `I launch`
+# steps and the journey resolve the published runtime, while the live-home
+# steps select this checkout's (`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build`). A
+# pull under one is not launch-ready under the other, so each image is
+# prepared under both.
+#
+# Fatal, not best-effort. A pull that failed here used to be reported as a
+# line in the log and then as a dozen scenarios refusing an unprepared image,
+# an hour later, each naming the image rather than the pull. The scenarios that
+# boot an image in a home of their own still prepare it themselves.
 # ---------------------------------------------------------------------------
-E2E_LIVE_IMAGES=(alpine rust:1-alpine python:3.12 python:3.12-alpine curlimages/curl:8.21.0)
+E2E_LIVE_IMAGES=(alpine nginx rust:1-alpine python:3.12 python:3.12-alpine curlimages/curl:8.21.0)
+E2E_RUNTIME_SOURCES=(download build)
 e2e_phase images
 for image in "${E2E_LIVE_IMAGES[@]}"; do
-  echo "==> pulling $image"
-  MVM_HOME="$E2E_HOME" "$MVMCTL" image pull "$image" \
-    || echo "    pull of $image FAILED; scenarios that boot it will say so"
+  for runtime_source in "${E2E_RUNTIME_SOURCES[@]}"; do
+    echo "==> pulling $image (guest runtime: $runtime_source)"
+    if ! MVM_HOME="$E2E_HOME" MVM_RUNTIME_OVERLAY_ACQUIRE_MODE="$runtime_source" \
+      "$MVMCTL" image pull "$image"; then
+      echo "!!! image pull $image failed (guest runtime: $runtime_source); the live" >&2
+      echo "!!! scenarios that boot it cannot run." >&2
+      exit 1
+    fi
+  done
 done
 
 e2e_phase launch-artifacts

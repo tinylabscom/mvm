@@ -122,5 +122,5 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 pub(in crate::commands) fn oci_cache_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("oci")
+    mvm_core::config::oci_cache_dir()
 }

@@ -317,6 +317,79 @@ fn documented_surface_script() -> String {
     fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
 }
 
+/// The images the runner prepares in the shared home, as its array lists them.
+fn documented_surface_live_images(script: &str) -> Vec<String> {
+    let line = script
+        .lines()
+        .find_map(|line| line.strip_prefix("E2E_LIVE_IMAGES=("))
+        .expect("the runner declares the images it prepares");
+    line.trim_end_matches(')')
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every image a live scenario prepares is prepared by the runner too, under
+/// both guest-runtime sources the suite launches with, and a pull that fails
+/// stops the run.
+///
+/// The pull used to be best-effort and ran under the published runtime only. A
+/// rootfs is keyed by the runtime injected into it, so every live-home scenario
+/// (which selects this checkout's runtime) found its image "not launch-ready",
+/// and the journey's `nginx` was never pulled at all; both surfaced an hour
+/// later as a dozen scenarios naming an image instead of the pull.
+#[test]
+fn the_documented_surface_runner_prepares_every_live_image_or_stops() {
+    let script = documented_surface_script();
+    let images = documented_surface_live_images(&script);
+
+    let mut prepared_by_scenarios = std::collections::BTreeSet::new();
+    let mut features = vec![std::path::PathBuf::from("features")];
+    while let Some(path) = features.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(&path).expect("read features dir") {
+                features.push(entry.expect("feature entry").path());
+            }
+        } else if path.extension().is_some_and(|ext| ext == "feature") {
+            let text = fs::read_to_string(&path).expect("read feature");
+            for line in text.lines() {
+                if let Some(rest) = line.split("the image \"").nth(1)
+                    && let Some((image, tail)) = rest.split_once('"')
+                    && tail.contains("is prepared in the live home")
+                {
+                    prepared_by_scenarios.insert(image.to_string());
+                }
+            }
+        }
+    }
+    // The journey boots its guest from a step rather than a feature line.
+    prepared_by_scenarios.insert("nginx".to_string());
+    for image in &prepared_by_scenarios {
+        assert!(
+            images.contains(image),
+            "a live scenario boots {image}, which the runner does not prepare: {images:?}"
+        );
+    }
+
+    assert!(
+        script.contains("E2E_RUNTIME_SOURCES=(download build)"),
+        "the runner must prepare each image under both guest-runtime sources"
+    );
+    assert!(
+        script.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=\"$runtime_source\""),
+        "each pull must select the runtime source it prepares for"
+    );
+    let pulls = script
+        .split("e2e_phase images")
+        .nth(1)
+        .and_then(|rest| rest.split("e2e_phase launch-artifacts").next())
+        .expect("the runner has an images phase");
+    assert!(
+        pulls.contains("exit 1") && !pulls.contains("|| echo"),
+        "a failed pull must stop the run:\n{pulls}"
+    );
+}
+
 /// The builder's store-image flock must lose to the suite deadline.
 ///
 /// `DEFAULT_LOCK_WAIT` is an hour and the suite's deadline defaulted to the

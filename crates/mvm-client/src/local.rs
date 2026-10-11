@@ -1003,9 +1003,11 @@ fn materialize_tree(
     layers: UnpackedLayers,
     options: TreeMaterializeOptions<'_>,
 ) -> Result<()> {
-    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    // The library carries no guest binaries; remaining legacy injection needs
-    // a source checkout or a complete compatibility cache.
+    let cache_root = mvm_core::config::oci_cache_dir(); // where the CLI prepares runtimes
+    if options.runtime_binaries.is_none() {
+        crate::launch::runtime_overlay::require_prepared_oci_guest_runtime(&cache_root)
+            .map_err(|e| backend_err(format!("{e:#}")))?;
+    }
     mvm_build::run_image::inject_and_materialize(
         mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
             .sealed(options.sealed)
@@ -1503,6 +1505,80 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
 
     use mvm_runtime::vm::instance_snapshot::ReseedShortfall;
+
+    /// Point `MVM_HOME` at `home` and select the published guest runtime, the
+    /// default a released `mvmctl` and its host library launch under.
+    fn published_runtime_home(home: &Path) -> mvm_core::util::test_env::TestEnv {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home);
+        env.remove(crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        env
+    }
+
+    /// A minimal unpacked image tree.
+    fn unpacked_tree(home: &Path) -> PathBuf {
+        let tree = home.join("unpacked");
+        std::fs::create_dir_all(tree.join("etc")).unwrap();
+        std::fs::write(tree.join("etc/hostname"), b"image\n").unwrap();
+        tree
+    }
+
+    /// The host library injects the guest runtime the CLI's preparation
+    /// installed, from the OCI cache the CLI reads it from. It used to look one
+    /// level up, where nothing installs one, and refused every image a release
+    /// `mvmctl` could boot with "legacy rootfs guest-runtime injection is
+    /// unavailable".
+    #[test]
+    fn a_library_launch_injects_the_guest_runtime_the_cli_prepared() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = published_runtime_home(home.path());
+        let layout = mvm_build::guest_agent_build::GuestAgentLayout::under(
+            &mvm_core::config::oci_cache_dir(),
+            env!("CARGO_PKG_VERSION"),
+            mvm_core::arch::GuestArch::host(),
+        );
+        std::fs::create_dir_all(&layout.dir).unwrap();
+        for bin in [
+            &layout.agent,
+            &layout.netinit,
+            &layout.egress_client,
+            &layout.entrypoint_runner,
+        ] {
+            std::fs::write(bin, b"\x7fELF-stub").unwrap();
+        }
+
+        let rootfs = materialize_from_dir(
+            &unpacked_tree(home.path()),
+            "lib-run",
+            UnpackedLayers::default(),
+        )
+        .expect("the prepared guest runtime is injected");
+
+        assert!(rootfs.is_file(), "{} was not written", rootfs.display());
+        assert!(rootfs.starts_with(home.path()));
+    }
+
+    /// Without a prepared runtime the library refuses at the CLI's boundary,
+    /// naming the verb that prepares one, rather than at the legacy fallback.
+    #[test]
+    fn a_library_launch_without_a_prepared_runtime_names_the_preparation_verb() {
+        let home = tempfile::tempdir().unwrap();
+        let _env = published_runtime_home(home.path());
+
+        let err = materialize_from_dir(
+            &unpacked_tree(home.path()),
+            "lib-run",
+            UnpackedLayers::default(),
+        )
+        .expect_err("no guest runtime is prepared");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("guest runtime is not prepared; run `mvmctl bootstrap` first"),
+            "{message}"
+        );
+        assert!(!message.contains("legacy rootfs"), "{message}");
+    }
 
     /// How a fake resumed guest answers the post-restore signal.
     #[derive(Clone, Copy)]
