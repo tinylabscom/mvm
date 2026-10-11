@@ -71,7 +71,9 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release.yml must call the shared documented-surface workflow"
     );
     assert!(
-        workflow.contains("needs: [bdd, e2e-docs, build, release-archive-smoke, distro-packages]"),
+        workflow.contains(
+            "needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]"
+        ),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
@@ -94,6 +96,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "bdd",
         "e2e-docs",
         "build",
+        "guest-runtime",
         "release-archive-smoke",
         "distro-packages",
     ] {

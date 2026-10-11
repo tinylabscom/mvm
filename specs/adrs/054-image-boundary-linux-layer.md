@@ -132,11 +132,15 @@ and cite #4100 for the direction, never the reverse.
   `mvm-host-vm-init` and `mvm-builderd` per boot. `mvm-setpriv` is the one mvm
   binary the builder image still bakes, and `mvm-host-vm-init` runs it from
   `/sbin`.
-- No CLI release carries the guest runtime, and `tests/release_assets.rs`
-  refuses the overlay, sidecar and initramfs as assets in `release.yml`.
-  `mvm_build::runtime_overlay::fetch_cli_release_archive` and
-  `install_runtime_overlay_archive` already implement a CLI-train archive
-  fetch, with no production caller.
+- Each CLI release builds the guest-bins archive and publishes it as a signed
+  asset (#4103): in the cosign sign loop, the signed checksum manifest and
+  the build provenance, and `tests/release_assets.rs` still refuses the
+  overlay, sidecar and initramfs as image assets of `release.yml`.
+  `install.sh` and the deb and rpm packages install it beside `mvmctl`;
+  `mvmctl bootstrap` on a release binary and `mvmctl env update` acquire it
+  through `mvm_build::runtime_overlay::fetch_cli_release_archive` (digest,
+  then signature). Nothing assembles the overlay, initramfs or sidecar from
+  it yet (#4104), so a release binary still boots the image set's copies.
 
 ## Consequences
 

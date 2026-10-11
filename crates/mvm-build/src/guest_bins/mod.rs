@@ -4,12 +4,12 @@
 //! The programs and libraries that run inside a guest are compiled from this
 //! workspace, against the one `Cargo.lock` the host links too. This archive is
 //! the guest runtime as one versioned unit, and its consumer is `mvmctl`
-//! itself: it is meant to ship as a signed asset of each CLI release, version
-//! locked to the CLI, and `mvmctl` is to assemble the runtime overlay, the
-//! initramfs and the SDK sidecar from it. Neither half is wired yet; today the
-//! archive is produced by `mvmctl build guest-bins` and by the manually
-//! dispatched guest-bins workflow, and nothing reads it. `mvm-images` does not
-//! consume it: that repository builds only the Linux layer.
+//! itself. Each CLI release builds it through the guest-bins workflow and
+//! publishes it as a signed asset, version locked to the CLI; a downloaded
+//! `mvmctl` acquires its own version's copy through [`release`]. A source
+//! checkout assembles the same members from the tree
+//! ([`crate::guest_runtime`]). `mvm-images` does not consume it: that
+//! repository builds only the Linux layer.
 //!
 //! The archive is a gzip tarball whose member paths spell each member's kind
 //! (see [`member`]):
@@ -56,6 +56,7 @@ pub mod cdylib;
 pub mod extras;
 pub mod member;
 pub mod python_sdk;
+pub mod release;
 
 pub use cdylib::{GPU_SHIM_CDYLIBS, GuestCdylib, HOST_SERVICES_CDYLIB, guest_cdylibs};
 pub use member::{GuestBinsMember, MemberError};

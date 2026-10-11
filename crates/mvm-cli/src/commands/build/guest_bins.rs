@@ -8,11 +8,10 @@
 //! so a warm cache makes this a packaging step and a cold one compiles each
 //! requested architecture once.
 //!
-//! Its consumer is `mvmctl`: the archive is the guest runtime a CLI release is
-//! to ship as a signed asset, from which `mvmctl` assembles the runtime
-//! overlay, the initramfs and the SDK sidecar. Neither the release asset nor
-//! that assembly exists yet, so today the command is how the archive is
-//! produced and inspected. `mvm-images` does not consume it.
+//! Its consumer is `mvmctl`: the archive is the guest runtime each CLI release
+//! publishes as a signed asset, and the release workflow produces it with this
+//! command. A downloaded `mvmctl` acquires its own version's copy;
+//! `mvm-images` does not consume it.
 
 use std::path::PathBuf;
 
