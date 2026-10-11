@@ -776,6 +776,48 @@ pub(super) fn security_snapshot_key_check() -> Check {
     }
 }
 
+/// Where the key that encrypts instance snapshots and warm standbys comes
+/// from. Read-only: doctor reports the source and never provisions one.
+///
+/// No key is informational on a host that has not paused or warmed anything
+/// yet; a source holding an unusable key (unreadable, wrong length, a file
+/// another user could read) is a finding, because every pause refuses on it.
+pub(super) fn security_snapshot_encryption_key_check() -> Check {
+    let (ok, info) =
+        snapshot_encryption_key_status(mvm_client::snapshot::host_snapshot_key_source());
+    Check {
+        name: "snapshot encryption key",
+        category: "security",
+        ok,
+        info,
+    }
+}
+
+/// The doctor line for a resolved snapshot key source, or why there is none.
+pub(super) fn snapshot_encryption_key_status(
+    resolved: Result<
+        mvm_client::snapshot::SnapshotKeySource,
+        mvm_client::snapshot::SnapshotKeyError,
+    >,
+) -> (bool, String) {
+    use mvm_client::snapshot::{SnapshotKeyError, SnapshotKeySource};
+    match resolved {
+        Ok(origin @ SnapshotKeySource::HomeKeyFile) => {
+            (true, format!("from {origin} (provisioned by mvmctl)"))
+        }
+        Ok(origin) => (true, format!("from {origin}")),
+        Err(SnapshotKeyError::Missing) => (
+            true,
+            format!(
+                "none yet — `mvmctl bootstrap` or the first `mvmctl pool warm` provisions one \
+                 at {}",
+                SnapshotKeySource::HomeKeyFile
+            ),
+        ),
+        Err(refusal) => (false, refusal.to_string()),
+    }
+}
+
 /// All template snapshot directories should be mode 0700.
 /// Walks `~/.mvm/templates/*/artifacts/*/snapshot/`,
 /// reports the first looser-perm directory found (or "all OK" /

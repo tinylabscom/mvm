@@ -107,6 +107,13 @@ impl fmt::Display for TenantSource<'_> {
             SnapshotKeySource::Explicit => f.write_str(&EnvKeyProvider::variable_for(tenant)),
             SnapshotKeySource::Keystore => write!(f, "the OS keystore entry mvm/{tenant}"),
             SnapshotKeySource::KeyFile => write!(f, "{DEFAULT_KEYS_DIR}/{tenant}.key"),
+            SnapshotKeySource::HomeKeyFile => write!(
+                f,
+                "{}",
+                mvm_core::config::mvm_keys_dir()
+                    .join(format!("{tenant}.key"))
+                    .display()
+            ),
         }
     }
 }

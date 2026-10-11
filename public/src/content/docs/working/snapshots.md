@@ -53,14 +53,23 @@ described under [Plaintext staging](#plaintext-staging).
 
 A sealed instance snapshot holds the guest's memory, so it is always encrypted
 (AES-256-GCM) under a 32-byte snapshot key. There is no setting that writes an
-unencrypted snapshot. Provision the key before the first pause, in one of two
-places:
+unencrypted snapshot. `mvmctl` reads the key from the first of these that holds
+one:
 
 - `MVM_TENANT_KEY_LOCAL`, set to 64 hex characters. Setting it is an explicit
   choice: it is then the only source `mvmctl` reads, which suits development,
   CI, and recovering a snapshot whose key you hold elsewhere.
+- The OS keystore entry `mvm/local`.
 - `/var/lib/mvm/keys/local.key`, holding the 32 raw bytes, mode `0600` or
   `0400`, readable by the user that runs `mvmctl`.
+- `~/.mvm/keys/local.key` (under `MVM_HOME` when that is set), the same format.
+
+A host with none of them gets one: `mvmctl bootstrap`, and the first
+`mvmctl pool warm`, write 32 random bytes to `~/.mvm/keys/local.key` at mode
+`0600` and record the creation in the local audit log. They never replace a
+file that is already there, and a key file another user could read is refused
+rather than rewritten. `mvmctl doctor` reports which source the key came from
+on its `snapshot encryption key` line.
 
 Keep a copy of the key. A snapshot encrypted under it cannot be resumed
 without it, and nothing else holds it.
@@ -69,7 +78,7 @@ without it, and nothing else holds it.
 anything, and the key it checked is the one that encrypts the capture. It
 refuses, with nothing written and the VM left running, when:
 
-- **no key is configured** in either place;
+- **no key is configured** in any of them (a pause does not create one);
 - **the key source cannot be read**, for example the key file exists but this
   user may not open it;
 - **the key is malformed**: not 64 hex characters, not 32 bytes, or a key file
@@ -202,8 +211,8 @@ Keys come from the same places as the snapshot key, per key domain:
 
 - **Host domain** — checkpoints of a VM admitted under no tenant, warm-pool
   parents and other host artifacts — uses the host snapshot key
-  (`MVM_TENANT_KEY_LOCAL`, the keystore entry `mvm/local`, or
-  `/var/lib/mvm/keys/local.key`).
+  (`MVM_TENANT_KEY_LOCAL`, the keystore entry `mvm/local`,
+  `/var/lib/mvm/keys/local.key`, or `~/.mvm/keys/local.key`).
 - **Tenant domain** `tenant:<name>` uses that tenant's own key
   (`MVM_TENANT_KEY_<NAME>`, the keystore entry `mvm/<name>`, or
   `/var/lib/mvm/keys/<name>.key`). The host key is never used in its place.

@@ -31,6 +31,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// before an OCI workload can launch.
 pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()> {
     run_steps(production)?;
+    // Warm standbys and paused machines are encrypted at rest; a host that
+    // has never held a snapshot key gets one here rather than at its first
+    // pause.
+    crate::commands::shared::ensure_snapshot_key()?;
     let mode = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode();
     // A release binary's guest runtime is the one its release ships, acquired
     // once up front. A source build has its tree; the image set has none.

@@ -11,6 +11,7 @@ mod hints;
 mod parse;
 mod resolve;
 mod signed_input;
+mod snapshot_key;
 mod state;
 mod vcpu_default;
 mod vsock;
@@ -39,6 +40,7 @@ pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destinatio
 pub(crate) use resolve::{ManifestArgRef, resolve_manifest_arg};
 pub(super) use resolve::{egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref};
 pub(in crate::commands) use signed_input::read_signed_input;
+pub(in crate::commands) use snapshot_key::ensure_snapshot_key;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

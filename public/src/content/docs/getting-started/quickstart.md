@@ -24,7 +24,9 @@ mvmctl pool warm 1 --image alpine
 mvmctl machine run --image alpine -- uname -a
 ```
 
-`MVM_RESIDENCY=warm` enables prepared claims in this shell. Linux otherwise
+`bootstrap` also creates the host snapshot key that warm standbys are
+encrypted under, at `~/.mvm/keys/local.key`, when the host has none; keep a
+copy of it. `MVM_RESIDENCY=warm` enables prepared claims in this shell. Linux otherwise
 defaults to `parked` with a zero warm target; `pool warm` alone does not change
 that policy.
 
