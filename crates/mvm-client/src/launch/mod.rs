@@ -22,6 +22,9 @@ pub mod runtime_source;
 pub mod start_params;
 #[cfg(test)]
 mod tests;
+mod unbooted;
+
+use unbooted::DefinitionOrigin;
 
 pub use request::{
     AccessMode, LaunchNetworkPolicy, LaunchRequest, LaunchRequestBuilder, LaunchSource,
@@ -694,8 +697,13 @@ impl LocalBackend {
     /// Reconcile + persist the declarative definition for a persistent
     /// launch. A same-config definition is reused; a different config is
     /// refused without `force` and recreated (stopping any old instance)
-    /// with it. Never boots.
-    fn persist_definition(&self, request: &LaunchRequest, name: &str) -> Result<mp::MachineSpec> {
+    /// with it. Never boots. Says whether the definition was written from
+    /// nothing, which decides whether a failure later in the launch removes it.
+    fn persist_definition(
+        &self,
+        request: &LaunchRequest,
+        name: &str,
+    ) -> Result<(mp::MachineSpec, DefinitionOrigin)> {
         let desired = persisted_spec_from_request(request, name);
         let existing = if machine_spec_path(name).exists() {
             Some(mp::load_machine_spec(name).map_err(crate::local::backend_err)?)
@@ -726,9 +734,12 @@ impl LocalBackend {
                     }
                 })?;
                 mvm_core::audit_emit!(ConfigChange, vm: name, "action=machine.create mode=persistent");
-                Ok(desired)
+                Ok((desired, DefinitionOrigin::Created))
             }
-            mp::SpecReconcile::Reuse => Ok(existing.expect("reuse implies an existing spec")),
+            mp::SpecReconcile::Reuse => Ok((
+                existing.expect("reuse implies an existing spec"),
+                DefinitionOrigin::Existing,
+            )),
             mp::SpecReconcile::Recreate { changed } => {
                 if self.machine_running(name) {
                     self.stop_for_recreate(name);
@@ -739,7 +750,7 @@ impl LocalBackend {
                     vm: name,
                     "action=machine.recreate changed={changed}"
                 );
-                Ok(desired)
+                Ok((desired, DefinitionOrigin::Existing))
             }
         }
     }
@@ -769,8 +780,9 @@ impl LocalBackend {
                     .name
                     .clone()
                     .expect("validated: persistent requests carry a name");
-                self.create_definition(&request, &name)?;
-                self.boot_persistent(&name, &request).await
+                let (_, origin) = self.create_definition(&request, &name)?;
+                let booted = self.boot_persistent(&name, &request).await;
+                self.discard_definition_on_failure(&name, origin, booted)
             }
         }
     }
@@ -796,7 +808,7 @@ impl LocalBackend {
             .name
             .clone()
             .expect("validated: persistent requests carry a name");
-        let spec = self.create_definition(request, &name)?;
+        let (spec, _) = self.create_definition(request, &name)?;
         Ok(MachineState {
             id: MachineId(name.clone()),
             name,
@@ -809,16 +821,24 @@ impl LocalBackend {
     }
 
     /// The persistent create path: reconcile + persist the spec, validate +
-    /// record secret references, register typed volume attachments.
-    fn create_definition(&self, request: &LaunchRequest, name: &str) -> Result<mp::MachineSpec> {
-        let spec = self.persist_definition(request, name)?;
-        self.validate_and_record_secret_refs(name, &request.secret_refs)?;
-        self.register_volume_attachments(
-            name,
-            &request.volumes,
-            AdmittedProfile::from_profile_name(&request.profile),
-        )?;
-        Ok(spec)
+    /// record secret references, register typed volume attachments. A
+    /// refusal removes a definition this call wrote.
+    fn create_definition(
+        &self,
+        request: &LaunchRequest,
+        name: &str,
+    ) -> Result<(mp::MachineSpec, DefinitionOrigin)> {
+        let (spec, origin) = self.persist_definition(request, name)?;
+        let recorded = self
+            .validate_and_record_secret_refs(name, &request.secret_refs)
+            .and_then(|()| {
+                self.register_volume_attachments(
+                    name,
+                    &request.volumes,
+                    AdmittedProfile::from_profile_name(&request.profile),
+                )
+            });
+        self.discard_definition_on_failure(name, origin, recorded.map(|()| (spec, origin)))
     }
 
     /// The transient launch path: collision check, secret-ref validation +
@@ -1223,14 +1243,7 @@ impl LocalBackend {
                 }
                 self.stop_for_recreate(name);
             }
-            self.release_session_resources(name)?;
-            // Drop the per-VM runtime dir too: a stale substitution-endpoint
-            // socket left behind blocks the next launch under the same name
-            // (the endpoint dies binding it, before its ready handshake).
-            remove_vm_runtime_dirs(name)?;
-            // The definition directory carries machine.json plus the
-            // secret-refs sidecar (already cleared above) — drop it whole.
-            remove_dir_if_present(&machine_state_dir(name))?;
+            self.remove_definition(name)?;
             mvm_core::audit_emit!(
                 ConfigChange,
                 vm: name,
