@@ -176,9 +176,9 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "5";
+const LOCAL_BUILD_EPOCH: &str = "6";
 
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 11] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -188,6 +188,8 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
+    ("mvm-tool-shim", "tool-shim"),
+    ("mvm-tool-helper", "tool-helper"),
 ];
 /// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
 /// archive's own cdylib table so the two cannot name different libraries.

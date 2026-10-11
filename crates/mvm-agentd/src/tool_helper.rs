@@ -1,0 +1,1892 @@
+//! The declared-command tool helper: the one guest process that can run a
+//! substituted tool's bytes.
+//!
+//! The guest init stashes every declared tool's original executable in a
+//! directory only this helper's identity can read and mounts the
+//! `mvm-tool-shim` client over every runnable path to those bytes. A workload
+//! process that execs a declared command therefore reaches only the shim; the
+//! shim relays the exact invocation here over a guest-local socket, and this
+//! helper:
+//!
+//! 1. maps the shim's own executable path (the path the kernel used to reach
+//!    it) to the one tool the signed plan bound to it — the workload cannot
+//!    choose a tool identity, and an `argv[0]` that claims the declared tool's
+//!    name fails closed into mediation;
+//! 2. asks the host to decide the exact argv over `host.tool.v1` before any
+//!    spawn, unless the agent already recorded a host decision for this relay
+//!    (the host-initiated `MediatedExec` path decides exactly once, on the
+//!    authenticated control session);
+//! 3. verifies the stash bytes still hash to the digest pinned at activation,
+//!    sanitizes the environment, and execs the tool as
+//!    [`crate::guest_mount::TOOL_UID`] with all three gids at
+//!    [`crate::guest_mount::TOOL_GID`] in a fresh session;
+//! 4. records that session under the host-minted binding with the agent, so
+//!    the tool's loopback egress is attributed and its routes and secrets are
+//!    enforced at the endpoint — and retires the binding when the tool exits.
+//!
+//! Every failure before the spawn is a refusal, never an approval: an unknown
+//! path, a malformed request, a denied decision, an unreachable host or agent,
+//! a digest mismatch or a failed exec all end with the shim exiting nonzero
+//! and the tool never running.
+
+use std::io;
+use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, MutexGuard};
+
+use mvm_contract::hash::sha256_hex;
+use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+
+use crate::tool_map::{Dispatch, EXIT_SPAWN, HelperReply, ShimRequest, ToolEntry, ToolMap};
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct ActiveTool {
+    session: u32,
+    start_ticks: u64,
+    binding: ToolInvocationBinding,
+}
+
+#[cfg(target_os = "linux")]
+impl ActiveTool {
+    fn matches(&self, question: &crate::tool_map::ToolSocketQuestion) -> bool {
+        self.session == question.session
+            && self.start_ticks == question.start_ticks
+            && self.binding == question.binding
+    }
+}
+
+#[cfg(target_os = "linux")]
+static ACTIVE_TOOLS: Mutex<Vec<ActiveTool>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "linux")]
+fn active_tools() -> MutexGuard<'static, Vec<ActiveTool>> {
+    ACTIVE_TOOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(target_os = "linux")]
+fn register_active(session: u32, binding: ToolInvocationBinding) -> io::Result<()> {
+    let (leader_session, start_ticks) = crate::tool_attribution::process_session_start(session)?;
+    if leader_session != session {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tool child is not its session leader",
+        ));
+    }
+    active_tools().push(ActiveTool {
+        session,
+        start_ticks,
+        binding,
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retire_active(session: u32) {
+    active_tools().retain(|active| active.session != session);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn register_active(_session: u32, _binding: ToolInvocationBinding) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "tool attribution requires Linux",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn retire_active(_session: u32) {}
+
+/// Largest tool binary the helper will hash and exec.
+pub const MAX_TOOL_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Failure modes that map to the reply the shim gets.
+#[derive(Debug, thiserror::Error)]
+pub enum HelperError {
+    /// Mediation itself is broken (transport down, stash unreadable or
+    /// tampered). The tool never runs.
+    #[error("{0}")]
+    Unavailable(String),
+    /// The shim's request or the tool state was malformed.
+    #[error("{0}")]
+    BadRequest(String),
+}
+
+/// How the helper learns prior decisions and records sessions.
+pub trait AgentDecisions {
+    /// Read the kernel-reported executable for the shim peer. Production
+    /// delegates this to the guest agent, which shares the workload uid and
+    /// can therefore inspect procfs without a privileged identity transition.
+    fn executable(&self, _pid: u32) -> Result<String, HelperError> {
+        Err(HelperError::Unavailable(
+            "shim executable provenance is unavailable".into(),
+        ))
+    }
+    /// Consume the host decision recorded for a `MediatedExec` relay pid.
+    /// `Ok(Some(binding))` is a decided relay (`None` binding when the tool
+    /// scopes nothing); `Ok(None)` is an undecided caller.
+    fn decided(&self, pid: u32) -> Result<Option<Option<ToolInvocationBinding>>, HelperError>;
+    /// Record a tool session under its binding for egress attribution.
+    fn record(&self, session: u32, binding: ToolInvocationBinding) -> Result<(), HelperError>;
+    /// Retire a recorded session after the tool exited.
+    fn retire(&self, session: u32);
+}
+
+/// How the helper asks the host to decide an invocation.
+pub trait HostDecisions {
+    /// One exact invocation decision, fail closed.
+    fn decide(&self, request: &ToolCheckRequest) -> Result<ToolDecisionReply, HelperError>;
+    /// Release a binding the helper minted and now retires.
+    fn release(&self, binding: ToolInvocationBinding);
+}
+
+/// One validated, decided run the helper is about to spawn.
+#[derive(Debug)]
+pub struct ApprovedRun<'a> {
+    /// The tool whose bytes run.
+    pub entry: &'a ToolEntry,
+    /// Exact argv the tool is spawned with (`argv[0]` is the declared path).
+    pub argv: Vec<String>,
+    /// The caller's working directory.
+    pub cwd: String,
+    /// Environment for the tool (already sanitized when mediated).
+    pub env: Vec<(String, String)>,
+    /// The host-minted binding for a scoped tool, if any.
+    pub binding: Option<ToolInvocationBinding>,
+    /// Whether the helper minted the binding (undecided path) and so must
+    /// release it at retirement; a consumed relay decision is released
+    /// host-side by the `MediatedExec` caller.
+    pub helper_minted_binding: bool,
+}
+
+/// Validate one shim request and take every decision the run needs. Pure
+/// policy: socket plumbing and spawning stay outside so the rules are
+/// testable without a guest.
+pub fn approve<'a>(
+    map: &'a ToolMap,
+    request: &ShimRequest,
+    peer_pid: u32,
+    _peer_uid: u32,
+    _peer_gid: u32,
+    agent: &dyn AgentDecisions,
+    host: &dyn HostDecisions,
+) -> Result<ApprovedRun<'a>, HelperReply> {
+    let entry = match map.dispatch(&request.exe, request.argv.first().map(String::as_str)) {
+        Dispatch::Mediate(entry) => entry,
+        Dispatch::Unknown => {
+            return Err(HelperReply::Denied {
+                reason: "the executed path is not a declared tool".into(),
+            });
+        }
+    };
+    let Some(argv) = non_empty_argv(&request.argv) else {
+        return Err(HelperReply::Denied {
+            reason: "empty declared command argv".into(),
+        });
+    };
+
+    // The relayed argv is reported to the host with the declared executable
+    // as argv[0]: the path that reached the shim is already verified to be
+    // the signed one, so the policy match stays canonical no matter which
+    // alias spelling the workload used.
+    let mut canonical = argv;
+    canonical[0] = entry.executable.clone();
+    let (binding, helper_minted_binding) = match agent.decided(peer_pid) {
+        Ok(Some(binding)) => (binding, false),
+        Ok(None) => match decide_at_host(entry, &canonical, host)? {
+            ToolDecisionReply::Allow => (None, false),
+            ToolDecisionReply::AllowBound { binding } => (Some(binding), true),
+            ToolDecisionReply::Deny => {
+                return Err(HelperReply::Denied {
+                    reason: "the declared tool invocation was denied by host policy".into(),
+                });
+            }
+        },
+        Err(error) => {
+            return Err(HelperReply::Unavailable {
+                reason: format!("tool decision state unavailable: {error}"),
+            });
+        }
+    };
+
+    Ok(ApprovedRun {
+        entry,
+        argv: canonical,
+        cwd: request.cwd.clone(),
+        env: crate::tool_map::sanitized_tool_env(&request.env),
+        binding,
+        helper_minted_binding,
+    })
+}
+
+fn non_empty_argv(argv: &[String]) -> Option<Vec<String>> {
+    let argv: Vec<String> = argv.to_vec();
+    if argv.first().is_some_and(|first| !first.is_empty()) {
+        Some(argv)
+    } else {
+        None
+    }
+}
+
+fn decide_at_host(
+    entry: &ToolEntry,
+    canonical_argv: &[String],
+    host: &dyn HostDecisions,
+) -> Result<ToolDecisionReply, HelperReply> {
+    let Some(request) = ToolCheckRequest::from_argv(entry.tool.clone(), canonical_argv) else {
+        return Err(HelperReply::Unavailable {
+            reason: "the declared tool invocation is malformed".into(),
+        });
+    };
+    host.decide(&request)
+        .map_err(|error| HelperReply::Unavailable {
+            reason: format!("tool decision transport failed: {error}"),
+        })
+}
+
+/// Verify the stash still holds the bytes pinned at activation.
+pub fn verify_stash(entry: &ToolEntry, stash: &Path) -> Result<(), HelperError> {
+    let size = std::fs::metadata(stash)
+        .map_err(|error| {
+            HelperError::Unavailable(format!(
+                "tool stash {} unreadable: {error}",
+                stash.display()
+            ))
+        })?
+        .len();
+    if size > MAX_TOOL_BYTES {
+        return Err(HelperError::Unavailable(format!(
+            "tool stash {} exceeds the {MAX_TOOL_BYTES}-byte bound",
+            stash.display()
+        )));
+    }
+    let bytes = std::fs::read(stash).map_err(|error| {
+        HelperError::Unavailable(format!(
+            "tool stash {} unreadable: {error}",
+            stash.display()
+        ))
+    })?;
+    if bytes.len() as u64 > MAX_TOOL_BYTES {
+        return Err(HelperError::Unavailable(format!(
+            "tool stash {} exceeds the {MAX_TOOL_BYTES}-byte bound",
+            stash.display()
+        )));
+    }
+    let actual = sha256_hex(&bytes);
+    if actual != entry.digest {
+        return Err(HelperError::Unavailable(format!(
+            "tool stash {} does not match the digest pinned at activation",
+            stash.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Finish a run the policy approved: verify the bytes, spawn the tool, wait
+/// for it, and retire what it recorded. Returns the exit code for the shim.
+pub fn run_approved(
+    run: &ApprovedRun<'_>,
+    stdio: [std::os::unix::io::RawFd; 3],
+    events: &mut dyn FnMut() -> ToolEvent,
+    agent: &dyn AgentDecisions,
+    host: &dyn HostDecisions,
+) -> i32 {
+    if let Err(error) = verify_stash(run.entry, Path::new(&run.entry.stash)) {
+        eprintln!("mvm-tool-helper: {error}");
+        release_helper_binding(run, host);
+        return crate::tool_map::EXIT_UNAVAILABLE;
+    }
+    let spawned = match spawn_tool(run, stdio) {
+        Ok(child) => child,
+        Err(error) => {
+            eprintln!("mvm-tool-helper: spawn {}: {error}", run.entry.tool);
+            release_helper_binding(run, host);
+            return EXIT_SPAWN;
+        }
+    };
+    let Ok(child) = u32::try_from(spawned.pid) else {
+        drop(spawned.gate);
+        kill_and_reap(spawned.pid);
+        release_helper_binding(run, host);
+        return crate::tool_map::EXIT_UNAVAILABLE;
+    };
+    let recorded = if let Some(binding) = run.binding.clone() {
+        if let Err(error) = agent.record(child, binding.clone()) {
+            eprintln!("mvm-tool-helper: attribution unavailable: {error}");
+            drop(spawned.gate);
+            kill_and_reap(spawned.pid);
+            release_helper_binding(run, host);
+            return crate::tool_map::EXIT_UNAVAILABLE;
+        }
+        if let Err(error) = register_active(child, binding) {
+            eprintln!("mvm-tool-helper: active session unavailable: {error}");
+            drop(spawned.gate);
+            kill_and_reap(spawned.pid);
+            agent.retire(child);
+            release_helper_binding(run, host);
+            return crate::tool_map::EXIT_UNAVAILABLE;
+        }
+        true
+    } else {
+        false
+    };
+    let mut gate = std::fs::File::from(spawned.gate);
+    if let Err(error) = std::io::Write::write_all(&mut gate, &[1]) {
+        eprintln!("mvm-tool-helper: release tool spawn: {error}");
+        drop(gate);
+        kill_and_reap(spawned.pid);
+        if recorded {
+            retire_active(child);
+            agent.retire(child);
+        }
+        release_helper_binding(run, host);
+        return crate::tool_map::EXIT_UNAVAILABLE;
+    }
+    drop(gate);
+    let code = wait_or_kill(spawned.pid, events);
+    if recorded {
+        retire_active(child);
+        agent.retire(child);
+    }
+    release_helper_binding(run, host);
+    code
+}
+
+fn release_helper_binding(run: &ApprovedRun<'_>, host: &dyn HostDecisions) {
+    if run.helper_minted_binding
+        && let Some(binding) = run.binding.clone()
+    {
+        host.release(binding);
+    }
+}
+
+struct SpawnedTool {
+    pid: i32,
+    gate: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+fn kill_and_reap(pid: i32) {
+    // SAFETY: the pid is the child forked by this helper, and the status is writable.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        let mut status = 0;
+        libc::waitpid(pid, &mut status, 0);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_and_reap(_pid: i32) {}
+
+/// What the shim's control socket reported while the tool runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolEvent {
+    /// The shim is alive; `Some` carries a signal the shim asked to be
+    /// forwarded to the tool's process group.
+    Running(Option<u8>),
+    /// The shim is gone: kill the tool and stop waiting.
+    Gone,
+}
+
+#[cfg(target_os = "linux")]
+fn child_code(status: i32) -> i32 {
+    // Reads the raw `waitpid` status directly: `ExitStatus::from_raw` is
+    // unsafe on some toolchains and not on others, which makes it a
+    // portability trap.
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        128 + libc::WTERMSIG(status)
+    }
+}
+
+/// Wait for `child`, forwarding the shim's signals to the tool's process
+/// group and killing the group the moment the shim goes away.
+#[cfg(target_os = "linux")]
+fn wait_or_kill(child: i32, events: &mut dyn FnMut() -> ToolEvent) -> i32 {
+    loop {
+        let mut status = 0;
+        // SAFETY: `status` is a writable int the kernel fills in.
+        let rc = unsafe { libc::waitpid(child, &mut status, libc::WNOHANG) };
+        if rc == child {
+            return child_code(status);
+        }
+        if rc < 0 {
+            // ECHILD and friends: the child is unwaitable, so report the
+            // mediation as broken rather than spinning.
+            return crate::tool_map::EXIT_UNAVAILABLE;
+        }
+        match events() {
+            ToolEvent::Running(Some(signal)) => {
+                // SAFETY: a positive signal number and the child's process
+                // group id, both plain integers.
+                unsafe { libc::kill(-child, signal as libc::c_int) };
+            }
+            ToolEvent::Running(None) => {}
+            ToolEvent::Gone => {
+                // SAFETY: negative pid kills the child's process group, which
+                // `setsid` in the child made its own.
+                unsafe { libc::kill(-child, libc::SIGKILL) };
+                let mut status = 0;
+                // SAFETY: as above.
+                unsafe { libc::waitpid(child, &mut status, 0) };
+                return child_code(status);
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_or_kill(_child: i32, _events: &mut dyn FnMut() -> ToolEvent) -> i32 {
+    crate::tool_map::EXIT_UNAVAILABLE
+}
+
+/// Spawn the verified stash with the approved identity and descriptors.
+/// Returns the child's pid.
+#[cfg(target_os = "linux")]
+fn spawn_tool(
+    run: &ApprovedRun<'_>,
+    stdio: [std::os::unix::io::RawFd; 3],
+) -> io::Result<SpawnedTool> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let stash = std::fs::File::open(&run.entry.stash)?;
+    // Rust opens with O_CLOEXEC: the descriptor survives until the execveat
+    // below consumes it and is then closed by the exec itself.
+    let stash_fd = stash.as_raw_fd();
+    let uid = crate::guest_mount::TOOL_UID;
+    let gid = crate::guest_mount::TOOL_GID;
+    let argv: Vec<std::ffi::CString> = run
+        .argv
+        .iter()
+        .map(|arg| std::ffi::CString::new(arg.as_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut argv_ptrs: Vec<*const libc::c_char> = argv.iter().map(|arg| arg.as_ptr()).collect();
+    argv_ptrs.push(std::ptr::null());
+    let env: Vec<std::ffi::CString> = run
+        .env
+        .iter()
+        .map(|(key, value)| std::ffi::CString::new(format!("{key}={value}").into_bytes()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let mut env_ptrs: Vec<*const libc::c_char> = env.iter().map(|var| var.as_ptr()).collect();
+    env_ptrs.push(std::ptr::null());
+    let cwd = std::ffi::CString::new(run.cwd.as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+
+    let mut gate_fds = [-1; 2];
+    // SAFETY: gate_fds is a writable pair of integers filled by pipe2.
+    if unsafe { libc::pipe2(gate_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful pipe2 returned two fresh owned descriptors.
+    let read_gate = unsafe { std::os::fd::OwnedFd::from_raw_fd(gate_fds[0]) };
+    let write_gate = unsafe { std::os::fd::OwnedFd::from_raw_fd(gate_fds[1]) };
+    let mut ready_fds = [-1; 2];
+    // SAFETY: ready_fds is another writable descriptor pair for pipe2.
+    if unsafe { libc::pipe2(ready_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful pipe2 returned two fresh owned descriptors.
+    let read_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(ready_fds[0]) };
+    let write_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(ready_fds[1]) };
+
+    // SAFETY: fork in a threaded helper; the child path calls only
+    // async-signal-safe syscalls with plain integer arguments and pointers to
+    // buffers that outlive the fork (they are not mutated afterwards). The
+    // parent closes only its own copy of the stash descriptor.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if pid == 0 {
+        // Child: become the tool. Every step is async-signal-safe; any
+        // failure ends in _exit, never a return into the forked address
+        // space with two threads' locks held.
+        unsafe {
+            if libc::setsid() < 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            libc::close(write_gate.as_raw_fd());
+            libc::close(read_ready.as_raw_fd());
+            for (target, fd) in [(0, stdio[0]), (1, stdio[1]), (2, stdio[2])] {
+                if fd < 0 {
+                    libc::close(target);
+                } else if fd != target && libc::dup2(fd, target) < 0 {
+                    libc::_exit(EXIT_SPAWN);
+                }
+            }
+            if libc::setgroups(0, std::ptr::null()) != 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            if libc::setresgid(gid, gid, gid) != 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            if libc::setresuid(uid, uid, uid) != 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            // A non-root-to-non-root transition retains the helper's
+            // SETUID/SETGID capabilities, including its ambient set. Revoke
+            // them before reporting readiness or executing untrusted code.
+            if crate::guest_mount::clear_process_capabilities().is_err() {
+                libc::_exit(EXIT_SPAWN);
+            }
+            if libc::chdir(cwd.as_ptr()) != 0 && libc::chdir(c"/".as_ptr()) != 0 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            let ready = 1u8;
+            if libc::write(write_ready.as_raw_fd(), (&ready as *const u8).cast(), 1) != 1 {
+                libc::_exit(EXIT_SPAWN);
+            }
+            libc::close(write_ready.as_raw_fd());
+            let mut permission = 0u8;
+            if libc::read(
+                read_gate.as_raw_fd(),
+                (&mut permission as *mut u8).cast(),
+                1,
+            ) != 1
+                || permission != 1
+            {
+                libc::_exit(crate::tool_map::EXIT_UNAVAILABLE);
+            }
+            libc::close(read_gate.as_raw_fd());
+            // AT_EMPTY_PATH execs the open descriptor: no path walk through
+            // the helper-only stash directory after the uid drop, and the
+            // bytes were digest-verified before the fork.
+            if execveat_raw(
+                stash_fd,
+                c"".as_ptr(),
+                argv_ptrs.as_ptr(),
+                env_ptrs.as_ptr(),
+                AT_EMPTY_PATH_RAW,
+            ) != 0
+            {
+                // Capture errno before any other syscall. Formatting uses
+                // only a stack buffer: allocation/stdio locks are unsafe here
+                // because this child was forked from a threaded helper.
+                let errno = *libc::__errno_location() as u32;
+                let (message, length) = exec_failure_message(errno);
+                libc::write(2, message.as_ptr().cast(), length);
+                libc::_exit(EXIT_SPAWN);
+            }
+            libc::_exit(EXIT_SPAWN);
+        }
+    }
+    drop(stash);
+    drop(read_gate);
+    drop(write_ready);
+    let mut ready_poll = libc::pollfd {
+        fd: read_ready.as_raw_fd(),
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    // SAFETY: ready_poll is one writable poll entry; the child owns the
+    // matching pipe writer and signals only after its identity transition.
+    let signaled = unsafe { libc::poll(&mut ready_poll, 1, 5_000) };
+    let mut ready = 0u8;
+    // SAFETY: ready is writable, and read_ready remains open for this call.
+    let confirmed = signaled > 0
+        && unsafe { libc::read(read_ready.as_raw_fd(), (&mut ready as *mut u8).cast(), 1) } == 1
+        && ready == 1;
+    if !confirmed {
+        kill_and_reap(pid);
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "tool child did not become its isolated identity",
+        ));
+    }
+    Ok(SpawnedTool {
+        pid,
+        gate: write_gate,
+    })
+}
+
+/// Allocation-free diagnostic for the raw-fork child. Do not include command
+/// arguments or environment values, which may contain sensitive inputs.
+#[cfg(any(target_os = "linux", test))]
+fn exec_failure_message(mut errno: u32) -> ([u8; 64], usize) {
+    let prefix = b"mvm-tool-helper: execveat failed (errno ";
+    let mut message = [0u8; 64];
+    message[..prefix.len()].copy_from_slice(prefix);
+    let mut digits = [0u8; 10];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (errno % 10) as u8;
+        errno /= 10;
+        if errno == 0 {
+            break;
+        }
+    }
+    let end = prefix.len() + digits.len() - start;
+    message[prefix.len()..end].copy_from_slice(&digits[start..]);
+    message[end..end + 2].copy_from_slice(b")\n");
+    (message, end + 2)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn spawn_tool(
+    _run: &ApprovedRun<'_>,
+    _stdio: [std::os::unix::io::RawFd; 3],
+) -> io::Result<SpawnedTool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "tools spawn only in a Linux guest",
+    ))
+}
+
+/// `execveat(2)` via the raw syscall. The libC route is unusable in the
+/// guest: `libc` gates the symbol away on linux-musl, and the pinned static
+/// musl in the toolchain does not export `execveat` at all. The syscall
+/// number is arch-fixed and `syscall(2)` is async-signal-safe.
+#[cfg(target_os = "linux")]
+fn execveat_raw(
+    fd: libc::c_int,
+    path: *const libc::c_char,
+    argv: *const *const libc::c_char,
+    envp: *const *const libc::c_char,
+    flags: libc::c_int,
+) -> libc::c_int {
+    // SAFETY: the caller passes a live descriptor and NUL-terminated vectors
+    // that outlive the call, per the execveat(2) contract; every argument is
+    // a plain integer or pointer to live memory.
+    unsafe { libc::syscall(libc::SYS_execveat, fd, path, argv, envp, flags) as libc::c_int }
+}
+
+/// `AT_EMPTY_PATH` from `linux/fcntl.h`.
+#[cfg(target_os = "linux")]
+const AT_EMPTY_PATH_RAW: libc::c_int = 0x1000;
+
+/// `msghdr::msg_controllen` and `cmsghdr::cmsg_len` are `usize` on some
+/// libC/target combinations and `socklen_t` on others, and the set differs
+/// between the pinned embed toolchains and the host toolchain. This trait
+/// converts from `usize` for whichever field type the target libc declares.
+#[cfg(target_os = "linux")]
+trait MsgLen {
+    fn of_len(len: usize) -> Self;
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for usize {
+    fn of_len(len: usize) -> Self {
+        len
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for u32 {
+    fn of_len(len: usize) -> Self {
+        u32::try_from(len).expect("a control buffer always fits msg_controllen")
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tool_helper/capability_tests.rs"]
+mod capability_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_failure_diagnostic_reports_errno_without_invocation_data() {
+        for errno in [0, 13, u32::MAX] {
+            let (message, length) = exec_failure_message(errno);
+            assert_eq!(
+                &message[..length],
+                format!("mvm-tool-helper: execveat failed (errno {errno})\n").as_bytes()
+            );
+        }
+    }
+
+    struct NoAgent;
+    impl AgentDecisions for NoAgent {
+        fn decided(&self, _pid: u32) -> Result<Option<Option<ToolInvocationBinding>>, HelperError> {
+            Ok(None)
+        }
+        fn record(
+            &self,
+            _session: u32,
+            _binding: ToolInvocationBinding,
+        ) -> Result<(), HelperError> {
+            Ok(())
+        }
+        fn retire(&self, _session: u32) {}
+    }
+
+    struct NoHost;
+    impl HostDecisions for NoHost {
+        fn decide(&self, _request: &ToolCheckRequest) -> Result<ToolDecisionReply, HelperError> {
+            Err(HelperError::Unavailable("no host".into()))
+        }
+        fn release(&self, _binding: ToolInvocationBinding) {}
+    }
+
+    fn entry(tool: &str, executable: &str) -> ToolEntry {
+        ToolEntry {
+            tool: tool.into(),
+            executable: executable.into(),
+            aliases: Vec::new(),
+            stash: format!("/run/mvm/toolstash/{}", "a".repeat(64)),
+            digest: "b".repeat(64),
+        }
+    }
+
+    fn map(entries: Vec<ToolEntry>) -> ToolMap {
+        ToolMap { tools: entries }
+    }
+
+    fn request(exe: &str, argv: &[&str]) -> ShimRequest {
+        ShimRequest {
+            exe: exe.into(),
+            argv: argv.iter().map(ToString::to_string).collect(),
+            cwd: "/work".into(),
+            env: vec![
+                ("LD_PRELOAD".into(), "/tmp/x".into()),
+                ("PATH".into(), "/bin".into()),
+            ],
+        }
+    }
+
+    #[test]
+    fn unknown_path_is_denied() {
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let reply = approve(
+            &tools,
+            &request("/tmp/sh", &["sh", "-c", "echo hi"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &NoHost,
+        )
+        .expect_err("unknown path refuses");
+        assert!(matches!(reply, HelperReply::Denied { .. }));
+    }
+
+    #[test]
+    fn empty_argv_is_denied() {
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let reply = approve(
+            &tools,
+            &request("/bin/sh", &[""]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &NoHost,
+        )
+        .expect_err("empty argv refuses");
+        assert!(matches!(reply, HelperReply::Denied { .. }));
+    }
+
+    #[test]
+    fn attacker_controlled_argv0_cannot_select_a_direct_run() {
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let reply = approve(
+            &tools,
+            &request("/bin/sh", &["ls", "-l"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &NoHost,
+        )
+        .expect_err("a substituted path must ask the host regardless of argv0");
+        assert!(matches!(reply, HelperReply::Unavailable { .. }));
+    }
+
+    #[test]
+    fn mediated_runs_canonicalize_argv_and_sanitize_env() {
+        struct AllowHost;
+        impl HostDecisions for AllowHost {
+            fn decide(&self, request: &ToolCheckRequest) -> Result<ToolDecisionReply, HelperError> {
+                assert_eq!(request.tool, "shell");
+                assert_eq!(request.executable.as_deref(), Some("/bin/sh"));
+                assert_eq!(request.argv, "/bin/sh -c 'echo hi'");
+                Ok(ToolDecisionReply::Allow)
+            }
+            fn release(&self, _binding: ToolInvocationBinding) {}
+        }
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let run = approve(
+            &tools,
+            &request("/bin/sh", &["sh", "-c", "echo hi"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &AllowHost,
+        )
+        .expect("mediated run approves");
+        assert_eq!(run.argv, vec!["/bin/sh", "-c", "echo hi"]);
+        assert!(!run.env.iter().any(|(key, _)| key == "LD_PRELOAD"));
+        assert!(run.env.iter().any(|(key, _)| key == "PATH"));
+        assert!(!run.helper_minted_binding);
+    }
+
+    #[test]
+    fn a_decided_relay_skips_the_host_and_is_not_released_here() {
+        struct PanicHost;
+        impl HostDecisions for PanicHost {
+            fn decide(
+                &self,
+                _request: &ToolCheckRequest,
+            ) -> Result<ToolDecisionReply, HelperError> {
+                panic!("a decided relay must not re-ask the host");
+            }
+            fn release(&self, _binding: ToolInvocationBinding) {}
+        }
+        struct DecidedAgent;
+        impl AgentDecisions for DecidedAgent {
+            fn decided(
+                &self,
+                pid: u32,
+            ) -> Result<Option<Option<ToolInvocationBinding>>, HelperError> {
+                assert_eq!(pid, 77);
+                Ok(Some(None))
+            }
+            fn record(
+                &self,
+                _session: u32,
+                _binding: ToolInvocationBinding,
+            ) -> Result<(), HelperError> {
+                Ok(())
+            }
+            fn retire(&self, _session: u32) {}
+        }
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let run = approve(
+            &tools,
+            &request("/bin/sh", &["sh", "-c", "echo hi"]),
+            77,
+            901,
+            901,
+            &DecidedAgent,
+            &PanicHost,
+        )
+        .expect("decided relay approves");
+        assert!(!run.helper_minted_binding);
+    }
+
+    #[test]
+    fn a_bound_allow_is_minted_by_the_helper_and_marked_for_release() {
+        struct BoundHost;
+        impl HostDecisions for BoundHost {
+            fn decide(
+                &self,
+                _request: &ToolCheckRequest,
+            ) -> Result<ToolDecisionReply, HelperError> {
+                Ok(ToolDecisionReply::AllowBound {
+                    binding: ToolInvocationBinding::from_random([3; 16]),
+                })
+            }
+            fn release(&self, _binding: ToolInvocationBinding) {}
+        }
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let run = approve(
+            &tools,
+            &request("/bin/sh", &["sh", "-c", "echo hi"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &BoundHost,
+        )
+        .expect("bound allow approves");
+        assert!(run.binding.is_some());
+        assert!(run.helper_minted_binding);
+    }
+
+    #[test]
+    fn a_host_deny_is_a_denial_not_an_unavailability() {
+        struct DenyHost;
+        impl HostDecisions for DenyHost {
+            fn decide(
+                &self,
+                _request: &ToolCheckRequest,
+            ) -> Result<ToolDecisionReply, HelperError> {
+                Ok(ToolDecisionReply::Deny)
+            }
+            fn release(&self, _binding: ToolInvocationBinding) {}
+        }
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let reply = approve(
+            &tools,
+            &request("/bin/sh", &["sh", "-c", "echo hi"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &DenyHost,
+        )
+        .expect_err("deny refuses");
+        assert!(matches!(reply, HelperReply::Denied { .. }));
+    }
+
+    #[test]
+    fn a_host_transport_failure_is_unavailable_not_denied() {
+        let tools = map(vec![entry("shell", "/bin/sh")]);
+        let reply = approve(
+            &tools,
+            &request("/bin/sh", &["sh", "-c", "echo hi"]),
+            10,
+            901,
+            901,
+            &NoAgent,
+            &NoHost,
+        )
+        .expect_err("transport failure refuses");
+        assert!(matches!(reply, HelperReply::Unavailable { .. }));
+    }
+
+    #[test]
+    fn failed_stash_check_releases_a_helper_minted_binding() {
+        struct CountingHost(std::cell::Cell<usize>);
+        impl HostDecisions for CountingHost {
+            fn decide(
+                &self,
+                _request: &ToolCheckRequest,
+            ) -> Result<ToolDecisionReply, HelperError> {
+                panic!("this run was already approved");
+            }
+            fn release(&self, _binding: ToolInvocationBinding) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let mut tool = entry("shell", "/bin/sh");
+        tool.stash = "/nonexistent/mvm-tool-stash".into();
+        let run = ApprovedRun {
+            entry: &tool,
+            argv: vec!["/bin/sh".into()],
+            cwd: "/".into(),
+            env: Vec::new(),
+            binding: Some(ToolInvocationBinding::from_random([7; 16])),
+            helper_minted_binding: true,
+        };
+        let host = CountingHost(std::cell::Cell::new(0));
+        let code = run_approved(&run, [-1; 3], &mut || ToolEvent::Gone, &NoAgent, &host);
+        assert_eq!(code, crate::tool_map::EXIT_UNAVAILABLE);
+        assert_eq!(host.0.get(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn verify_stash_detects_tampering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stash = dir.path().join("stash");
+        std::fs::write(&stash, b"tool bytes").expect("write stash");
+        let mut tool = entry("shell", "/bin/sh");
+        tool.stash = stash.to_string_lossy().into_owned();
+        tool.digest = sha256_hex(b"tool bytes");
+        assert!(verify_stash(&tool, &stash).is_ok());
+        std::fs::write(&stash, b"other bytes").expect("tamper");
+        assert!(verify_stash(&tool, &stash).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_connected_shim_gets_a_structured_reply_when_request_validation_fails() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+
+        let (mut shim, helper) = UnixStream::pair().expect("socket pair");
+        shim.shutdown(std::net::Shutdown::Write)
+            .expect("finish malformed request");
+        handle_connection(helper, &ToolMap::default()).expect("send refusal");
+
+        let mut reply = String::new();
+        shim.read_to_string(&mut reply).expect("read refusal");
+        let reply: HelperReply = serde_json::from_str(reply.trim()).expect("structured reply");
+        assert!(
+            matches!(reply, HelperReply::Unavailable { .. }),
+            "validation failure must be unavailable, got {reply:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Socket server: how the shim reaches the helper.
+// ---------------------------------------------------------------------------
+
+/// Bind the helper's guest-local socket and serve it for the life of the
+/// helper. The socket lives in a root-owned directory only the helper group
+/// can write, so the workload cannot unlink and rebind the name;
+/// the shim additionally verifies the listener's identity after connecting.
+#[cfg(target_os = "linux")]
+pub fn bind_and_serve(map: ToolMap, ready: std::os::fd::OwnedFd) -> io::Result<()> {
+    let socket = std::path::Path::new(crate::tool_map::HELPER_SOCKET);
+    let _ = std::fs::remove_file(socket);
+    let listener = std::os::unix::net::UnixListener::bind(socket)?;
+    std::fs::set_permissions(socket, {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(0o666)
+    })?;
+    let attribution = std::path::Path::new(crate::tool_map::TOOL_ATTRIBUTION_SOCKET);
+    let _ = std::fs::remove_file(attribution);
+    let attribution_listener = std::os::unix::net::UnixListener::bind(attribution)?;
+    std::fs::set_permissions(attribution, {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(0o666)
+    })?;
+    std::thread::spawn(move || serve_attribution(attribution_listener));
+    let mut ready = std::fs::File::from(ready);
+    std::io::Write::write_all(&mut ready, &[1])?;
+    drop(ready);
+    eprintln!(
+        "mvm-tool-helper: serving {} for {} declared tool(s)",
+        socket.display(),
+        map.tools.len()
+    );
+    serve(map, listener)
+}
+
+/// Maximum shim connections handled concurrently. Each may block up to the
+/// host-decision deadline, so an unbounded thread-per-connection lets any
+/// guest process exhaust the helper by connecting in parallel; excess
+/// connections are refused fail-closed with an explicit `Unavailable` reply.
+#[cfg(any(target_os = "linux", test))]
+const MAX_CONCURRENT_CONNECTIONS: usize = 8;
+
+/// A bounded set of connection slots shared by the accept loop.
+///
+/// Pure counting (no I/O) so the bound is unit-testable off-Linux.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default)]
+struct ConnectionSlots {
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+/// One held slot; released on drop, wherever the handling thread ends.
+#[cfg(any(target_os = "linux", test))]
+struct ConnectionGuard {
+    slots: std::sync::Arc<ConnectionSlots>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ConnectionSlots {
+    /// Take a slot, or `None` when the bound is reached.
+    fn try_acquire(self: &std::sync::Arc<Self>) -> Option<ConnectionGuard> {
+        use std::sync::atomic::Ordering;
+        let mut current = self.in_flight.load(Ordering::Relaxed);
+        loop {
+            if current >= MAX_CONCURRENT_CONNECTIONS {
+                return None;
+            }
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionGuard {
+                        slots: std::sync::Arc::clone(self),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.slots
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl ConnectionGuard {
+    /// Test-only: consume the guard so its slot frees, without naming Drop.
+    fn slot_released_on_drop(self) {}
+}
+
+#[cfg(target_os = "linux")]
+pub fn serve(map: ToolMap, listener: std::os::unix::net::UnixListener) -> io::Result<()> {
+    let slots = std::sync::Arc::new(ConnectionSlots::default());
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else {
+            continue;
+        };
+        let Some(guard) = slots.try_acquire() else {
+            // Fail closed and explicit: the shim treats a refused connection
+            // as mediation unavailable and exits nonzero without the tool
+            // ever running.
+            let _ = send_reply(
+                &mut stream,
+                &crate::tool_map::HelperReply::Unavailable {
+                    reason: "tool mediation is at its concurrent connection limit".into(),
+                },
+            );
+            continue;
+        };
+        let map = map.clone();
+        std::thread::spawn(move || {
+            let _guard = guard;
+            if let Err(error) = handle_connection(stream, &map) {
+                eprintln!("mvm-tool-helper: connection failed: {error}");
+            }
+        });
+    }
+    Ok(())
+}
+
+/// Read the shim's request line plus its attached descriptors 0, 1 and 2.
+#[cfg(target_os = "linux")]
+fn recv_request(
+    stream: &std::os::unix::net::UnixStream,
+) -> io::Result<(ShimRequest, [Option<std::os::fd::OwnedFd>; 3])> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let mut buffer = vec![0u8; (crate::tool_map::MAX_SHIM_FRAME_BYTES + 1) as usize];
+    let mut control = vec![0u8; 128];
+    let mut iov = libc::iovec {
+        iov_base: buffer.as_mut_ptr().cast(),
+        iov_len: buffer.len(),
+    };
+    // Zero-initialized rather than a struct literal: `msghdr` carries private
+    // padding fields on some libC targets (linux-musl), which makes literal
+    // construction unconstructable there.
+    let mut header = unsafe { std::mem::zeroed::<libc::msghdr>() };
+    header.msg_name = std::ptr::null_mut();
+    header.msg_namelen = 0;
+    header.msg_iov = &mut iov;
+    header.msg_iovlen = 1;
+    header.msg_control = control.as_mut_ptr().cast();
+    header.msg_controllen = MsgLen::of_len(control.len());
+    header.msg_flags = 0;
+    // SAFETY: `header` points at the live buffer and control vectors; the
+    // kernel writes at most their lengths into them.
+    let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut header, 0) };
+    if received < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if received == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "tool request ended before its frame",
+        ));
+    }
+    let mut fds: [Option<std::os::fd::OwnedFd>; 3] = [None, None, None];
+    // SAFETY: `header` was filled by the successful recvmsg above; walking
+    // its control messages reads only kernel-written memory within the
+    // control buffer.
+    unsafe {
+        let mut control_header = libc::CMSG_FIRSTHDR(&header);
+        while !control_header.is_null() {
+            if (*control_header).cmsg_level == libc::SOL_SOCKET
+                && (*control_header).cmsg_type == libc::SCM_RIGHTS
+            {
+                let payload = (*control_header)
+                    .cmsg_len
+                    .saturating_sub(libc::CMSG_LEN(0) as _) as usize;
+                let count = payload / std::mem::size_of::<std::os::unix::io::RawFd>();
+                let data = libc::CMSG_DATA(control_header) as *const std::os::unix::io::RawFd;
+                for index in 0..count {
+                    let received_fd = std::os::fd::OwnedFd::from_raw_fd(*data.add(index));
+                    if let Some(slot) = fds.get_mut(index) {
+                        *slot = Some(received_fd);
+                    }
+                }
+            }
+            control_header = libc::CMSG_NXTHDR(&header, control_header);
+        }
+    }
+    if header.msg_flags & (libc::MSG_CTRUNC | libc::MSG_TRUNC) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "truncated tool request",
+        ));
+    }
+    if fds.iter().any(Option::is_none) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tool request did not carry all three standard descriptors",
+        ));
+    }
+    let mut frame = buffer[..received as usize].to_vec();
+    while !frame.contains(&b'\n') {
+        if frame.len() >= crate::tool_map::MAX_SHIM_FRAME_BYTES as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tool request exceeds its frame bound",
+            ));
+        }
+        let mut next = [0u8; 4096];
+        let remaining = crate::tool_map::MAX_SHIM_FRAME_BYTES as usize - frame.len();
+        let limit = remaining.min(next.len());
+        let count = (&*stream).read(&mut next[..limit])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "tool request ended before its newline",
+            ));
+        }
+        frame.extend_from_slice(&next[..count]);
+    }
+    if frame.len() > crate::tool_map::MAX_SHIM_FRAME_BYTES as usize || frame.last() != Some(&b'\n')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tool request contains data after its frame",
+        ));
+    }
+    let line = std::str::from_utf8(&frame)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let request: ShimRequest = serde_json::from_str(line.trim_end())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    Ok((request, fds))
+}
+
+/// The peer's kernel-authenticated pid and identity.
+#[cfg(target_os = "linux")]
+fn peer_process(stream: &std::os::unix::net::UnixStream) -> io::Result<(u32, u32, u32)> {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` is a correctly sized `ucred` and `len` holds its size.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((cred.pid as u32, cred.uid, cred.gid))
+}
+
+/// Read procfs metadata with the peer's filesystem IDs. Linux gates
+/// `/proc/<pid>/exe` and `/proc/<pid>/fd` on both filesystem IDs; the helper
+/// retains only the UID/GID transition capabilities needed for its tool
+/// child, rather than a process-inspection capability.
+#[cfg(target_os = "linux")]
+fn with_filesystem_ids<T>(uid: u32, gid: u32, read: impl FnOnce() -> T) -> io::Result<T> {
+    struct Restore {
+        uid: libc::c_int,
+        gid: libc::c_int,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: these are the filesystem IDs returned by the kernel for
+            // this thread before the temporary transition.
+            unsafe {
+                libc::setfsuid(self.uid as libc::uid_t);
+                libc::setfsgid(self.gid as libc::gid_t);
+            }
+        }
+    }
+
+    let expected_uid = i32::try_from(uid)
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "peer UID is out of range"))?;
+    let expected_gid = i32::try_from(gid)
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "peer GID is out of range"))?;
+    // SAFETY: these calls change only the calling thread's filesystem IDs.
+    let previous_gid = unsafe { libc::setfsgid(gid) };
+    let previous_uid = unsafe { libc::setfsuid(uid) };
+    let restore = Restore {
+        uid: previous_uid,
+        gid: previous_gid,
+    };
+    // A repeated request returns the current ID, detecting a refused
+    // transition without treating the previous ID as a success indicator.
+    // SAFETY: the same plain IDs are handed back to the kernel.
+    let current_uid = unsafe { libc::setfsuid(uid) };
+    let current_gid = unsafe { libc::setfsgid(gid) };
+    if current_uid != expected_uid || current_gid != expected_gid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "tool helper could not adopt the peer's filesystem IDs",
+        ));
+    }
+    let result = read();
+    drop(restore);
+    Ok(result)
+}
+
+/// An event source over the shim's control socket. After its one request the
+/// shim sends nothing but forwarded signals (one byte each) and eventually
+/// closes; readable data is drained as signals, and a hangup kills the tool.
+/// Ask the helper whether a socket the agent cannot inspect belongs to a
+/// still-live bound tool session. Every transport or identity failure is an
+/// unattributed flow.
+#[cfg(target_os = "linux")]
+pub(crate) fn tool_socket_owned(
+    session: u32,
+    start_ticks: u64,
+    binding: &ToolInvocationBinding,
+    inode: u64,
+) -> bool {
+    use mvm_core::net::session::{read_json_frame, write_json_frame};
+    use std::os::unix::net::UnixStream;
+
+    let question = crate::tool_map::ToolSocketQuestion {
+        session,
+        start_ticks,
+        binding: binding.clone(),
+        inode,
+    };
+    let ask = || -> io::Result<bool> {
+        let mut stream = UnixStream::connect(crate::tool_map::TOOL_ATTRIBUTION_SOCKET)?;
+        let (_, uid, gid) = peer_process(&stream)?;
+        let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
+        if uid != helper.uid() || gid != helper.gid() {
+            return Ok(false);
+        }
+        let deadline = Some(std::time::Duration::from_secs(2));
+        stream.set_read_timeout(deadline)?;
+        stream.set_write_timeout(deadline)?;
+        write_json_frame(
+            &mut stream,
+            &question,
+            crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+        )
+        .map_err(io::Error::other)?;
+        let reply: crate::tool_map::ToolSocketAnswer =
+            read_json_frame(&mut stream, crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES)
+                .map_err(io::Error::other)?;
+        Ok(reply.owned)
+    };
+    ask().unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn owns_socket_in_live_tool(question: &crate::tool_map::ToolSocketQuestion) -> bool {
+    if question.session == 0 || question.inode == 0 {
+        return false;
+    }
+    // Keep the single registry owner locked across the ownership query.
+    // Retirement must not race a positive reply for an expired binding.
+    let active = active_tools();
+    if !active.iter().any(|active| active.matches(question)) {
+        return false;
+    }
+    with_filesystem_ids(
+        crate::guest_mount::TOOL_UID,
+        crate::guest_mount::TOOL_GID,
+        || {
+            if crate::tool_attribution::process_session_start(question.session).ok()
+                != Some((question.session, question.start_ticks))
+            {
+                return false;
+            }
+            let target = format!("socket:[{}]", question.inode);
+            let Ok(processes) = std::fs::read_dir("/proc") else {
+                return false;
+            };
+            let mut owned = false;
+            for (index, process) in processes.enumerate() {
+                if index >= 4096 {
+                    return false;
+                }
+                let Ok(process) = process else {
+                    return false;
+                };
+                let Some(pid) = process
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse().ok())
+                else {
+                    continue;
+                };
+                let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+                    Ok(status) => status,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return false,
+                };
+                let uid = status
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Uid:")
+                            .and_then(|ids| ids.split_whitespace().next())
+                    })
+                    .and_then(|value| value.parse::<u32>().ok());
+                if uid != Some(crate::guest_mount::TOOL_UID) {
+                    continue;
+                }
+                let descriptors = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+                    Ok(descriptors) => descriptors,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return false,
+                };
+                let mut holds = false;
+                for descriptor in descriptors {
+                    let Ok(descriptor) = descriptor else {
+                        return false;
+                    };
+                    match std::fs::read_link(descriptor.path()) {
+                        Ok(path) if path.to_str() == Some(target.as_str()) => holds = true,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(_) => return false,
+                    }
+                }
+                if holds {
+                    if crate::tool_attribution::process_session_start(pid)
+                        .ok()
+                        .is_none_or(|(session, _)| session != question.session)
+                    {
+                        return false;
+                    }
+                    owned = true;
+                }
+            }
+            owned
+        },
+    )
+    .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_attribution(mut stream: std::os::unix::net::UnixStream) -> io::Result<()> {
+    use mvm_core::net::session::{read_json_frame, write_json_frame};
+
+    let (pid, uid, gid) = peer_process(&stream)?;
+    if pid != 1
+        || uid != crate::guest_mount::WORKLOAD_UID
+        || gid != crate::guest_mount::WORKLOAD_GID
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "tool attribution caller is not the guest agent",
+        ));
+    }
+    let deadline = Some(std::time::Duration::from_secs(2));
+    stream.set_read_timeout(deadline)?;
+    stream.set_write_timeout(deadline)?;
+    let question = read_json_frame::<crate::tool_map::ToolSocketQuestion>(
+        &mut stream,
+        crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+    )
+    .map_err(io::Error::other)?;
+    let answer = crate::tool_map::ToolSocketAnswer {
+        owned: owns_socket_in_live_tool(&question),
+    };
+    write_json_frame(
+        &mut stream,
+        &answer,
+        crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+    )
+    .map_err(io::Error::other)
+}
+
+#[cfg(target_os = "linux")]
+fn serve_attribution(listener: std::os::unix::net::UnixListener) {
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else {
+            continue;
+        };
+        // A single authenticated agent queries this endpoint. Processing one
+        // bounded frame at a time avoids unbounded threads on connection floods.
+        let _ = handle_attribution(stream);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn peer_events(stream: std::os::unix::net::UnixStream) -> impl FnMut() -> ToolEvent {
+    use std::collections::VecDeque;
+    use std::os::fd::AsRawFd;
+
+    let mut pending: VecDeque<u8> = VecDeque::new();
+    move || loop {
+        // Capture the owned stream, not merely its descriptor number: otherwise
+        // it closes before the first poll and that number can be reused.
+        let fd = stream.as_raw_fd();
+        if let Some(signal) = pending.pop_front() {
+            return ToolEvent::Running(Some(signal));
+        }
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: `pollfd` is one live entry for the duration of the poll.
+        let rc = unsafe { libc::poll(&mut pollfd, 1, 50) };
+        if rc <= 0 {
+            return ToolEvent::Running(None);
+        }
+        if pollfd.revents & libc::POLLNVAL != 0 {
+            return ToolEvent::Gone;
+        }
+        if pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
+            let mut buffer = [0u8; 64];
+            // SAFETY: `buffer` is writable for the length handed to recv.
+            let count = unsafe {
+                libc::recv(
+                    fd,
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                    libc::MSG_DONTWAIT,
+                )
+            };
+            if count <= 0 {
+                return ToolEvent::Gone;
+            }
+            pending.extend(buffer[..count as usize].iter().copied());
+            if pollfd.revents & libc::POLLHUP != 0 && pending.is_empty() {
+                return ToolEvent::Gone;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn send_reply(stream: &mut std::os::unix::net::UnixStream, reply: &HelperReply) -> io::Result<()> {
+    use std::io::Write;
+    let mut line = serde_json::to_vec(reply).map_err(io::Error::other)?;
+    line.push(b'\n');
+    stream.write_all(&line)
+}
+
+/// Serve one shim connection end to end.
+#[cfg(target_os = "linux")]
+fn handle_connection(mut stream: std::os::unix::net::UnixStream, map: &ToolMap) -> io::Result<()> {
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(
+        crate::vsock::TOOL_REQUEST_TIMEOUT_SECS,
+    )));
+    let outcome =
+        connection_outcome(&stream, map).unwrap_or_else(|error| HelperReply::Unavailable {
+            reason: format!("tool helper could not validate the invocation: {error}"),
+        });
+    send_reply(&mut stream, &outcome)
+}
+
+/// Validate and run one request. Keeping transport failures inside the reply
+/// boundary is load-bearing: once a shim has connected, every pre-spawn
+/// failure must become a structured refusal rather than an empty EOF that
+/// leaves the caller unable to distinguish denial from an approved run.
+#[cfg(target_os = "linux")]
+fn connection_outcome(
+    stream: &std::os::unix::net::UnixStream,
+    map: &ToolMap,
+) -> io::Result<HelperReply> {
+    let (request, stdio) = recv_request(stream)?;
+    let (peer_pid, peer_uid, peer_gid) = peer_process(stream)?;
+    let actual_executable = agent().executable(peer_pid).map_err(io::Error::other)?;
+    if !crate::tool_map::provenance_matches(&request.exe, &actual_executable) {
+        return Ok(HelperReply::Denied {
+            reason: "the executable path does not match the connecting process".into(),
+        });
+    }
+    use std::os::fd::AsRawFd;
+    let stdio_raw: [std::os::unix::io::RawFd; 3] = stdio
+        .each_ref()
+        .map(|fd| fd.as_ref().map(AsRawFd::as_raw_fd).unwrap_or(-1));
+
+    Ok(
+        match approve(map, &request, peer_pid, peer_uid, peer_gid, agent(), host()) {
+            Ok(run) => {
+                let mut events = peer_events(stream.try_clone()?);
+                HelperReply::Exited {
+                    code: run_approved(&run, stdio_raw, &mut events, agent(), host()),
+                }
+            }
+            Err(reply) => reply,
+        },
+    )
+}
+
+/// The production agent-transport singleton.
+#[cfg(target_os = "linux")]
+fn agent() -> &'static dyn AgentDecisions {
+    &SocketAgent
+}
+
+/// The production host-transport singleton.
+#[cfg(target_os = "linux")]
+fn host() -> &'static dyn HostDecisions {
+    &BrokerHost
+}
+
+#[cfg(target_os = "linux")]
+struct SocketAgent;
+
+#[cfg(target_os = "linux")]
+impl SocketAgent {
+    fn call(
+        request: &crate::tool_map::DecisionRequest,
+    ) -> Result<crate::tool_map::DecisionReply, HelperError> {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::linux::net::SocketAddrExt;
+        use std::os::unix::net::{SocketAddr as UnixAddr, UnixStream};
+
+        let address =
+            UnixAddr::from_abstract_name(crate::tool_decision_socket::DECISION_SOCKET_NAME)
+                .map_err(|error| HelperError::Unavailable(format!("decision address: {error}")))?;
+        let mut stream = UnixStream::connect_addr(&address)
+            .map_err(|error| HelperError::Unavailable(format!("decision socket: {error}")))?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(5)));
+        let mut line = serde_json::to_vec(request).map_err(|error| {
+            HelperError::Unavailable(format!("encode decision request: {error}"))
+        })?;
+        line.push(b'\n');
+        stream
+            .write_all(&line)
+            .map_err(|error| HelperError::Unavailable(format!("send decision request: {error}")))?;
+        let mut reply = String::new();
+        BufReader::new(std::io::Read::take(
+            &mut stream,
+            crate::tool_map::MAX_DECISION_FRAME_BYTES,
+        ))
+        .read_line(&mut reply)
+        .map_err(|error| HelperError::Unavailable(format!("read decision reply: {error}")))?;
+        serde_json::from_str(reply.trim_end())
+            .map_err(|error| HelperError::Unavailable(format!("decode decision reply: {error}")))
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl AgentDecisions for SocketAgent {
+    fn executable(&self, pid: u32) -> Result<String, HelperError> {
+        match Self::call(&crate::tool_map::DecisionRequest::Executable { pid })? {
+            crate::tool_map::DecisionReply::Executable { path } => Ok(path),
+            crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
+                "the guest agent could not inspect the shim executable".into(),
+            )),
+            crate::tool_map::DecisionReply::Decided { .. }
+            | crate::tool_map::DecisionReply::NotDecided
+            | crate::tool_map::DecisionReply::Ok => Err(HelperError::Unavailable(
+                "unexpected reply to an executable provenance question".into(),
+            )),
+        }
+    }
+
+    fn decided(&self, pid: u32) -> Result<Option<Option<ToolInvocationBinding>>, HelperError> {
+        match Self::call(&crate::tool_map::DecisionRequest::Decided { pid })? {
+            crate::tool_map::DecisionReply::Decided { binding } => Ok(Some(binding)),
+            crate::tool_map::DecisionReply::NotDecided => Ok(None),
+            crate::tool_map::DecisionReply::Executable { .. }
+            | crate::tool_map::DecisionReply::Ok
+            | crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
+                "unexpected reply to a decided-tool question".into(),
+            )),
+        }
+    }
+
+    fn record(&self, session: u32, binding: ToolInvocationBinding) -> Result<(), HelperError> {
+        match Self::call(&crate::tool_map::DecisionRequest::Record {
+            session,
+            binding: Some(binding),
+        })? {
+            crate::tool_map::DecisionReply::Ok => Ok(()),
+            crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
+                "the guest agent could not attribute the tool session".into(),
+            )),
+            crate::tool_map::DecisionReply::Executable { .. }
+            | crate::tool_map::DecisionReply::Decided { .. }
+            | crate::tool_map::DecisionReply::NotDecided => Err(HelperError::Unavailable(
+                "unexpected reply to an attribution request".into(),
+            )),
+        }
+    }
+
+    fn retire(&self, session: u32) {
+        let _ = Self::call(&crate::tool_map::DecisionRequest::Retire { session });
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct BrokerHost;
+
+#[cfg(target_os = "linux")]
+impl BrokerHost {
+    /// One framed `host.tool.v1` call. Mirrors the host-local connector
+    /// client's deadlines: the endpoint can hold an `ask` for its full
+    /// approval timeout, so the read waits just past it.
+    fn call(verb: &str, payload: serde_json::Value) -> Result<serde_json::Value, HelperError> {
+        use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceId};
+
+        let service = ServiceId::parse(mvm_core::protocol::host_tool::HOST_TOOL_SERVICE)
+            .map_err(|error| HelperError::Unavailable(format!("tool service id: {error}")))?;
+        let mut stream = crate::vsock::connect_host_vsock(
+            crate::vsock::BROKER_PORT,
+            crate::vsock::TOOL_REQUEST_TIMEOUT_SECS,
+        )
+        .map_err(|error| HelperError::Unavailable(format!("broker: {error}")))?;
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(
+            crate::vsock::TOOL_DECISION_TIMEOUT_SECS,
+        )));
+        let request = ServiceCall {
+            service,
+            verb: verb.into(),
+            correlation_id: CorrelationId::new(format!("tool-helper-{}", std::process::id())),
+            payload,
+            capability: None,
+        };
+        crate::broker_client::call(&mut stream, &request).map_err(|error| match error {
+            crate::broker_client::BrokerError::Service { message, .. } => {
+                HelperError::Unavailable(format!("host tool decision: {message}"))
+            }
+            crate::broker_client::BrokerError::Transport(error) => {
+                HelperError::Unavailable(format!("host tool transport: {error}"))
+            }
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl HostDecisions for BrokerHost {
+    fn decide(&self, request: &ToolCheckRequest) -> Result<ToolDecisionReply, HelperError> {
+        let payload = serde_json::to_value(request)
+            .map_err(|error| HelperError::Unavailable(format!("encode tool question: {error}")))?;
+        let reply = Self::call(mvm_core::protocol::host_tool::DECIDE_VERB, payload)?;
+        serde_json::from_value(reply)
+            .map_err(|error| HelperError::Unavailable(format!("decode tool decision: {error}")))
+    }
+
+    fn release(&self, binding: ToolInvocationBinding) {
+        let payload = serde_json::to_value(
+            mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease {
+                release: binding,
+            },
+        );
+        if let Ok(payload) = payload {
+            let _ = Self::call(mvm_core::protocol::host_tool::RELEASE_VERB, payload);
+        }
+    }
+}
+
+#[test]
+fn connection_slots_enforce_the_concurrency_bound() {
+    let slots = std::sync::Arc::new(ConnectionSlots::default());
+    let mut guards: Vec<ConnectionGuard> = (0..MAX_CONCURRENT_CONNECTIONS)
+        .map(|_| slots.try_acquire().expect("slot under the bound"))
+        .collect();
+    assert_eq!(guards.len(), MAX_CONCURRENT_CONNECTIONS);
+    assert!(
+        slots.try_acquire().is_none(),
+        "a connection beyond the bound is refused"
+    );
+    guards.pop().expect("one guard").slot_released_on_drop();
+    assert!(slots.try_acquire().is_some(), "a released slot is reusable");
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod socket_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn event_source_owns_the_socket_until_it_is_dropped() {
+        use std::os::fd::AsRawFd;
+
+        let (mut shim, helper) = UnixStream::pair().expect("pair");
+        let fd = helper.as_raw_fd();
+        let mut events = peer_events(helper);
+        // SAFETY: F_GETFD only queries the descriptor; it does not mutate it.
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        shim.write_all(&[libc::SIGTERM as u8]).expect("signal");
+        assert_eq!(events(), ToolEvent::Running(Some(libc::SIGTERM as u8)));
+        assert_eq!(events(), ToolEvent::Running(None));
+        drop(shim);
+        assert_eq!(events(), ToolEvent::Gone);
+    }
+
+    #[test]
+    fn helper_returns_a_typed_failure_for_a_malformed_request() {
+        let (mut shim, helper) = UnixStream::pair().expect("pair");
+        let server = std::thread::spawn(move || handle_connection(helper, &ToolMap::default()));
+        shim.write_all(b"not-json\n").expect("send malformed frame");
+        let mut answer = String::new();
+        shim.read_to_string(&mut answer)
+            .expect("read typed failure");
+        assert!(matches!(
+            serde_json::from_str::<HelperReply>(answer.trim_end()).expect("reply"),
+            HelperReply::Unavailable { .. }
+        ));
+        // Validation failed, but the transport successfully delivered its
+        // structured refusal; only a failure to send that reply is an I/O error.
+        server.join().expect("server join").expect("send refusal");
+    }
+
+    #[test]
+    fn filesystem_identity_scope_restores_both_ids() {
+        // SAFETY: these calls read, rather than change, the thread's IDs.
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let executable = with_filesystem_ids(uid, gid, || {
+            crate::tool_map::process_executable(std::process::id())
+        })
+        .expect("adopt current filesystem IDs")
+        .expect("read own executable");
+        assert!(!executable.is_empty());
+        assert!(with_filesystem_ids(u32::MAX, gid, || ()).is_err());
+        // SAFETY: repeated setfsuid/setfsgid calls return the current IDs.
+        assert_eq!(unsafe { libc::setfsuid(uid) }, uid as libc::c_int);
+        assert_eq!(unsafe { libc::setfsgid(gid) }, gid as libc::c_int);
+    }
+
+    #[test]
+    fn attribution_socket_refuses_a_caller_that_is_not_pid_one() {
+        let (mut caller, helper) = UnixStream::pair().expect("pair");
+        let error = handle_attribution(helper).expect_err("only the guest agent may ask");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let mut answer = Vec::new();
+        caller.read_to_end(&mut answer).expect("read closed socket");
+        assert!(answer.is_empty());
+    }
+
+    #[test]
+    fn active_attribution_requires_exact_session_start_and_binding() {
+        let active = ActiveTool {
+            session: 42,
+            start_ticks: 123,
+            binding: ToolInvocationBinding::from_random([9; 16]),
+        };
+        let question = crate::tool_map::ToolSocketQuestion {
+            session: active.session,
+            start_ticks: active.start_ticks,
+            binding: active.binding.clone(),
+            inode: 777,
+        };
+        assert!(active.matches(&question));
+        let mut wrong = question.clone();
+        wrong.session += 1;
+        assert!(!active.matches(&wrong));
+        wrong = question.clone();
+        wrong.start_ticks += 1;
+        assert!(!active.matches(&wrong));
+        wrong = question;
+        wrong.binding = ToolInvocationBinding::from_random([8; 16]);
+        assert!(!active.matches(&wrong));
+    }
+
+    #[test]
+    fn registering_a_missing_leader_fails_closed() {
+        assert!(register_active(u32::MAX, ToolInvocationBinding::from_random([9; 16])).is_err());
+    }
+
+    #[test]
+    fn an_unknown_or_zero_socket_never_receives_a_binding() {
+        let mut question = crate::tool_map::ToolSocketQuestion {
+            session: 424242,
+            start_ticks: 1,
+            binding: ToolInvocationBinding::from_random([9; 16]),
+            inode: 777,
+        };
+        assert!(!owns_socket_in_live_tool(&question));
+        question.inode = 0;
+        assert!(!owns_socket_in_live_tool(&question));
+    }
+}

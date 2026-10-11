@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease;
-use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply, ToolOrigin};
 use mvm_core::substitution_wire::WireRequest;
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -31,7 +31,13 @@ enum ListenerMode {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ConnectorRequest {
-    Tool(ToolCheckRequest),
+    /// A declared-tool question. `origin` is chosen by the host-side caller
+    /// (the connector socket is host-local; the guest can never dial it), so
+    /// the label a guest-origin decision carries is structurally honest.
+    Tool {
+        question: ToolCheckRequest,
+        origin: ToolOrigin,
+    },
     Release(ToolInvocationRelease),
     Http(WireRequest),
 }
@@ -165,9 +171,9 @@ impl SubstitutionService {
                 let response = self.process(wire).await;
                 write_json_frame(&mut stream, &response).await?;
             }
-            ConnectorRequest::Tool(request) => {
-                anyhow::ensure!(request.is_valid(), "invalid tool invocation");
-                let decision = self.decide_tool_invocation(&request).await;
+            ConnectorRequest::Tool { question, origin } => {
+                anyhow::ensure!(question.is_valid(), "invalid tool invocation");
+                let decision = self.decide_tool_invocation(&question, origin).await;
                 let response = match decision {
                     Ok(InvocationVerdict::Allow { binding: None }) => ToolDecisionReply::Allow,
                     Ok(InvocationVerdict::Allow {
@@ -227,7 +233,9 @@ mod server_tests {
         use crate::supervisor::runtime_approval::NoApprovalBackend;
         use crate::supervisor::tool_decision::ToolDecisionGate;
         use mvm_contract::policy::tool_rules::ToolRules;
-        use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+        use mvm_contract::protocol::network_flow::tool::{
+            ToolCheckRequest, ToolDecisionReply, ToolOrigin,
+        };
         use mvm_core::plan::TenantId;
 
         let signer = Arc::new(CapturingAuditSigner::new());
@@ -250,11 +258,7 @@ mod server_tests {
             recorder,
         ));
         let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
-        for (tool, expected) in [
-            ("read", ToolDecisionReply::Allow),
-            ("write", ToolDecisionReply::Deny),
-            ("unlisted", ToolDecisionReply::Deny),
-        ] {
+        for tool in ["read", "write", "unlisted"] {
             let (mut client, server) = UnixStream::pair().expect("socket pair");
             let service = Arc::clone(&service);
             let handler =
@@ -264,13 +268,25 @@ mod server_tests {
                 executable: Some(format!("/bin/{tool}")),
                 argv: format!("{tool} data"),
             };
-            write_json_frame(&mut client, &request)
-                .await
-                .expect("send question");
+            // The host-local client frames its question with the host-chosen
+            // origin label; a bare ToolCheckRequest no longer parses.
+            write_json_frame(
+                &mut client,
+                &serde_json::json!({
+                    "question": request,
+                    "origin": ToolOrigin::Host,
+                }),
+            )
+            .await
+            .expect("send question");
             let reply: ToolDecisionReply = read_json_frame(&mut client, MAX_FRAME_BYTES)
                 .await
                 .expect("read decision");
-            assert_eq!(reply, expected);
+            if tool == "read" {
+                assert!(matches!(reply, ToolDecisionReply::AllowBound { .. }));
+            } else {
+                assert_eq!(reply, ToolDecisionReply::Deny);
+            }
             handler
                 .await
                 .expect("handler join")

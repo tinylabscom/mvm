@@ -184,7 +184,10 @@ impl EnvSection {
 /// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
 /// decisions are enforced at the seams the host controls (the MCP tool-call
 /// gate and declared `machine exec --tool` invocations); declared commands
-/// also require the exact signed `executable` path and enforce `argv`. A tool's `routes` and `secrets` are enforced at the
+/// also require the exact signed `executable` path and enforce `argv`. A
+/// declared command spawned by the workload itself is intercepted by the
+/// in-guest shim and decided by the per-VM endpoint before it runs.
+/// A tool's `routes` and `secrets` are enforced at the
 /// per-VM endpoint against flows attributed to an admitted invocation of
 /// that tool.
 ///

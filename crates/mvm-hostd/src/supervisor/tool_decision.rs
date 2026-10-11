@@ -6,11 +6,12 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use mvm_contract::policy::approval_prompt::ApprovalSubject;
 use mvm_contract::policy::tool_rules::{ToolDecision, ToolRules};
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
-use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolOrigin};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -26,11 +27,12 @@ pub enum ToolVerdict {
     Deny(&'static str),
 }
 
-/// A decision for a host-started invocation, which may carry a binding.
+/// A decision for a host-started invocation, carrying its lifecycle binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvocationVerdict {
-    /// The invocation may proceed. When its tool owns routes or secrets, the
-    /// binding its flows must carry to use them.
+    /// The invocation may proceed. The binding correlates its telemetry span;
+    /// endpoint scope enforcement also consumes it when the tool owns routes
+    /// or secrets.
     Allow {
         binding: Option<ToolInvocationBinding>,
     },
@@ -43,14 +45,92 @@ pub enum InvocationVerdict {
 /// that never released cannot exhaust the table.
 pub const MAX_LIVE_INVOCATIONS: usize = 256;
 
+trait ActiveToolTrace: Send {
+    fn finish(self: Box<Self>, outcome: &'static str);
+}
+
+trait ToolTelemetry: Send + Sync {
+    fn start(
+        &self,
+        binding: &ToolInvocationBinding,
+        tool: &str,
+        origin: ToolOrigin,
+    ) -> Box<dyn ActiveToolTrace>;
+}
+
+struct TracingToolTelemetry;
+
+struct TracingToolInvocation {
+    span: tracing::Span,
+    started: Instant,
+}
+
+impl ActiveToolTrace for TracingToolInvocation {
+    fn finish(self: Box<Self>, outcome: &'static str) {
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.span.in_scope(|| {
+            tracing::info!(
+                target: "mvm.tool",
+                phase = "finish",
+                outcome,
+                duration_ms,
+                "tool invocation finished"
+            );
+        });
+    }
+}
+
+impl ToolTelemetry for TracingToolTelemetry {
+    fn start(
+        &self,
+        binding: &ToolInvocationBinding,
+        tool: &str,
+        origin: ToolOrigin,
+    ) -> Box<dyn ActiveToolTrace> {
+        let binding_id = binding.audit_id();
+        let tool_sha256 = hex::encode(Sha256::digest(tool.as_bytes()));
+        let span = tracing::info_span!(
+            target: "mvm.tool",
+            "mvm.tool.invocation",
+            binding_id = %binding_id,
+            tool_sha256 = %tool_sha256,
+            origin = origin.audit_label(),
+        );
+        span.in_scope(|| {
+            tracing::info!(
+                target: "mvm.tool",
+                phase = "start",
+                "tool invocation started"
+            );
+        });
+        Box::new(TracingToolInvocation {
+            span,
+            started: Instant::now(),
+        })
+    }
+}
+
+struct LiveInvocation {
+    binding: ToolInvocationBinding,
+    tool: String,
+    trace: Box<dyn ActiveToolTrace>,
+}
+
+impl LiveInvocation {
+    fn finish(self, outcome: &'static str) {
+        self.trace.finish(outcome);
+    }
+}
+
 /// Rules, approver and chain recorder for one VM. Constructed only from the
 /// endpoint's admitted plan projection.
 pub struct ToolDecisionGate {
     rules: ToolRules,
     approver: Arc<dyn RuntimeApprover>,
     recorder: Arc<Recorder>,
-    /// Live bindings and the tool each was minted for, oldest first.
-    invocations: Mutex<VecDeque<(ToolInvocationBinding, String)>>,
+    telemetry: Arc<dyn ToolTelemetry>,
+    /// Live invocation traces, oldest first.
+    invocations: Mutex<VecDeque<LiveInvocation>>,
 }
 
 impl ToolDecisionGate {
@@ -61,10 +141,20 @@ impl ToolDecisionGate {
         approver: Arc<dyn RuntimeApprover>,
         recorder: Arc<Recorder>,
     ) -> Self {
+        Self::with_telemetry(rules, approver, recorder, Arc::new(TracingToolTelemetry))
+    }
+
+    fn with_telemetry(
+        rules: ToolRules,
+        approver: Arc<dyn RuntimeApprover>,
+        recorder: Arc<Recorder>,
+        telemetry: Arc<dyn ToolTelemetry>,
+    ) -> Self {
         Self {
             rules,
             approver,
             recorder,
+            telemetry,
             invocations: Mutex::new(VecDeque::new()),
         }
     }
@@ -77,31 +167,33 @@ impl ToolDecisionGate {
 
     /// Decide and record one invocation. A recorder failure is an error, so
     /// the caller cannot mistake an unaudited decision for an allow.
-    pub async fn decide(&self, request: &ToolCheckRequest) -> Result<ToolVerdict, RecorderError> {
+    pub async fn decide(
+        &self,
+        request: &ToolCheckRequest,
+        origin: ToolOrigin,
+    ) -> Result<ToolVerdict, RecorderError> {
         let verdict = self.verdict(request).await;
-        self.record(request, verdict, None).await?;
+        self.record(request, verdict, None, origin).await?;
         Ok(verdict)
     }
 
-    /// Decide and record one host-started invocation. An allowed invocation
-    /// of a tool that owns routes or secrets gets a fresh binding, recorded
-    /// with the decision and live until [`Self::release`].
+    /// Decide and record one invocation. Every allow gets a fresh binding and
+    /// a telemetry span that stays live until [`Self::release`]. Tools with
+    /// endpoint scopes use the same binding for route and secret enforcement.
     pub async fn decide_invocation(
         &self,
         request: &ToolCheckRequest,
+        origin: ToolOrigin,
     ) -> Result<InvocationVerdict, RecorderError> {
         let verdict = self.verdict(request).await;
         let binding = match verdict {
-            ToolVerdict::Allow if self.scopes_endpoint(&request.tool) => {
-                Some(self.mint(&request.tool))
-            }
+            ToolVerdict::Allow => Some(self.fresh_binding()),
             _ => None,
         };
-        if let Err(error) = self.record(request, verdict, binding.as_ref()).await {
-            if let Some(binding) = &binding {
-                self.release(binding);
-            }
-            return Err(error);
+        self.record(request, verdict, binding.as_ref(), origin)
+            .await?;
+        if let Some(binding) = &binding {
+            self.start_trace(binding.clone(), &request.tool, origin);
         }
         Ok(match verdict {
             ToolVerdict::Allow => InvocationVerdict::Allow { binding },
@@ -111,7 +203,15 @@ impl ToolDecisionGate {
 
     /// Retire a binding. Flows naming it afterwards belong to no tool.
     pub fn release(&self, binding: &ToolInvocationBinding) {
-        self.live().retain(|(live, _)| live != binding);
+        let invocation = {
+            let mut live = self.live();
+            live.iter()
+                .position(|invocation| &invocation.binding == binding)
+                .and_then(|index| live.remove(index))
+        };
+        if let Some(invocation) = invocation {
+            invocation.finish("completed");
+        }
     }
 
     /// The tool a live binding was minted for.
@@ -119,33 +219,36 @@ impl ToolDecisionGate {
     pub fn tool_for(&self, binding: &ToolInvocationBinding) -> Option<String> {
         self.live()
             .iter()
-            .find(|(live, _)| live == binding)
-            .map(|(_, tool)| tool.clone())
+            .find(|invocation| &invocation.binding == binding)
+            .map(|invocation| invocation.tool.clone())
     }
 
-    fn scopes_endpoint(&self, tool: &str) -> bool {
-        self.rules
-            .detail
-            .get(tool)
-            .is_some_and(|detail| !detail.routes.is_empty() || !detail.secrets.is_empty())
-    }
-
-    fn live(&self) -> std::sync::MutexGuard<'_, VecDeque<(ToolInvocationBinding, String)>> {
+    fn live(&self) -> std::sync::MutexGuard<'_, VecDeque<LiveInvocation>> {
         self.invocations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn mint(&self, tool: &str) -> ToolInvocationBinding {
+    fn fresh_binding(&self) -> ToolInvocationBinding {
         let mut bytes = [0u8; 16];
         rand::rng().fill_bytes(&mut bytes);
-        let binding = ToolInvocationBinding::from_random(bytes);
+        ToolInvocationBinding::from_random(bytes)
+    }
+
+    fn start_trace(&self, binding: ToolInvocationBinding, tool: &str, origin: ToolOrigin) {
+        let trace = self.telemetry.start(&binding, tool, origin);
+        let invocation = LiveInvocation {
+            binding,
+            tool: tool.to_string(),
+            trace,
+        };
         let mut live = self.live();
-        if live.len() >= MAX_LIVE_INVOCATIONS {
-            live.pop_front();
+        if live.len() >= MAX_LIVE_INVOCATIONS
+            && let Some(retired) = live.pop_front()
+        {
+            retired.finish("evicted");
         }
-        live.push_back((binding.clone(), tool.to_string()));
-        binding
+        live.push_back(invocation);
     }
 
     async fn verdict(&self, request: &ToolCheckRequest) -> ToolVerdict {
@@ -175,12 +278,14 @@ impl ToolDecisionGate {
         request: &ToolCheckRequest,
         verdict: ToolVerdict,
         binding: Option<&ToolInvocationBinding>,
+        origin: ToolOrigin,
     ) -> Result<(), RecorderError> {
         let (outcome, reason) = match verdict {
             ToolVerdict::Allow => ("allow", "allowed"),
             ToolVerdict::Deny(reason) => ("deny", reason),
         };
         let mut labels = vec![
+            ("origin".to_string(), origin.audit_label().to_string()),
             (
                 "tool_sha256".to_string(),
                 hex::encode(Sha256::digest(request.tool.as_bytes())),
@@ -263,11 +368,13 @@ mod tests {
             Arc::clone(&approver),
         );
         assert!(matches!(
-            gate.decide(&request("write", "write x")).await,
+            gate.decide(&request("write", "write x"), ToolOrigin::Host)
+                .await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert!(matches!(
-            gate.decide(&request("other", "other")).await,
+            gate.decide(&request("other", "other"), ToolOrigin::Host)
+                .await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
@@ -296,7 +403,7 @@ mod tests {
             Arc::clone(&approver),
         );
         assert_eq!(
-            gate.decide(&request("shell", "echo ok"))
+            gate.decide(&request("shell", "echo ok"), ToolOrigin::Host)
                 .await
                 .expect("audit"),
             ToolVerdict::Allow
@@ -325,12 +432,12 @@ mod tests {
         let (gate, signer) = gate(rules, Arc::clone(&approver));
         let mut spoof = request("gh", "gh api");
         assert!(matches!(
-            gate.decide(&spoof).await,
+            gate.decide(&spoof, ToolOrigin::Host).await,
             Ok(ToolVerdict::Deny(_))
         ));
         spoof.executable = None;
         assert!(matches!(
-            gate.decide(&spoof).await,
+            gate.decide(&spoof, ToolOrigin::Host).await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
@@ -367,13 +474,43 @@ mod tests {
         })
     }
 
+    #[derive(Clone, Default)]
+    struct FakeTelemetry {
+        starts: Arc<AtomicUsize>,
+        finishes: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ToolTelemetry for FakeTelemetry {
+        fn start(
+            &self,
+            _binding: &ToolInvocationBinding,
+            _tool: &str,
+            _origin: ToolOrigin,
+        ) -> Box<dyn ActiveToolTrace> {
+            self.starts.fetch_add(1, Ordering::Relaxed);
+            Box::new(FakeActiveTrace {
+                finishes: Arc::clone(&self.finishes),
+            })
+        }
+    }
+
+    struct FakeActiveTrace {
+        finishes: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ActiveToolTrace for FakeActiveTrace {
+        fn finish(self: Box<Self>, outcome: &'static str) {
+            self.finishes.lock().unwrap().push(outcome);
+        }
+    }
+
     #[tokio::test]
     async fn an_allowed_scoped_invocation_gets_a_recorded_binding_until_released() {
         let (gate, signer) = gate(scoped_rules(), approving());
         let InvocationVerdict::Allow {
             binding: Some(binding),
         } = gate
-            .decide_invocation(&request("gh", "gh api"))
+            .decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
             .await
             .expect("audit")
         else {
@@ -391,20 +528,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unscoped_and_refused_invocations_get_no_binding() {
-        let (gate, _signer) = gate(scoped_rules(), approving());
-        assert_eq!(
-            gate.decide_invocation(&request("plain", "plain x"))
-                .await
-                .expect("audit"),
-            InvocationVerdict::Allow { binding: None }
+    async fn an_allowed_tool_has_one_telemetry_span_from_allow_through_release() {
+        let telemetry = Arc::new(FakeTelemetry::default());
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer, TenantId("local".into())));
+        let gate = ToolDecisionGate::with_telemetry(
+            scoped_rules(),
+            approving(),
+            recorder,
+            telemetry.clone(),
         );
+        let InvocationVerdict::Allow {
+            binding: Some(binding),
+        } = gate
+            .decide_invocation(&request("plain", "plain x"), ToolOrigin::GuestBroker)
+            .await
+            .expect("audit")
+        else {
+            panic!("allowed tool use must carry its trace binding");
+        };
+
+        assert_eq!(telemetry.starts.load(Ordering::Relaxed), 1);
+        assert!(telemetry.finishes.lock().unwrap().is_empty());
+
+        gate.release(&binding);
+        assert_eq!(telemetry.finishes.lock().unwrap().as_slice(), ["completed"]);
+    }
+
+    #[tokio::test]
+    async fn every_allowed_invocation_is_traced_but_refusals_get_no_binding() {
+        let (gate, _signer) = gate(scoped_rules(), approving());
+        let InvocationVerdict::Allow {
+            binding: Some(binding),
+        } = gate
+            .decide_invocation(&request("plain", "plain x"), ToolOrigin::Host)
+            .await
+            .expect("audit")
+        else {
+            panic!("every allowed tool use gets a lifecycle trace binding");
+        };
+        assert_eq!(gate.tool_for(&binding).as_deref(), Some("plain"));
         assert!(matches!(
-            gate.decide_invocation(&request("other", "other"))
+            gate.decide_invocation(&request("other", "other"), ToolOrigin::Host)
                 .await
                 .expect("audit"),
             InvocationVerdict::Deny(_)
         ));
+        assert_eq!(gate.live().len(), 1);
+        gate.release(&binding);
         assert!(gate.live().is_empty());
     }
 
@@ -416,7 +587,7 @@ mod tests {
         ));
         let gate = ToolDecisionGate::new(scoped_rules(), approving(), recorder);
         assert!(
-            gate.decide_invocation(&request("gh", "gh api"))
+            gate.decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
                 .await
                 .is_err()
         );
@@ -429,7 +600,7 @@ mod tests {
         let mut minted = Vec::new();
         for _ in 0..=MAX_LIVE_INVOCATIONS {
             match gate
-                .decide_invocation(&request("gh", "gh api"))
+                .decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
                 .await
                 .expect("audit")
             {
@@ -470,6 +641,10 @@ mod tests {
             approver,
             recorder,
         );
-        assert!(gate.decide(&request("shell", "echo ok")).await.is_err());
+        assert!(
+            gate.decide(&request("shell", "echo ok"), ToolOrigin::Host)
+                .await
+                .is_err()
+        );
     }
 }

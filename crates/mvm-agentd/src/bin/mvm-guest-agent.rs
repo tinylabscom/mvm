@@ -949,6 +949,27 @@ fn main() {
         })
         .flatten();
 
+    // Same ownership and lifetime as the attribution listener: bound by PID 1
+    // before any workload runs, served once activation has dropped privilege,
+    // answering only the tool helper identity and root. Without it the helper
+    // cannot consume relay decisions or record tool sessions, so declared
+    // commands fall back to a full host decision per invocation and scoped
+    // tools run unattributed — degraded, never wider.
+    #[cfg(target_os = "linux")]
+    let decision_listener = init::is_pid1()
+        .then(|| {
+            mvm_agentd::tool_decision_socket::bind_listener()
+                .map_err(|error| {
+                    eprintln!(
+                        "mvm-guest-agent: tool decision socket unavailable, so declared \
+                         commands are decided per invocation and scoped tools unattributed: \
+                         {error}"
+                    );
+                })
+                .ok()
+        })
+        .flatten();
+
     if init::is_pid1() && serve_until_activated(&listener, &server) {
         init::start_orphan_reaper();
     }
@@ -960,6 +981,11 @@ fn main() {
         #[cfg(target_os = "linux")]
         if let Some(listener) = attribution_listener {
             std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(listener) = decision_listener {
+            std::thread::spawn(move || mvm_agentd::tool_decision_socket::serve(listener));
         }
 
         // Defer integration and probe scans to background threads, but only

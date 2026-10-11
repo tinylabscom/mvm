@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind};
 
-/// Fixed identity used by the guest agent and workload command runner.
 pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
@@ -31,6 +30,20 @@ pub const WORKLOAD_GID: u32 = 901;
 /// descriptors with `pidfd_getfd`.
 pub const TOOL_GID: u32 = 907;
 
+/// Fixed user a host-bound tool invocation runs as.
+///
+/// Chosen by the tool helper at spawn: the helper holds `CAP_SETUID` and
+/// `CAP_SETGID` for exactly this transition, and no workload process holds
+/// either. Where the group boundary ([`TOOL_GID`]) already refuses ptrace and
+/// descriptor theft, the distinct user additionally refuses signals from the
+/// workload (a same-uid `kill` is allowed; a cross-uid one is not) and keeps
+/// files the tool creates out of the workload's ownership. The guest agent
+/// cannot set this user — it is not root after the drop — so host-initiated
+/// `MediatedExec` children keep running as the workload user with only the
+/// tool group changed; both paths are recorded against the same attribution
+/// session either way.
+pub const TOOL_UID: u32 = 902;
+
 /// Home directory used by workload processes.
 ///
 /// The workload root is mounted read-only, so this is a *mount point*: image
@@ -44,8 +57,13 @@ pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
 /// point — one mvm neither built nor materialized.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
-/// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
+/// Linux capability the tool helper needs to start a mediated tool invocation
+/// under [`TOOL_UID`].
+pub const CAP_SETUID: u32 = mvm_setpriv::CAP_SETUID;
+/// Linux capability the tool helper needs to start a mediated tool invocation
+/// under [`TOOL_GID`].
+pub const CAP_SETGID: u32 = mvm_setpriv::CAP_SETGID;
 /// Linux capability the egress client needs to serve the loopback DNS stub on
 /// port 53.
 pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
@@ -59,9 +77,9 @@ pub const CAP_SETPCAP: u32 = 8;
 /// helper, never by the agent.
 pub const CAP_SYS_ADMIN: u32 = mvm_setpriv::CAP_SYS_ADMIN;
 /// Capabilities explicitly retained by the guest agent after boot setup.
-pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
+pub const RESTORE_AGENT_CAPABILITIES: u64 = (1u64 << CAP_KILL) | (1u64 << CAP_SYS_TIME);
 /// Capabilities retained by the CRNG reseed helper, and nothing else.
-pub const CRNG_RESEED_HELPER_CAPABILITIES: u32 = 1u32 << CAP_SYS_ADMIN;
+pub const CRNG_RESEED_HELPER_CAPABILITIES: u64 = 1u64 << CAP_SYS_ADMIN;
 /// Identity of the CRNG reseed helper. Distinct from [`WORKLOAD_UID`], which
 /// the agent and workload share, so neither can signal it, change its limits,
 /// or pose as it on the helper socket. mkGuest images reserve the same number.
@@ -69,8 +87,10 @@ pub const CRNG_RESEED_HELPER_UID: u32 = 988;
 /// Group of the CRNG reseed helper on the universal initramfs path.
 pub const CRNG_RESEED_HELPER_GID: u32 = 988;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod capability_sets;
+#[cfg(all(target_os = "linux", test))]
+mod high_capability_tests;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
 mod cgroup2;
@@ -81,6 +101,8 @@ pub use cgroup2::{
     mount_and_delegate_cgroup2,
 };
 pub use extensions::mount_extensions;
+#[cfg(any(target_os = "linux", test))]
+pub use service_identity::TOOL_HELPER_IDENTITY;
 pub use service_identity::{ADDON_DNS_IDENTITY, EGRESS_CLIENT_IDENTITY, ServiceIdentity};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
@@ -125,13 +147,10 @@ impl MountError {
     }
 }
 
-/// Result type for boot-time mount operations.
 pub type Result<T> = std::result::Result<T, MountError>;
 
-/// Fixed path where the rootfs is staged before pivot/switch_root.
 pub(crate) const ROOTFS_STAGING: &str = "/mnt/root";
 
-/// Validate a 64-character lowercase hex dm-verity roothash.
 pub fn validate_roothash(roothash: &str, name: &str) -> Result<()> {
     if roothash.len() != 64
         || !roothash
@@ -342,12 +361,10 @@ pub fn mount_sdk_sidecar(device: &str, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reserved mountpoints that volumes are not allowed to shadow.
 #[cfg(test)]
 pub(crate) const RESERVED_MOUNTS: &[&str] =
     &["/", "/mvm", "/mvm/runtime", "/dev", "/dev/vda", "/dev/vdc"];
 
-/// Validate that a volume mountpoint does not collide with reserved paths.
 pub fn validate_volume_mountpoint(mountpoint: &str) -> Result<()> {
     validated_relative_mountpoint(mountpoint).map(|_| ())
 }
@@ -506,7 +523,6 @@ fn writable_block_volume_owner(volume: &VolumeConfig) -> Option<(u32, u32)> {
         .then_some((WORKLOAD_UID, WORKLOAD_GID))
 }
 
-/// Mount custom virtio-fs and ext4 block volumes inside the new root tree.
 pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
     let mut scaffolds = BTreeSet::new();
     for vol in volumes {
@@ -609,7 +625,6 @@ pub fn ensure_workload_home() -> Result<()> {
     Ok(())
 }
 
-/// Where the pseudo-terminal slave filesystem is mounted.
 pub const DEVPTS_MOUNT_POINT: &str = "/dev/pts";
 
 /// Standard tty-group layout for the slave nodes `devpts` hands out.
@@ -759,7 +774,6 @@ pub fn mount_workload_home() -> Result<()> {
     Ok(())
 }
 
-/// What [`mount_workload_home`] settled on, once it has run.
 static RESOLVED_HOME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// Resolve the writable home directory for workload processes.
@@ -842,17 +856,16 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
 /// usable from `pre_exec`.
 #[cfg(target_os = "linux")]
-pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::io::Result<()> {
+pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u64) -> std::io::Result<()> {
     assume_identity_with_saved_gid(uid, gid, gid, keep)
 }
 
-/// [`assume_identity_retaining`], leaving `saved_gid` as the saved group id.
 #[cfg(target_os = "linux")]
 fn assume_identity_with_saved_gid(
     uid: u32,
     gid: u32,
     saved_gid: u32,
-    keep: u32,
+    keep: u64,
 ) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -876,6 +889,18 @@ fn assume_identity_with_saved_gid(
     Ok(())
 }
 
+/// Remove all active capability sets after a non-root identity transition.
+///
+/// Clearing permitted and inheritable also clears ambient capabilities: Linux
+/// requires every ambient bit to remain in both sets. Unlike a root-to-non-root
+/// transition, changing between non-root uids does not do this automatically.
+/// Uses only the allocation-free capset helper, so it is safe between fork
+/// and exec. The caller must also set `no_new_privs` before executing code.
+#[cfg(target_os = "linux")]
+pub(crate) fn clear_process_capabilities() -> std::io::Result<()> {
+    set_capabilities(0)
+}
+
 /// The capability slots `PR_CAPBSET_DROP` is asked about.
 ///
 /// The kernel's own ceiling is `CAP_LAST_CAP`, which grows between releases.
@@ -889,15 +914,14 @@ const CAPABILITY_SLOTS: std::ops::RangeInclusive<u32> = 0..=63;
 /// Whether `keep` retains capability slot `cap`.
 ///
 /// Split out from the syscall loop so the mask arithmetic is testable off
-/// Linux and without root. The widening to `u64` is load-bearing rather than
-/// cosmetic: `1u32 << 32` panics in debug and is UB-adjacent in release, so a
-/// `u32` shift silently mis-answers every slot above 31.
+/// Linux and without root. Both the mask and shift use `u64`, so every slot
+/// in the Linux v3 capability representation can be retained.
 ///
 /// Gated on its two real consumers: the Linux syscall loop, and the tests
 /// that pin the mask arithmetic on every host.
 #[cfg(any(target_os = "linux", test))]
-fn bounding_set_retains(keep: u32, cap: u32) -> bool {
-    u64::from(keep) & (1u64 << cap) != 0
+fn bounding_set_retains(keep: u64, cap: u32) -> bool {
+    keep & (1u64 << cap) != 0
 }
 
 /// Drop every capability from the bounding set except `keep`.
@@ -907,7 +931,7 @@ fn bounding_set_retains(keep: u32, cap: u32) -> bool {
 /// parent on behalf of every descendant. Slots the running kernel does not
 /// implement report `EINVAL` and are skipped.
 #[cfg(target_os = "linux")]
-fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
+fn drop_capability_bounding_set_to(keep: u64) -> std::io::Result<()> {
     for cap in CAPABILITY_SLOTS {
         if bounding_set_retains(keep, cap) {
             continue;
@@ -970,7 +994,7 @@ pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
 /// different masks. See [`bounding_drop_is_unenforceable`] for why `EPERM`
 /// alone is a skip.
 #[cfg(target_os = "linux")]
-fn narrow_bounding_set_where_enforceable(keep: u32) -> std::io::Result<()> {
+fn narrow_bounding_set_where_enforceable(keep: u64) -> std::io::Result<()> {
     match drop_capability_bounding_set_to(keep) {
         Err(err) if bounding_drop_is_unenforceable(&err) => Ok(()),
         result => result,
@@ -991,7 +1015,6 @@ fn bounding_drop_is_unenforceable(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(libc::EPERM)
 }
 
-/// `prctl(PR_SET_NO_NEW_PRIVS, 1)`. One-way and inherited across fork/exec.
 #[cfg(target_os = "linux")]
 fn set_no_new_privileges() -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
@@ -2354,7 +2377,7 @@ mod privilege_tests {
 
     /// Gate for the live privilege witnesses; panics on a request without root.
     #[cfg(target_os = "linux")]
-    fn privileged() -> bool {
+    pub(super) fn privileged() -> bool {
         let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
         // SAFETY: geteuid has no preconditions.
         let euid = unsafe { libc::geteuid() };
@@ -2383,11 +2406,22 @@ mod privilege_tests {
             );
             // An all-ones u32 mask retains exactly the slots a u32 can name.
             assert_eq!(
-                bounding_set_retains(u32::MAX, cap),
+                bounding_set_retains(u64::from(u32::MAX), cap),
                 cap < 32,
                 "u32::MAX must retain slots 0..32 and no others; slot {cap} disagreed"
             );
+            assert!(bounding_set_retains(u64::MAX, cap));
+            assert!(bounding_set_retains(1u64 << cap, cap));
         }
+    }
+
+    #[test]
+    fn bounding_set_preserves_mixed_low_and_high_bits() {
+        let mask = (1u64 << CAP_NET_BIND_SERVICE) | (1u64 << 38) | (1u64 << 39);
+        let retained: Vec<_> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(mask, *cap))
+            .collect();
+        assert_eq!(retained, vec![CAP_NET_BIND_SERVICE, 38, 39]);
     }
 
     #[test]
@@ -2594,7 +2628,7 @@ mod privilege_tests {
     /// agent's retained set ever changes.
     #[test]
     fn workload_keep_mask_is_empty_and_narrower_than_the_agent_mask() {
-        const WORKLOAD_KEEP: u32 = 0;
+        const WORKLOAD_KEEP: u64 = 0;
         assert_eq!(WORKLOAD_KEEP, 0, "the workload retains no capability");
         assert_eq!(
             WORKLOAD_KEEP & RESTORE_AGENT_CAPABILITIES,

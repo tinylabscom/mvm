@@ -20,6 +20,7 @@ pub mod host_cost;
 pub mod host_kv;
 pub mod host_signer;
 pub mod host_time;
+pub mod host_tool;
 /// Bounded, flow-aware guest/host networking wire contract: framing,
 /// opcodes, and the session/stream state machine shared by guest and host.
 pub mod network_flow;

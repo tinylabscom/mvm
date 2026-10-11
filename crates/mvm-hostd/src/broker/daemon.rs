@@ -473,6 +473,27 @@ impl HostAgentDaemon {
                     .context("register controller-backed typed capability")?;
             }
         }
+        let host_tool = mvm_core::protocol::broker::ServiceId::parse(
+            mvm_core::protocol::host_tool::HOST_TOOL_SERVICE,
+        )
+        .expect("host.tool.v1 is a valid ServiceId");
+        if r.services_bindings.contains(&host_tool) {
+            match &r.tool_decision_socket {
+                Some(socket) => {
+                    registry.register(Arc::new(
+                        crate::broker::handlers::host_tool_v1::HostToolV1Handler::new(
+                            PathBuf::from(socket),
+                        ),
+                    ));
+                }
+                None => {
+                    warn!(
+                        vm_id = %r.vm_id,
+                        "host.tool.v1 bound but no tool_decision_socket; guest tool                          questions will return NotBound"
+                    );
+                }
+            }
+        }
         let host_audit = mvm_core::protocol::broker::ServiceId::parse("host.audit.v1")
             .expect("host.audit.v1 is a valid ServiceId");
         if r.services_bindings.contains(&host_audit)
@@ -820,6 +841,7 @@ mod tests {
                     .into_owned(),
             ),
             audit_signer_uds_path: signer.map(|p| p.to_string_lossy().into_owned()),
+            tool_decision_socket: None,
             services_bindings: vec![],
             capability_bindings: vec![],
             assurance: None,

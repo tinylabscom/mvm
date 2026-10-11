@@ -13,6 +13,12 @@ on:
   schedule:
     - cron: "51 4 * * *"
   workflow_dispatch:
+    inputs:
+      tool_live_only:
+        description: Run only the tool_live KVM witness in the live BDD track
+        required: false
+        default: false
+        type: boolean
 
 # One Extended CI run at a time, across every ref and trigger. The
 # organization's hosted-runner pool is 20 concurrent jobs shared with the merge
@@ -138,6 +144,7 @@ jobs:
   # the Extended CI tracking issue through security-lane-watch.yml.
   bdd-live-warm-claim:
     name: BDD live warm claim (Linux, Firecracker)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.tool_live_only }}
     runs-on: ubuntu-latest
     # The scenario enforces the 300 ms startup ceiling, so the recipe builds an
     # optimized mvmctl beside the debug test harness; the second profile is
@@ -219,7 +226,10 @@ jobs:
     # timeout, and nothing should wait behind that.
     needs: bdd-live-warm-claim
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
+    # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
+    # the one self-hosted certification machine.
+    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
@@ -228,17 +238,10 @@ jobs:
       # runner budget above.
       max-parallel: 1
       matrix:
-        include:
-          - witness: ci_live
-            # Cold compilation needs about 35 minutes, then the lifecycle up to 40.
-            timeout: 90
-          - witness: tool_live
-            timeout: 60
-          # Seals an OCI image into a signed .mvmpkg with the home's own
-          # signer and boots it as `machine run ./witness.mvmpkg`: the
-          # Firecracker boot witness for the single-file artifact.
-          - witness: bundle_boot_live
-            timeout: 60
+        # bundle_boot_live seals an OCI image into a signed .mvmpkg with the
+        # home's own signer and boots it as `machine run ./witness.mvmpkg`: the
+        # Firecracker boot witness for the single-file artifact.
+        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60}]' || '[{"witness":"ci_live","timeout":90},{"witness":"tool_live","timeout":60},{"witness":"bundle_boot_live","timeout":60}]') }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
@@ -286,6 +289,35 @@ jobs:
           fi
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
+
+      - name: Verify tool credential boundaries on Linux
+        if: matrix.witness == 'tool_live'
+        run: |
+          set -euo pipefail
+          cargo test -p mvm-agentd --lib --no-run --message-format=json > "$RUNNER_TEMP/tool-tests.jsonl"
+          test_binary="$(python3 - "$RUNNER_TEMP/tool-tests.jsonl" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as records:
+              binaries = [
+                  item["executable"]
+                  for line in records
+                  if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                  and item.get("executable")
+                  and item["target"]["name"] == "mvm_agentd"
+              ]
+          assert len(binaries) == 1, binaries
+          print(binaries[0])
+          PY
+          )"
+          for test in \
+            tool_helper::capability_tests::helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege \
+            tool_helper::capability_tests::installed_stash_executes_only_through_helper_descriptor \
+            tool_attribution::tests::relay_provenance_reads_the_isolated_group_and_restores_credentials; do
+            "$test_binary" --list --exact "$test" | grep -Fx "$test: test"
+            sudo env MVM_GUEST_PRIVILEGED_TESTS=1 "$test_binary" --exact "$test" --nocapture
+          done
+          "$test_binary" tool_ --nocapture
+          cargo test -p mvm-agentd --bin mvm-tool-shim
 
       - name: Run the selected live witness
         if: matrix.witness != 'bundle_boot_live'

@@ -59,6 +59,30 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
     );
 }
 
+#[test]
+fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        workflow.contains("tool_live_only:"),
+        "workflow_dispatch must expose the focused witness input"
+    );
+    let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
+    assert!(
+        warm_claim.contains("!inputs.tool_live_only"),
+        "a focused tool witness must skip the warm-claim predecessor"
+    );
+    let readme = job_block(&workflow, "bdd-live-readme");
+    assert!(
+        readme.contains(r#"[{"witness":"tool_live","timeout":60}]"#),
+        "the focused matrix must contain only tool_live"
+    );
+    assert!(
+        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-latest'"),
+        "the focused witness must use the dedicated self-hosted KVM runner"
+    );
+}
+
 /// So must the release workflow. This is the gate that did not exist: a tag
 /// could be cut with only the hermetic BDD lane green, and the hermetic lane
 /// boots no guest.
@@ -602,6 +626,32 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
 
 fn ci_full() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
+}
+
+#[test]
+fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    for job in ["test-workspace-build", "test-workspace-aarch64"] {
+        let body = job_block(&ci, job);
+        let install = body
+            .find("- uses: ./.github/actions/install-zigbuild")
+            .expect("producer lane installs the pinned cross toolchain");
+        let tests = body
+            .find("- name: Install cargo-nextest")
+            .expect("producer lane runs nextest");
+        assert!(install < tests, "{job} must install Zig before tests");
+    }
+
+    let shard = fs::read_to_string(".github/workflows/workspace-shard.yml")
+        .expect("read workspace shard workflow");
+    assert!(shard.contains(
+        "- uses: ./.github/actions/install-zigbuild\n        if: inputs.runner_kind == 'github'"
+    ));
+    assert!(shard.contains("command -v cargo-zigbuild"));
+
+    let extended = ci_full();
+    let live = job_block(&extended, "bdd-live-readme");
+    assert!(live.contains("- uses: ./.github/actions/install-zigbuild"));
 }
 
 fn source_bootstrap_script() -> String {
