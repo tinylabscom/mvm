@@ -3,11 +3,15 @@ use mvm_core::arch::GuestArch;
 use mvm_fs::overlay::RuntimeOverlayArtifact;
 use std::path::{Path, PathBuf};
 
+/// One assembly of the runtime overlay from a source checkout's guest
+/// runtime. A release binary assembles its overlay in `mvmctl bootstrap` from
+/// its release's guest runtime instead; there is no published overlay to
+/// download.
 pub struct RuntimeOverlayAcquireParams<'a> {
     pub cache_root: &'a Path,
     pub expected_version: &'a str,
     pub arch: GuestArch,
-    pub source_checkout_root: Option<&'a Path>,
+    pub source_checkout_root: &'a Path,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,88 +57,52 @@ fn default_runtime_overlay_mode(
     }
 }
 
-/// How one overlay acquisition gets its bytes. Only a source build is a cold
-/// build; a published download is never gated by the cold-build policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum OverlayAcquisition<'a> {
-    BuildFromSource { workspace_root: &'a Path },
-    Download,
-}
+/// The artifact the cold-build gate is consulted for when the overlay has to
+/// be compiled.
+const OVERLAY_COLD_BUILD_ARTIFACT: &str = "the MVM guest runtime (runtime overlay)";
 
-impl OverlayAcquisition<'_> {
-    fn for_params<'a>(params: &RuntimeOverlayAcquireParams<'a>) -> OverlayAcquisition<'a> {
-        match params.source_checkout_root {
-            Some(workspace_root) => OverlayAcquisition::BuildFromSource { workspace_root },
-            None => OverlayAcquisition::Download,
-        }
-    }
-
-    /// The artifact name the cold-build gate is consulted for, if any.
-    fn cold_build_artifact(&self) -> Option<&'static str> {
-        match self {
-            OverlayAcquisition::BuildFromSource { .. } => {
-                Some("the MVM guest runtime (runtime overlay)")
-            }
-            OverlayAcquisition::Download => None,
-        }
-    }
-}
-
+/// Assemble the runtime overlay from the checkout's guest runtime, building
+/// the archive first when it is not cached (behind the cold-build gate).
 pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
-    let acquisition = OverlayAcquisition::for_params(params);
-    if let OverlayAcquisition::BuildFromSource { workspace_root } = acquisition
-        && mvm_build::guest_runtime::cached_source_guest_runtime(
-            params.cache_root,
-            params.expected_version,
-            params.arch,
-            workspace_root,
-        )?
-        .is_none()
-        && let Some(artifact) = acquisition.cold_build_artifact()
+    let workspace_root = params.source_checkout_root;
+    if mvm_build::guest_runtime::cached_source_guest_runtime(
+        params.cache_root,
+        params.expected_version,
+        params.arch,
+        workspace_root,
+    )?
+    .is_none()
     {
-        mvm_runtime::ui::admit_cold_build(artifact).map_err(anyhow::Error::msg)?;
+        mvm_runtime::ui::admit_cold_build(OVERLAY_COLD_BUILD_ARTIFACT)
+            .map_err(anyhow::Error::msg)?;
     }
-    match acquisition {
-        OverlayAcquisition::BuildFromSource { workspace_root } => {
-            build_runtime_overlay_from_source_checkout(
-                workspace_root,
-                params.cache_root,
-                params.expected_version,
-                params.arch,
-            )
-            .with_context(|| {
-                format!(
-                    "build runtime overlay {} for {} from source checkout {}",
-                    params.expected_version,
-                    params.arch,
-                    workspace_root.display()
-                )
-            })
-        }
-        OverlayAcquisition::Download => mvm_build::runtime_overlay::download_runtime_overlay(
+    build_runtime_overlay_from_source_checkout(
+        workspace_root,
+        params.cache_root,
+        params.expected_version,
+        params.arch,
+    )
+    .with_context(|| {
+        format!(
+            "build runtime overlay {} for {} from source checkout {}",
             params.expected_version,
             params.arch,
-            params.cache_root,
+            workspace_root.display()
         )
-        .with_context(|| {
-            format!(
-                "download runtime overlay {} for {} into {}",
-                params.expected_version,
-                params.arch,
-                params.cache_root.display()
-            )
-        }),
-    }
+    })
 }
 
 /// Prepare the explicitly selected OCI guest runtime.
 ///
 /// This is an acquisition API for `bootstrap` and `image pull`, never for the
-/// latency-sensitive launch path. Published artifacts are the default even for
-/// a source-built CLI; setting `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build` opts
-/// into the source build.
+/// latency-sensitive launch path. With `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build`
+/// a source-built CLI compiles it from its checkout, keyed by the source.
+/// Otherwise it is keyed by this CLI's version: a source build assembles it
+/// from its own tree, and a release binary has it from `mvmctl bootstrap`,
+/// which installs it from the guest runtime its release ships. The image set
+/// carries no guest runtime, so nothing is downloaded from it.
 pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
@@ -147,41 +115,49 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     {
         return Ok(());
     }
-    refuse_image_set_oci_runtime_for(mvm_build::artifact_acquisition::compiled_channel())?;
-    let phase = mvm_runtime::ui::activity::start(
-        "Preparing the published guest runtime (first use; downloaded and cached afterward)",
-    );
-    acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-        cache_root,
-        expected_version: version,
-        arch,
-        source_checkout_root: None,
-    })?;
-    phase.finish();
-    if mvm_build::guest_agent_build::cached_guest_binaries(oci_cache_root, version, arch).is_none()
-    {
-        anyhow::bail!(
-            "published runtime overlay {version} for {arch} did not install the OCI guest runtime"
+    if let Some(workspace_root) = runtime_overlay_source_checkout_root() {
+        return prepare_versioned_source_oci_guest_runtime(
+            cache_root,
+            &workspace_root,
+            version,
+            arch,
         );
     }
-    Ok(())
+    anyhow::bail!(
+        "the guest runtime of mvmctl {version} is not prepared; run `mvmctl bootstrap` first, \
+         which installs it from the guest runtime this release ships"
+    )
 }
 
-/// A release binary's OCI guest runtime is installed by `mvmctl bootstrap`
-/// from the guest runtime its own release ships, with the other pieces from
-/// the same archive. Downloading the image set's overlay for it instead would
-/// boot guest code from another tree, so a release binary refuses and names
-/// the bootstrap. Other builds keep the image set.
-fn refuse_image_set_oci_runtime_for(
-    channel: mvm_build::artifact_acquisition::DistributionChannel,
+/// A source build's OCI guest runtime under its version key, assembled from
+/// the guest-runtime archive its own tree builds: the one guest runtime a
+/// source build has, now that the image set carries none.
+fn prepare_versioned_source_oci_guest_runtime(
+    cache_root: &Path,
+    workspace_root: &Path,
+    version: &str,
+    arch: GuestArch,
 ) -> Result<()> {
-    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
-        anyhow::bail!(
-            "the guest runtime of mvmctl {} is not prepared; run `mvmctl bootstrap` first, which \
-             installs it from this release",
-            env!("CARGO_PKG_VERSION")
-        );
+    let cold = mvm_build::guest_runtime::cached_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        workspace_root,
+    )?
+    .is_none();
+    if cold {
+        mvm_runtime::ui::admit_cold_build("the OCI guest runtime").map_err(anyhow::Error::msg)?;
+        mvm_runtime::ui::activity::println_above(&format!("[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"));
     }
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        workspace_root,
+    )
+    .context("prepare the source-built guest runtime for OCI")?;
+    mvm_build::runtime_pieces::install_oci_guest_runtime(cache_root, version, arch, &runtime)
+        .context("install the OCI guest runtime from this checkout's guest runtime")?;
     Ok(())
 }
 
@@ -339,20 +315,51 @@ mod acquisition_policy_tests {
         assert!(shared_guest_runtime_cache_root(Path::new("/")).is_err());
     }
 
+    /// Outside an explicit source build, a prepared OCI guest runtime is
+    /// reused from its version key with nothing compiled or downloaded, and
+    /// nothing is installed from the image set.
     #[test]
-    fn a_release_binary_never_takes_its_oci_guest_runtime_from_the_image_set() {
-        let refused = refuse_image_set_oci_runtime_for(
-            mvm_build::artifact_acquisition::DistributionChannel::Release,
-        )
-        .expect_err("a release binary installs its own guest runtime");
-        assert!(
-            refused.to_string().contains("mvmctl bootstrap"),
-            "{refused}"
+    fn a_prepared_versioned_oci_guest_runtime_is_reused_without_the_image_set() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            "file:///nonexistent/mvm-image-set",
         );
-        refuse_image_set_oci_runtime_for(
-            mvm_build::artifact_acquisition::DistributionChannel::Source,
+        let home = tempfile::tempdir().expect("temporary home");
+        let oci = home.path().join("cache/oci");
+        let staged = home.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        for name in [
+            "mvm-guest-agent",
+            "mvm-guest-netinit",
+            "mvm-egress-client",
+            "mvm-oci-entrypoint",
+        ] {
+            std::fs::write(
+                staged.join(name),
+                mvm_build::guest_agent_build::fake_static_elf(GuestArch::host(), name.as_bytes()),
+            )
+            .unwrap();
+        }
+        mvm_build::guest_agent_build::install_into_cache(
+            mvm_build::guest_agent_build::GuestRuntimeBinaryPaths {
+                agent: &staged.join("mvm-guest-agent"),
+                netinit: &staged.join("mvm-guest-netinit"),
+                egress_client: &staged.join("mvm-egress-client"),
+                entrypoint_runner: &staged.join("mvm-oci-entrypoint"),
+            },
+            &oci,
+            env!("CARGO_PKG_VERSION"),
+            GuestArch::host(),
         )
-        .expect("a source build keeps the image set's published runtime");
+        .unwrap();
+
+        prepare_oci_guest_runtime(&oci).expect("a prepared runtime is reused");
+        assert!(
+            !home.path().join("cache/image-set").exists(),
+            "no image-set member may be installed"
+        );
     }
 
     #[test]
@@ -395,37 +402,9 @@ mod acquisition_policy_tests {
         assert!(message.contains("mvmctl bootstrap"), "{message}");
     }
 
-    fn params(source_checkout_root: Option<&Path>) -> RuntimeOverlayAcquireParams<'_> {
-        RuntimeOverlayAcquireParams {
-            cache_root: Path::new("/cache"),
-            expected_version: "0.0.0",
-            arch: GuestArch::host(),
-            source_checkout_root,
-        }
-    }
-
     #[test]
-    fn a_published_download_is_never_a_cold_build() {
-        let acquisition = OverlayAcquisition::for_params(&params(None));
-        assert_eq!(acquisition, OverlayAcquisition::Download);
-        assert_eq!(acquisition.cold_build_artifact(), None);
-    }
-
-    #[test]
-    fn a_source_build_consults_the_cold_build_gate() {
-        let root = Path::new("/checkout");
-        let acquisition = OverlayAcquisition::for_params(&params(Some(root)));
-        assert_eq!(
-            acquisition,
-            OverlayAcquisition::BuildFromSource {
-                workspace_root: root
-            }
-        );
-        assert!(
-            acquisition
-                .cold_build_artifact()
-                .is_some_and(|name| name.contains("runtime overlay"))
-        );
+    fn the_overlay_cold_build_gate_names_the_runtime_overlay() {
+        assert!(OVERLAY_COLD_BUILD_ARTIFACT.contains("runtime overlay"));
     }
 
     #[test]

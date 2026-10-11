@@ -16,11 +16,10 @@ use mvm_fs::initramfs::{InitramfsArtifact, InitramfsResolver};
 use mvm_fs::parallel::par_map;
 use thiserror::Error;
 
-use crate::published_image_set::{
-    ImageSetMemberError, MemberVersion, PublishedImageSet, SetMemberCache, SetMemberCacheError,
-};
+use crate::published_image_set::{MemberVersion, SetMemberCache, SetMemberCacheError};
 use crate::runtime_overlay::ExpandedArchiveLimits as InitramfsArchiveLimits;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
+use mvm_core::image_set::MemberTarget;
+use mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE;
 
 /// Failure modes for universal initramfs resolution/build.
 #[derive(Debug, Error)]
@@ -49,17 +48,7 @@ pub enum InitramfsBuildError {
         reason: String,
     },
 
-    /// The image set this build pins could not be acquired and verified.
-    #[error("{0:#}")]
-    ImageSet(anyhow::Error),
-
-    /// The verified image set could not deliver the initramfs: it declares no
-    /// member for the arch, or the bytes served are not the ones it declares.
-    /// Boxed so the rare refusal does not widen every `Result` here.
-    #[error(transparent)]
-    ImageSetMember(Box<ImageSetMemberError>),
-
-    /// No usable initramfs from the pinned image set is installed, or the one
+    /// No usable initramfs from a bundle's image set is installed, or the one
     /// delivered carries a `VERSION` that cannot name a cache entry.
     #[error(transparent)]
     ImageSetCache(#[from] SetMemberCacheError),
@@ -67,12 +56,6 @@ pub enum InitramfsBuildError {
     /// Underlying I/O error.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-impl From<ImageSetMemberError> for InitramfsBuildError {
-    fn from(error: ImageSetMemberError) -> Self {
-        Self::ImageSetMember(Box::new(error))
-    }
 }
 
 /// Resolve a cached universal initramfs. On a miss with a non-default cache
@@ -269,15 +252,13 @@ fn is_recoverable_resolve_miss(error: &InitramfsBuildError) -> bool {
 /// Resolve a cached universal initramfs, or return an error describing why it
 /// is unavailable. A cold contributor cache packs the sealed initramfs agent
 /// from this checkout's guest-runtime archive — the same archive the overlay
-/// and SDK sidecar are assembled from — on every host; release distributions
-/// use the published download.
+/// and SDK sidecar are assembled from — on every host. A release binary
+/// assembles it from its own release's guest runtime in `mvmctl bootstrap`;
+/// there is no published copy to fetch in its place.
 ///
 /// The build is not host-gated: the archive cross-compiles with
 /// `cargo zigbuild` and the agent is packed into a deterministic cpio on the
-/// host. Gating it to Linux left the macOS contributor with the
-/// download as its only arm; when the release carried no initramfs for the
-/// arch, the absence was negative-cached for a day and every launch on that
-/// host booted with no initramfs at all.
+/// host, so every host has the same one arm.
 pub fn resolve_or_build_local_initramfs(
     _env: &dyn ShellEnvironment,
     cache_root: &Path,
@@ -300,32 +281,19 @@ pub fn resolve_or_build_local_initramfs(
     }
 
     if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
-        return resolve_or_download_image_set_initramfs(arch, cache_root);
+        return Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!(
+                "the universal initramfs {version} for {arch} is not prepared; run \
+                 `mvmctl bootstrap`, which assembles it from this release's guest runtime ({initial})"
+            ),
+        });
     }
 
-    // A source checkout builds; only a checkout-less source build falls back to
-    // the published artifact. Reporting both failures matters: the download arm
-    // fails whenever the locked image set carries no initramfs for this arch,
-    // and on its own that reads as "unavailable" rather than "your checkout did
-    // not build".
     if crate::image_source::guest_runtime_source_checkout().is_some() {
         mvm_vmm::host::ui::admit_cold_build("the universal initramfs")
             .map_err(|reason| InitramfsBuildError::CargoBuildFailed { reason })?;
     }
-    let build_err = match build_initramfs_from_source_checkout(cache_root, version, arch) {
-        Ok(artifact) => return Ok(artifact),
-        Err(e) => e,
-    };
-    match resolve_or_download_image_set_initramfs(arch, cache_root) {
-        Ok(artifact) => Ok(artifact),
-        Err(download_err) => Err(InitramfsBuildError::CargoBuildFailed {
-            reason: format!(
-                "building the universal initramfs {version} from this checkout failed \
-                 ({build_err}), and acquiring the pinned image set's initramfs for {arch} also \
-                 failed ({download_err})"
-            ),
-        }),
-    }
+    build_initramfs_from_source_checkout(cache_root, version, arch)
 }
 
 /// Pack the initramfs from this checkout's guest-runtime archive, which lives
@@ -587,13 +555,6 @@ fn set_cache_perms(_p: &Path) -> Result<(), InitramfsBuildError> {
 // Download the published initramfs (consumer side)
 // =================================================================
 
-/// A locked set without an initramfs is re-checked daily, so a contributor who
-/// moves the lock to a set carrying one sees it without making every
-/// invocation pay for fetching the root.
-const RELEASE_NOT_FOUND_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
-const RELEASE_NOT_FOUND_CACHE_DIR: &str = ".release-not-found";
-
 /// Release-side artifact names for one arch. Pure data so the download path
 /// and the release pipeline can agree on filenames without touching network
 /// code in the release job.
@@ -616,128 +577,8 @@ impl InitramfsArtifactNames {
     }
 }
 
-fn release_not_found_marker(cache_root: &Path, root: &str, arch: GuestArch) -> PathBuf {
-    cache_root
-        .join(RELEASE_NOT_FOUND_CACHE_DIR)
-        .join(root)
-        .join(arch.to_string())
-}
-
-fn record_release_not_found(
-    cache_root: &Path,
-    root: &str,
-    arch: GuestArch,
-    observed_at: u64,
-) -> Result<(), InitramfsBuildError> {
-    let marker = release_not_found_marker(cache_root, root, arch);
-    mvm_core::util::atomic_io::atomic_write_str(&marker, &observed_at.to_string())
-        .map_err(std::io::Error::other)?;
-    Ok(())
-}
-
-fn release_not_found_is_fresh(cache_root: &Path, root: &str, arch: GuestArch, now: u64) -> bool {
-    let marker = release_not_found_marker(cache_root, root, arch);
-    let Some(observed_at) = std::fs::read_to_string(marker)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    else {
-        return false;
-    };
-    now.saturating_sub(observed_at) < RELEASE_NOT_FOUND_TTL.as_secs()
-}
-
-fn current_unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-fn not_in_image_set_error(arch: GuestArch) -> InitramfsBuildError {
-    InitramfsBuildError::from(ImageSetMemberError::NoMember {
-        release_tag: mvm_core::image_set::image_train_lock()
-            .image_set
-            .release_tag
-            .clone(),
-        role: ImageSetRole::Initramfs,
-        target: MemberTarget::Arch(arch),
-    })
-}
-
-/// Whether `error` says the locked set carries no initramfs for the arch. The
-/// root is pinned, so the answer holds until the lock moves — unlike a
-/// transport failure, which is worth retrying on the next invocation.
-fn is_absent_from_image_set(error: &InitramfsBuildError) -> bool {
-    matches!(
-        error,
-        InitramfsBuildError::ImageSetMember(member)
-            if matches!(**member, ImageSetMemberError::NoMember { .. })
-    )
-}
-
-fn with_release_negative_cache<T>(
-    cache_root: &Path,
-    root: &str,
-    arch: GuestArch,
-    now: u64,
-    attempt: impl FnOnce() -> Result<T, InitramfsBuildError>,
-) -> Result<T, InitramfsBuildError> {
-    if release_not_found_is_fresh(cache_root, root, arch, now) {
-        return Err(not_in_image_set_error(arch));
-    }
-
-    match attempt() {
-        Ok(value) => {
-            let marker = release_not_found_marker(cache_root, root, arch);
-            if let Err(error) = std::fs::remove_file(&marker)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                tracing::debug!(
-                    path = %marker.display(),
-                    %error,
-                    "failed to clear initramfs release negative-cache marker"
-                );
-            }
-            Ok(value)
-        }
-        Err(error) if is_absent_from_image_set(&error) => {
-            if let Err(marker_error) = record_release_not_found(cache_root, root, arch, now) {
-                tracing::debug!(
-                    %marker_error,
-                    "failed to persist initramfs release negative-cache marker"
-                );
-            }
-            Err(error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-/// The pinned image set's initramfs for `arch`: from the cache when it is
-/// installed there, otherwise acquired and installed.
-///
-/// A locked set that declares no initramfs for the arch is remembered per
-/// root, so the absence is re-checked daily rather than on every launch, and
-/// moving the lock to another root asks again at once.
-fn resolve_or_download_image_set_initramfs(
-    arch: GuestArch,
-    cache_root: &Path,
-) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    let set = SetMemberCache::locked();
-    if let Ok(artifact) = resolve_image_set_initramfs(cache_root, &set, arch) {
-        return Ok(artifact);
-    }
-    with_release_negative_cache(
-        cache_root,
-        set.root().as_str(),
-        arch,
-        current_unix_seconds(),
-        || download_initramfs(arch, cache_root),
-    )
-}
-
-/// Resolve `arch`'s initramfs installed from the image set `set`, a pure
-/// cache read.
+/// Resolve `arch`'s initramfs installed from the image set `set` by a
+/// bundle's boot assets, a pure cache read.
 ///
 /// The resolver expects the member `VERSION` recorded when it was installed
 /// from its digest-verified bytes, not the running CLI's version; the set is
@@ -749,7 +590,7 @@ pub fn resolve_image_set_initramfs(
 ) -> Result<InitramfsArtifact, InitramfsBuildError> {
     let version = set.installed_version(
         cache_root,
-        ImageSetRole::Initramfs,
+        BOOT_ASSET_INITRAMFS_ROLE,
         MemberTarget::Arch(arch),
     )?;
     Ok(
@@ -758,51 +599,15 @@ pub fn resolve_image_set_initramfs(
     )
 }
 
-/// Download the initramfs tarball for `arch` as a member of the image set
-/// this build pins, safely extract it, re-verify each inner artifact, and
-/// install it as a member of that set (see [`download_initramfs_from`]).
-///
-/// The archive is trusted only through the set: the root manifest is held to
-/// its locked digest and its publisher's signature, and the archive to the
-/// size and digest that root declares, all before extraction.
-pub fn download_initramfs(
-    arch: GuestArch,
-    cache_root: &Path,
-) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    let image_set = PublishedImageSet::acquire().map_err(InitramfsBuildError::ImageSet)?;
-    download_initramfs_from(&image_set, arch, cache_root)
-}
-
-/// [`download_initramfs`] from a set that has already been acquired.
-///
-/// The member is filed under the set's root — at
-/// `<cache_root>/image-set/<root>/<member-version>/<arch>/`, still beneath the
-/// initramfs cache root every boot path recognises — and labelled with its own
-/// `VERSION`. The install is recorded only once the artifact is in place, so
-/// an interrupted one reads as a miss and is acquired again.
-pub fn download_initramfs_from(
-    image_set: &PublishedImageSet,
-    arch: GuestArch,
-    cache_root: &Path,
-) -> Result<InitramfsArtifact, InitramfsBuildError> {
-    let names = InitramfsArtifactNames::for_arch(&arch.to_string());
-    let tmp = tempfile::tempdir()?;
-    let stage = tmp.path();
-    let archive_local = stage.join(&names.archive);
-    image_set.fetch_member_artifact(
-        ImageSetRole::Initramfs,
-        arch,
-        &names.archive,
-        &archive_local,
-    )?;
-    install_image_set_initramfs_archive(&archive_local, &image_set.member_cache(), arch, cache_root)
-}
-
 /// Install an already-authenticated initramfs member without registry access.
 ///
 /// The caller must verify the archive against the image set's digest and size
-/// before calling. Extraction and inner artifact verification are shared with
-/// the download path; the installed member retains the original set identity.
+/// before calling; a bundle's boot assets are the one caller. The member is
+/// filed under the set's root — at
+/// `<cache_root>/image-set/<root>/<member-version>/<arch>/`, still beneath the
+/// initramfs cache root every boot path recognises — and labelled with its own
+/// `VERSION`. The install is recorded only once the artifact is in place, so
+/// an interrupted one reads as a miss.
 pub fn install_image_set_initramfs_archive(
     archive: &Path,
     set: &SetMemberCache,
@@ -840,7 +645,7 @@ fn install_image_set_initramfs_archive_with_limits(
         install_initramfs_into_cache(stage, &set.cache_root(cache_root), version.as_str(), arch)?;
     set.record(
         cache_root,
-        ImageSetRole::Initramfs,
+        BOOT_ASSET_INITRAMFS_ROLE,
         MemberTarget::Arch(arch),
         &version,
     )?;
@@ -953,9 +758,7 @@ fn canonical_archive_member_name(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::published_image_set::fixture::ImageSetFixture;
     use mvm_core::util::test_env::TestEnv;
-    use std::cell::Cell;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -1054,78 +857,6 @@ mod tests {
             error.to_string().contains("changed while packing"),
             "{error}"
         );
-    }
-
-    fn absent(arch: GuestArch) -> InitramfsBuildError {
-        not_in_image_set_error(arch)
-    }
-
-    #[test]
-    fn an_absent_member_is_attempted_once_within_the_negative_cache_ttl() {
-        let tmp = tempfile::tempdir().unwrap();
-        let attempts = Cell::new(0);
-        let version = "0.18.0";
-        let arch = GuestArch::Aarch64;
-
-        let first = with_release_negative_cache(tmp.path(), version, arch, 1_000, || {
-            attempts.set(attempts.get() + 1);
-            Err::<(), _>(absent(arch))
-        })
-        .unwrap_err();
-        let second = with_release_negative_cache(tmp.path(), version, arch, 1_001, || {
-            attempts.set(attempts.get() + 1);
-            Ok(())
-        })
-        .unwrap_err();
-
-        assert_eq!(attempts.get(), 1);
-        assert!(is_absent_from_image_set(&first));
-        assert!(is_absent_from_image_set(&second));
-        assert!(
-            second.to_string().contains("initramfs/aarch64"),
-            "a cached refusal must still name the role and arch: {second}"
-        );
-    }
-
-    #[test]
-    fn an_expired_marker_retries_and_refreshes_only_an_absence() {
-        let tmp = tempfile::tempdir().unwrap();
-        let attempted = Cell::new(false);
-        let version = "0.18.0";
-        let arch = GuestArch::Aarch64;
-        record_release_not_found(tmp.path(), version, arch, 1_000).unwrap();
-        let retry_at = 1_000 + RELEASE_NOT_FOUND_TTL.as_secs();
-
-        let error = with_release_negative_cache(tmp.path(), version, arch, retry_at, || {
-            attempted.set(true);
-            Err::<(), _>(absent(arch))
-        })
-        .unwrap_err();
-
-        assert!(attempted.get());
-        assert!(is_absent_from_image_set(&error));
-        let marker = release_not_found_marker(tmp.path(), version, arch);
-        assert_eq!(
-            std::fs::read_to_string(marker).unwrap(),
-            retry_at.to_string()
-        );
-    }
-
-    /// A transport failure or a refused root says nothing about what the
-    /// locked set carries, so it is retried on the next invocation.
-    #[test]
-    fn a_transient_failure_is_not_negative_cached() {
-        let tmp = tempfile::tempdir().unwrap();
-        let version = "0.18.0";
-        let arch = GuestArch::Aarch64;
-
-        let error = with_release_negative_cache(tmp.path(), version, arch, 1_000, || {
-            Err::<(), _>(InitramfsBuildError::ImageSet(anyhow::anyhow!("timeout")))
-        })
-        .unwrap_err();
-
-        assert!(matches!(error, InitramfsBuildError::ImageSet(_)));
-        assert!(!release_not_found_marker(tmp.path(), version, arch).exists());
     }
 
     /// The defect this closes: the cache key is `(version, arch)` and the
@@ -1400,102 +1131,6 @@ mod tests {
         )
     }
 
-    /// Acquire `fixture` as the verified set. A fixture carries no publisher
-    /// signature; that rung has its own witnesses in
-    /// `crate::published_image_set`.
-    fn acquire(fixture: &ImageSetFixture, served: &Path, env: &mut TestEnv) -> PublishedImageSet {
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        PublishedImageSet::acquire_from(fixture.serve_from(served))
-            .expect("the fixture root must be accepted")
-    }
-
-    fn with_initramfs(declared: Vec<u8>) -> ImageSetFixture {
-        ImageSetFixture::complete().publish(
-            mvm_core::image_set::ImageSetRole::Initramfs,
-            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
-            "initramfs-aarch64.tar.gz",
-            declared,
-        )
-    }
-
-    #[test]
-    fn download_initramfs_installs_the_member_the_signed_root_names() {
-        let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("cache").join("initramfs");
-        let version = "0.18.0";
-        let arch = GuestArch::Aarch64;
-        let set = acquire(
-            &with_initramfs(served_initramfs_archive(version)),
-            &tmp.path().join("served"),
-            &mut env,
-        );
-
-        let artifact = download_initramfs_from(&set, arch, &cache_root).unwrap();
-
-        let expected_dir = set
-            .member_cache()
-            .cache_root(&cache_root)
-            .join(version)
-            .join(arch.to_string());
-        assert_eq!(artifact.image_path, expected_dir.join("initramfs.cpio.gz"));
-        assert!(expected_dir.join("initramfs.hash").is_file());
-        assert!(expected_dir.join("initramfs.size").is_file());
-        assert!(expected_dir.join("VERSION").is_file());
-    }
-
-    /// Bytes other than the ones the signed root declares are refused at the
-    /// digest — the served archive differs only in its gzip trailer, so an
-    /// extraction attempt would have failed differently — and nothing is
-    /// installed.
-    #[test]
-    fn download_initramfs_refuses_bytes_the_root_does_not_declare() {
-        let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("cache");
-        let archive = served_initramfs_archive("0.18.0");
-        let mut tampered = archive.clone();
-        let last = tampered.len() - 1;
-        tampered[last] ^= 0xff;
-        let fixture = with_initramfs(archive).serve_instead("initramfs-aarch64.tar.gz", tampered);
-        let set = acquire(&fixture, &tmp.path().join("served"), &mut env);
-
-        let err = download_initramfs_from(&set, GuestArch::Aarch64, &cache_root)
-            .expect_err("tampered archive must be refused");
-
-        assert!(
-            matches!(
-                &err,
-                InitramfsBuildError::ImageSetMember(member)
-                    if matches!(**member, ImageSetMemberError::DigestMismatch { .. })
-            ),
-            "{err:?}"
-        );
-        assert!(!set.member_cache().cache_root(&cache_root).exists());
-    }
-
-    /// The initramfs is a required member, so a set that omits it for an
-    /// architecture is refused when it is acquired, naming the member, and
-    /// never reaches the download or the cache.
-    #[test]
-    fn a_set_without_an_initramfs_for_the_arch_is_refused_before_download() {
-        let mut env = TestEnv::new();
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_root = tmp.path().join("cache");
-        let fixture = with_initramfs(served_initramfs_archive("0.18.0")).without_member(
-            mvm_core::image_set::ImageSetRole::Initramfs,
-            mvm_core::image_set::MemberTarget::Arch(GuestArch::X86_64),
-        );
-
-        let err = PublishedImageSet::acquire_from(fixture.serve_from(&tmp.path().join("served")))
-            .err()
-            .expect("a set without the member must be refused");
-
-        assert!(format!("{err:#}").contains("initramfs/x86_64"), "{err:#}");
-        assert!(!cache_root.exists());
-    }
-
     /// A member cut from a workspace at another version than this CLI's.
     const MEMBER_VERSION: &str = "0.0.1-member";
 
@@ -1567,7 +1202,7 @@ mod tests {
             assert!(
                 set.installed_version(
                     &cache,
-                    ImageSetRole::Initramfs,
+                    BOOT_ASSET_INITRAMFS_ROLE,
                     MemberTarget::Arch(GuestArch::Aarch64)
                 )
                 .is_err()
@@ -1629,7 +1264,7 @@ mod tests {
             assert!(
                 set.installed_version(
                     &cache,
-                    ImageSetRole::Initramfs,
+                    BOOT_ASSET_INITRAMFS_ROLE,
                     MemberTarget::Arch(GuestArch::Aarch64)
                 )
                 .is_err()
@@ -1663,7 +1298,7 @@ mod tests {
         assert!(
             set.installed_version(
                 &cache,
-                ImageSetRole::Initramfs,
+                BOOT_ASSET_INITRAMFS_ROLE,
                 MemberTarget::Arch(GuestArch::Aarch64)
             )
             .is_err()
@@ -1742,55 +1377,54 @@ mod tests {
         assert!(
             set.installed_version(
                 &cache,
-                ImageSetRole::Initramfs,
+                BOOT_ASSET_INITRAMFS_ROLE,
                 MemberTarget::Arch(GuestArch::Aarch64)
             )
             .is_err()
         );
     }
 
-    /// The set's identity is its signed root, so an initramfs whose `VERSION`
-    /// is not this CLI's installs, lands beneath the initramfs cache root every
-    /// boot path recognises, and resolves from the cache on the next boot
-    /// without the set being served.
+    /// Write `bytes` as an authenticated archive a bundle's boot assets would
+    /// hand over, and return its path.
+    fn bundle_archive(dir: &Path, bytes: Vec<u8>) -> PathBuf {
+        let path = dir.join("initramfs-aarch64.tar.gz");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// The set's identity is its signed root, so an initramfs a bundle's boot
+    /// assets deliver at a `VERSION` that is not this CLI's installs, lands
+    /// beneath the initramfs cache root every boot path recognises, and
+    /// resolves from the cache afterwards.
     #[test]
     fn a_set_initramfs_at_another_version_installs_and_resolves_from_cache() {
         assert_ne!(MEMBER_VERSION, env!("CARGO_PKG_VERSION"));
-        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("cache").join("initramfs");
-        let served = tmp.path().join("served");
-        let set = acquire(
-            &with_initramfs(served_initramfs_archive(MEMBER_VERSION)),
-            &served,
-            &mut env,
-        );
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"bundle-set"));
+        let archive = bundle_archive(tmp.path(), served_initramfs_archive(MEMBER_VERSION));
 
-        let installed = download_initramfs_from(&set, GuestArch::Aarch64, &cache_root)
-            .expect("a member at another version must install");
+        let installed =
+            install_image_set_initramfs_archive(&archive, &set, GuestArch::Aarch64, &cache_root)
+                .expect("a member at another version must install");
         assert_eq!(installed.version, MEMBER_VERSION);
         assert!(installed.image_path.starts_with(&cache_root));
 
-        std::fs::remove_dir_all(&served).unwrap();
-        let resolved =
-            resolve_image_set_initramfs(&cache_root, &set.member_cache(), GuestArch::Aarch64)
-                .expect("the installed member must resolve from the cache");
+        std::fs::remove_file(&archive).unwrap();
+        let resolved = resolve_image_set_initramfs(&cache_root, &set, GuestArch::Aarch64)
+            .expect("the installed member must resolve from the cache");
         assert_eq!(resolved, installed);
     }
 
-    /// An initramfs installed from one root is not a member of another: once
-    /// the lock moves, it is acquired again rather than reused.
+    /// An initramfs installed under one root is not a member of another.
     #[test]
     fn a_set_initramfs_from_another_root_is_not_reused() {
-        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let cache_root = tmp.path().join("cache").join("initramfs");
-        let set = acquire(
-            &with_initramfs(served_initramfs_archive(MEMBER_VERSION)),
-            &tmp.path().join("served"),
-            &mut env,
-        );
-        download_initramfs_from(&set, GuestArch::Aarch64, &cache_root).unwrap();
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"bundle-set"));
+        let archive = bundle_archive(tmp.path(), served_initramfs_archive(MEMBER_VERSION));
+        install_image_set_initramfs_archive(&archive, &set, GuestArch::Aarch64, &cache_root)
+            .unwrap();
 
         let moved = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"next"));
         let err = resolve_image_set_initramfs(&cache_root, &moved, GuestArch::Aarch64)
@@ -1804,38 +1438,40 @@ mod tests {
         );
     }
 
-    /// A release host's boot finds the pinned set's initramfs in the cache and
-    /// never reaches for the transport, which here points nowhere.
+    /// An initramfs an older CLI installed from the pinned image set is still
+    /// on disk after an upgrade. It is the image set's copy, built from
+    /// another tree, so the launch-side resolve never returns it: a CLI whose
+    /// own initramfs is not prepared misses rather than boots that one.
     #[test]
-    fn the_pinned_sets_cached_initramfs_resolves_without_the_network() {
-        let mut env = TestEnv::new();
-        env.set(
-            "MVM_UPDATE_DOWNLOAD_URL",
-            "file:///nonexistent/mvm-initramfs-fixture",
-        );
+    fn an_initramfs_installed_from_the_pinned_set_is_never_resolved_for_a_launch() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("source");
         let cache_root = tmp.path().join("cache").join("initramfs");
         let set = SetMemberCache::locked();
-        write_initramfs_artifact(&source, MEMBER_VERSION, b"cpio-payload");
+        let version = env!("CARGO_PKG_VERSION");
+        write_initramfs_artifact(&source, version, b"cpio-payload");
         install_initramfs_into_cache(
             &source,
             &set.cache_root(&cache_root),
-            MEMBER_VERSION,
+            version,
             GuestArch::Aarch64,
         )
         .unwrap();
         set.record(
             &cache_root,
-            ImageSetRole::Initramfs,
+            BOOT_ASSET_INITRAMFS_ROLE,
             MemberTarget::Arch(GuestArch::Aarch64),
-            &MemberVersion::parse(MEMBER_VERSION).unwrap(),
+            &MemberVersion::parse(version).unwrap(),
         )
         .unwrap();
 
-        let artifact = resolve_or_download_image_set_initramfs(GuestArch::Aarch64, &cache_root)
-            .expect("the cached member must resolve without the network");
-        assert_eq!(artifact.version, MEMBER_VERSION);
+        let err = InitramfsResolver::new(&cache_root, version)
+            .resolve(&GuestArch::Aarch64.to_string())
+            .expect_err("the pinned set's copy is not this CLI's initramfs");
+        assert!(
+            matches!(err, mvm_fs::initramfs::InitramfsError::Missing(_)),
+            "{err:?}"
+        );
     }
 
     /// The version-keyed cache that source builds and seeding use keeps exact

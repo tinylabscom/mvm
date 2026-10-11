@@ -13,32 +13,27 @@
 //! host-services sources, so an archive that rebuilt only other guest binaries
 //! keeps the sidecar it already has, still naming the archive it came from.
 //!
-//! A piece acquired from the pinned image set lives under that set's root
-//! instead and is reported as such.
-//!
 //! A release binary has no tree to build an archive from. It assembles the
 //! same pieces from the guest runtime its own release ships
 //! ([`assemble_release_runtime_pieces`]), into the same version-keyed slots,
 //! and then records that it adopted that archive
-//! ([`adopted_release_archive`]). From then on a launch attaches only what
-//! that archive produced: a piece that is missing or no longer verifies is
-//! refused, naming `mvmctl bootstrap`, rather than replaced by the pinned
-//! image set's copy ([`image_set_fallback_refusal`]). A release binary that
-//! has not adopted its archive yet keeps the image set's copies, which is
-//! what every release before the archive existed boots.
+//! ([`adopted_release_archive`]).
+//!
+//! These slots are the only place a launch looks. The image set carries no
+//! guest runtime, so a piece that is missing or no longer verifies is refused
+//! with the command that assembles it, never replaced by a copy built from
+//! another tree.
 
 use std::path::{Path, PathBuf};
 
 use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
 use mvm_fs::initramfs::InitramfsArtifact;
 use mvm_fs::overlay::{RuntimeOverlayArtifact, RuntimeOverlayLayout};
 use mvm_fs::sdk_sidecar::{SdkSidecarArtifact, SdkSidecarLayout};
 
 use crate::guest_runtime::{GuestRuntime, GuestRuntimeError, is_archive_digest};
 use crate::initramfs::InitramfsBuildError;
-use crate::published_image_set::{SetMemberCache, SetMemberCacheError};
 use crate::runtime_overlay::RuntimeOverlayError;
 use crate::sdk_sidecar::SdkSidecarBuildError;
 
@@ -109,24 +104,6 @@ impl RuntimePiece {
             }
         }
     }
-
-    /// The image-set member this piece is published as.
-    fn image_set_role(self) -> ImageSetRole {
-        match self {
-            RuntimePiece::RuntimeOverlay => ImageSetRole::RuntimeOverlay,
-            RuntimePiece::Initramfs => ImageSetRole::Initramfs,
-            RuntimePiece::SdkSidecar(libc) => ImageSetRole::SdkSidecar(libc),
-        }
-    }
-
-    /// The cache root this piece's resolvers, and its image-set install
-    /// records, are keyed under.
-    fn resolver_cache_root(self, cache_root: &Path) -> PathBuf {
-        match self {
-            RuntimePiece::Initramfs => initramfs_cache_root(cache_root),
-            RuntimePiece::RuntimeOverlay | RuntimePiece::SdkSidecar(_) => cache_root.to_path_buf(),
-        }
-    }
 }
 
 /// The leading twelve characters of an archive digest, as status lines show it.
@@ -148,8 +125,6 @@ pub enum PieceOriginError {
     },
     #[error("{} does not hold an archive digest", path.display())]
     InvalidRecord { path: PathBuf },
-    #[error(transparent)]
-    ImageSet(#[from] SetMemberCacheError),
 }
 
 /// Record that the piece in `dir` was assembled from the archive `digest`.
@@ -190,42 +165,29 @@ pub enum PieceOrigin {
     /// A version-keyed copy that names no archive: seeded from another cache
     /// without its record, or written before pieces recorded one.
     LocalUnrecorded,
-    /// Installed from the pinned image set, at the member's own version.
-    ImageSet { version: String },
     /// Not in the cache.
     Missing,
 }
 
-/// Where `piece` would be attached from, read from the cache alone and in the
-/// order the launch resolvers look: the version-keyed slot, then the member of
-/// the pinned image set `set`. Reads presence and records only; nothing is
-/// hashed, so this answers a diagnostic, not whether the bytes are sound.
+/// Where `piece` would be attached from, read from the cache alone: the
+/// version-keyed slot the launch resolvers read. Reads presence and records
+/// only; nothing is hashed, so this answers a diagnostic, not whether the
+/// bytes are sound.
 pub fn piece_origin(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
     piece: RuntimePiece,
-    set: &SetMemberCache,
 ) -> Result<PieceOrigin, PieceOriginError> {
-    if piece.local_image(cache_root, version, arch).is_file() {
-        return Ok(
-            match archive_origin(&piece.local_dir(cache_root, version, arch))? {
-                Some(digest) => PieceOrigin::Archive { digest },
-                None => PieceOrigin::LocalUnrecorded,
-            },
-        );
+    if !piece.local_image(cache_root, version, arch).is_file() {
+        return Ok(PieceOrigin::Missing);
     }
-    match set.installed_version(
-        &piece.resolver_cache_root(cache_root),
-        piece.image_set_role(),
-        MemberTarget::Arch(arch),
-    ) {
-        Ok(version) => Ok(PieceOrigin::ImageSet {
-            version: version.into(),
-        }),
-        Err(SetMemberCacheError::NotInstalled { .. }) => Ok(PieceOrigin::Missing),
-        Err(error) => Err(error.into()),
-    }
+    Ok(
+        match archive_origin(&piece.local_dir(cache_root, version, arch))? {
+            Some(digest) => PieceOrigin::Archive { digest },
+            None => PieceOrigin::LocalUnrecorded,
+        },
+    )
 }
 
 /// Remove `piece`'s version-keyed copy so the next assembly rebuilds it rather
@@ -323,35 +285,6 @@ pub fn adopted_release_archive(
     }
 }
 
-/// Why a launch may not attach `piece` from the pinned image set, or `None`
-/// when it may.
-///
-/// Once a release binary has adopted its own guest runtime, its pieces come
-/// from that archive and nowhere else: a version-keyed piece that is missing
-/// or fails its checks is refused rather than silently replaced by an image
-/// set's copy built from another tree. A source build never writes the
-/// record, and a release binary that has not run `mvmctl bootstrap` since it
-/// was installed has none yet, so both keep the image set as before. An
-/// unreadable record refuses too: something other than an assembler wrote it.
-pub fn image_set_fallback_refusal(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    piece: RuntimePiece,
-) -> Option<String> {
-    let adopted = match adopted_release_archive(cache_root, version, arch) {
-        Ok(None) => return None,
-        Ok(Some(digest)) => format!("release guest runtime archive {}", short_digest(&digest)),
-        Err(error) => format!("a release guest runtime ({error})"),
-    };
-    Some(format!(
-        "the {} {version} for {arch} was assembled from {adopted} and is missing or no longer \
-         verifies; refusing the pinned image set's copy. Run `mvmctl bootstrap` to assemble \
-         it again",
-        piece.label()
-    ))
-}
-
 /// What [`assemble_release_runtime_pieces`] produced.
 #[derive(Debug, Clone)]
 pub struct ReleaseAssembly {
@@ -368,8 +301,8 @@ pub struct ReleaseAssembly {
 /// through the same assemblers a source build uses — the overlay's verity
 /// tree and roothash computed here on the host, as claim 3 requires — and
 /// the OCI guest runtime is installed from the same members. The adoption
-/// record is written last, so a launch never refuses the image set on the
-/// strength of an assembly that did not finish.
+/// record is written last, so it never names an archive whose pieces did not
+/// all assemble.
 pub fn assemble_release_runtime_pieces(
     cache_root: &Path,
     version: &str,
@@ -390,8 +323,9 @@ pub fn assemble_release_runtime_pieces(
 }
 
 /// Install the four binaries an OCI rootfs is given from `runtime`, under the
-/// key a release binary looks them up by: its own version.
-fn install_oci_guest_runtime(
+/// key a launch outside an explicit source build looks them up by: the CLI's
+/// own version.
+pub fn install_oci_guest_runtime(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
@@ -456,10 +390,9 @@ mod tests {
     fn a_local_piece_reports_the_archive_it_names_or_that_it_names_none() {
         let cache = tempfile::tempdir().unwrap();
         let arch = GuestArch::X86_64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
         for piece in RuntimePiece::ALL {
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::Missing,
                 "{}",
                 piece.label()
@@ -468,7 +401,7 @@ mod tests {
             std::fs::create_dir_all(image.parent().unwrap()).unwrap();
             std::fs::write(&image, b"image").unwrap();
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::LocalUnrecorded,
                 "{}",
                 piece.label()
@@ -476,7 +409,7 @@ mod tests {
             record_archive_origin(&piece.local_dir(cache.path(), "1.2.3", arch), &digest('b'))
                 .unwrap();
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::Archive {
                     digest: digest('b')
                 },
@@ -485,59 +418,10 @@ mod tests {
             );
             // Another version's slot is not this one.
             assert_eq!(
-                piece_origin(cache.path(), "1.2.4", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.4", arch, piece).unwrap(),
                 PieceOrigin::Missing
             );
         }
-    }
-
-    #[test]
-    fn an_image_set_member_is_reported_at_its_own_version() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::Aarch64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
-        for piece in RuntimePiece::ALL {
-            set.record(
-                &piece.resolver_cache_root(cache.path()),
-                piece.image_set_role(),
-                MemberTarget::Arch(arch),
-                &crate::published_image_set::MemberVersion::parse("0.9.0").unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
-                PieceOrigin::ImageSet {
-                    version: "0.9.0".to_string()
-                },
-                "{}",
-                piece.label()
-            );
-        }
-    }
-
-    #[test]
-    fn the_version_keyed_slot_wins_over_the_image_set_like_the_launch_resolvers() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::X86_64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
-        let piece = RuntimePiece::SdkSidecar(GuestLibc::Musl);
-        set.record(
-            cache.path(),
-            piece.image_set_role(),
-            MemberTarget::Arch(arch),
-            &crate::published_image_set::MemberVersion::parse("0.9.0").unwrap(),
-        )
-        .unwrap();
-        let image = piece.local_image(cache.path(), "1.2.3", arch);
-        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
-        std::fs::write(&image, b"image").unwrap();
-        record_archive_origin(&piece.local_dir(cache.path(), "1.2.3", arch), &digest('c')).unwrap();
-        assert_eq!(
-            piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
-            PieceOrigin::Archive {
-                digest: digest('c')
-            }
-        );
     }
 
     #[test]
@@ -581,7 +465,6 @@ mod tests {
             use sha2::Digest as _;
             hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()))
         };
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
 
         // One fresh home per architecture: a host has one.
         for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
@@ -594,10 +477,6 @@ mod tests {
             })
             .unwrap();
             assert_eq!(release.origin, ReleaseGuestRuntimeOrigin::Installed);
-            assert!(
-                image_set_fallback_refusal(cache.path(), VERSION, arch, RuntimePiece::Initramfs)
-                    .is_none()
-            );
             let assembly =
                 assemble_release_runtime_pieces(cache.path(), VERSION, arch, &release.archive)
                     .unwrap();
@@ -636,17 +515,13 @@ mod tests {
 
             for piece in RuntimePiece::ALL {
                 assert_eq!(
-                    piece_origin(cache.path(), VERSION, arch, piece, &set).unwrap(),
+                    piece_origin(cache.path(), VERSION, arch, piece).unwrap(),
                     PieceOrigin::Archive {
                         digest: digest.clone()
                     },
                     "{}",
                     piece.label()
                 );
-                let refusal = image_set_fallback_refusal(cache.path(), VERSION, arch, piece)
-                    .expect("an adopted release closes the image set");
-                assert!(refusal.contains("mvmctl bootstrap"), "{refusal}");
-                assert!(refusal.contains(short_digest(&digest)), "{refusal}");
             }
             assert_eq!(
                 adopted_release_archive(cache.path(), VERSION, arch).unwrap(),
@@ -699,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_adoption_record_refuses_the_image_set() {
+    fn an_unreadable_adoption_record_is_an_error_not_an_absence() {
         let cache = tempfile::tempdir().unwrap();
         let arch = GuestArch::X86_64;
         let record = release_adoption_record(cache.path(), "1.2.3", arch);
@@ -709,23 +584,14 @@ mod tests {
             adopted_release_archive(cache.path(), "1.2.3", arch),
             Err(PieceOriginError::InvalidRecord { .. })
         ));
-        assert!(
-            image_set_fallback_refusal(cache.path(), "1.2.3", arch, RuntimePiece::RuntimeOverlay)
-                .is_some()
-        );
         // Another version, or the other architecture, adopted nothing.
-        assert!(
-            image_set_fallback_refusal(cache.path(), "1.2.4", arch, RuntimePiece::RuntimeOverlay)
-                .is_none()
+        assert_eq!(
+            adopted_release_archive(cache.path(), "1.2.4", arch).unwrap(),
+            None
         );
-        assert!(
-            image_set_fallback_refusal(
-                cache.path(),
-                "1.2.3",
-                GuestArch::Aarch64,
-                RuntimePiece::RuntimeOverlay
-            )
-            .is_none()
+        assert_eq!(
+            adopted_release_archive(cache.path(), "1.2.3", GuestArch::Aarch64).unwrap(),
+            None
         );
     }
 }

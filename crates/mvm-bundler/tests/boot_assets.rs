@@ -7,7 +7,8 @@ use mvm_core::image_set::*;
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 use mvm_core::plan::bundle::{
-    KeyId, TrustStore, read_and_verify_bundle, select_boot_asset_members,
+    BOOT_ASSET_INITRAMFS_ROLE, BOOT_ASSET_OVERLAY_ROLE, KeyId, TrustStore, read_and_verify_bundle,
+    select_boot_asset_members,
 };
 
 struct Publisher {
@@ -38,9 +39,26 @@ fn archive_bytes(name: &str) -> Vec<u8> {
     format!("archive:{name}").into_bytes()
 }
 
+/// A complete set as the image repository still publishes it: the Linux
+/// layer plus the retired overlay and initramfs members a bundle's boot assets
+/// are selected from.
 fn manifest() -> ImageSetManifest {
+    let retired = [GuestArch::X86_64, GuestArch::Aarch64]
+        .into_iter()
+        .flat_map(|arch| {
+            [BOOT_ASSET_OVERLAY_ROLE, BOOT_ASSET_INITRAMFS_ROLE]
+                .into_iter()
+                .map(move |role| RequiredMember {
+                    role,
+                    target: MemberTarget::Arch(arch),
+                })
+        });
     let members = ImageSetRequirement::current_train()
         .members()
+        .iter()
+        .copied()
+        .chain(retired)
+        .collect::<Vec<_>>()
         .iter()
         .enumerate()
         .map(|(i, required)| {
@@ -74,10 +92,9 @@ fn manifest() -> ImageSetManifest {
                         GuestDeviceRequirement::DmVerity,
                     ],
                 ),
-                ImageSetRole::RuntimeOverlay
-                | ImageSetRole::Initramfs
-                | ImageSetRole::SdkSidecar(_)
-                | ImageSetRole::QemuWasmSmokePack => (vec![ArtifactFormat::TarGz], None, vec![]),
+                ImageSetRole::RetiredGuestRuntime(_) | ImageSetRole::QemuWasmSmokePack => {
+                    (vec![ArtifactFormat::TarGz], None, vec![])
+                }
             };
             ImageSetMember {
                 role: required.role,
@@ -226,7 +243,7 @@ fn boot_export_binds_original_bytes_and_refuses_bad_inputs_before_signing() {
     let mut missing_role = original.clone();
     missing_role
         .members
-        .retain(|member| member.role != ImageSetRole::Initramfs);
+        .retain(|member| member.role != BOOT_ASSET_INITRAMFS_ROLE);
     let missing_bytes = serde_json::to_vec(&missing_role).unwrap();
     let missing_pin = Sha256Hex::from_bytes(&missing_bytes);
     let mut missing_inputs = inputs.clone();

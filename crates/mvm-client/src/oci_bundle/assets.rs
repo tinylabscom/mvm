@@ -167,13 +167,13 @@ mod tests {
         );
         let fixture = ImageSetFixture::complete()
             .publish(
-                ImageSetRole::RuntimeOverlay,
+                mvm_core::plan::bundle::BOOT_ASSET_OVERLAY_ROLE,
                 target,
                 "overlay.tar.gz",
                 overlay,
             )
             .publish(
-                ImageSetRole::Initramfs,
+                mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE,
                 target,
                 "initramfs.tar.gz",
                 initramfs,

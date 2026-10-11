@@ -6,8 +6,6 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use mvm_contract::guest_libc::GuestLibc;
-
 use super::BuilderBootAbiRange;
 use super::identity::ProtocolRange;
 use super::{
@@ -72,7 +70,6 @@ fn check_members(members: &[ImageSetMember]) -> Result<(), ImageSetError> {
 
 fn check_member(member: &ImageSetMember) -> Result<(), ImageSetError> {
     check_target_for_role(member)?;
-    check_sidecar_libc(member)?;
     check_build_mode(member)?;
     check_artifacts(member)?;
     check_boot_protocol_presence(member)
@@ -105,18 +102,6 @@ fn check_target_for_role(member: &ImageSetMember) -> Result<(), ImageSetError> {
             role: member.role,
             target: member.target,
         })
-    }
-}
-
-/// `GuestLibc::Unknown` is a detection outcome, not a variant anyone can build
-/// a sidecar for, so a member claiming it is refused.
-fn check_sidecar_libc(member: &ImageSetMember) -> Result<(), ImageSetError> {
-    if member.role == ImageSetRole::SdkSidecar(GuestLibc::Unknown) {
-        Err(ImageSetError::UnknownSidecarLibc {
-            target: member.target,
-        })
-    } else {
-        Ok(())
     }
 }
 
@@ -291,18 +276,16 @@ pub struct ImageSetRequirement {
     members: Vec<RequiredMember>,
 }
 
-/// Every role published once per guest architecture.
-const ARCH_BOUND_ROLES: [ImageSetRole; 10] = [
+/// Every role published once per guest architecture. The guest runtime is not
+/// among them: it ships with the CLI, and a set that still carries it is
+/// accepted with those members ignored.
+const ARCH_BOUND_ROLES: [ImageSetRole; 6] = [
     ImageSetRole::BuilderVm,
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
-    ImageSetRole::RuntimeOverlay,
-    ImageSetRole::SdkSidecar(GuestLibc::Glibc),
-    ImageSetRole::SdkSidecar(GuestLibc::Musl),
     ImageSetRole::Stage0BootstrapKernel,
-    ImageSetRole::Initramfs,
 ];
 
 impl ImageSetRequirement {

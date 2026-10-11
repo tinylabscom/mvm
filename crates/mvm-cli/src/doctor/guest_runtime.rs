@@ -1,13 +1,11 @@
-//! Which guest-runtime archive, or which image set, each launch-time piece in
-//! the cache came from.
+//! Which guest-runtime archive each launch-time piece in the cache came from.
 //!
 //! The runtime overlay, the initramfs and the two SDK sidecars are assembled
 //! from one guest-runtime archive: the one a source build compiles from its
-//! tree, or the one a release binary's own release ships. A release binary
-//! that has not adopted its archive yet, and a build that downloads, install
-//! them from the pinned image set instead. A bug report about a guest needs to
-//! know which, and whether the pieces agree with each other and with that
-//! archive. Read from the cache alone: nothing is built, downloaded or hashed.
+//! tree, or the published one of this CLI's version — a release binary's own.
+//! The image set carries none of them. A bug report about a guest needs to
+//! know which archive, and whether the pieces agree with each other and with
+//! it. Read from the cache alone: nothing is built, downloaded or hashed.
 
 use mvm_build::runtime_pieces::{
     PieceOrigin, PieceOriginError, RuntimePiece, adopted_release_archive, piece_origin,
@@ -22,7 +20,8 @@ use super::Check;
 /// The archive this binary's pieces should come from, if it has one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CurrentArchive {
-    /// No source tree, and no release guest runtime adopted into this cache.
+    /// No source tree, and no published guest runtime adopted into this
+    /// cache yet.
     NoSourceTree,
     /// The tree's archive has not been built into this cache.
     NotBuilt,
@@ -105,18 +104,13 @@ pub(super) fn guest_runtime_check() -> Check {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    let set = mvm_build::published_image_set::SetMemberCache::locked();
     let pieces: Vec<_> = RuntimePiece::ALL
         .into_iter()
-        .map(|piece| (piece, piece_origin(&cache_root, version, arch, piece, &set)))
+        .map(|piece| (piece, piece_origin(&cache_root, version, arch, piece)))
         .collect();
     guest_runtime_line(
         &CurrentArchive::detect(&cache_root, version, arch),
         runtime_overlay_acquire_mode(),
-        &mvm_core::image_set::image_train_lock()
-            .image_set
-            .release_tag
-            .to_string(),
         &pieces,
     )
 }
@@ -128,26 +122,21 @@ pub(super) fn guest_runtime_check() -> Check {
 fn guest_runtime_line(
     current: &CurrentArchive,
     mode: RuntimeOverlayAcquireMode,
-    set_tag: &str,
     pieces: &[(RuntimePiece, Result<PieceOrigin, PieceOriginError>)],
 ) -> Check {
     let acquisition = match (mode, current) {
-        (RuntimeOverlayAcquireMode::BuildFromSourceCheckout, _) => {
-            "assembled from the source guest runtime".to_string()
+        (_, CurrentArchive::Release { .. }) => "assembled from the release guest runtime",
+        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, CurrentArchive::NoSourceTree) => {
+            "not adopted yet; `mvmctl bootstrap` assembles them from the release guest runtime"
         }
-        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, CurrentArchive::Release { .. }) => {
-            "assembled from the release guest runtime".to_string()
-        }
-        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, _) => {
-            format!("installed from image set {set_tag}")
-        }
+        _ => "assembled from the source guest runtime",
     };
     let mut ok = true;
     let origins: Vec<String> = pieces
         .iter()
         .map(|(piece, origin)| {
             let described = match origin {
-                Ok(origin) => describe_origin(origin, current, set_tag),
+                Ok(origin) => describe_origin(origin, current),
                 Err(error) => {
                     ok = false;
                     format!("unreadable ({error})")
@@ -168,7 +157,7 @@ fn guest_runtime_line(
     }
 }
 
-fn describe_origin(origin: &PieceOrigin, current: &CurrentArchive, set_tag: &str) -> String {
+fn describe_origin(origin: &PieceOrigin, current: &CurrentArchive) -> String {
     match origin {
         PieceOrigin::Archive { digest } => {
             let relation = match current.digest() {
@@ -179,7 +168,6 @@ fn describe_origin(origin: &PieceOrigin, current: &CurrentArchive, set_tag: &str
             format!("archive {}{relation}", short_digest(digest))
         }
         PieceOrigin::LocalUnrecorded => "local copy, archive not recorded".to_string(),
-        PieceOrigin::ImageSet { version } => format!("image set {set_tag} (member {version})"),
         PieceOrigin::Missing => "not prepared".to_string(),
     }
 }
@@ -198,7 +186,7 @@ mod tests {
         origins: [Result<PieceOrigin, PieceOriginError>; 4],
     ) -> Check {
         let pieces: Vec<_> = RuntimePiece::ALL.into_iter().zip(origins).collect();
-        guest_runtime_line(&current, mode, "image-set/v9.9.9", &pieces)
+        guest_runtime_line(&current, mode, &pieces)
     }
 
     #[test]
@@ -316,34 +304,31 @@ mod tests {
         ));
     }
 
+    /// A cache an older CLI populated from the image set reports nothing
+    /// prepared: those copies are not this CLI's pieces, and the line names
+    /// the bootstrap that assembles them instead of the image set.
     #[test]
-    fn a_release_build_names_the_image_set_and_its_member_versions() {
-        let member = || {
-            Ok(PieceOrigin::ImageSet {
-                version: "0.2.4".to_string(),
-            })
-        };
+    fn a_published_build_that_has_not_bootstrapped_names_bootstrap_not_the_image_set() {
         let c = line(
             CurrentArchive::NoSourceTree,
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
-            [member(), member(), member(), member()],
+            [
+                Ok(PieceOrigin::Missing),
+                Ok(PieceOrigin::Missing),
+                Ok(PieceOrigin::Missing),
+                Ok(PieceOrigin::Missing),
+            ],
         );
         assert!(c.ok, "{}", c.info);
         assert!(
             c.info.starts_with(
-                "no source or release archive — installed from image set image-set/v9.9.9 — "
+                "no source or release archive — not adopted yet; `mvmctl bootstrap` assembles \
+                 them from the release guest runtime — "
             ),
             "{}",
             c.info
         );
-        assert_eq!(
-            c.info
-                .matches("image set image-set/v9.9.9 (member 0.2.4)")
-                .count(),
-            4,
-            "{}",
-            c.info
-        );
+        assert!(!c.info.contains("image set"), "{}", c.info);
     }
 
     #[test]

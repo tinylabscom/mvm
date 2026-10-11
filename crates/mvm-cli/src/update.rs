@@ -1155,18 +1155,32 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     ui::info("The binary has been replaced on disk.");
     ui::info("To verify: Open a new shell and run 'mvmctl --version'");
     ui::info("Or run: hash -r  (to clear your shell's command cache)");
+    ui::info(UPDATED_BINARY_BOOTSTRAP_NOTE);
 
     Ok(())
 }
 
+/// The updated binary assembles its runtime overlay, initramfs and SDK
+/// sidecars from the guest runtime just staged, and there is no other copy to
+/// boot: until it runs bootstrap, a launch refuses and names it.
+const UPDATED_BINARY_BOOTSTRAP_NOTE: &str = "Then run 'mvmctl bootstrap' once: the new version \
+     assembles its guest runtime from the archive this update staged before its first launch.";
+
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAction, decide_update, source_helper_commit, source_helper_commit_for,
-        source_helper_marker_matches, validate_source_helper_bundle,
+        UPDATED_BINARY_BOOTSTRAP_NOTE, UpdateAction, decide_update, source_helper_commit,
+        source_helper_commit_for, source_helper_marker_matches, validate_source_helper_bundle,
         validate_source_helper_identity,
     };
     use mvm_build::artifact_acquisition::DistributionChannel;
+
+    /// An updated binary has no assembled guest runtime of its own version
+    /// yet, and nothing to fall back to, so the update names the bootstrap.
+    #[test]
+    fn an_update_names_the_bootstrap_that_assembles_the_new_guest_runtime() {
+        assert!(UPDATED_BINARY_BOOTSTRAP_NOTE.contains("mvmctl bootstrap"));
+    }
 
     #[test]
     fn the_helper_commit_is_this_builds_own_channel_and_identity() {

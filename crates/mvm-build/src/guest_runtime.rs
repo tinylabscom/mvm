@@ -852,8 +852,8 @@ fn file_digest(path: &Path) -> Result<String, GuestRuntimeError> {
 /// for both architectures, executables as static ELFs of their architecture
 /// (the OCI guest set is validated as such), written as one archive the way
 /// [`crate::guest_bins::GuestBinsArtifact`] lays it out.
-#[cfg(test)]
-pub(crate) mod release_fixture {
+#[cfg(any(test, feature = "test-support"))]
+pub mod release_fixture {
     use super::*;
     use mvm_core::image_set::{GitCommit, WorktreeState};
 
@@ -889,13 +889,13 @@ pub(crate) mod release_fixture {
     }
 
     /// Write `version`'s release archive into `dir` and return its path.
-    pub(crate) fn write_release_archive(dir: &Path, version: &str) -> PathBuf {
+    pub fn write_release_archive(dir: &Path, version: &str) -> PathBuf {
         write_release_archive_tampering(dir, version, None)
     }
 
     /// [`write_release_archive`], with the bytes of `tampered` changed after
     /// the manifest recorded their digest.
-    pub(crate) fn write_release_archive_tampering(
+    pub fn write_release_archive_tampering(
         dir: &Path,
         version: &str,
         tampered: Option<&str>,

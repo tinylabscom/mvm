@@ -11,8 +11,12 @@
 //! the archive it acquired
 //! ([`mvm_build::runtime_pieces::assemble_release_runtime_pieces`]).
 //!
-//! A source checkout builds its guest runtime from the tree instead, so
-//! nothing here runs for one.
+//! A source build assembles its guest runtime from its tree when
+//! `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build` asks for that. Otherwise it uses
+//! the published guest runtime of its own version, acquired here exactly as a
+//! release binary acquires it; a version that was never released has none,
+//! and the refusal names the source build. The image set carries no guest
+//! runtime, so there is no third source.
 
 use std::path::{Path, PathBuf};
 
@@ -58,31 +62,42 @@ fn report(runtime: &ReleaseGuestRuntime) {
     ui::success(&format!("Guest runtime {name} ready ({}).", runtime.origin));
 }
 
-/// Make sure the release guest runtime matching the running binary is
-/// present. A source build has nothing to acquire and returns `None`.
-pub(crate) fn prepare_for_running_binary() -> Result<Option<ReleaseGuestRuntime>> {
-    if compiled_channel() != DistributionChannel::Release {
-        return Ok(None);
-    }
+/// Make sure the published guest runtime matching the running binary's
+/// version is present: installed beside the binary, cached, or fetched and
+/// verified from that version's release.
+pub(crate) fn prepare_for_running_binary() -> Result<ReleaseGuestRuntime> {
     let exe = std::env::current_exe().context("locating the running mvmctl")?;
-    let runtime = acquire(
-        crate::update::current_version(),
-        &cache_root(),
-        &installed_guest_runtime_dirs(&exe),
-    )?;
+    let version = crate::update::current_version();
+    let runtime = acquire(version, &cache_root(), &installed_guest_runtime_dirs(&exe))
+        .with_context(|| unpublished_source_build_hint(compiled_channel(), version))?;
     report(&runtime);
-    Ok(Some(runtime))
+    Ok(runtime)
 }
 
-/// The running release binary's guest runtime, acquired as bootstrap acquires
-/// it and installed into the digest-keyed store, for an explicit `build` verb
-/// that assembles one piece from it. Only a release binary ships one.
+/// What a failed acquisition adds for a source build, whose version is
+/// usually ahead of the last release and so has no published guest runtime.
+fn unpublished_source_build_hint(channel: DistributionChannel, version: &str) -> String {
+    match channel {
+        DistributionChannel::Release => {
+            format!("mvmctl {version} cannot run without the guest runtime its release ships")
+        }
+        DistributionChannel::Source => format!(
+            "a source build of mvmctl {version} uses a published guest runtime only when that \
+             version was released; assemble this checkout's with \
+             `{}=build mvmctl bootstrap`",
+            mvm_build::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV
+        ),
+    }
+}
+
+/// The published guest runtime of the running binary's version, acquired as
+/// bootstrap acquires it and installed into the digest-keyed store, for an
+/// explicit `build` verb that assembles one piece from it.
 pub(crate) fn installed_for_running_binary(
     cache_root: &Path,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<mvm_build::guest_runtime::GuestRuntime> {
-    let release = prepare_for_running_binary()?
-        .context("only a release binary has a guest runtime of its own")?;
+    let release = prepare_for_running_binary()?;
     mvm_build::guest_runtime::install_release_guest_runtime(
         cache_root,
         &release.archive,
@@ -120,10 +135,40 @@ mod tests {
         assert_eq!(release_tag("0.24.0-rc.1"), "v0.24.0-rc.1");
     }
 
+    /// A source build's version is usually unreleased; when its published
+    /// runtime cannot be acquired, the refusal names the source build rather
+    /// than falling back to anything.
     #[test]
-    fn a_source_build_acquires_nothing() {
+    fn an_unpublished_source_build_is_pointed_at_its_own_tree() {
+        let hint = unpublished_source_build_hint(DistributionChannel::Source, "9.9.9");
+        assert!(
+            hint.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap"),
+            "{hint}"
+        );
+        let release = unpublished_source_build_hint(DistributionChannel::Release, "9.9.9");
+        assert!(!release.contains("ACQUIRE_MODE"), "{release}");
+    }
+
+    #[test]
+    fn a_missing_published_runtime_refuses_and_names_the_source_build() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let empty = tempfile::TempDir::new().unwrap();
+        env.set(
+            "MVM_UPDATE_DOWNLOAD_URL",
+            format!("file://{}", empty.path().display()),
+        );
+        let home = tempfile::TempDir::new().unwrap();
+        env.set("HOME", home.path().to_string_lossy().into_owned());
+        env.set(
+            "MVM_HOME",
+            home.path().join("state").to_string_lossy().into_owned(),
+        );
         if compiled_channel() == DistributionChannel::Source {
-            assert!(prepare_for_running_binary().unwrap().is_none());
+            let err = prepare_for_running_binary().expect_err("no runtime is published here");
+            assert!(
+                format!("{err:#}").contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build"),
+                "{err:#}"
+            );
         }
     }
 

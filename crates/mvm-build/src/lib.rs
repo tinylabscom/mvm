@@ -182,10 +182,6 @@ pub mod builder_backend_select;
 /// its VM here).
 pub mod builder_health;
 
-/// Which arm prepares an image that is otherwise pair-built from an image
-/// checkout: adopt the pinned set's verified members (when they were built
-/// from this tree, or unconditionally on request), or build locally.
-pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
 pub mod guest_agent_build;

@@ -149,55 +149,32 @@ pub fn attach_runtime_overlay_if_cached_version(
     }
     let resolver =
         mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
-    let attached = attach_runtime_overlay(start_config, hypervisor, &resolver, arch);
-    let Err(miss) = attached else {
-        return Ok(());
-    };
-    // A release binary that adopted its own guest runtime attaches only what
-    // that archive assembled; the image set's copy was built from another tree.
-    if let Some(refusal) = mvm_build::runtime_pieces::image_set_fallback_refusal(
-        &cache_root,
-        version,
-        arch,
-        mvm_build::runtime_pieces::RuntimePiece::RuntimeOverlay,
-    ) {
-        return Err(miss.context(refusal));
-    }
-    // The published overlay is a member of the image set this build pins, and
-    // is filed under that set's root rather than this CLI's version.
-    let pinned_set = mvm_build::published_image_set::SetMemberCache::locked();
-    if let Some(pinned) = expected_version {
-        // A machine that booted from the pinned set recorded that member's own
-        // version, which is what continuity asks for here.
-        return match mvm_build::runtime_overlay::resolve_image_set_runtime_overlay(
-            &cache_root,
-            &pinned_set,
-            arch,
-        ) {
-            Ok(artifact) if artifact.version == pinned => {
-                apply_runtime_overlay_artifact(start_config, artifact);
-                Ok(())
-            }
-            _ => Err(anyhow::anyhow!(
-                "runtime overlay version {version} is required for this boot and was not found in the local cache"
-            )),
-        };
-    }
-    if let Ok(artifact) = mvm_build::runtime_overlay::resolve_image_set_runtime_overlay(
-        &cache_root,
-        &pinned_set,
-        arch,
-    ) {
-        apply_runtime_overlay_artifact(start_config, artifact);
-        return Ok(());
-    }
+    // The overlay is assembled from this CLI's own guest runtime and lives
+    // only in its version-keyed slot. A miss is preparation work for
+    // `mvmctl bootstrap`; no other copy is attached in its place.
+    attach_runtime_overlay(start_config, hypervisor, &resolver, arch).with_context(|| {
+        match expected_version {
+            // Continuity asked for the overlay a machine booted with; this CLI
+            // cannot assemble another version's, so name what is missing.
+            Some(pinned) if pinned != env!("CARGO_PKG_VERSION") => format!(
+                "runtime overlay version {pinned} is required for this boot and was not found \
+                 in the local cache"
+            ),
+            _ => prepare_hint(version, arch),
+        }
+    })
+}
+
+/// The command that prepares this CLI's guest runtime pieces, for a launch
+/// that found one missing.
+fn prepare_hint(version: &str, arch: mvm_core::arch::GuestArch) -> String {
     let command = match runtime_overlay_acquire_mode() {
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
             "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap"
         }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => "mvmctl bootstrap",
     };
-    anyhow::bail!("runtime overlay {version} for {arch} is not prepared; run `{command}` first")
+    format!("the guest runtime {version} for {arch} is not prepared; run `{command}` first")
 }
 
 // ── SDK sidecar ──────────────────────────────────────────────────────────────
@@ -213,7 +190,7 @@ pub fn attach_runtime_overlay_if_cached_version(
 ///
 /// 1. Return immediately when no bound SDK service needs a sidecar; reject an
 ///    unknown guest libc before selecting a host artifact.
-/// 2. Resolve a prepared version-keyed or pinned-set sidecar.
+/// 2. Resolve the prepared version-keyed sidecar.
 /// 3. Refuse a miss with the explicit bootstrap command; never assemble or
 ///    download from the launch path.
 pub fn resolve_sdk_sidecar_attachment_for_host(
@@ -256,20 +233,6 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
         Err(e) => e,
     };
 
-    if let Some(refusal) = mvm_build::runtime_pieces::image_set_fallback_refusal(
-        &cache_root,
-        version,
-        arch,
-        mvm_build::runtime_pieces::RuntimePiece::SdkSidecar(libc),
-    ) {
-        return Err(cache_miss).context(refusal);
-    }
-    let pinned_set = mvm_build::published_image_set::SetMemberCache::locked();
-    if let Some(attached) =
-        resolve_image_set_sidecar_attachment(services, &cache_root, &pinned_set, arch, libc)
-    {
-        return Ok(Some(attached));
-    }
     Err(cache_miss).with_context(|| {
         format!("SDK sidecar for {arch}/{libc} is not prepared; run `mvmctl bootstrap` first")
     })
@@ -292,32 +255,9 @@ pub fn prepare_pair_launch_artifacts(_pair: &mut PairArtifactSource<'_>) -> Resu
         cache_root: &cache_root,
         expected_version: version,
         arch,
-        source_checkout_root: Some(&workspace_root),
+        source_checkout_root: &workspace_root,
     })?;
     Ok(())
-}
-
-/// The attachment for the `libc` sidecar installed from `set`, when one is
-/// installed and still sound. A pure cache read.
-fn resolve_image_set_sidecar_attachment(
-    services: &[mvm_contract::protocol::broker::ServiceId],
-    cache_root: &std::path::Path,
-    set: &mvm_build::published_image_set::SetMemberCache,
-    arch: mvm_core::arch::GuestArch,
-    libc: mvm_contract::guest_libc::GuestLibc,
-) -> Option<SdkSidecarAttachment> {
-    let resolver =
-        mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache_root, set, arch, libc).ok()?;
-    let attached =
-        mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(services, &resolver, arch, libc)
-            .ok()??;
-    warn_if_sidecar_predates_the_working_tree(
-        resolver.cache_root(),
-        resolver.expected_version(),
-        arch,
-        libc,
-    );
-    Some(attached)
 }
 
 /// Say so when the cached sidecar cannot carry this checkout's cdylib changes.
@@ -668,80 +608,62 @@ mod sdk_sidecar_host_resolution_tests {
         assert!(!dir.path().join("cache/guest-runtime").exists());
     }
 
-    /// A published sidecar member already installed at another version is
-    /// still reused offline by either libc, preserving pinned-set continuity.
-    #[test]
-    fn a_download_mode_host_attaches_a_sidecar_adopted_from_the_pinned_set() {
-        let member_version = "0.0.1-member";
-        for libc in [
-            mvm_contract::guest_libc::GuestLibc::Glibc,
-            mvm_contract::guest_libc::GuestLibc::Musl,
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let arch = GuestArch::host();
-            let cache = dir.path().join("cache");
-            let set = mvm_build::published_image_set::SetMemberCache::locked();
-            seed_sidecar_variant(&set.cache_root(&cache), member_version, arch, libc);
-            set.record(
-                &cache,
-                mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
-                mvm_core::image_set::MemberTarget::Arch(arch),
-                &mvm_build::published_image_set::MemberVersion::parse(member_version).unwrap(),
-            )
-            .unwrap();
-
-            let mut env = mvm_core::util::test_env::TestEnv::new();
-            env.isolate_mvm_home(dir.path());
-            env.set(
-                crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-                "download",
-            );
-            env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
-
-            let attached =
-                resolve_sdk_sidecar_attachment_for_host(&[svc("host.kv.v1")], libc, None)
-                    .unwrap_or_else(|e| panic!("the adopted {libc} member must attach: {e:#}"))
-                    .expect("a bound SDK service must attach the sidecar");
-            assert_eq!(attached.version, member_version);
-        }
-    }
-
-    /// A release binary that adopted its own guest runtime does not attach
-    /// the image set's sidecar in place of the one its archive assembled.
-    #[test]
-    fn an_adopted_release_runtime_refuses_the_image_set_sidecar() {
-        let member_version = "0.0.1-member";
-        let libc = mvm_contract::guest_libc::GuestLibc::Musl;
-        let dir = tempfile::tempdir().unwrap();
-        let arch = GuestArch::host();
-        let cache = dir.path().join("cache");
+    /// Seed the `libc` sidecar the way an older CLI installed it from the
+    /// pinned image set: under the set's root, at the member's own version.
+    fn seed_pinned_set_sidecar(
+        cache: &std::path::Path,
+        member_version: &str,
+        arch: GuestArch,
+        libc: mvm_contract::guest_libc::GuestLibc,
+    ) {
         let set = mvm_build::published_image_set::SetMemberCache::locked();
-        seed_sidecar_variant(&set.cache_root(&cache), member_version, arch, libc);
+        seed_sidecar_variant(&set.cache_root(cache), member_version, arch, libc);
         set.record(
-            &cache,
-            mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
+            cache,
+            mvm_core::image_set::ImageSetRole::RetiredGuestRuntime(
+                mvm_core::image_set::RetiredGuestRuntimeRole::SdkSidecar(libc),
+            ),
             mvm_core::image_set::MemberTarget::Arch(arch),
             &mvm_build::published_image_set::MemberVersion::parse(member_version).unwrap(),
         )
         .unwrap();
-        record_adopted_release(&cache, arch);
+    }
 
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(dir.path());
-        env.set(
-            crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-            "download",
-        );
-        env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
+    /// A sidecar an older CLI installed from the pinned image set is still
+    /// on disk after an upgrade. A launch never attaches it, for either libc,
+    /// whether or not this version adopted a release guest runtime: the
+    /// sidecar comes from this CLI's own guest runtime, and a miss names the
+    /// bootstrap that assembles it.
+    #[test]
+    fn a_launch_never_attaches_the_image_sets_sidecar() {
+        for adopted in [false, true] {
+            for libc in [
+                mvm_contract::guest_libc::GuestLibc::Glibc,
+                mvm_contract::guest_libc::GuestLibc::Musl,
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                let arch = GuestArch::host();
+                let cache = dir.path().join("cache");
+                seed_pinned_set_sidecar(&cache, env!("CARGO_PKG_VERSION"), arch, libc);
+                if adopted {
+                    record_adopted_release(&cache, arch);
+                }
 
-        let error = resolve_sdk_sidecar_attachment_for_host(&[svc("host.kv.v1")], libc, None)
-            .expect_err("the image set's sidecar must not stand in for the release's");
-        let rendered = format!("{error:#}");
-        assert!(
-            rendered.contains("refusing the pinned image set's copy"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
+                let mut env = mvm_core::util::test_env::TestEnv::new();
+                env.isolate_mvm_home(dir.path());
+                env.set(
+                    crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+                    "download",
+                );
+                env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
+
+                let error =
+                    resolve_sdk_sidecar_attachment_for_host(&[svc("host.kv.v1")], libc, None)
+                        .expect_err("the image set's sidecar is not this CLI's");
+                let rendered = format!("{error:#}");
+                assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
+            }
+        }
     }
 
     /// The download-mode refusal has to read like the cache-miss one it
@@ -799,46 +721,6 @@ mod sdk_sidecar_host_resolution_tests {
         .expect("a warm cache resolves without any transport")
         .expect("a bound SDK service must attach the sidecar");
         assert_eq!(attached.version, version);
-    }
-
-    /// The published sidecar is identified by the root this build pins: a
-    /// member at another version than this CLI's, for either libc, attaches
-    /// from the cache without the transport being touched.
-    #[test]
-    fn a_pinned_set_sidecar_at_another_version_attaches_without_the_network() {
-        let member_version = "0.0.1-member";
-        assert_ne!(member_version, env!("CARGO_PKG_VERSION"));
-        for libc in [
-            mvm_contract::guest_libc::GuestLibc::Glibc,
-            mvm_contract::guest_libc::GuestLibc::Musl,
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let arch = GuestArch::host();
-            let cache = dir.path().join("cache");
-            let set = mvm_build::published_image_set::SetMemberCache::locked();
-            seed_sidecar_variant(&set.cache_root(&cache), member_version, arch, libc);
-            set.record(
-                &cache,
-                mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
-                mvm_core::image_set::MemberTarget::Arch(arch),
-                &mvm_build::published_image_set::MemberVersion::parse(member_version).unwrap(),
-            )
-            .unwrap();
-
-            let mut env = mvm_core::util::test_env::TestEnv::new();
-            env.isolate_mvm_home(dir.path());
-            env.set(
-                crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-                "download",
-            );
-            env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
-
-            let attached =
-                resolve_sdk_sidecar_attachment_for_host(&[svc("host.audit.v1")], libc, None)
-                    .unwrap_or_else(|e| panic!("the pinned {libc} member must attach: {e:#}"))
-                    .expect("a bound SDK service must attach the sidecar");
-            assert_eq!(attached.version, member_version);
-        }
     }
 }
 
@@ -1387,7 +1269,7 @@ mod runtime_overlay_attach_tests {
     const MEMBER_VERSION: &str = "0.0.1-member";
 
     /// Install `MEMBER_VERSION` of the overlay as a member of `set`, laid out
-    /// exactly as the image-set download installs one.
+    /// exactly as an older CLI installed one from the image set.
     fn seed_set_member(
         cache: &std::path::Path,
         set: &mvm_build::published_image_set::SetMemberCache,
@@ -1396,74 +1278,45 @@ mod runtime_overlay_attach_tests {
         seed_cache(&set.cache_root(cache), MEMBER_VERSION, arch);
         set.record(
             cache,
-            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+            mvm_core::plan::bundle::BOOT_ASSET_OVERLAY_ROLE,
             mvm_core::image_set::MemberTarget::Arch(arch),
             &mvm_build::published_image_set::MemberVersion::parse(MEMBER_VERSION).unwrap(),
         )
         .unwrap();
     }
 
-    /// The published overlay is identified by the root this build pins, so a
-    /// member at another version than this CLI's attaches from the cache. The
-    /// transport points nowhere: reaching for the network would fail the boot.
+    /// An overlay an older CLI installed from the pinned image set is still on
+    /// disk after an upgrade. A launch never attaches it, whether or not this
+    /// version adopted a release guest runtime: the overlay comes from this
+    /// CLI's own guest runtime, and the miss names the bootstrap.
     #[test]
-    fn a_pinned_set_member_at_another_version_attaches_without_the_network() {
+    fn a_launch_never_attaches_the_image_sets_overlay() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        assert_ne!(MEMBER_VERSION, env!("CARGO_PKG_VERSION"));
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(dir.path());
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-        env.set(
-            "MVM_UPDATE_DOWNLOAD_URL",
-            "file:///nonexistent/mvm-runtime-overlay-release-fixture",
-        );
-        let arch = GuestArch::host();
-        let cache = dir.path().join("cache");
-        let set = mvm_build::published_image_set::SetMemberCache::locked();
-        seed_set_member(&cache, &set, arch);
+        for adopted in [false, true] {
+            let mut env = TestEnv::new();
+            let dir = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(dir.path());
+            env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
+            env.set(
+                "MVM_UPDATE_DOWNLOAD_URL",
+                "file:///nonexistent/mvm-runtime-overlay-release-fixture",
+            );
+            let arch = GuestArch::host();
+            let cache = dir.path().join("cache");
+            let set = mvm_build::published_image_set::SetMemberCache::locked();
+            seed_set_member(&cache, &set, arch);
+            if adopted {
+                super::sdk_sidecar_host_resolution_tests::record_adopted_release(&cache, arch);
+            }
 
-        let mut sc = VmStartConfig::default();
-        attach_runtime_overlay_if_cached(&mut sc, "firecracker")
-            .expect("the pinned set's member must attach from the cache");
-
-        let expected = RuntimeOverlayResolver::new(set.cache_root(&cache), MEMBER_VERSION.into())
-            .layout(&arch.to_string());
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(MEMBER_VERSION));
-        assert_eq!(
-            sc.runtime_overlay_path.as_deref(),
-            expected.overlay_ext4.to_str()
-        );
-    }
-
-    /// Once this version adopted its release guest runtime, a missing or
-    /// broken version-keyed overlay is refused rather than replaced by the
-    /// pinned set's member, which would boot guest code from another tree.
-    #[test]
-    fn an_adopted_release_runtime_refuses_the_image_set_overlay() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(dir.path());
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-        env.set(
-            "MVM_UPDATE_DOWNLOAD_URL",
-            "file:///nonexistent/mvm-runtime-overlay-release-fixture",
-        );
-        let arch = GuestArch::host();
-        let cache = dir.path().join("cache");
-        let set = mvm_build::published_image_set::SetMemberCache::locked();
-        seed_set_member(&cache, &set, arch);
-        super::sdk_sidecar_host_resolution_tests::record_adopted_release(&cache, arch);
-
-        let mut sc = VmStartConfig::default();
-        let error = attach_runtime_overlay_if_cached(&mut sc, "firecracker")
-            .expect_err("an adopted release must not boot the image set's overlay");
-        let rendered = format!("{error:#}");
-        assert!(rendered.contains("runtime overlay"), "{rendered}");
-        assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
-        assert!(sc.runtime_overlay_path.is_none());
-        assert!(sc.runtime_overlay_roothash.is_none());
+            let mut sc = VmStartConfig::default();
+            let error = attach_runtime_overlay_if_cached(&mut sc, "firecracker")
+                .expect_err("the image set's overlay is not this CLI's");
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
+            assert!(sc.runtime_overlay_path.is_none());
+            assert!(sc.runtime_overlay_roothash.is_none());
+        }
     }
 
     /// A member installed from a root this build no longer pins is not used,

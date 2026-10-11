@@ -311,10 +311,11 @@ pub struct ImageSetMember {
     /// both can publish in one atomic set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_mode: Option<MemberBuildMode>,
-    /// Fingerprint of the sources this member was built from, computed at the
-    /// producing commit by the same function a consumer uses on its own tree.
-    /// Today only the SDK sidecar publishes one; a consumer whose fingerprint
-    /// matches can adopt the published bytes instead of rebuilding them.
+    /// Fingerprint of the sources a guest-runtime member was built from.
+    /// Published on the SDK sidecar members of sets that still carry them
+    /// (see [`RetiredGuestRuntimeRole`]), and parsed so those sets stay
+    /// readable. Nothing reads it: the guest runtime ships with the CLI, so no
+    /// image-set member is adopted in place of a build any more.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_fingerprint: Option<Sha256Hex>,
     /// Present exactly for roles that boot; see [`ImageSetRole::is_bootable`].
@@ -357,22 +358,49 @@ impl fmt::Display for WorkloadImageProfile {
 }
 
 /// The part a member plays in the set.
+///
+/// Every role but one is part of the Linux layer: kernels, base root
+/// filesystems, the builder image, the Stage 0 seed and the browser smoke
+/// pack. The guest runtime — the runtime overlay, the universal initramfs and
+/// the SDK sidecars — ships with each `mvmctl` release instead, so a set that
+/// still publishes those members parses them as [`Self::RetiredGuestRuntime`]:
+/// they are never required, and a launch never attaches one. Only a portable
+/// bundle's boot assets still select them, through the set the bundle embeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageSetRole {
     BuilderVm,
     WorkloadKernel(WorkloadImageProfile),
     WorkloadRootfs(WorkloadImageProfile),
-    RuntimeOverlay,
-    /// One sidecar per C library, since a guest can only load the variant
-    /// linked against the libc it carries.
-    SdkSidecar(GuestLibc),
     Stage0BootstrapKernel,
     QemuWasmSmokePack,
-    /// The universal initramfs a sealed boot starts from. It carries the
-    /// guest agent, so it is published per architecture like the runtime
-    /// overlay; a backend loads it beside a kernel rather than booting it.
+    /// A guest-runtime member of a set published before the guest runtime
+    /// moved to the CLI release. Untagged, so it keeps the wire spelling those
+    /// sets signed (`"runtime_overlay"`, `{"sdk_sidecar": "glibc"}`,
+    /// `"initramfs"`) and the set's root digest still covers the same bytes.
+    #[serde(untagged)]
+    RetiredGuestRuntime(RetiredGuestRuntimeRole),
+}
+
+/// A guest-runtime role an older image set publishes. Accepted so a release
+/// binary keeps reading such a set until the image repository stops
+/// publishing these members; nothing in a launch reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetiredGuestRuntimeRole {
+    RuntimeOverlay,
+    SdkSidecar(GuestLibc),
     Initramfs,
+}
+
+impl fmt::Display for RetiredGuestRuntimeRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RuntimeOverlay => f.write_str("runtime_overlay"),
+            Self::SdkSidecar(libc) => write!(f, "sdk_sidecar_{libc}"),
+            Self::Initramfs => f.write_str("initramfs"),
+        }
+    }
 }
 
 impl ImageSetRole {
@@ -391,6 +419,12 @@ impl ImageSetRole {
     pub fn is_arch_independent(self) -> bool {
         matches!(self, Self::QemuWasmSmokePack)
     }
+
+    /// Whether this is a guest-runtime role a set may still carry and every
+    /// consumer ignores.
+    pub fn is_retired(self) -> bool {
+        matches!(self, Self::RetiredGuestRuntime(_))
+    }
 }
 
 impl fmt::Display for ImageSetRole {
@@ -399,11 +433,9 @@ impl fmt::Display for ImageSetRole {
             Self::BuilderVm => f.write_str("builder_vm"),
             Self::WorkloadKernel(profile) => write!(f, "{profile}_workload_kernel"),
             Self::WorkloadRootfs(profile) => write!(f, "{profile}_workload_rootfs"),
-            Self::RuntimeOverlay => f.write_str("runtime_overlay"),
-            Self::SdkSidecar(libc) => write!(f, "sdk_sidecar_{libc}"),
             Self::Stage0BootstrapKernel => f.write_str("stage0_bootstrap_kernel"),
             Self::QemuWasmSmokePack => f.write_str("qemu_wasm_smoke_pack"),
-            Self::Initramfs => f.write_str("initramfs"),
+            Self::RetiredGuestRuntime(role) => role.fmt(f),
         }
     }
 }

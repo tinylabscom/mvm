@@ -175,9 +175,10 @@ tar xzf "runtime-overlay-${ARCH}.tar.gz"
 shasum -a 256 --check checksums-sha256.txt
 ```
 
-When `mvmctl build runtime-overlay build --source download` installs this
-payload into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, it runs the same
-chain, then verifies the extracted inner files against the embedded
+When a release that predates the guest-runtime asset installs this payload
+with `mvmctl build runtime-overlay build --source download`, into
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`,
+it runs the same chain, then verifies the extracted inner files against the embedded
 `checksums-sha256.txt`, and later required-overlay boots recheck those cached
 file hashes before attach. A drifted cache entry is refused.
 

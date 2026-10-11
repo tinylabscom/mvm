@@ -130,12 +130,15 @@ and cite #4100 for the direction, never the reverse.
   pieces from it (`mvm_build::runtime_pieces::assemble_runtime_pieces`); the
   explicit `mvmctl build runtime-overlay build` and
   `mvmctl build sdk-sidecar build` assemble the piece they name from it, with
-  no `mvm-images` checkout and no builder VM, and `--source download` installs
-  the pinned image set's member instead. Each assembled piece records the
+  no `mvm-images` checkout and no builder VM; outside a checkout they assemble
+  it from the published guest runtime of the CLI's version. Neither has a
+  `--source download`: the image set carries no such piece. A source build
+  assembles from its tree in bootstrap whatever
+  `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE` says. Each assembled piece records the
   digest of the archive it came from beside its version-keyed files, and
   `mvmctl doctor`'s `guest runtime` line reports, per piece, that archive (and
-  whether it is the one this tree builds today) or the image-set member a
-  launch would attach. The archive object is the one digest-keyed cache; the
+  whether it is the one this tree builds today, or this release's). The
+  archive object is the one digest-keyed cache; the
   pieces keep their version-keyed slots because that is what the launch
   resolvers read, and the sidecar keys reuse on its host-services sources
   rather than the archive digest.
@@ -156,16 +159,35 @@ and cite #4100 for the direction, never the reverse.
   assemblers a source build uses
   (`mvm_build::runtime_pieces::assemble_release_runtime_pieces`), so the
   overlay's roothash is computed on the host there too. It then records which
-  archive it adopted, and `mvmctl doctor` names it. From then on a launch of
-  that version refuses the image set's copies
-  (`mvm_build::runtime_pieces::image_set_fallback_refusal`); a missing or
-  broken piece names `mvmctl bootstrap` instead. An archive that fails
-  verification fails bootstrap, and nothing is adopted. A release binary that
-  has not bootstrapped since it was installed still boots the image set's
-  copies, which is also all a release published before the archive existed
-  knows how to do: `install.sh` tolerates the missing asset only for those,
-  and a release carrying this code cannot be published without its archive.
-  The image set keeps carrying the three pieces until #4105.
+  archive it adopted, and `mvmctl doctor` names it. An archive that fails
+  verification fails bootstrap, and nothing is adopted. `install.sh` tolerates
+  a missing asset only for releases published before the archive existed, and
+  a release carrying this code cannot be published without its archive.
+- The guest runtime has left the image-set contract (#4105).
+  `ImageSetRequirement::current_train()` names only the Linux layer — the
+  builder image, both workload kernels and root filesystems, the Stage 0
+  kernel on both architectures, and the smoke pack — so a set without an
+  overlay, sidecars or initramfs is complete. A set that still lists them,
+  such as the pinned `image-set/v0.2.4`, parses: the three roles deserialize,
+  in their original wire spelling, as `ImageSetRole::RetiredGuestRuntime`, and
+  the sidecars' `source_fingerprint` is parsed and never read. Nothing
+  requires, selects or fetches a retired member except a portable bundle's
+  boot assets (`BOOT_ASSET_OVERLAY_ROLE`, `BOOT_ASSET_INITRAMFS_ROLE`), which
+  authenticate an overlay and initramfs through the set the bundle embeds;
+  their replacement is #3928's to decide. An embedded set is no longer
+  required to carry an overlay. `IMAGES_CHECKOUT_MARKERS` no longer lists the
+  `runtime-overlay` and `initramfs` image definitions, and the pair builds of
+  those roles are gone.
+- There is no image-set fallback. Every launch resolver — the overlay
+  attach, the SDK sidecar attach, the universal initramfs and
+  `resolve_cached_runtime_overlay` — reads only the version-keyed slot this
+  CLI assembled, and a miss names `mvmctl bootstrap`. A release binary that
+  has not bootstrapped since it was installed refuses its first launch with
+  that pointer; a release published before the archive existed is a
+  different binary and keeps booting its own pinned set's copies.
+  Fetch-when-unchanged is deleted with its module and environment variable.
+  `mvmctl image dev ensure` without a selected checkout installs the pinned
+  set's dev members, which are Linux layer.
 
 ## Consequences
 
@@ -183,11 +205,11 @@ and cite #4100 for the direction, never the reverse.
   then bakes no mvm binary, and the builder cache key stops folding the setpriv
   source closure for ABI 2 images (#4107).
 - The guest runtime leaves the image-set contract, and fetch-when-unchanged is
-  deleted: `MVM_FETCH_UNCHANGED_IMAGES` (including its `pinned` value),
-  `mvm_build::fetch_unchanged`, and the members' `source_fingerprint` (#4105).
-  The `guest_agent_protocol` range in `images.lock` is replaced by a
+  deleted, including its `pinned` value and its module (#4105, landed); the
+  members' `source_fingerprint` stays parseable until no published set carries
+  it. The `guest_agent_protocol` range in `images.lock` is replaced by a
   base-image contract version that the base root filesystem declares and
-  `mvmctl` checks before boot.
+  `mvmctl` checks before boot; that needs `mvm-images` to declare one first.
 - mvm's CI stops building guest pieces through `mvm-images` (#4108).
 - `mvm-images` drops the `mvm` input and every read of mvm's source
   (tinylabscom/mvm-images#49) and attests build provenance for image sets
@@ -196,25 +218,27 @@ and cite #4100 for the direction, never the reverse.
 
 ### Ordering
 
-The order is forced by what shipped CLIs accept.
-`ImageSetRequirement::current_train()` requires `runtime_overlay`,
-`sdk_sidecar_{glibc,musl}` and `initramfs` on both architectures, and every
-acquire of the locked set, every image set embedded in a signed bundle, and
-`image boot verify --require-complete` enforce it. Every `mvmctl` released so
-far therefore refuses a set without those roles. The mvm release that relaxes
-the requirement ships first; `mvm-images` publishes a set without the roles
-only after it, and only that release or a later one may pin such a set.
-Older CLIs keep pinning their own published sets and are unaffected.
+The order is forced by what shipped CLIs accept. Every `mvmctl` released
+before #4105 requires `runtime_overlay`, `sdk_sidecar_{glibc,musl}` and
+`initramfs` on both architectures in every acquire of the locked set, every
+image set embedded in a signed bundle, and `image boot verify
+--require-complete`, so each refuses a set without those roles. The mvm
+release carrying #4105 relaxes the requirement first; `mvm-images` publishes
+a set without the roles only after it, and only that release or a later one
+may pin such a set. Older CLIs keep pinning their own published sets and are
+unaffected.
 
-`ImageSetRole` is a closed serde enum. Deleting the three variants makes the
-pinned `image-set/v0.2.4` manifest unparseable, so either the variants stay
-deserializable until the pin advances past every set that carries them, or
-the pin advances in the same change. `IMAGES_CHECKOUT_MARKERS` recognises an
-`mvm-images` checkout by its `runtime-overlay` and `initramfs` image
-definitions and changes in lockstep with their deletion.
-`check_embedded_image_set_for_backend` requires a `RuntimeOverlay` member in
-an embedded set; what a `.mvmpkg` that embeds an image set records about the
-guest runtime it was tested with is decided in #3928.
+`ImageSetRole` is a closed serde enum, so deleting the three variants would
+have made the pinned `image-set/v0.2.4` manifest unparseable. They live on as
+one untagged `RetiredGuestRuntime` variant that keeps their wire spelling, so
+the current pin and any set `mvm-images` publishes before it drops the roles
+still parse, and the variant can go once no pinned set carries them.
+`IMAGES_CHECKOUT_MARKERS` already recognises an `mvm-images` checkout without
+the `runtime-overlay` and `initramfs` image definitions, so it does not have
+to change when they are deleted. What a `.mvmpkg` that embeds an image set
+records about the guest runtime it was tested with, and where a portable
+bundle's boot assets take their overlay and initramfs from once no set
+publishes them, is decided in #3928.
 
 ### Why `mkGuest` stays
 

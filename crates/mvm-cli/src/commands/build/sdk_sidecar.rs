@@ -1,6 +1,7 @@
 //! `mvmctl build sdk-sidecar build` — explicitly populate the SDK sidecar
-//! cache for both guest libcs: packed on the host from this checkout's
-//! guest-runtime archive, or installed from the pinned image set.
+//! cache for both guest libcs, packed on the host from a guest runtime: this
+//! checkout's archive, or the published one of this CLI's version. The image
+//! set carries no sidecar.
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -25,15 +26,15 @@ enum Cmd {
 
 #[derive(ClapArgs, Debug, Clone)]
 struct BuildArgs {
-    /// Where the sidecars come from. `build` packs them from this checkout's
-    /// guest-runtime archive, building the archive first if it is not cached;
-    /// `download` installs the pinned image set's members; `auto` builds in a
-    /// source checkout, packs from the release's own guest runtime on a
-    /// release binary, and downloads otherwise.
+    /// Which guest runtime the sidecars are packed from. `build` packs them
+    /// from this checkout's guest-runtime archive, building the archive first
+    /// if it is not cached; `auto` does the same in a source checkout and
+    /// otherwise packs from the published guest runtime of this version — on
+    /// a release binary, the one its own release ships.
     #[arg(long, value_enum, default_value_t = Source::Auto)]
     source: Source,
 
-    /// Repack or re-download even when a matching sidecar is already cached.
+    /// Repack even when a matching sidecar is already cached.
     #[arg(long)]
     force: bool,
 }
@@ -42,7 +43,6 @@ struct BuildArgs {
 enum Source {
     Auto,
     Build,
-    Download,
 }
 
 /// The acquisition a request resolves to.
@@ -50,10 +50,8 @@ enum Source {
 enum Route {
     /// Pack from the guest-runtime archive of the checkout at this root.
     Archive(std::path::PathBuf),
-    /// Pack from the guest runtime this release binary's release ships.
+    /// Pack from the published guest runtime of this CLI's version.
     ReleaseArchive,
-    /// Install the pinned image set's members.
-    ImageSet,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -63,16 +61,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn run_build(args: BuildArgs) -> Result<()> {
-    if adopted_from_pinned_set()? {
-        return Ok(());
-    }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
     match route(
         args.source,
         mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root(),
-        mvm_build::artifact_acquisition::compiled_channel(),
     )? {
         Route::Archive(workspace_root) => {
             pack_from_archive(&cache_root, version, arch, &workspace_root, args.force)
@@ -82,29 +76,22 @@ fn run_build(args: BuildArgs) -> Result<()> {
                 crate::release_guest_runtime::installed_for_running_binary(&cache_root, arch)?;
             pack_from_runtime(&cache_root, version, arch, &runtime, args.force)
         }
-        Route::ImageSet => install_from_image_set(&cache_root, arch, args.force),
     }
 }
 
-/// `auto` builds wherever there is a checkout to build from, and on a release
-/// binary packs from the guest runtime its release ships. An explicit `build`
-/// without a checkout is refused with the way out named.
-fn route(
-    source: Source,
-    checkout: Option<std::path::PathBuf>,
-    channel: mvm_build::artifact_acquisition::DistributionChannel,
-) -> Result<Route> {
-    use mvm_build::artifact_acquisition::DistributionChannel;
+/// `auto` builds wherever there is a checkout to build from, and otherwise
+/// packs from the published guest runtime of this version — a release
+/// binary's own. An explicit `build` without a checkout is refused with the
+/// way out named.
+fn route(source: Source, checkout: Option<std::path::PathBuf>) -> Result<Route> {
     match (source, checkout) {
-        (Source::Auto, None) if channel == DistributionChannel::Release => {
-            Ok(Route::ReleaseArchive)
-        }
-        (Source::Download, _) | (Source::Auto, None) => Ok(Route::ImageSet),
         (Source::Build | Source::Auto, Some(root)) => Ok(Route::Archive(root)),
+        (Source::Auto, None) => Ok(Route::ReleaseArchive),
         (Source::Build, None) => anyhow::bail!(
             "--source build packs the sidecars from the guest runtime cargo builds in an mvm \
              source checkout, and this binary has none; run it from a contributor build, set {} \
-             to an mvm checkout, or use --source download",
+             to an mvm checkout, or use --source auto to pack them from the published guest \
+             runtime of this version",
             mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
         ),
     }
@@ -163,91 +150,19 @@ fn pack_from_runtime(
     Ok(())
 }
 
-/// Install both variants from the pinned image set, skipping one already
-/// installed from it unless `force`.
-fn install_from_image_set(
-    cache_root: &std::path::Path,
-    arch: GuestArch,
-    force: bool,
-) -> Result<()> {
-    let set = mvm_build::published_image_set::SetMemberCache::locked();
-    let tag = &mvm_core::image_set::image_train_lock()
-        .image_set
-        .release_tag;
-    for libc in mvm_build::runtime_pieces::SDK_SIDECAR_LIBCS {
-        let cached =
-            mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache_root, &set, arch, libc)
-                .ok()
-                .and_then(|resolver| resolver.resolve(&arch.to_string(), libc).ok());
-        let artifact = match cached {
-            Some(artifact) if !force => artifact,
-            _ => mvm_build::sdk_sidecar::download_sdk_sidecar(arch, libc, cache_root)?,
-        };
-        ui::success(&format!(
-            "SDK sidecar ({libc}) for {arch} installed from image set {tag}: {}",
-            artifact.image.display()
-        ));
-    }
-    Ok(())
-}
-
-/// When the caller set `MVM_FETCH_UNCHANGED_IMAGES`, adopt the pinned set's
-/// verified sidecar members instead of packing: under `1` only when they were
-/// built from exactly this tree's sources, under `pinned` whatever they were
-/// built from. Returns whether they were adopted. A refused adoption is final:
-/// the verified bytes were asked for, which must not silently fall back to a
-/// local pack.
-fn adopted_from_pinned_set() -> Result<bool> {
-    use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
-    let request = ArmRequest::for_host(PinnedMembers::SdkSidecars);
-    if request.mode == FetchMode::Off {
-        return Ok(false);
-    }
-    // Said at notice level whichever arm runs: the documented-surface e2e
-    // records which one did, and an unannounced fall-through is
-    // indistinguishable from the knob doing nothing.
-    let arm = fetch::resolve_arm(request)?;
-    ui::notice(&arm.report(request));
-    let fetch::Arm::Adopt { set, .. } = arm else {
-        return Ok(false);
-    };
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    fetch::fetch_sidecars_from_set(&set, request.arch, &cache_root).map_err(|e| {
-        anyhow::anyhow!(
-            "adopting the SDK sidecars of the pinned image set {} failed: {e}",
-            set.release_tag()
-        )
-    })?;
-    ui::success(&format!(
-        "SDK sidecars (glibc, musl) installed from the pinned image set {}; no build run.",
-        set.release_tag()
-    ));
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::{Cli, Commands, build::group as build_group};
     use clap::Parser;
-    use mvm_build::artifact_acquisition::DistributionChannel;
     use std::path::PathBuf;
 
-    const SOURCE: DistributionChannel = DistributionChannel::Source;
-    const RELEASE: DistributionChannel = DistributionChannel::Release;
-
-    /// A release binary packs from its own release's guest runtime, never the
-    /// image set's members, unless `download` asks for those by name.
+    /// Without a checkout there is nothing to build from, so `auto` packs
+    /// from the published guest runtime of this version — never the image
+    /// set, which carries no sidecar.
     #[test]
-    fn a_release_binary_packs_from_its_own_guest_runtime_by_default() {
-        assert_eq!(
-            route(Source::Auto, None, RELEASE).unwrap(),
-            Route::ReleaseArchive
-        );
-        assert_eq!(
-            route(Source::Download, None, RELEASE).unwrap(),
-            Route::ImageSet
-        );
+    fn without_a_checkout_auto_packs_from_the_published_guest_runtime() {
+        assert_eq!(route(Source::Auto, None).unwrap(), Route::ReleaseArchive);
     }
 
     #[test]
@@ -260,7 +175,7 @@ mod tests {
                 "sdk-sidecar",
                 "build",
                 "--source",
-                "download",
+                "build",
                 "--force",
             ],
         ] {
@@ -272,39 +187,40 @@ mod tests {
         }
     }
 
+    /// The image set carries no sidecar, so there is nothing to download.
+    #[test]
+    fn source_download_is_no_longer_accepted() {
+        Cli::try_parse_from([
+            "mvmctl",
+            "build",
+            "sdk-sidecar",
+            "build",
+            "--source",
+            "download",
+        ])
+        .expect_err("--source download names a retired image-set member");
+    }
+
     #[test]
     fn a_source_checkout_packs_from_the_archive_by_default() {
         let root = PathBuf::from("/checkout");
         assert_eq!(
-            route(Source::Auto, Some(root.clone()), SOURCE).unwrap(),
+            route(Source::Auto, Some(root.clone())).unwrap(),
             Route::Archive(root.clone())
         );
         assert_eq!(
-            route(Source::Build, Some(root.clone()), SOURCE).unwrap(),
+            route(Source::Build, Some(root.clone())).unwrap(),
             Route::Archive(root)
-        );
-    }
-
-    #[test]
-    fn without_a_checkout_auto_installs_the_image_set_members() {
-        assert_eq!(route(Source::Auto, None, SOURCE).unwrap(), Route::ImageSet);
-    }
-
-    #[test]
-    fn download_installs_the_image_set_members_even_in_a_checkout() {
-        assert_eq!(
-            route(Source::Download, Some(PathBuf::from("/checkout")), SOURCE).unwrap(),
-            Route::ImageSet
         );
     }
 
     /// The sidecar no longer comes from an image checkout or the builder VM, so
     /// an explicit build without a source checkout names what is missing and
-    /// the download alternative, not an image-checkout variable.
+    /// the published alternative, not an image-checkout variable.
     #[test]
     fn an_explicit_build_without_a_checkout_names_the_way_out() {
-        let error = route(Source::Build, None, SOURCE).unwrap_err().to_string();
-        assert!(error.contains("--source download"), "{error}");
+        let error = route(Source::Build, None).unwrap_err().to_string();
+        assert!(error.contains("--source auto"), "{error}");
         assert!(
             error.contains(mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV),
             "{error}"

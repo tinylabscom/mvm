@@ -67,18 +67,18 @@ Feature: SDK sidecar attaches only for admitted SDK host-service bindings
     When the launch path resolves the SDK sidecar
     Then the launch is refused and the error reports an integrity mismatch
 
-  Scenario: a downloaded mvmctl acquires the published sidecar and boots
+  Scenario: a downloaded mvmctl assembles the sidecar from its release guest runtime and boots
     Given an empty SDK sidecar cache
-    And a published SDK sidecar release artifact
+    And a release guest runtime installed beside mvmctl
     And a workload plan that binds host service "host.audit.v1"
-    When the launch path acquires the SDK sidecar from the published release
+    When bootstrap assembles the SDK sidecar from the release guest runtime
     Then the SDK sidecar is attached read-only at "/mvm/sdk"
     And admission accepts the launch with the sidecar attachment
     And the assembled workload cmdline names the SDK sidecar device the backend attached
 
-  Scenario: a published sidecar whose archive does not match its checksum is refused
+  Scenario: a release guest runtime whose host-services library does not match is refused
     Given an empty SDK sidecar cache
-    And a published SDK sidecar release artifact whose archive checksum does not match
+    And a release guest runtime whose host-services library does not match its manifest
     And a workload plan that binds host service "host.audit.v1"
-    When the launch path acquires the SDK sidecar from the published release
+    When bootstrap assembles the SDK sidecar from the release guest runtime
     Then the launch is refused and the SDK sidecar cache stays empty

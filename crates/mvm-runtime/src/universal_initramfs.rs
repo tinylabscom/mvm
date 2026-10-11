@@ -143,40 +143,16 @@ pub fn attach_universal_initramfs_if_cached(
 }
 
 /// The initramfs a launch attaches, from the cache alone: the version-keyed
-/// one, then the pinned image set's member — unless this version adopted its
-/// release guest runtime, whose initramfs is then the only one it boots. The
-/// adoption record sits under the mvm cache root, one level above
-/// `cache_root`.
+/// one this CLI assembled from its own guest runtime. There is no other copy
+/// to fall back to; a miss names the command that assembles it.
 fn resolve_cached_initramfs(
     cache_root: &std::path::Path,
     version: &str,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<mvm_fs::initramfs::InitramfsArtifact, mvm_build::initramfs::InitramfsBuildError> {
-    let miss = match mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
+    mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
         .resolve(&arch.to_string())
-    {
-        Ok(artifact) => return Ok(artifact),
-        Err(miss) => miss,
-    };
-    if let Some(refusal) = cache_root.parent().and_then(|shared| {
-        mvm_build::runtime_pieces::image_set_fallback_refusal(
-            shared,
-            version,
-            arch,
-            mvm_build::runtime_pieces::RuntimePiece::Initramfs,
-        )
-    }) {
-        return Err(
-            mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
-                reason: format!("{refusal}: {miss}"),
-            },
-        );
-    }
-    mvm_build::initramfs::resolve_image_set_initramfs(
-        cache_root,
-        &mvm_build::published_image_set::SetMemberCache::locked(),
-        arch,
-    )
+        .map_err(mvm_build::initramfs::InitramfsBuildError::from)
 }
 
 fn attach_universal_initramfs_with_resolver(
@@ -231,7 +207,8 @@ fn attach_universal_initramfs_with_resolver(
                     "the universal initramfs {version} for {arch} could not be resolved, and \
                      this workload cannot boot without it: it is what mounts the guest runtime \
                      overlay at /mvm/runtime, which carries the guest agent and the egress \
-                     client. Run `mvmctl doctor` to see the artifact state"
+                     client. Run `mvmctl bootstrap` to assemble it from this CLI's guest \
+                     runtime, or `mvmctl doctor` to see the artifact state"
                 )));
             }
             tracing::debug!(error = %e, "universal initramfs not attached");
@@ -487,37 +464,68 @@ mod tests {
     /// untouched. `seed_warm_universal_initramfs` makes the difference
     /// observable: a resolver that ran would find the warm artifact and attach
     /// it.
-    /// An adopted release guest runtime closes the image set: a missing
-    /// version-keyed initramfs names the bootstrap that reassembles it instead
-    /// of booting the pinned set's member.
+    /// The image set carries no guest runtime, so a launch never attaches an
+    /// initramfs an older CLI installed from it: with only that copy on disk,
+    /// the resolve misses, whether or not this version adopted a release
+    /// guest runtime.
     #[test]
-    fn an_adopted_release_runtime_refuses_the_image_set_initramfs() {
+    fn a_launch_never_attaches_the_image_sets_initramfs() {
         let tmp = tempfile::tempdir().unwrap();
         let cache = tmp.path().join("cache");
         let initramfs_cache = cache.join("initramfs");
         let arch = GuestArch::host();
-        let record = mvm_build::runtime_pieces::release_adoption_record(&cache, "9.9.9", arch);
+        let version = env!("CARGO_PKG_VERSION");
+        let set = mvm_build::published_image_set::SetMemberCache::locked();
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let payload = b"cpio-payload";
+        let image = {
+            use std::io::Write as _;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(payload).unwrap();
+            gz.finish().unwrap()
+        };
+        std::fs::write(staged.join(mvm_fs::initramfs::INITRAMFS_IMAGE_FILE), &image).unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_HASH_FILE),
+            format!(
+                "{}\n",
+                mvm_core::packs::Sha256Hex::from_bytes(payload).as_str()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_SIZE_FILE),
+            format!("{}\n", image.len()),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::VERSION_FILE),
+            format!("{version}\n"),
+        )
+        .unwrap();
+        mvm_build::initramfs::install_initramfs_into_cache(
+            &staged,
+            &set.cache_root(&initramfs_cache),
+            version,
+            arch,
+        )
+        .unwrap();
+        set.record(
+            &initramfs_cache,
+            mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE,
+            mvm_core::image_set::MemberTarget::Arch(arch),
+            &mvm_build::published_image_set::MemberVersion::parse(version).unwrap(),
+        )
+        .unwrap();
+
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("the image set's initramfs is not this CLI's");
+        let record = mvm_build::runtime_pieces::release_adoption_record(&cache, version, arch);
         std::fs::create_dir_all(record.parent().unwrap()).unwrap();
         std::fs::write(&record, format!("{}\n", "e".repeat(64))).unwrap();
-
-        let refused = resolve_cached_initramfs(&initramfs_cache, "9.9.9", arch)
-            .expect_err("nothing is assembled, and the image set is closed");
-        let rendered = refused.to_string();
-        assert!(
-            rendered.contains("refusing the pinned image set's copy"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("mvmctl bootstrap"), "{rendered}");
-
-        // A version that adopted nothing still reaches the image set (which
-        // has nothing installed here, so it misses for its own reason).
-        let other = resolve_cached_initramfs(&initramfs_cache, "9.9.8", arch)
-            .expect_err("an empty cache has no initramfs");
-        assert!(
-            !other
-                .to_string()
-                .contains("refusing the pinned image set's copy")
-        );
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("an adopted release has nothing else to attach either");
     }
 
     #[test]

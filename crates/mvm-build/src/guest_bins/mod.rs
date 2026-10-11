@@ -89,7 +89,7 @@ pub struct GuestBinsManifest {
     /// [`guest_agent_build::guest_source_fingerprint`] of the producing tree.
     pub guest_source_fingerprint: String,
     /// [`guest_agent_build::sdk_cdylib_source_fingerprint`] of the producing
-    /// tree — the value the SDK sidecar's fetch-when-unchanged check compares.
+    /// tree — the value a source-built SDK sidecar's staleness check compares.
     pub sdk_cdylib_source_fingerprint: String,
     /// The producing checkout: its commit, and whether its files matched it.
     /// A dirty tree carries a fingerprint of its changes, so its bytes are

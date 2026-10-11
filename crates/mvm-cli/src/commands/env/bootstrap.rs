@@ -31,9 +31,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// before an OCI workload can launch.
 pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()> {
     run_steps(production)?;
-    let release = crate::release_guest_runtime::prepare_for_running_binary()
-        .context("preparing the release guest runtime")?;
-    let local_build_requested = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode()
+    let mode = mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode();
+    // A release binary's guest runtime is the one its release ships, acquired
+    // once up front. A source build has its tree; the image set has none.
+    let release =
+        if publishes_its_guest_runtime(mvm_build::artifact_acquisition::compiled_channel(), mode) {
+            Some(
+                crate::release_guest_runtime::prepare_for_running_binary()
+                    .context("preparing the release guest runtime")?,
+            )
+        } else {
+            None
+        };
+    let local_build_requested = mode
         == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         || mvm_build::image_source::configured_images_dir().is_some();
     let kernel = acquire_bootstrap_artifacts_with(
@@ -90,8 +100,21 @@ where
     Ok(kernel)
 }
 
+/// Whether this binary takes its guest runtime from a release: a release
+/// binary does, unless it was explicitly asked to build one (which then fails
+/// for want of a checkout). A source build always assembles its own tree's.
+fn publishes_its_guest_runtime(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
+) -> bool {
+    channel == mvm_build::artifact_acquisition::DistributionChannel::Release
+        && mode
+            == mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+}
+
 /// Where bootstrap's launch-time pieces — the runtime overlay, the initramfs,
-/// both SDK sidecars and the OCI guest runtime — come from.
+/// both SDK sidecars and the OCI guest runtime — come from. The image set
+/// carries none of them, so there are exactly two answers.
 #[derive(Debug, Clone, Copy)]
 enum PiecesSource<'a> {
     /// Assembled from this checkout's guest-runtime archive.
@@ -99,25 +122,16 @@ enum PiecesSource<'a> {
     /// Assembled from the guest runtime this release binary's own release
     /// ships, already authenticated.
     ReleaseArchive(&'a mvm_build::guest_bins::release::ReleaseGuestRuntime),
-    /// Installed from the pinned image set.
-    ImageSet,
 }
 
-/// An explicit source build wins; otherwise a release binary, which always
-/// has its own guest runtime by now, assembles from it, and every other build
-/// installs the image set's members.
-fn pieces_source<'a>(
-    mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
-    release: Option<&'a mvm_build::guest_bins::release::ReleaseGuestRuntime>,
-) -> PiecesSource<'a> {
-    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
-
-    match (mode, release) {
-        (RuntimeOverlayAcquireMode::BuildFromSourceCheckout, _) => PiecesSource::SourceCheckout,
-        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, Some(release)) => {
-            PiecesSource::ReleaseArchive(release)
-        }
-        (RuntimeOverlayAcquireMode::DownloadPublishedArtifact, None) => PiecesSource::ImageSet,
+/// A release binary assembles from the guest runtime bootstrap acquired; every
+/// other build assembles from its tree.
+fn pieces_source(
+    release: Option<&mvm_build::guest_bins::release::ReleaseGuestRuntime>,
+) -> PiecesSource<'_> {
+    match release {
+        Some(release) => PiecesSource::ReleaseArchive(release),
+        None => PiecesSource::SourceCheckout,
     }
 }
 
@@ -130,25 +144,18 @@ fn prepare_launch_runtime_artifacts(
     let oci =
         || mvm_client::launch::runtime_overlay::prepare_oci_guest_runtime(&cache_root.join("oci"));
     prepare_runtime_pieces_with(
-        pieces_source(
-            mvm_client::launch::runtime_overlay::runtime_overlay_acquire_mode(),
-            release,
-        ),
+        pieces_source(release),
         || {
             oci()?;
             prewarm_pieces_from_source(&cache_root, version, arch)
         },
         |release| prewarm_pieces_from_release(&cache_root, version, arch, release),
-        || {
-            oci()?;
-            prewarm_pieces_from_image_set(&cache_root, version, arch)
-        },
     )
 }
 
-/// Assemble every piece from the release's own guest runtime, and install the
-/// OCI guest runtime from it. An archive that fails here fails bootstrap: the
-/// image set is never the fallback for a release binary's own runtime.
+/// Assemble every piece from the published guest runtime, and install the OCI
+/// guest runtime from it. An archive that fails here fails bootstrap; there is
+/// no other source to fall back to.
 fn prewarm_pieces_from_release(
     cache_root: &std::path::Path,
     version: &str,
@@ -213,67 +220,20 @@ fn prewarm_pieces_from_source(
     Ok(())
 }
 
-/// Install whichever of the overlay, the initramfs and the SDK sidecars the
-/// cache lacks from the image set this build pins.
-fn prewarm_pieces_from_image_set(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: mvm_core::arch::GuestArch,
-) -> Result<()> {
-    use mvm_client::launch::runtime_overlay::{
-        RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-    };
-
-    let resolver =
-        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
-    if mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch).is_err() {
-        acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-            cache_root,
-            expected_version: version,
-            arch,
-            source_checkout_root: None,
-        })?;
-    }
-
-    let set = mvm_build::published_image_set::SetMemberCache::locked();
-    let initramfs_cache = mvm_build::runtime_pieces::initramfs_cache_root(cache_root);
-    if mvm_build::initramfs::resolve_image_set_initramfs(&initramfs_cache, &set, arch).is_err() {
-        mvm_build::initramfs::download_initramfs(arch, &initramfs_cache)?;
-    }
-    for libc in mvm_build::runtime_pieces::SDK_SIDECAR_LIBCS {
-        let ready =
-            mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache_root, &set, arch, libc)
-                .and_then(|resolver| {
-                    resolver
-                        .resolve(&arch.to_string(), libc)
-                        .map_err(mvm_build::sdk_sidecar::SdkSidecarBuildError::from)
-                })
-                .is_ok();
-        if !ready {
-            mvm_build::sdk_sidecar::download_sdk_sidecar(arch, libc, cache_root)?;
-        }
-    }
-    Ok(())
-}
-
 /// Run exactly one acquisition for `source`: a source build never downloads,
-/// a release binary assembles from its own archive only, and an image-set
-/// acquisition never compiles.
-fn prepare_runtime_pieces_with<'a, S, R, P>(
+/// and a published runtime is assembled from its own archive only.
+fn prepare_runtime_pieces_with<'a, S, R>(
     source: PiecesSource<'a>,
     from_source: S,
     from_release: R,
-    from_image_set: P,
 ) -> Result<()>
 where
     S: FnOnce() -> Result<()>,
     R: FnOnce(&'a mvm_build::guest_bins::release::ReleaseGuestRuntime) -> Result<()>,
-    P: FnOnce() -> Result<()>,
 {
     match source {
         PiecesSource::SourceCheckout => from_source(),
         PiecesSource::ReleaseArchive(release) => from_release(release),
-        PiecesSource::ImageSet => from_image_set(),
     }
 }
 
@@ -409,7 +369,7 @@ mod tests {
     use super::{
         PiecesSource, acquire_bootstrap_artifacts_with, launch_helper_specs, pieces_source,
         prepare_runtime_pieces_with, prewarm_host_aux_helpers_for, prewarm_pieces_from_release,
-        release_assembly_line,
+        publishes_its_guest_runtime, release_assembly_line,
     };
     use mvm_build::guest_bins::release::{ReleaseGuestRuntime, ReleaseGuestRuntimeOrigin};
     use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
@@ -446,10 +406,6 @@ mod tests {
                 calls.borrow_mut().push("release archive");
                 Ok(())
             },
-            || {
-                calls.borrow_mut().push("image set");
-                Ok(())
-            },
         )
         .unwrap();
         calls.into_inner()
@@ -457,39 +413,39 @@ mod tests {
 
     #[test]
     fn source_bootstrap_assembles_from_the_archive_and_downloads_nothing() {
-        let release = release_runtime("/r/mvm-guest-bins-v9.9.9.tar.gz".into());
-        for release in [None, Some(&release)] {
-            assert_eq!(
-                ran(pieces_source(
-                    RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
-                    release
-                )),
-                ["source archive"]
-            );
-        }
+        assert_eq!(ran(pieces_source(None)), ["source archive"]);
     }
 
     #[test]
     fn a_release_binary_assembles_from_its_own_guest_runtime_and_never_the_image_set() {
         let release = release_runtime("/r/mvm-guest-bins-v9.9.9.tar.gz".into());
-        assert_eq!(
-            ran(pieces_source(
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
-                Some(&release)
-            )),
-            ["release archive"]
-        );
+        assert_eq!(ran(pieces_source(Some(&release))), ["release archive"]);
     }
 
+    /// Only a release binary in its default mode acquires a published guest
+    /// runtime. A source build assembles its tree's in either mode — the image
+    /// set it used to install from in download mode carries none — and a
+    /// release binary asked to build has no tree, which the source arm reports.
     #[test]
-    fn published_bootstrap_without_a_release_runtime_acquires_from_the_image_set() {
-        assert_eq!(
-            ran(pieces_source(
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
-                None
-            )),
-            ["image set"]
-        );
+    fn only_a_release_binary_takes_a_published_guest_runtime() {
+        use mvm_build::artifact_acquisition::DistributionChannel;
+        assert!(publishes_its_guest_runtime(
+            DistributionChannel::Release,
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+        ));
+        assert!(!publishes_its_guest_runtime(
+            DistributionChannel::Release,
+            RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+        ));
+        for mode in [
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+            RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
+        ] {
+            assert!(!publishes_its_guest_runtime(
+                DistributionChannel::Source,
+                mode
+            ));
+        }
     }
 
     /// A release archive that does not verify fails the bootstrap step, and
