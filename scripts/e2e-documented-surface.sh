@@ -546,6 +546,25 @@ warm_launch_artifacts() {
   fi
   rm -f "$warm_log"
 }
+# ---------------------------------------------------------------------------
+# Pull the OCI images the live scenarios boot.
+#
+# A launch is cache-only: it boots an image `image pull` already prepared and
+# refuses one that was not ("cached OCI image ... is not launch-ready"). The
+# live scenarios boot these in this home, through `machine run --image`, a
+# detected runtime (`rust` from Cargo.toml, `python` from the command), or the
+# warm-up below, so the home is prepared here, the way an operator prepares
+# one. Best-effort like the warm-up: a pull that fails surfaces as the
+# scenarios that needed it failing, naming the image.
+# ---------------------------------------------------------------------------
+E2E_LIVE_IMAGES=(alpine rust:1-alpine python:3.12 python:3.12-alpine curlimages/curl:8.21.0)
+e2e_phase images
+for image in "${E2E_LIVE_IMAGES[@]}"; do
+  echo "==> pulling $image"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" image pull "$image" \
+    || echo "    pull of $image FAILED; scenarios that boot it will say so"
+done
+
 e2e_phase launch-artifacts
 warm_launch_artifacts
 
