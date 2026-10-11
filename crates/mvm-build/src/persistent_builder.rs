@@ -1054,8 +1054,9 @@ pub fn artifact_dir_for(session_job_dir: &Path, job_id: &str) -> PathBuf {
 /// 2. Validates `$STORE_PATH/vmlinux` and `$STORE_PATH/rootfs.ext4`
 ///    (mkGuest layout contract); exits 4 with stderr message on
 ///    miss.
-/// 3. `cp -L`s vmlinux + rootfs.ext4 (+ optional manifest.json)
-///    to `/job/<job_id>/out/`.
+/// 3. `cp -L`s vmlinux + rootfs.ext4, plus whichever of
+///    [`crate::builder_output::NIX_OUTPUT_MEMBERS`] the output has, to
+///    `/job/<job_id>/out/`.
 /// 4. Writes the store path to `/job/<job_id>/out/store-path.txt`
 ///    so the host can recover the revision hash post-dispatch.
 pub fn stage_flake_dispatch_job(
@@ -1110,10 +1111,10 @@ pub fn stage_flake_dispatch_job(
          {seal_rootfs_journal_sh}\n\
          sync\n\
          rm -f \"$BUILD_HOOK_ROOTFS\"\n\
-         if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
-             cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
-         fi\n",
+         {copy_members_sh}",
         store_path_sidecar = STORE_PATH_SIDECAR,
+        copy_members_sh =
+            crate::builder_output::copy_nix_output_members_sh("\"$STORE_PATH\"", "\"$OUT_DIR\""),
         flake_ref = shell_single_quote(flake_ref),
         attr = shell_single_quote(attr),
         seal_rootfs_journal_sh =
@@ -1305,6 +1306,16 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
         let dst_rootfs = mounts.artifact_out.join("rootfs.ext4");
         std::fs::copy(artifact_dir.join("rootfs.ext4"), &dst_rootfs)
             .map_err(|e| BuilderVmError::ExtractionFailed(format!("copying rootfs.ext4: {e}")))?;
+        for member in crate::builder_output::NIX_OUTPUT_MEMBERS {
+            if let Some(src) =
+                crate::builder_output::regular_member_if_present(&artifact_dir.join(member))?
+            {
+                std::fs::copy(&src, mounts.artifact_out.join(member)).map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!("copying {member}: {e}"))
+                })?;
+            }
+        }
+        crate::builder_output::seal_declared_rootfs(&mounts.artifact_out)?;
 
         Ok(BuilderArtifacts::Image {
             rootfs_path: dst_rootfs,
@@ -1803,6 +1814,15 @@ mod tests {
         assert!(body.contains("'packages.aarch64-linux.default'"), "{body}");
         assert!(body.contains(STORE_PATH_SIDECAR), "{body}");
         assert!(body.contains("cp -L"), "{body}");
+        // The same member set every one-shot build copies, and no verity pair.
+        assert!(
+            body.contains(&crate::builder_output::copy_nix_output_members_sh(
+                "\"$STORE_PATH\"",
+                "\"$OUT_DIR\""
+            )),
+            "{body}"
+        );
+        assert!(!body.contains("rootfs.roothash"), "{body}");
         let artifact_dir = artifact_dir_for(&job_dir, &job_id);
         assert!(
             artifact_dir.is_dir(),

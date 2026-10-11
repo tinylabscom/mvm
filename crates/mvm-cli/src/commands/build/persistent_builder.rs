@@ -530,6 +530,11 @@ fn run_submit(args: SubmitArgs) -> Result<()> {
 
     if outcome.exit_code == 0 {
         let artifact_dir = artifact_dir_for(&record.job_dir, &job_dir_relpath);
+        if let Some(roothash) = mvm_build::builder_output::seal_declared_rootfs(&artifact_dir)
+            .context("sealing the dispatch's rootfs")?
+        {
+            println!("rootfs.roothash: {roothash}");
+        }
         match summarize_artifacts(&artifact_dir) {
             Ok(summary) => {
                 println!("artifact_dir: {}", artifact_dir.display());
@@ -789,18 +794,17 @@ fn stage_flake_cmd_sh(
          fi\n\
          cp -L \"$STORE_PATH/vmlinux\" \"$OUT_DIR/vmlinux\"\n\
          cp -L \"$STORE_PATH/rootfs.ext4\" \"$OUT_DIR/rootfs.ext4\"\n\
-         # Manifest sidecar — copy if present, but don't fail\n\
-         # for flakes that don't emit it.\n\
-         if [ -f \"$STORE_PATH/manifest.json\" ]; then\n\
-             cp -L \"$STORE_PATH/manifest.json\" \"$OUT_DIR/manifest.json\"\n\
+         # The guest sidecar, when the image publishes one.\n\
+         if [ -f \"$STORE_PATH/mvm-meta.json\" ]; then\n\
+             cp -L \"$STORE_PATH/mvm-meta.json\" \"$OUT_DIR/mvm-meta.json\"\n\
          fi\n\
-         # Production image sidecars — retain the dm-verity payload and\n\
-         # admission metadata emitted by the Nix image flake.\n\
-         for sidecar in rootfs.verity rootfs.roothash rootfs-closure-paths mvm-meta.json; do\n\
-             if [ -f \"$STORE_PATH/$sidecar\" ]; then\n\
-                 cp -L \"$STORE_PATH/$sidecar\" \"$OUT_DIR/$sidecar\"\n\
-             fi\n\
-         done\n",
+         # Every other member a build returns. The dm-verity pair is not\n\
+         # one: the host computes it over the rootfs it receives.\n\
+         {copy_members_sh}",
+        copy_members_sh = mvm_build::builder_output::copy_nix_output_members_sh(
+            "\"$STORE_PATH\"",
+            "\"$OUT_DIR\""
+        ),
         out_dir = guest_artifact_dir(transport, &job_id),
         flake_ref = shell_escape(flake_ref),
         attr = shell_escape(attr),
@@ -1122,10 +1126,20 @@ mod tests {
         );
         assert!(body.contains("vmlinux"), "{body}");
         assert!(body.contains("rootfs.ext4"), "{body}");
-        assert!(body.contains("rootfs.verity"), "{body}");
-        assert!(body.contains("rootfs.roothash"), "{body}");
-        assert!(body.contains("rootfs-closure-paths"), "{body}");
         assert!(body.contains("mvm-meta.json"), "{body}");
+        // The member set every one-shot build returns, and no verity pair:
+        // the host seals the rootfs it receives.
+        assert!(
+            body.contains(&mvm_build::builder_output::copy_nix_output_members_sh(
+                "\"$STORE_PATH\"",
+                "\"$OUT_DIR\""
+            )),
+            "{body}"
+        );
+        assert!(body.contains("initrd"), "{body}");
+        assert!(body.contains("rootfs-closure-paths"), "{body}");
+        assert!(!body.contains("rootfs.verity"), "{body}");
+        assert!(!body.contains("rootfs.roothash"), "{body}");
         // `cp -L` (not just `cp`) so the host gets real bytes,
         // not store-path symlinks that don't resolve.
         assert!(body.contains("cp -L"), "must use cp -L: {body}");
