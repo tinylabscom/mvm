@@ -1,14 +1,15 @@
 //! Workload stdout/stderr into guest capture.
 //!
-//! The output pump already reads every workload pipe on its own threads and
-//! hands each chunk to one drain loop. That loop also offers each chunk here,
-//! so a workload's output reaches the host collector for the VM's life — not
-//! only the CLI invocation that happens to be attached — whether or not anyone
-//! is reading the call's stream.
+//! Every path that reads a workload's pipes — the entrypoint output pump, the
+//! streaming exec, and process control's detached processes — also offers
+//! each chunk here as it reads it, so a workload's output reaches the host
+//! collector for the VM's life — not only the CLI invocation that happens to
+//! be attached — whether or not anyone is reading the call's stream, and
+//! beyond any per-call buffer cap.
 //!
 //! Offering is one non-waiting admission per chunk of at most
 //! [`MAX_STDIO_BYTES`]: a full capture queue sheds and counts, it never slows
-//! the pump, and so never the workload. Nothing is offered until the agent
+//! the reader, and so never the workload. Nothing is offered until the agent
 //! installs the tap, which it does only on a boot asserting telemetry.
 
 use std::sync::{Arc, OnceLock};
