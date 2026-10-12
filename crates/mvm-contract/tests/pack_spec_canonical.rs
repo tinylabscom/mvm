@@ -6,9 +6,53 @@ use sha2::{Digest, Sha256};
 
 const FIXTURES: [&str; 3] = ["minimal", "python", "claude-style"];
 
+/// Every golden, embedded rather than read at runtime: the contract's tests
+/// also run under `wasm32-wasip1`, where the sandbox has no filesystem.
+const GOLDENS: [(&str, &[u8]); 9] = [
+    (
+        "minimal.json",
+        include_bytes!("fixtures/pack-spec-v1/minimal.json"),
+    ),
+    (
+        "python.json",
+        include_bytes!("fixtures/pack-spec-v1/python.json"),
+    ),
+    (
+        "claude-style.json",
+        include_bytes!("fixtures/pack-spec-v1/claude-style.json"),
+    ),
+    (
+        "canonical/minimal.json",
+        include_bytes!("fixtures/pack-spec-v1/canonical/minimal.json"),
+    ),
+    (
+        "canonical/minimal.sha256",
+        include_bytes!("fixtures/pack-spec-v1/canonical/minimal.sha256"),
+    ),
+    (
+        "canonical/python.json",
+        include_bytes!("fixtures/pack-spec-v1/canonical/python.json"),
+    ),
+    (
+        "canonical/python.sha256",
+        include_bytes!("fixtures/pack-spec-v1/canonical/python.sha256"),
+    ),
+    (
+        "canonical/claude-style.json",
+        include_bytes!("fixtures/pack-spec-v1/canonical/claude-style.json"),
+    ),
+    (
+        "canonical/claude-style.sha256",
+        include_bytes!("fixtures/pack-spec-v1/canonical/claude-style.sha256"),
+    ),
+];
+
 fn fixture(path: &str) -> Vec<u8> {
-    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pack-spec-v1/");
-    std::fs::read(format!("{dir}{path}")).unwrap_or_else(|e| panic!("{path}: {e}"))
+    GOLDENS
+        .iter()
+        .find(|(name, _)| *name == path)
+        .map(|(_, bytes)| bytes.to_vec())
+        .unwrap_or_else(|| panic!("{path}: no embedded golden"))
 }
 
 #[test]
