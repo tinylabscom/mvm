@@ -112,8 +112,13 @@ fn live_ci_budget_covers_cold_setup_and_measured_lifecycle() {
         .split('}')
         .next()
         .expect("the lifecycle witness has a matrix entry");
+    // The matrix entry may carry further keys after the timeout (e.g. the
+    // cleanup slot); the budget is the leading number either way.
     let job_minutes: u32 = lifecycle
         .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
         .parse()
         .expect("the job budget must be a number");
     let cold_setup_minutes = 35;
