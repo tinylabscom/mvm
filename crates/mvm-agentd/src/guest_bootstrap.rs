@@ -111,7 +111,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_flowmux_identity();
     provision_egress_ca();
     run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
-    let vsock_egress = cmdline_has_flag("mvm.vsock_egress=1");
+    let vsock_egress = cmdline_has_flag(crate::workload_env::VSOCK_EGRESS_TOKEN);
     if vsock_egress {
         start_vsock_egress()?;
     }

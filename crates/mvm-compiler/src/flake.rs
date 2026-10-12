@@ -151,14 +151,9 @@ pub(crate) fn render_flake_nix_at_url(
             then map (name: pkgs.${{name}}) launch.image.packages
             else throw "mvmforge: unsupported image.kind '${{launch.image.kind}}'";
           factoryService = buildFactoryService system pkgs appPkg;
-          # Function workloads: PID 1 is the factory's idle `bootCommand`
-          # (stage source → before_start hook → idle), routed to
-          # /etc/mvm/boot via mkGuest's `bootCommand`. /etc/mvm/entrypoint
-          # stays the agent's per-call marker (the wrapper), baked by the
-          # factory's extraFiles — overloading one file made extraFiles
-          # clobber PID 1, so it exec'd the single-shot wrapper and the
-          # kernel panicked at boot. The boot script is owned by the
-          # factory (single source of truth shared with mkFunctionWorkload).
+          # Function workloads: /etc/mvm/entrypoint is the agent's per-call
+          # marker (the wrapper), baked by the factory's extraFiles; mkGuest
+          # renders no entrypoint of its own when the caller supplies one.
           #
           # Command workloads keep the single-file path: cmdBootScript
           # stages the source then execs the long-running command, and
@@ -173,13 +168,11 @@ pub(crate) fn render_flake_nix_at_url(
             then {{
               name = launch.workload_id;
               packages = [ appPkg ] ++ imagePackages ++ factoryService.servicePackages;
-              # uid 0: the bootScript symlinks into working_dir (root-owned);
-              # the per-call wrapper drops privileges internally.
+              # uid 0: the per-call wrapper drops privileges internally.
               uids.entrypoint = 0;
-              # entrypoint drives classification only; not written to disk
-              # when bootCommand is set (extraFiles owns /etc/mvm/entrypoint).
-              entrypoint.command = factoryService.bootCommand;
-              bootCommand = factoryService.bootCommand;
+              # Classify the real per-call wrapper; extraFiles owns
+              # /etc/mvm/entrypoint, so mkGuest renders none.
+              entrypoint.command = [ "/usr/lib/mvm/wrappers/runner" ];
               extraFiles = factoryService.extraFiles;
             }}
             else {{
@@ -319,22 +312,24 @@ mod tests {
         w
     }
 
-    // Regression guard for the boot→ping panic: a function workload's
-    // PID 1 must be the factory's idle bootCommand
-    // (→ /etc/mvm/boot), with /etc/mvm/entrypoint left as the agent's
-    // per-call marker via the factory's extraFiles. The old lowering
-    // baked the idle script onto entrypoint.command, which extraFiles
-    // then clobbered with the single-shot wrapper → kernel panic.
+    // A function workload's /etc/mvm/entrypoint is the agent's per-call
+    // marker from the factory's extraFiles. The image carries no init, so
+    // nothing is handed to mkGuest as a PID 1 command.
     #[test]
-    fn flake_function_entrypoint_splits_pid1_boot_from_agent_marker() {
+    fn flake_function_entrypoint_comes_from_the_factory_marker() {
         let s = build_flake_nix(&sample_function()).unwrap();
         assert!(
-            s.contains("bootCommand = factoryService.bootCommand;"),
-            "function PID 1 must come from the factory bootCommand"
+            !s.contains("bootCommand = "),
+            "the image has no PID 1 command to pass"
+        );
+        assert!(s.contains("extraFiles = factoryService.extraFiles;"));
+        assert!(
+            s.contains("entrypoint.command = [ \"/usr/lib/mvm/wrappers/runner\" ];"),
+            "classification tracks the per-call wrapper the factory installs"
         );
         assert!(
-            s.contains("entrypoint.command = factoryService.bootCommand;"),
-            "entrypoint (classification) tracks the factory bootCommand"
+            !s.contains("factoryService.bootCommand"),
+            "the factory exports no boot command"
         );
         // The old inlined idle script (the clobber path) is gone.
         assert!(!s.contains("funcBootScript"));
@@ -402,15 +397,11 @@ mod tests {
 
     #[test]
     fn flake_dispatch_uses_factory_extra_files_and_packages() {
-        // The factory returns `{ extraFiles, servicePackages,
-        // bootCommand, service }`; the function path consumes all of
-        // the first three. The idle bootScript (before_start hook →
-        // sleep infinity) now lives inside the factory, not inlined in
-        // the emitted flake — so PID 1 is `factoryService.bootCommand`.
+        // The factory returns `{ extraFiles, servicePackages, service }`;
+        // the function path consumes the first two.
         let s = build_flake_nix(&sample()).unwrap();
         assert!(s.contains("factoryService.servicePackages"));
         assert!(s.contains("factoryService.extraFiles"));
-        assert!(s.contains("factoryService.bootCommand"));
     }
 
     #[test]

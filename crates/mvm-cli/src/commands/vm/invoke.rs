@@ -940,8 +940,7 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
 
 /// Point the workload's TLS stack at the guest-side egress CA bundle when one
 /// is provisioned. An OCI entrypoint runs under `env_clear()` + the request
-/// env, so — unlike a flake `/init` child that inherits the shell exports —
-/// these must ride the agent request env. Mirrors the mkGuest egress-ca
+/// env, so these must ride the agent request env. Mirrors the egress-ca
 /// exports (`SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` →
 /// combined bundle, `NODE_EXTRA_CA_CERTS` → the egress cert alone). No CA
 /// provisioned ⇒ env unchanged.

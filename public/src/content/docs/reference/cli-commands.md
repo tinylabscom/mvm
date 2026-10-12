@@ -1116,7 +1116,7 @@ mvmctl machine run -it --image <dev-image> -- htop      # exits with htop, VM go
 For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
 `mvmctl` selects only backends that can keep the guest NIC-less and route
 traffic through the host-side vsock mediation endpoint. On that path the
-injected guest `/init` starts `mvm-egress-client` and the runtime injects proxy
+guest agent starts `mvm-egress-client` and the runtime injects proxy
 env vars pointing at its loopback SOCKS listener automatically. Today that
 means `hvf`; incapable backends are refused rather than silently
 falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
