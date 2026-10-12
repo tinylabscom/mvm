@@ -385,3 +385,134 @@ fn only_the_runner_picker_routes_ci_to_the_kvm_pool_and_never_for_a_fork() {
         "the picker must never fail a run, so it cannot run under `set -e`"
     );
 }
+
+/// The script every job that can run on the KVM pool runs as its last step.
+const JOB_CLEANUP: &str = "nix/ops/hetzner/job-cleanup.sh";
+
+/// Top-level jobs of a workflow as `(name, body)`. Jobs sit at two-space
+/// indent under `jobs:`; a body ends at the next job or top-level key.
+fn jobs(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut in_jobs = false;
+    for line in text.lines() {
+        if !line.starts_with(' ') && !line.is_empty() && !line.starts_with('#') {
+            in_jobs = line.trim_end() == "jobs:";
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let is_header = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && !line.trim_start().starts_with('#')
+            && line.trim_end().ends_with(':');
+        if is_header {
+            out.push((line.trim().trim_end_matches(':').to_string(), String::new()));
+        } else if let Some((_, body)) = out.last_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    out
+}
+
+/// Whether a job's runner selection can name the KVM pool, directly or
+/// through a matrix `runner:` value.
+fn can_run_on_kvm_pool(body: &str) -> bool {
+    body.lines().any(|line| {
+        let line = line.trim_start();
+        let line = line.strip_prefix("- ").unwrap_or(line);
+        (line.starts_with("runs-on:") || line.starts_with("runner:")) && line.contains("hetzner")
+    })
+}
+
+/// The text of a job's last step: everything from the last list item at
+/// step indent (six spaces) to the end of the job.
+fn last_step(body: &str) -> Option<&str> {
+    let at = body.rfind("\n      - ")?;
+    Some(&body[at + 1..])
+}
+
+/// Why a KVM-pool job does not clean up after itself, if it does not.
+fn missing_cleanup(body: &str) -> Option<String> {
+    let Some(step) = last_step(body) else {
+        return Some("it has no steps".into());
+    };
+    let always = step.lines().any(|line| line.trim() == "if: always()");
+    if !step.contains(JOB_CLEANUP) {
+        return Some(format!("its last step does not run {JOB_CLEANUP}"));
+    }
+    if !always {
+        return Some(format!(
+            "its last step runs {JOB_CLEANUP} but not under `if: always()`, so a failed \
+             or cancelled job skips it"
+        ));
+    }
+    None
+}
+
+/// The KVM box is one persistent machine shared by CI and by people. A job
+/// that leaves a VMM running or a temporary tree behind costs every later
+/// job and session: a leaked Firecracker ran at full CPU for days, and
+/// leftovers filled half the root disk. Every job that can run there must
+/// end with the always-run cleanup that kills what it started by PID and
+/// removes its isolated HOME, MVM_HOME and TMPDIR.
+#[test]
+fn every_kvm_pool_job_ends_with_the_always_run_cleanup() {
+    let mut checked = 0;
+    let mut violations = Vec::new();
+    for workflow in workflows() {
+        for (job, body) in jobs(&workflow.text) {
+            if !can_run_on_kvm_pool(&body) {
+                continue;
+            }
+            checked += 1;
+            if let Some(why) = missing_cleanup(&body) {
+                violations.push(format!("{}: job `{job}`: {why}", workflow.name));
+            }
+        }
+    }
+    assert!(
+        checked > 0,
+        "no job can run on the KVM pool; if the pool moved, this test is no longer guarding it"
+    );
+    assert!(
+        violations.is_empty(),
+        "a job that can run on the self-hosted KVM pool does not clean up after itself:\n  {}",
+        violations.join("\n  ")
+    );
+    assert!(
+        Path::new(JOB_CLEANUP).is_file(),
+        "{JOB_CLEANUP} is what every KVM-pool job runs last; it must exist"
+    );
+}
+
+#[test]
+fn a_kvm_pool_job_without_the_cleanup_is_refused() {
+    let text = "on:\n  workflow_dispatch:\njobs:\n  a:\n    runs-on: [self-hosted, hetzner]\n    steps:\n      - run: cargo test\n  b:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n";
+    let found = jobs(text);
+    assert_eq!(found.len(), 2);
+    assert!(can_run_on_kvm_pool(&found[0].1));
+    assert!(!can_run_on_kvm_pool(&found[1].1));
+    assert!(
+        missing_cleanup(&found[0].1)
+            .unwrap()
+            .contains("does not run")
+    );
+}
+
+#[test]
+fn the_cleanup_must_be_last_and_always_run() {
+    let not_last = "    runs-on: hetzner\n    steps:\n      - if: always()\n        run: bash nix/ops/hetzner/job-cleanup.sh /tmp/x\n      - run: cargo test\n";
+    assert!(missing_cleanup(not_last).is_some());
+    let not_always = "    runs-on: hetzner\n    steps:\n      - run: cargo test\n      - run: bash nix/ops/hetzner/job-cleanup.sh /tmp/x\n";
+    assert!(missing_cleanup(not_always).unwrap().contains("always()"));
+    let good = "    runs-on: hetzner\n    steps:\n      - run: cargo test\n      - name: Clean\n        if: always()\n        run: bash nix/ops/hetzner/job-cleanup.sh /tmp/x\n";
+    assert_eq!(missing_cleanup(good), None);
+}
+
+#[test]
+fn a_matrix_runner_naming_the_pool_counts() {
+    let body = "    strategy:\n      matrix:\n        include:\n          - runner: [self-hosted, hetzner, kvm]\n    runs-on: ${{ matrix.runner }}\n";
+    assert!(can_run_on_kvm_pool(body));
+}

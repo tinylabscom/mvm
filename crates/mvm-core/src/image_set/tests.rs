@@ -20,7 +20,10 @@ fn base_image_declaration_is_explicit_exclusive_and_integer() {
         "builder_boot_abi": 2
     });
     let parsed: ImageSetCompatibility = serde_json::from_value(good.clone()).unwrap();
-    assert_eq!(parsed.workload, WorkloadCompatibility::BaseImageContract(1));
+    assert_eq!(
+        parsed.base_image_contract,
+        Some(BaseImageContract::LINUX_LAYER)
+    );
     assert_eq!(serde_json::to_value(parsed).unwrap(), good);
     for contract in [
         serde_json::Value::Null,
@@ -38,10 +41,22 @@ fn base_image_declaration_is_explicit_exclusive_and_integer() {
         .as_object_mut()
         .unwrap()
         .remove("base_image_contract");
-    assert!(serde_json::from_value::<ImageSetCompatibility>(absent).is_err());
+    assert!(
+        serde_json::from_value::<ImageSetCompatibility>(absent)
+            .unwrap()
+            .base_image_contract
+            .is_none()
+    );
     let mut both = good.clone();
     both["guest_agent_protocol"] = serde_json::json!({"min":2, "max":2});
-    assert!(serde_json::from_value::<ImageSetCompatibility>(both).is_err());
+    let parsed: ImageSetCompatibility = serde_json::from_value(both).unwrap();
+    let mut mixed = manifest();
+    mixed.schema_version = IMAGE_SET_SCHEMA_VERSION;
+    mixed.compatibility = parsed;
+    assert!(matches!(
+        validate_structure(&mixed),
+        Err(ImageSetError::WorkloadCompatibilitySchemaMismatch { .. })
+    ));
     let mut null_legacy = good.clone();
     null_legacy["guest_agent_protocol"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<ImageSetCompatibility>(null_legacy).is_err());
@@ -58,7 +73,8 @@ fn schema_selects_base_contract_not_guest_protocol() {
         validate_structure(&new),
         Err(ImageSetError::WorkloadCompatibilitySchemaMismatch { .. })
     ));
-    new.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    new.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+    new.compatibility.guest_agent_protocol = None;
     new.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
     assert!(matches!(
         validate_structure(&new),
@@ -69,16 +85,12 @@ fn schema_selects_base_contract_not_guest_protocol() {
     let mut null_source = serde_json::to_value(&new).unwrap();
     null_source["mvm_source_commit"] = serde_json::Value::Null;
     assert!(serde_json::from_value::<ImageSetManifest>(null_source).is_err());
-    let mut unrelated_runtime = host();
-    unrelated_runtime.guest_agent_protocol = ProtocolRange::new(99, 99).unwrap();
-    check_protocol_compatibility(&new, &unrelated_runtime).unwrap();
-    new.compatibility.workload = WorkloadCompatibility::BaseImageContract(999);
+    check_protocol_compatibility(&new, &host()).unwrap();
+    new.compatibility.base_image_contract = Some(BaseImageContract::new(999));
     assert!(matches!(
         check_protocol_compatibility(&new, &host()),
-        Err(ImageSetError::BaseImageContractUnsupported {
-            set: 999,
-            supported: 1
-        })
+        Err(ImageSetError::BaseImageContractUnsupported { set, .. })
+            if set == BaseImageContract::new(999)
     ));
     new.schema_version = LEGACY_IMAGE_SET_SCHEMA_VERSION;
     assert!(matches!(
@@ -97,7 +109,8 @@ fn schema_selects_base_contract_not_guest_protocol() {
 fn linux_root_members_declare_exactly_one_ext4_payload_independent_of_name() {
     let mut base = manifest();
     base.schema_version = IMAGE_SET_SCHEMA_VERSION;
-    base.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    base.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+    base.compatibility.guest_agent_protocol = None;
     base.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
     base.mvm_source_commit = None;
     let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
@@ -150,7 +163,8 @@ fn linux_root_members_declare_exactly_one_ext4_payload_independent_of_name() {
 fn linux_only_contract_requires_the_complete_builder_boot_payload_abi() {
     let mut base = manifest();
     base.schema_version = IMAGE_SET_SCHEMA_VERSION;
-    base.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    base.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+    base.compatibility.guest_agent_protocol = None;
     base.mvm_source_commit = None;
     for abi in [
         None,
@@ -182,6 +196,28 @@ fn linux_only_contract_requires_the_complete_builder_boot_payload_abi() {
 }
 
 #[test]
+fn linux_only_schema_refuses_retired_runtime_source_fingerprints_including_null() {
+    let mut base = manifest();
+    base.schema_version = IMAGE_SET_SCHEMA_VERSION;
+    base.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+    base.compatibility.guest_agent_protocol = None;
+    base.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+    base.mvm_source_commit = None;
+    validate_structure(&base).unwrap();
+    base.members[0].source_fingerprint = Some(sha("retired runtime sources"));
+    assert!(matches!(
+        validate_structure(&base),
+        Err(ImageSetError::SourceProvenanceSchemaMismatch {
+            field: "members.source_fingerprint",
+            ..
+        })
+    ));
+    let mut null_source = serde_json::to_value(&base).unwrap();
+    null_source["members"][0]["source_fingerprint"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<ImageSetManifest>(null_source).is_err());
+}
+
+#[test]
 fn linux_only_schema_refuses_every_retired_guest_runtime_role() {
     for retired in [
         RetiredGuestRuntimeRole::RuntimeOverlay,
@@ -197,7 +233,8 @@ fn linux_only_schema_refuses_every_retired_guest_runtime_role() {
             serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
         assert_eq!(parsed, legacy);
         legacy.schema_version = IMAGE_SET_SCHEMA_VERSION;
-        legacy.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+        legacy.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        legacy.compatibility.guest_agent_protocol = None;
         legacy.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
         legacy.mvm_source_commit = None;
         assert!(matches!(
@@ -364,9 +401,10 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
         }),
         mvm_source_commit: Some(commit('b')),
         compatibility: ImageSetCompatibility {
-            workload: WorkloadCompatibility::LegacyGuestAgent(ProtocolRange::new(2, 2).unwrap()),
+            guest_agent_protocol: Some(ProtocolRange::new(2, 2).unwrap()),
             builder_cache_contract: 4,
             builder_boot_abi: None,
+            base_image_contract: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {
@@ -464,7 +502,7 @@ fn linux_direct_backend_support_is_explicit_and_non_linux_tiers_refuse() {
 
 fn host() -> HostProtocolSupport {
     HostProtocolSupport {
-        guest_agent_protocol: ProtocolRange::new(2, 3).unwrap(),
+        base_image_contract: BaseImageContractRange::SUPPORTED,
         builder_cache_contract: 4,
         builder_boot_abi: payload_capable(),
     }
@@ -1486,36 +1524,119 @@ mod completeness {
 mod protocol {
     use super::*;
 
-    fn with_host_range(min: u32, max: u32) -> HostProtocolSupport {
+    fn with_base_range(min: u32, max: u32) -> HostProtocolSupport {
         HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(min, max).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(min),
+                BaseImageContract::new(max),
+            )
+            .unwrap(),
             ..host()
         }
     }
 
+    /// The guest agent ships with `mvmctl`, so the range a set still records
+    /// for it decides nothing: no host range is compared with it, and a set
+    /// that no longer records one parses and is accepted.
     #[test]
-    fn accepts_an_overlapping_guest_agent_range() {
+    fn the_retired_guest_agent_range_decides_nothing() {
+        let mut manifest = manifest();
+        manifest.compatibility.guest_agent_protocol = Some(ProtocolRange::new(9, 9).unwrap());
+        validate_structure(&manifest).unwrap();
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+
+        manifest.compatibility.guest_agent_protocol = None;
+        validate_structure(&manifest).unwrap();
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert!(
+            json["compatibility"].get("guest_agent_protocol").is_none(),
+            "an absent range is not written back: {json}"
+        );
+        let back: ImageSetManifest = serde_json::from_value(json).unwrap();
+        check_protocol_compatibility(&back, &host()).unwrap();
+    }
+
+    /// Every set published before the declaration existed carries none. That
+    /// is read as the legacy contract 0 by name and checked like any other
+    /// value, so a host that stops booting legacy base images refuses it
+    /// rather than passing it unexamined.
+    #[test]
+    fn a_set_without_a_base_image_contract_is_checked_as_the_legacy_contract() {
         let manifest = manifest();
-        for (min, max) in [(2, 2), (1, 2), (2, 9), (1, 9)] {
-            check_protocol_compatibility(&manifest, &with_host_range(min, max)).unwrap();
-        }
+        assert_eq!(manifest.compatibility.base_image_contract, None);
+        assert_eq!(
+            manifest.compatibility.base_image_contract_or_legacy(),
+            BaseImageContract::LEGACY
+        );
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+
+        let error = check_protocol_compatibility(&manifest, &with_base_range(1, 1)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ImageSetError::BaseImageContractUnsupported { set, .. }
+                    if set == BaseImageContract::LEGACY
+            ),
+            "{error}"
+        );
     }
 
     #[test]
-    fn refuses_a_guest_agent_range_that_does_not_overlap() {
-        let manifest = manifest();
-        for (min, max) in [(1, 1), (3, 5)] {
-            let error =
-                check_protocol_compatibility(&manifest, &with_host_range(min, max)).unwrap_err();
-            assert!(
-                matches!(
-                    error,
-                    ImageSetError::GuestAgentProtocolDisjoint { set, host }
-                        if (set.min(), set.max()) == (2, 2) && (host.min(), host.max()) == (min, max)
-                ),
-                "{min}..={max}"
-            );
-        }
+    fn a_linux_layer_set_is_accepted() {
+        let mut manifest = manifest();
+        manifest.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_base_image_contract_is_refused() {
+        let mut manifest = manifest();
+        manifest.compatibility.base_image_contract = Some(BaseImageContract::new(2));
+        let error = check_protocol_compatibility(&manifest, &host()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ImageSetError::BaseImageContractUnsupported { set, .. }
+                    if set == BaseImageContract::new(2)
+            ),
+            "{error}"
+        );
+        assert_eq!(error.stage(), ImageSetStage::ProtocolCompatibility);
+        assert!(error.to_string().contains("0..=1"), "{error}");
+    }
+
+    #[test]
+    fn the_base_image_contract_round_trips_as_a_bare_integer() {
+        let mut declared = manifest();
+        declared.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        let json = serde_json::to_value(&declared.compatibility).unwrap();
+        assert_eq!(json["base_image_contract"], serde_json::json!(1));
+        let back: ImageSetCompatibility = serde_json::from_value(json).unwrap();
+        assert_eq!(back, declared.compatibility);
+        let legacy = serde_json::to_value(&manifest().compatibility).unwrap();
+        assert!(legacy.get("base_image_contract").is_none(), "{legacy}");
+    }
+
+    /// The lock and its signed root agree when they promise the same thing.
+    /// The lock no longer copies the retired guest-agent range, so that range
+    /// cannot make them disagree; every live field still can.
+    #[test]
+    fn the_same_contract_ignores_only_the_retired_guest_agent_range() {
+        let root = manifest().compatibility;
+        let mut lock = root.clone();
+        lock.guest_agent_protocol = None;
+        assert!(root.same_contract(&lock));
+
+        let mut moved = lock.clone();
+        moved.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        assert!(!root.same_contract(&moved));
+        let mut moved = lock.clone();
+        moved.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        assert!(!root.same_contract(&moved));
+        let mut moved = lock;
+        moved.builder_cache_contract += 1;
+        assert!(!root.same_contract(&moved));
     }
 
     /// A release published before the field existed carries none, and meant
@@ -1525,7 +1646,7 @@ mod protocol {
         let manifest = manifest();
         assert_eq!(manifest.compatibility.builder_boot_abi, None);
         assert_eq!(
-            manifest.compatibility.builder_boot_abi_or_legacy().unwrap(),
+            manifest.compatibility.builder_boot_abi_or_legacy(),
             BuilderBootAbi::LEGACY
         );
         check_protocol_compatibility(&manifest, &host()).unwrap();
@@ -2073,7 +2194,11 @@ mod verification {
             Err(ImageSetError::Incomplete { .. })
         ));
         let incompatible = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(7),
+                BaseImageContract::new(8),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: payload_capable(),
         };
@@ -2082,7 +2207,7 @@ mod verification {
                 &set.request().with_host_protocols(&incompatible),
                 accept_signature
             ),
-            Err(ImageSetError::GuestAgentProtocolDisjoint { .. })
+            Err(ImageSetError::BaseImageContractUnsupported { .. })
         ));
     }
 
@@ -2363,7 +2488,11 @@ mod verification {
     fn a_set_the_host_cannot_speak_to_is_refused_only_when_protocols_are_supplied() {
         let set = staged();
         let incompatible = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(7),
+                BaseImageContract::new(8),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: payload_capable(),
         };
@@ -2378,7 +2507,7 @@ mod verification {
         .expect_err("a set this host cannot speak to must be refused");
 
         assert!(
-            matches!(err, ImageSetError::GuestAgentProtocolDisjoint { .. }),
+            matches!(err, ImageSetError::BaseImageContractUnsupported { .. }),
             "got: {err}"
         );
         assert_eq!(err.stage(), ImageSetStage::ProtocolCompatibility);

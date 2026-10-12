@@ -1444,23 +1444,19 @@ fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
             "the runner must not hand an image checkout to any step: found `{forbidden}`"
         );
     }
-    let unset = script
-        .find("unset MVM_FETCH_UNCHANGED_IMAGES")
-        .expect("the runner must clear the fetch knob before the sidecar verb reads it");
-    let sidecar = script
-        .find(
-            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build",
-        )
-        .expect("the sidecar must be packed from the tree, refusing the image set's members");
     assert!(
-        unset < sidecar,
-        "the knob must be cleared before the sidecar is packed"
+        !script.contains("MVM_FETCH_UNCHANGED_IMAGES"),
+        "fetch-when-unchanged is gone; the runner must not set its knob"
     );
     assert!(
         script.contains(
-            "MVM_HOME=\"$E2E_HOME\" MVM_FETCH_UNCHANGED_IMAGES=pinned \"$MVMCTL\" image dev ensure"
+            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build"
         ),
-        "the dev default image is Linux layer and must be adopted from the pinned set"
+        "the sidecar must be packed from the tree"
+    );
+    assert!(
+        script.contains("MVM_HOME=\"$E2E_HOME\" \"$MVMCTL\" image dev ensure"),
+        "the dev default image is Linux layer and is installed from the pinned set"
     );
 }
 

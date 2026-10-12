@@ -625,7 +625,16 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
             if sample.warm_first_command_memory.is_none() {
                 return Err(LaneViolation::MissingWarmMemory);
             }
-            Ok(())
+            // The dispatch window starts at admission, so a claim can clear it
+            // while the launch as a caller sees it does not. Every warm sample
+            // is also held to the ceiling from invocation.
+            let Some(startup_ms) = sample.phases.startup_ms else {
+                return Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "startup_ms",
+                });
+            };
+            validate_hard_boot_timing(lane, startup_ms)
         }
     }
 }
@@ -1088,6 +1097,7 @@ mod tests {
             command_ms: 5.0,
             teardown_ms: 7.0,
             total_ms,
+            startup_ms: None,
         }
     }
 
@@ -1460,7 +1470,35 @@ mod tests {
             Err(LaneViolation::MissingWarmMemory)
         );
         sample.warm_first_command_memory = Some(warm_memory());
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaim, &sample),
+            Err(LaneViolation::MissingWork {
+                lane: LaunchLane::WarmClaim,
+                expected: "startup_ms",
+            })
+        );
+        sample.phases.startup_ms = Some(WARM_CLAIM_HARD_MAX_MS - 0.1);
         assert_eq!(validate_lane(LaunchLane::WarmClaim, &sample), Ok(()));
+    }
+
+    #[test]
+    fn a_warm_sample_is_held_to_the_ceiling_from_invocation() {
+        let mut sample = launch_sample();
+        sample.work.warm_claim = true;
+        sample.launch_mode = LaunchMode::Warm;
+        sample.warm_first_command_memory = Some(warm_memory());
+        // A dispatch window well inside the ceiling does not excuse a launch
+        // that took the ceiling to reach the guest from the caller's command.
+        assert!(sample.phases.dispatch_window_ms() < WARM_CLAIM_HARD_MAX_MS);
+        sample.phases.startup_ms = Some(WARM_CLAIM_HARD_MAX_MS);
+        assert_eq!(
+            validate_lane(LaunchLane::WarmClaim, &sample),
+            Err(LaneViolation::HardMaximumExceeded {
+                lane: LaunchLane::WarmClaim,
+                found_ms: WARM_CLAIM_HARD_MAX_MS,
+                limit_ms: WARM_CLAIM_HARD_MAX_MS,
+            })
+        );
     }
 
     #[test]

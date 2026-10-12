@@ -57,7 +57,9 @@ fn new_base_markers_are_checked_after_authentication_for_each_profile_and_arch()
                 let served = tempfile::tempdir().unwrap();
                 let root = contract_root(marker, None);
                 let fixture = ImageSetFixture::complete()
-                    .with_base_image_contract(1)
+                    .with_base_image_contract(Some(
+                        mvm_core::image_set::BaseImageContract::LINUX_LAYER,
+                    ))
                     .publish(
                         ImageSetRole::WorkloadRootfs(profile),
                         MemberTarget::Arch(arch),
@@ -98,7 +100,9 @@ fn installed_cache_hits_recheck_declaration_marker_and_bytes_for_prod_and_dev() 
             let root = contract_root(marker, None);
             let profile = WorkloadImageProfile::DefaultTenant;
             let target = MemberTarget::Arch(ARCH);
-            let fixture = ImageSetFixture::complete().with_base_image_contract(1);
+            let fixture = ImageSetFixture::complete().with_base_image_contract(Some(
+                mvm_core::image_set::BaseImageContract::LINUX_LAYER,
+            ));
             let fixture = if build_mode.is_some() {
                 fixture
                     .publish_dev(
@@ -206,7 +210,7 @@ fn renamed_ext4_payload_still_requires_the_marker_and_installs_by_authenticated_
         let served = tempfile::tempdir().unwrap();
         let root = contract_root(marker, None);
         let fixture = ImageSetFixture::complete()
-            .with_base_image_contract(1)
+            .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
             .publish(
                 ImageSetRole::WorkloadKernel(profile),
                 target,
@@ -256,7 +260,7 @@ fn base_marker_never_trusts_symlink_components() {
     let mut compatibility = mvm_core::image_set::image_train_lock()
         .compatibility
         .clone();
-    compatibility.workload = mvm_core::image_set::WorkloadCompatibility::BaseImageContract(1);
+    compatibility.base_image_contract = Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER);
     for path in ["/etc", "/etc/mvm", "/etc/mvm/base-image-contract"] {
         let image = tempfile::NamedTempFile::new().unwrap();
         // Parents may be replaced by a symlink only when their children are
@@ -271,7 +275,8 @@ fn base_marker_never_trusts_symlink_components() {
 fn unknown_base_contract_is_refused_before_member_acquisition() {
     let _env = unsigned_env();
     let served = tempfile::tempdir().unwrap();
-    let fixture = with_member(b"not requested").with_base_image_contract(99);
+    let fixture = with_member(b"not requested")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(99)));
     fn never_download(_: &str, _: &Path) -> Result<()> {
         panic!("unsupported locked contract must refuse before acquisition");
     }
@@ -338,6 +343,53 @@ fn a_set_without_any_guest_runtime_member_is_acquired() {
     let set = PublishedImageSet::acquire_from(with_member(b"stage0").serve_from(served.path()))
         .expect("the guest runtime is not part of the image-set contract");
     assert!(!set.manifest().members.iter().any(|m| m.role.is_retired()));
+}
+
+/// The pinned `image-set/v0.2.4` records a guest-agent protocol range and no
+/// base-image contract. The lock copies neither, the range decides nothing,
+/// and the absent contract is checked as the legacy contract 0, which this
+/// CLI boots.
+#[test]
+fn a_set_recording_only_the_retired_guest_agent_range_is_acquired_as_the_legacy_contract() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_retired_guest_runtime()
+        .with_retired_guest_agent_protocol(mvm_core::image_set::ProtocolRange::new(9, 9).unwrap())
+        .with_base_image_contract(None);
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .expect("a legacy set must be acquired");
+    assert_eq!(
+        set.manifest().compatibility.base_image_contract_or_legacy(),
+        mvm_core::image_set::BaseImageContract::LEGACY
+    );
+}
+
+#[test]
+fn a_set_declaring_the_linux_layer_contract_is_acquired() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER));
+    PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .expect("a set declaring the Linux-layer contract must be acquired");
+}
+
+/// A base-image contract this CLI does not boot is refused at acquisition,
+/// before any member is fetched, so nothing from the set can boot.
+#[test]
+fn a_set_declaring_a_base_image_contract_this_cli_does_not_boot_is_refused() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"stage0")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(2)));
+    let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+        .err()
+        .expect("an unknown base-image contract must be refused");
+    assert!(
+        format!("{err:#}").contains("base-image contract 2"),
+        "{err:#}"
+    );
 }
 
 #[test]

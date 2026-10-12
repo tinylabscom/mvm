@@ -1122,6 +1122,42 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
     );
 }
 
+/// `env cleanup` must never reach outside the state it owns. Where the Linux
+/// environment is this host, its dev-VM `/tmp` sweep used to run as a host
+/// shell command and empty the host's `/tmp` — deleting the tempdirs of every
+/// test running beside it. A file another process left in `/tmp` has to
+/// survive the command.
+#[test]
+fn cleanup_leaves_files_it_did_not_create_in_the_hosts_tmp() {
+    let bystander = tempfile::Builder::new()
+        .prefix("mvm-cleanup-bystander-")
+        .tempdir_in("/tmp")
+        .expect("tempdir in /tmp");
+    let sentinel = bystander.path().join("owned-by-someone-else");
+    std::fs::write(&sentinel, b"keep").expect("write sentinel");
+
+    let sandbox = AuditSandbox::new();
+    let output = sandbox
+        .mvmctl()
+        .args(["env", "cleanup", "--keep", "5"])
+        .output()
+        .expect("spawn mvmctl");
+    assert!(
+        output.status.success(),
+        "mvmctl cleanup --keep 5 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        sentinel.is_file(),
+        "env cleanup deleted {} from the host's /tmp",
+        sentinel.display()
+    );
+    assert!(
+        sandbox.home_path().is_dir(),
+        "env cleanup deleted the sandbox it was run from"
+    );
+}
+
 /// Bring up an `--hypervisor mock` VM in the sandbox via the
 /// `MVM_DIRECT_BOOT` direct-boot path. Returns when the VM is
 /// registered in the name registry. Used as a fixture by tests of

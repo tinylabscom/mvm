@@ -200,7 +200,7 @@ impl PublishedImageSet {
             .context("refuse a partial image-set release")?;
         check_protocol_compatibility(&manifest, &host)
             .context("refuse an image set incompatible with this host")?;
-        if manifest.compatibility != train.compatibility {
+        if !manifest.compatibility.same_contract(&train.compatibility) {
             bail!(
                 "images.lock compatibility does not match the signed image-set manifest; run the pin-update workflow"
             );
@@ -305,20 +305,8 @@ impl PublishedImageSet {
             }
         }
 
-        // Legacy images declared their baked agent. A Linux-only base cannot
-        // attest to the separately selected CLI runtime: zero is unrecorded.
-        let (protocol_version, init_system, agent_binary) =
-            match self.manifest.compatibility.workload {
-                mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(range) => (
-                    u8::try_from(range.max())
-                        .context("signed guest-agent protocol does not fit the runtime sidecar")?,
-                    "busybox",
-                    "real",
-                ),
-                mvm_core::image_set::WorkloadCompatibility::BaseImageContract(_) => {
-                    (0, "cli-initramfs", "")
-                }
-            };
+        // A base image provides no evidence about the separately attached runtime.
+        let (protocol_version, init_system, agent_binary) = (0, "cli-initramfs", "");
         crate::builder_vm::GuestSidecar {
             name: "mvm-default-microvm".to_string(),
             accessible: false,
@@ -520,24 +508,25 @@ impl PublishedImageSet {
 }
 
 /// Check the root marker against the authenticated Linux-base declaration.
-/// Legacy sets predate this marker and retain their guest protocol contract.
+/// Legacy sets predate this marker; their retired guest range is not runtime evidence.
 /// Reads the ext4 directly: no mount, extraction or guest symlink resolution.
 pub fn verify_base_image_contract(
     image: &Path,
     compatibility: &mvm_core::image_set::ImageSetCompatibility,
 ) -> Result<()> {
-    let mvm_core::image_set::WorkloadCompatibility::BaseImageContract(version) =
-        compatibility.workload
-    else {
+    let Some(version) = compatibility.base_image_contract else {
         return Ok(());
     };
-    if version != mvm_core::image_set::BASE_IMAGE_CONTRACT_VERSION {
+    if version != mvm_core::image_set::BaseImageContract::LINUX_LAYER {
         bail!("unsupported base-image contract {version}");
     }
     let tree = mvm_fs::tree_diff::Ext4Tree::open(image)
         .context("open authenticated base root filesystem")?;
     let marker = tree
-        .read_regular_file_no_symlinks("etc/mvm/base-image-contract", 16)
+        .read_regular_file_no_symlinks(
+            mvm_core::image_set::BASE_IMAGE_CONTRACT_MARKER.trim_start_matches('/'),
+            16,
+        )
         .context("read base-image contract marker without symlinks")?;
     if marker != format!("{version}\n").as_bytes() {
         bail!("base-image contract marker does not match authenticated declaration {version}");
@@ -553,10 +542,7 @@ pub fn verify_cached_default_workload(
     build_mode: Option<MemberBuildMode>,
 ) -> Result<()> {
     let train = mvm_core::image_set::image_train_lock();
-    if matches!(
-        train.compatibility.workload,
-        mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(_)
-    ) {
+    if train.compatibility.base_image_contract.is_none() {
         return Ok(());
     }
     let host = crate::stage0_kernel::current_image_set_protocol_support();
@@ -567,7 +553,11 @@ pub fn verify_cached_default_workload(
         &host,
         None,
     )?;
-    if root.manifest().compatibility != train.compatibility {
+    if !root
+        .manifest()
+        .compatibility
+        .same_contract(&train.compatibility)
+    {
         bail!("cached authenticated image-set compatibility does not match images.lock");
     }
     verify_installed_workload_files(

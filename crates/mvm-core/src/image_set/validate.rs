@@ -6,14 +6,13 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::BuilderBootAbiRange;
-use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
     IMAGE_SET_SCHEMA_VERSION, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRole, LocalCheckouts, MemberTarget, ReleaseProducer,
     WorkloadImageProfile,
 };
+use super::{BaseImageContractRange, BuilderBootAbiRange};
 use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::Sha256Hex;
@@ -39,16 +38,12 @@ pub fn validate_structure(manifest: &ImageSetManifest) -> Result<(), ImageSetErr
 fn check_schema_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError> {
     let expected = match manifest.schema_version {
         super::LEGACY_IMAGE_SET_SCHEMA_VERSION => {
-            matches!(
-                manifest.compatibility.workload,
-                super::WorkloadCompatibility::LegacyGuestAgent(_)
-            )
+            manifest.compatibility.base_image_contract.is_none()
         }
         IMAGE_SET_SCHEMA_VERSION => {
-            matches!(
-                manifest.compatibility.workload,
-                super::WorkloadCompatibility::BaseImageContract(_)
-            )
+            manifest.compatibility.base_image_contract
+                == Some(super::BaseImageContract::LINUX_LAYER)
+                && manifest.compatibility.guest_agent_protocol.is_none()
         }
         _ => {
             return Err(ImageSetError::UnsupportedSchemaVersion {
@@ -86,8 +81,20 @@ fn check_schema_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError
         return Err(ImageSetError::RetiredRuntimeInLinuxSet { role: member.role });
     }
     if !legacy {
-        manifest.compatibility.builder_boot_abi_or_legacy()?;
+        let required = super::BuilderBootAbi::NO_MVM_BINARY;
+        if manifest.compatibility.builder_boot_abi != Some(required) {
+            return Err(ImageSetError::BaseBuilderBootAbiMismatch {
+                declared: manifest.compatibility.builder_boot_abi,
+                required,
+            });
+        }
         for member in &manifest.members {
+            if member.source_fingerprint.is_some() {
+                return Err(ImageSetError::SourceProvenanceSchemaMismatch {
+                    schema: manifest.schema_version,
+                    field: "members.source_fingerprint",
+                });
+            }
             if matches!(member.role, ImageSetRole::WorkloadRootfs(_)) {
                 let roots = member
                     .artifacts
@@ -407,7 +414,8 @@ pub fn require_complete(
 /// The protocol versions this host speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostProtocolSupport {
-    pub guest_agent_protocol: ProtocolRange,
+    /// The base-image contracts this host's guest runtime boots.
+    pub base_image_contract: BaseImageContractRange,
     pub builder_cache_contract: u32,
     /// The builder boot ABIs this host can boot: through the legacy ABI only
     /// when it has no boot payload to hand a builder, through the payload ABI
@@ -432,23 +440,20 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    match declared.workload {
-        super::WorkloadCompatibility::LegacyGuestAgent(set) => {
-            if !set.overlaps(host.guest_agent_protocol) {
-                return Err(ImageSetError::GuestAgentProtocolDisjoint {
-                    set,
-                    host: host.guest_agent_protocol,
-                });
-            }
-        }
-        super::WorkloadCompatibility::BaseImageContract(set) => {
-            if set != super::BASE_IMAGE_CONTRACT_VERSION {
-                return Err(ImageSetError::BaseImageContractUnsupported {
-                    set,
-                    supported: super::BASE_IMAGE_CONTRACT_VERSION,
-                });
-            }
-        }
+    let base = declared.base_image_contract_or_legacy();
+    if !host.base_image_contract.contains(base) {
+        return Err(ImageSetError::BaseImageContractUnsupported {
+            set: base,
+            host: host.base_image_contract,
+        });
+    }
+    if declared.base_image_contract.is_some()
+        && declared.builder_boot_abi != Some(super::BuilderBootAbi::NO_MVM_BINARY)
+    {
+        return Err(ImageSetError::BaseBuilderBootAbiMismatch {
+            declared: declared.builder_boot_abi,
+            required: super::BuilderBootAbi::NO_MVM_BINARY,
+        });
     }
     if declared.builder_cache_contract != host.builder_cache_contract {
         return Err(ImageSetError::BuilderCacheContractMismatch {
@@ -456,7 +461,7 @@ pub fn check_declared_protocol_compatibility(
             host: host.builder_cache_contract,
         });
     }
-    let abi = declared.builder_boot_abi_or_legacy()?;
+    let abi = declared.builder_boot_abi_or_legacy();
     if !host.builder_boot_abi.contains(abi) {
         return Err(ImageSetError::BuilderBootAbiUnsupported {
             set: abi,

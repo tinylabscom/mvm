@@ -74,10 +74,10 @@ cosign verify-blob \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "$DOWNLOAD_DIR/$MANIFEST"
 
-# Compatibility is established before the member is requested.
+# Compatibility is established before the member is requested. An absent
+# base-image contract is a set published before the declaration: contract 0.
 jq -e --argjson contract "$BUILDER_CACHE_CONTRACT" '
-  .compatibility.guest_agent_protocol.min <= 2 and
-  .compatibility.guest_agent_protocol.max >= 2 and
+  (.compatibility.base_image_contract // 0) <= 1 and
   .compatibility.builder_cache_contract == $contract
 ' "$DOWNLOAD_DIR/$MANIFEST" >/dev/null
 

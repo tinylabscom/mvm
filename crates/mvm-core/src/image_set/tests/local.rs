@@ -282,7 +282,7 @@ mod builder_boot_abi {
         manifest.compatibility.builder_boot_abi = None;
         validate_structure(&manifest).expect("a release predating the field still validates");
         assert_eq!(
-            manifest.compatibility.builder_boot_abi_or_legacy().unwrap(),
+            manifest.compatibility.builder_boot_abi_or_legacy(),
             BuilderBootAbi::LEGACY
         );
     }
@@ -923,7 +923,11 @@ mod local_path {
         let set = stage(local_manifest());
         let current = checkouts();
         let host = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(5, 6).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(5),
+                BaseImageContract::new(6),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: BuilderBootAbiRange::WITH_PAYLOAD,
         };

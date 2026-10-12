@@ -148,11 +148,10 @@ fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
         }),
         mvm_source_commit: Some(GitCommit::new("b".repeat(40)).expect("commit")),
         compatibility: ImageSetCompatibility {
-            workload: mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(
-                ProtocolRange::new(2, 2).expect("protocol"),
-            ),
+            guest_agent_protocol: Some(ProtocolRange::new(2, 2).expect("protocol")),
             builder_cache_contract: 4,
             builder_boot_abi: None,
+            base_image_contract: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {

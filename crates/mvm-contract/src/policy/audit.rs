@@ -589,6 +589,10 @@ pub enum LocalAuditKind {
     /// checkpointing each step. Detail:
     ///   `action=replay.begin|replay.end from=<id> source_vm=<v> entries=<n>     ///    steps=<n>`
     MachineReplay,
+    /// mvm minted the host snapshot key, the root that encrypts instance
+    /// snapshots and host-domain checkpoints, because no source held one.
+    /// Detail carries the key file's path, never the key.
+    SnapshotKeyCreated,
 }
 
 /// A single local audit log entry.
@@ -1310,6 +1314,7 @@ mod tests {
             LocalAuditKind::WorkspaceRedo,
             // Replay.
             LocalAuditKind::MachineReplay,
+            LocalAuditKind::SnapshotKeyCreated,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
@@ -1375,6 +1380,7 @@ mod tests {
             (LocalAuditKind::WorkspaceUndo, "workspace_undo"),
             (LocalAuditKind::WorkspaceRedo, "workspace_redo"),
             (LocalAuditKind::MachineReplay, "machine_replay"),
+            (LocalAuditKind::SnapshotKeyCreated, "snapshot_key_created"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();

@@ -243,25 +243,23 @@ impl ImageSetFixture {
         self
     }
 
-    /// Declare `range` as the guest-agent protocol the set supports. The lock
+    /// Declare `contract` as the set's base-image contract. The lock
     /// [`Self::serve_from`] derives copies it, so only the host compatibility
     /// check can refuse the set over it.
     #[must_use]
-    pub fn with_guest_agent_protocol(mut self, range: mvm_core::image_set::ProtocolRange) -> Self {
-        self.manifest.compatibility.workload =
-            mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(range);
-        self
-    }
-
-    /// Declare a Linux-only base contract with the matching manifest schema.
-    #[must_use]
-    pub fn with_base_image_contract(mut self, version: u32) -> Self {
+    pub fn with_base_image_contract(
+        mut self,
+        contract: Option<mvm_core::image_set::BaseImageContract>,
+    ) -> Self {
+        self.manifest.compatibility.base_image_contract = contract;
+        if contract.is_none() {
+            return self;
+        }
         self.manifest.schema_version = mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION;
         self.manifest.mvm_source_commit = None;
         self.manifest.compatibility.builder_boot_abi =
             Some(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY);
-        self.manifest.compatibility.workload =
-            mvm_core::image_set::WorkloadCompatibility::BaseImageContract(version);
+        self.manifest.compatibility.guest_agent_protocol = None;
         for index in 0..self.manifest.members.len() {
             let member = &self.manifest.members[index];
             if matches!(
@@ -288,6 +286,17 @@ impl ImageSetFixture {
         self
     }
 
+    /// Record `range` as the retired guest-agent protocol range, as every set
+    /// up to `image-set/v0.2.4` does.
+    #[must_use]
+    pub fn with_retired_guest_agent_protocol(
+        mut self,
+        range: mvm_core::image_set::ProtocolRange,
+    ) -> Self {
+        self.manifest.compatibility.guest_agent_protocol = Some(range);
+        self
+    }
+
     /// Serve `bytes` under `name` while the root keeps declaring whatever it
     /// declared before.
     #[must_use]
@@ -310,6 +319,8 @@ impl ImageSetFixture {
     pub fn serve_from(&self, dir: &Path) -> ImageSetSource {
         let mut train: ImageTrainLock = mvm_core::image_set::image_train_lock().clone();
         train.compatibility = self.manifest.compatibility.clone();
+        // The checked-in lock never copies the retired guest-agent range.
+        train.compatibility.guest_agent_protocol = None;
         let root = serde_json::to_vec(&self.manifest).unwrap();
         train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&root);
         std::fs::create_dir_all(dir).unwrap();

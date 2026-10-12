@@ -20,6 +20,7 @@ mod request;
 pub mod runtime_overlay;
 pub mod runtime_source;
 pub mod start_params;
+pub mod startup_budget;
 #[cfg(test)]
 mod tests;
 mod unbooted;

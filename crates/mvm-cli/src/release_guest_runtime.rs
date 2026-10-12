@@ -53,13 +53,20 @@ fn acquire(
     .with_context(|| format!("acquiring the guest runtime of mvmctl {tag}"))
 }
 
+/// Which guest runtime this binary will boot with, and where it came from.
+/// Printed whatever the verbosity: it is the provenance of every launch that
+/// follows, and the fresh-install smoke requires it from a plain `bootstrap`.
 fn report(runtime: &ReleaseGuestRuntime) {
+    ui::notice(&ready_line(runtime));
+}
+
+fn ready_line(runtime: &ReleaseGuestRuntime) -> String {
     let name = runtime
         .archive
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    ui::success(&format!("Guest runtime {name} ready ({}).", runtime.origin));
+    format!("Guest runtime {name} ready ({}).", runtime.origin)
 }
 
 /// Make sure the published guest runtime matching the running binary's
@@ -138,6 +145,31 @@ mod tests {
     /// A source build's version is usually unreleased; when its published
     /// runtime cannot be acquired, the refusal names the source build rather
     /// than falling back to anything.
+    /// `scripts/smoke-fresh-install.sh` greps for this exact text to prove a
+    /// release archive adopted the guest runtime staged beside it.
+    #[test]
+    fn the_ready_line_names_the_archive_and_where_it_came_from() {
+        let runtime = ReleaseGuestRuntime {
+            archive: PathBuf::from("/r/guest-runtime/mvm-guest-bins-v9.9.9.tar.gz"),
+            manifest: mvm_build::guest_bins::GuestBinsManifest {
+                schema_version: mvm_build::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+                version: "9.9.9".to_string(),
+                guest_source_fingerprint: "a".repeat(64),
+                sdk_cdylib_source_fingerprint: "b".repeat(64),
+                source: mvm_build::image_source::RepoIdentity {
+                    commit: mvm_core::image_set::GitCommit::new("c".repeat(40)).unwrap(),
+                    worktree: mvm_core::image_set::WorktreeState::Clean,
+                },
+                files: Default::default(),
+            },
+            origin: mvm_build::guest_bins::release::ReleaseGuestRuntimeOrigin::Installed,
+        };
+        assert_eq!(
+            ready_line(&runtime),
+            "Guest runtime mvm-guest-bins-v9.9.9.tar.gz ready (installed beside mvmctl)."
+        );
+    }
+
     #[test]
     fn an_unpublished_source_build_is_pointed_at_its_own_tree() {
         let hint = unpublished_source_build_hint(DistributionChannel::Source, "9.9.9");

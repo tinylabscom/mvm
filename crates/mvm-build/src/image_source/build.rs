@@ -521,12 +521,12 @@ fn emitter_uses_legacy_mvm_input(images_root: &Path) -> Result<bool, LocalImageB
     match std::fs::symlink_metadata(&capability) {
         Ok(_) => {
             let text = read_contract_source(&capability)?;
-            if text.trim() != mvm_core::image_set::BASE_IMAGE_CONTRACT_VERSION.to_string() {
+            if text.trim() != mvm_core::image_set::BaseImageContract::LINUX_LAYER.to_string() {
                 return Err(LocalImageBuildError::Tool {
                     what: format!("reading base-image contract {}", capability.display()),
                     detail: format!(
                         "malformed or unsupported base-image contract; this host supports {}",
-                        mvm_core::image_set::BASE_IMAGE_CONTRACT_VERSION
+                        mvm_core::image_set::BaseImageContract::LINUX_LAYER
                     ),
                 });
             }

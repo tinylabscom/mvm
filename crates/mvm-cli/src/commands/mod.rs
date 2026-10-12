@@ -378,6 +378,7 @@ fn run_command() -> Result<()> {
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
+    register_builder_image_acquirer();
     register_stream_plane();
     // Bound for the rest of the command so queued trace spans are flushed as
     // it returns. A verb that ends early goes through `mvm_observability::exit`,
@@ -652,6 +653,17 @@ fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
         Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
         Commands::PersistentBuilder(_) => true,
+        // `machine build` is `build` under its documented name.
+        Commands::Machine(machine_args) => matches!(
+            machine_args.action,
+            crate::commands::machine::MachineAction::Build(_)
+        ),
+        // An explicit pull materializes its rootfs in a builder VM when the
+        // tree is too large for the in-process writer.
+        Commands::Image(image_args) => matches!(
+            image_args.action,
+            crate::commands::image::ImageAction::Pull { .. }
+        ),
         Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
         _ => false,
     }
@@ -708,6 +720,19 @@ fn apply_startup_env(cli: &Cli) {
 fn register_builder_session_starter() {
     mvm_build::persistent_builder::register_session_starter(Box::new(|| {
         crate::commands::build::persistent_builder::start_session_for_contended_build()
+    }));
+}
+
+/// Let every builder entry point acquire a missing builder image itself.
+///
+/// `mvm-build` resolves the image for every build, but the signed image-set
+/// fetch and the local image-set build live up here. Whichever build finds
+/// the cache cold acquires through the one function `mvmctl bootstrap` and the
+/// flake build use, so a build on a fresh home never asks for bootstrap first.
+fn register_builder_image_acquirer() {
+    mvm_build::builder_vm_bootstrap::register_builder_image_acquirer(Box::new(|| {
+        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
+            .map_err(|error| format!("{error:#}"))
     }));
 }
 
@@ -933,6 +958,36 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_builder_auto_bootstrap(&command(&[
             "cache", "info",
+        ])));
+    }
+
+    /// `machine build` is the documented build verb, and its manifest form
+    /// reaches the builder only through image resolution: were it left out,
+    /// a fresh home would be refused with "run `mvmctl bootstrap`".
+    #[test]
+    fn machine_build_may_acquire_its_builder_image() {
+        for argv in [
+            &[
+                "machine",
+                "build",
+                "--mvm-config",
+                "examples/exit_code/mvm.toml",
+            ][..],
+            &["machine", "build", "--flake", "."][..],
+        ] {
+            assert!(
+                command_allows_builder_auto_bootstrap(&command(argv)),
+                "{argv:?}"
+            );
+        }
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "image", "pull", "alpine",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "machine", "run", "--image", "alpine", "--", "true",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "image", "ls",
         ])));
     }
 
