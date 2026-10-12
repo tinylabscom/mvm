@@ -18,7 +18,7 @@
 //! batch after an outage is.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, TryLockError};
+use std::sync::{Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
 use mvm_core::protocol::telemetry::MAX_RECORD_BYTES;
