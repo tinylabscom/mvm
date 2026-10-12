@@ -137,6 +137,30 @@ unbounded line.
    unavailable` → show the code; `stopped` → clean end. Absence of records
    is not evidence of health — the status snapshot is.
 
+## What the host withholds and masks
+
+Before a record is queued for the records file, the host collector:
+
+- **withholds** any record carrying a secret bound to the VM (the
+  fingerprints the VM's substitution endpoint holds), counted as
+  `secret_withheld`. Stdio is scanned joined to each stream's last bytes, so
+  a secret split across chunks is caught too. Chunks are held back up to
+  500 ms so that, when the rest of a secret follows within that window, no
+  part of it is written. **Limit:** a guest that pauses longer than 500 ms
+  in the middle of printing a bound secret gets the part before the pause
+  written; the completing chunk is still withheld, so the secret is never
+  on disk whole. Holding longer would delay every quiet stream's last line
+  by as much, and the host cannot tell a secret's prefix from ordinary
+  output (it holds fingerprints, not values). Encoded or derived forms of a
+  secret are not recognised, as on the stream plane.
+- **masks** every text and byte field through the stream plane's curated
+  redaction seam (`XXX` in place of a match), the same rules the transcript
+  uses. A field the seam cannot vouch for withholds the record.
+
+Records travel encrypted from guest to host. The records file is the
+scrubbed result, owner-only (`0600`) in the VM's owner-only state
+directory.
+
 ## The status
 
 `TelemetryStatus` is a tagged object on `collection`:
