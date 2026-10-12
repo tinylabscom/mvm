@@ -732,21 +732,31 @@ mod tests {
         let (mut guest, mut host) = UnixStream::pair().unwrap();
         let expected = guest_key.verifying_key();
         let anchor = anchor_key.clone();
-        let collector = std::thread::spawn(move || {
-            let mut receiver = authenticate(&mut host, &anchor, &expected);
-            let mut received = 0usize;
-            while receiver.receive(&mut host).is_ok() {
-                received += 1;
-            }
-            received
-        });
+        let received = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let collector = {
+            let received = Arc::clone(&received);
+            std::thread::spawn(move || {
+                let mut receiver = authenticate(&mut host, &anchor, &expected);
+                while receiver.receive(&mut host).is_ok() {
+                    received.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        };
         let done = Arc::new(AtomicBool::new(false));
         let producer = flood(Arc::clone(&capture), Arc::clone(&done));
         let stop = Arc::new(AtomicBool::new(false));
         let stopper = {
             let stop = Arc::clone(&stop);
+            let received = Arc::clone(&received);
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                // Stop only once the flood is demonstrably crossing, so the
+                // stop lands mid-flood rather than before it started.
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while received.load(Ordering::Relaxed) < 4 * RECORDS_PER_TURN
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 stop.store(true, Ordering::Release);
                 std::time::Instant::now()
             })
@@ -764,7 +774,8 @@ mod tests {
         done.store(true, Ordering::Relaxed);
         let (emitted, _) = producer.join().unwrap();
         drop(guest);
-        let received = collector.join().unwrap();
+        collector.join().unwrap();
+        let received = received.load(Ordering::Relaxed);
         assert_eq!(end, SessionEnd::PeerClosed);
         // One capped turn at most separates the stop from the return.
         assert!(
