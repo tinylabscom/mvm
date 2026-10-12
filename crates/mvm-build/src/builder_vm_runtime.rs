@@ -1820,7 +1820,11 @@ mod tests {
         std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
         // What the guest returned: a rootfs the hook rewrote, a sealed sidecar,
         // and no verity pair, because no script copies the Nix-built one.
-        let rootfs: Vec<u8> = (0..8 * 4096).map(|i| (i % 241) as u8).collect();
+        let mut rootfs: Vec<u8> = (0..8 * 4096).map(|i| (i % 241) as u8).collect();
+        // An ext4 superblock declaring 4 KiB blocks: the seal reads its
+        // geometry from the image.
+        rootfs[1024 + 24..1024 + 28].copy_from_slice(&2u32.to_le_bytes());
+        rootfs[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
         std::fs::write(artifact_out.join("rootfs.ext4"), &rootfs).unwrap();
         std::fs::write(
             artifact_out.join(crate::builder_vm::SIDECAR_FILENAME),
