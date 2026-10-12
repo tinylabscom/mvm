@@ -247,6 +247,31 @@ impl Drop for ProcessExitObserver {
     }
 }
 
+/// Collect an owned child's status after its exit event has fired.
+///
+/// On macOS the kqueue exit note is posted while the process is still being
+/// torn down, so a single non-blocking wait straight after the event can find
+/// nothing to collect yet. The event says the process is exiting; poll for the
+/// status until it is collectable or `deadline` passes. Only a collected
+/// status is proof of exit, so `Ok(None)` past the deadline stays unproven.
+pub fn collect_after_exit_event<T, E>(
+    deadline: Instant,
+    mut collect: impl FnMut() -> Result<Option<T>, E>,
+) -> Result<Option<T>, E> {
+    let mut attempt = 0u32;
+    loop {
+        if let Some(status) = collect()? {
+            return Ok(Some(status));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt).min(deadline - now));
+        attempt = attempt.saturating_add(1);
+    }
+}
+
 /// Wait for a process-exit event, falling back to bounded adaptive polling when
 /// the platform observer is unavailable or cannot verify the event.
 ///
@@ -363,6 +388,40 @@ mod tests {
     use super::*;
     use std::process::Command;
     use std::time::Duration;
+
+    #[test]
+    fn a_status_that_lags_its_exit_event_is_still_collected() {
+        let mut polls = 0;
+        let collected = collect_after_exit_event(Instant::now() + Duration::from_secs(5), || {
+            polls += 1;
+            Ok::<_, io::Error>((polls == 3).then_some(7))
+        })
+        .unwrap();
+        assert_eq!(collected, Some(7));
+        assert_eq!(polls, 3);
+    }
+
+    #[test]
+    fn a_status_that_never_arrives_stays_unproven_past_the_deadline() {
+        let collected =
+            collect_after_exit_event(Instant::now() + Duration::from_millis(30), || {
+                Ok::<Option<u8>, io::Error>(None)
+            })
+            .unwrap();
+        assert_eq!(collected, None);
+    }
+
+    #[test]
+    fn a_collection_error_is_returned_rather_than_retried() {
+        let mut polls = 0;
+        let error = collect_after_exit_event(Instant::now() + Duration::from_secs(5), || {
+            polls += 1;
+            Err::<Option<u8>, _>(io::Error::other("wait failed"))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "wait failed");
+        assert_eq!(polls, 1);
+    }
 
     #[cfg(unix)]
     #[test]

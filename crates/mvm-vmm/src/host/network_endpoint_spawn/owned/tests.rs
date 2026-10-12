@@ -50,6 +50,16 @@ fn exited(endpoint: &mut OwnedEndpoint) {
     endpoint.exit_observed = true;
 }
 
+/// The status of a child whose exit event has fired, which macOS can make
+/// collectable a moment after the event.
+fn collected(endpoint: &mut OwnedEndpoint) -> ExitStatus {
+    collect_after_exit_event(Instant::now() + Duration::from_secs(3), || {
+        endpoint.collect()
+    })
+    .unwrap()
+    .expect("exited child status")
+}
+
 #[test]
 fn valid_handshake_retains_child_until_explicit_idempotent_shutdown() {
     let mut endpoint =
@@ -137,7 +147,7 @@ fn exit_status_is_preserved_and_nonzero_is_never_success() {
     for code in [0, 23] {
         let mut endpoint = helper(&format!("exit {code}"));
         exited(&mut endpoint);
-        assert_eq!(endpoint.collect().unwrap().unwrap().code(), Some(code));
+        assert_eq!(collected(&mut endpoint).code(), Some(code));
         assert_eq!(endpoint.shutdown().is_ok(), code == 0);
         assert_eq!(endpoint.shutdown().is_ok(), code == 0);
         assert_eq!(endpoint.exit_status().unwrap().code(), Some(code));
@@ -161,7 +171,7 @@ fn child_exited_before_registration_keeps_exact_status() {
     );
     let mut endpoint = OwnedEndpoint::new(child);
     endpoint.arm().unwrap();
-    assert_eq!(endpoint.collect().unwrap().unwrap().code(), Some(37));
+    assert_eq!(collected(&mut endpoint).code(), Some(37));
     assert!(endpoint.shutdown().is_err());
     assert_eq!(endpoint.faults.signal_attempts, 0);
 }
@@ -171,7 +181,7 @@ fn delayed_exit_event_is_not_reaped_by_observer() {
     let mut endpoint = helper("sleep 0.02; exit 19");
     exited(&mut endpoint);
     assert!(endpoint.status.is_none());
-    assert_eq!(endpoint.collect().unwrap().unwrap().code(), Some(19));
+    assert_eq!(collected(&mut endpoint).code(), Some(19));
     assert!(endpoint.shutdown().is_err());
 }
 

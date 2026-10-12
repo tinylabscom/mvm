@@ -167,6 +167,11 @@ mod tests {
         crate::audit::host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
         let parent_plan = PlanFixture::new().tenant("parent-tenant").build();
         let child_plan = PlanFixture::new().tenant("child-tenant").build();
+        // The supervisor binds its stop endpoint before it starts capture, so
+        // the socket namespace is still the private one it creates.
+        let stop = Box::leak(Box::new(AtomicBool::new(false)));
+        let stop_control =
+            super::super::hvf_stop::StopControl::start("route-parent", stop).unwrap();
         let (owner, producer) = CaptureOwner::start(CaptureParams {
             vm: "route-parent",
             authority: if operational {
@@ -177,9 +182,6 @@ mod tests {
             redaction: &parent_plan.redaction,
         })
         .unwrap();
-        let stop = Box::leak(Box::new(AtomicBool::new(false)));
-        let stop_control =
-            super::super::hvf_stop::StopControl::start("route-parent", stop).unwrap();
         let route = CaptureRoute::start(
             owner,
             config::vm_state_dir("route-parent").join("supervisor.pid"),
