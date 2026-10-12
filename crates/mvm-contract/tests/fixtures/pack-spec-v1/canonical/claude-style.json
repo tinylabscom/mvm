@@ -1,0 +1,1 @@
+{"copy":[{"destination":"/app/bin/claude","source":"bin/claude"}],"dependencies":[],"entrypoint":["/app/bin/claude","--version"],"identity":{"name":"acme/claude-style","version":"1.2.3-rc.1+build.7"},"packages":[],"resources":{"cpu_cores":2,"memory_mb":1024},"schema":"mvm.pack-spec/v1","source":{"kind":"local","path":"app"},"target":"x86_64-linux"}

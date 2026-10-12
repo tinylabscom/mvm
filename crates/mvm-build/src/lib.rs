@@ -219,6 +219,9 @@ pub mod runtime_pieces;
 /// `~/.mvm/cache/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`
 /// for [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
 pub mod sdk_sidecar;
+/// Cross-process reuse of guest-source fingerprints and object
+/// verifications, keyed on the exact filesystem state they describe.
+mod source_stamp;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
 pub use nix::manifest as nix_manifest;

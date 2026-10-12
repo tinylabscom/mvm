@@ -171,11 +171,11 @@ impl PreparedOutputs {
         &self,
         admitted: &std::cell::RefCell<Option<AdmissionContext>>,
         backend: &str,
-        strategy: mvm_build::run_image::RootStrategy,
+        posture: mvm_client::admission::BootPosture,
         result: Result<T>,
     ) -> Result<T> {
         let admitted = admitted.borrow_mut().take();
-        super::up::record_transient_outcome(admitted.as_ref(), backend, strategy, &result);
+        super::up::record_transient_outcome(admitted.as_ref(), backend, posture, &result);
         let collected = self.collect(admitted.as_ref(), result.is_ok());
         let value = result?;
         collected?;

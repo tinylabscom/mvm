@@ -146,16 +146,59 @@ impl SupervisorStandbyPool {
         template_id: Option<&str>,
         max_memory_mib: u64,
     ) -> Result<Vec<String>> {
+        self.evict_oldest_where(max_memory_mib, |h| h.template_id.as_deref() == template_id)
+    }
+
+    /// Evict the oldest idle or parked parents of one launch shape until their
+    /// recorded memory footprint fits `max_memory_mib`.
+    ///
+    /// The per-shape bound a warm sweep applies to what it just warmed. Keyed on
+    /// the whole compatibility key rather than the template, because every OCI
+    /// image shares the `None` template: bounding by template let a sweep for
+    /// one image evict every other image's standbys.
+    pub fn evict_compatible_to_memory_budget(
+        &self,
+        want: &StandbyCompat,
+        max_memory_mib: u64,
+    ) -> Result<Vec<String>> {
+        self.evict_oldest_where(max_memory_mib, |h| h.is_compatible(want))
+    }
+
+    /// Evict the oldest unclaimed standbys of any shape until the guest memory
+    /// they hold fits `max_memory_mib`.
+    ///
+    /// The host-wide bound on standbys. Only standbys with a live process hold
+    /// guest memory; a saved-state standby is a snapshot on disk and is neither
+    /// counted nor evicted.
+    pub fn evict_to_total_memory(&self, max_memory_mib: u64) -> Result<Vec<String>> {
+        self.evict_oldest_where(max_memory_mib, |h| !h.is_saved_state() && pid_alive(h.pid))
+    }
+
+    /// Guest memory, in MiB, held by unclaimed standbys with a live process.
+    pub fn idle_live_memory_mib(&self) -> Result<u64> {
+        Ok(self
+            .list()?
+            .iter()
+            .filter(|h| {
+                matches!(h.state, StandbyState::Idle | StandbyState::Parked)
+                    && !h.is_saved_state()
+                    && pid_alive(h.pid)
+            })
+            .fold(0u64, |total, h| total.saturating_add(u64::from(h.mem_mib))))
+    }
+
+    fn evict_oldest_where(
+        &self,
+        max_memory_mib: u64,
+        selects: impl Fn(&StandbyHandle) -> bool,
+    ) -> Result<Vec<String>> {
         // Share the claim lock with reservation so a parent cannot be selected
         // for eviction from an idle listing while another launcher claims it.
         let _budget_guard = mvm_core::atomic_io::FileLock::acquire(&self.root.join("claim"))?;
         let mut candidates: Vec<_> = self
             .list()?
             .into_iter()
-            .filter(|h| {
-                h.template_id.as_deref() == template_id
-                    && matches!(h.state, StandbyState::Idle | StandbyState::Parked)
-            })
+            .filter(|h| matches!(h.state, StandbyState::Idle | StandbyState::Parked) && selects(h))
             .collect();
         let mut memory_mib = candidates
             .iter()
@@ -285,6 +328,20 @@ impl SupervisorStandbyPool {
         }
         Ok(reaped)
     }
+}
+
+/// Ask a standby's process to stop. For a standby whose pool record is gone,
+/// so the usual remove-and-reap path cannot reach it.
+pub fn terminate_standby_process(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    if pid <= 1 {
+        return;
+    }
+    // SAFETY: SIGTERM to a pid the pool recorded as a standby this host
+    // started; a pid that has since exited makes this a no-op.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
 }
 
 /// `kill(pid, 0)` liveness — 0 ⇒ the process exists.
@@ -540,6 +597,76 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(pool.load("claimed").unwrap().state, StandbyState::Claimed);
+    }
+
+    #[test]
+    fn a_shape_budget_never_evicts_another_images_standby() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut a_old = saved_handle("a-old", "aa", "image-a", StandbyState::Idle);
+        a_old.spawned_unix_secs = 1;
+        let mut a_new = saved_handle("a-new", "aa", "image-a", StandbyState::Idle);
+        a_new.spawned_unix_secs = 2;
+        let mut b = saved_handle("b", "aa", "image-b", StandbyState::Idle);
+        b.spawned_unix_secs = 0;
+        for h in [&a_old, &a_new, &b] {
+            pool.record(h).unwrap();
+        }
+
+        let evicted = pool
+            .evict_compatible_to_memory_budget(&a_new.compat(), 1024)
+            .unwrap();
+        assert_eq!(evicted, vec!["a-old"]);
+        assert!(
+            pool.load("b").is_ok(),
+            "every OCI image shares the None template; a sweep for one must not evict another"
+        );
+    }
+
+    /// A live standby whose pid is a real child this test owns, so an
+    /// eviction's SIGTERM lands on it rather than on the test process.
+    fn live_handle(id: &str, child: &std::process::Child, spawned: u64) -> StandbyHandle {
+        let mut h = handle(id, "aa", StandbyState::Idle);
+        h.pid = child.id();
+        h.spawned_unix_secs = spawned;
+        h
+    }
+
+    fn sleeper() -> std::process::Child {
+        std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawning a stand-in standby process")
+    }
+
+    #[test]
+    fn the_total_budget_evicts_the_oldest_live_standbys_of_any_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut oldest = sleeper();
+        let mut newer = sleeper();
+        let mut newest_child = sleeper();
+        pool.record(&live_handle("oldest", &oldest, 1)).unwrap();
+        pool.record(&live_handle("newer", &newer, 2)).unwrap();
+        let mut newest = live_handle("newest", &newest_child, 3);
+        newest.image_sha256 = Some("another-image".into());
+        pool.record(&newest).unwrap();
+        // A snapshot on disk holds no guest memory and is not counted.
+        pool.record(&saved_handle("saved", "aa", "img", StandbyState::Idle))
+            .unwrap();
+        assert_eq!(pool.idle_live_memory_mib().unwrap(), 3 * 1024);
+
+        let evicted = pool.evict_to_total_memory(1024).unwrap();
+        assert_eq!(evicted, vec!["oldest", "newer"]);
+        assert_eq!(pool.idle_live_memory_mib().unwrap(), 1024);
+        assert!(pool.load("saved").is_ok());
+        // The evicted standbys' processes were told to stop.
+        for child in [&mut oldest, &mut newer] {
+            let status = child.wait().expect("waiting for the evicted stand-in");
+            assert!(!status.success());
+        }
+        let _ = newest_child.kill();
+        let _ = newest_child.wait();
     }
 
     #[test]

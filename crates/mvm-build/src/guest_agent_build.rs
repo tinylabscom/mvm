@@ -419,6 +419,37 @@ pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> 
     }
 }
 
+/// The workspace inputs [`guest_source_fingerprint`] hashes.
+pub(crate) const GUEST_SOURCE_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/mvm-contract/Cargo.toml",
+    "crates/mvm-contract/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
+    "crates/mvm-setpriv/Cargo.toml",
+    "crates/mvm-setpriv/src",
+    "crates/mvm-build/src/guest_agent_build.rs",
+];
+
+/// The workspace inputs [`sdk_cdylib_source_fingerprint`] hashes.
+pub(crate) const SDK_CDYLIB_SOURCE_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/mvm-contract/Cargo.toml",
+    "crates/mvm-contract/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
+    "crates/mvm-host-services/Cargo.toml",
+    "crates/mvm-host-services/src",
+    "crates/mvm-setpriv/Cargo.toml",
+    "crates/mvm-setpriv/src",
+];
+
 /// Fingerprints already computed in this process, by workspace root.
 static GUEST_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
 /// [`sdk_cdylib_source_fingerprint`] answers, by workspace root.
@@ -439,16 +470,24 @@ pub enum Freshness {
 /// Answer `compute(workspace_root)` from `memo` unless `freshness` asks for a
 /// new walk. A new walk does not replace the memoized answer: the memo is what
 /// every other call site of this command has already acted on.
+///
+/// A memoized lookup that misses in this process may still be answered from
+/// a record an earlier process left for exactly this state of the guest
+/// inputs ([`crate::source_stamp`]); `fingerprint` names which one it is and
+/// what it reads.
 pub(crate) fn memoized_fingerprint<E>(
     memo: &ProcessMemo<PathBuf, String>,
+    fingerprint: &crate::source_stamp::Fingerprint<'_>,
     workspace_root: &Path,
     freshness: Freshness,
     compute: impl FnOnce(&Path) -> Result<String, E>,
 ) -> Result<String, E> {
     match freshness {
-        Freshness::Memoized => {
-            memo.get_or_try_insert(workspace_root.to_path_buf(), || compute(workspace_root))
-        }
+        Freshness::Memoized => memo.get_or_try_insert(workspace_root.to_path_buf(), || {
+            crate::source_stamp::stamped_fingerprint(fingerprint, workspace_root, || {
+                compute(workspace_root)
+            })
+        }),
         Freshness::Rewalk => compute(workspace_root),
     }
 }
@@ -481,6 +520,10 @@ pub fn guest_source_fingerprint_with(
 ) -> Result<String, GuestAgentBuildError> {
     memoized_fingerprint(
         &GUEST_SOURCE_FINGERPRINTS,
+        &crate::source_stamp::Fingerprint {
+            kind: "guest-source",
+            roots: GUEST_SOURCE_INPUTS,
+        },
         workspace_root,
         freshness,
         compute_guest_source_fingerprint,
@@ -517,6 +560,10 @@ pub fn sdk_cdylib_source_fingerprint_with(
 ) -> Result<String, GuestAgentBuildError> {
     memoized_fingerprint(
         &SDK_CDYLIB_SOURCE_FINGERPRINTS,
+        &crate::source_stamp::Fingerprint {
+            kind: "sdk-cdylib-source",
+            roots: SDK_CDYLIB_SOURCE_INPUTS,
+        },
         workspace_root,
         freshness,
         compute_sdk_cdylib_source_fingerprint,
@@ -528,24 +575,7 @@ fn compute_sdk_cdylib_source_fingerprint(
 ) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-host-services-cdylib-input-v1\0");
-    hash_inputs(
-        &mut hasher,
-        workspace_root,
-        &[
-            "Cargo.lock",
-            "Cargo.toml",
-            "crates/mvm-contract/Cargo.toml",
-            "crates/mvm-contract/src",
-            "crates/mvm-core/Cargo.toml",
-            "crates/mvm-core/src",
-            "crates/mvm-agentd/Cargo.toml",
-            "crates/mvm-agentd/src",
-            "crates/mvm-host-services/Cargo.toml",
-            "crates/mvm-host-services/src",
-            "crates/mvm-setpriv/Cargo.toml",
-            "crates/mvm-setpriv/src",
-        ],
-    )?;
+    hash_inputs(&mut hasher, workspace_root, SDK_CDYLIB_SOURCE_INPUTS)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -589,23 +619,7 @@ pub(crate) fn hash_inputs(
 fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-oci-guest-build-input-v1\0");
-    hash_inputs(
-        &mut hasher,
-        workspace_root,
-        &[
-            "Cargo.lock",
-            "Cargo.toml",
-            "crates/mvm-contract/Cargo.toml",
-            "crates/mvm-contract/src",
-            "crates/mvm-core/Cargo.toml",
-            "crates/mvm-core/src",
-            "crates/mvm-agentd/Cargo.toml",
-            "crates/mvm-agentd/src",
-            "crates/mvm-setpriv/Cargo.toml",
-            "crates/mvm-setpriv/src",
-            "crates/mvm-build/src/guest_agent_build.rs",
-        ],
-    )?;
+    hash_inputs(&mut hasher, workspace_root, GUEST_SOURCE_INPUTS)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -1894,6 +1908,48 @@ rust = "1.91.1"
             guest_source_fingerprint(dir.path()).unwrap(),
             first,
             "a second ask in the same process must not re-walk the tree"
+        );
+    }
+
+    /// Every launch is a new process, so the memo above never helps the next
+    /// one. A later process reuses the answer an earlier one recorded for the
+    /// same, settled tree, without walking it, and any edit to an input is
+    /// seen before a record could be reused.
+    #[test]
+    #[cfg(unix)]
+    fn a_later_process_reuses_a_recorded_fingerprint_until_an_input_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = tempfile::tempdir().unwrap();
+        make_fake_checkout(dir.path(), "fn main() { println!(\"v1\"); }");
+        crate::source_stamp::record_fingerprints_in(Some(records.path().to_path_buf()));
+        // A stamp vouches only for entries older than the settle window.
+        std::thread::sleep(crate::source_stamp::SETTLE + std::time::Duration::from_millis(200));
+        let as_a_new_process = || {
+            GUEST_SOURCE_FINGERPRINTS.remove(&dir.path().to_path_buf());
+            guest_source_fingerprint(dir.path()).unwrap()
+        };
+
+        let first = as_a_new_process();
+        let walks = source_input_walks_on_this_thread();
+        assert_eq!(as_a_new_process(), first);
+        assert_eq!(
+            source_input_walks_on_this_thread(),
+            walks,
+            "the second process answers from the record without walking"
+        );
+
+        // Same length as before, so only the bytes and timestamps move.
+        std::fs::write(
+            dir.path().join("crates/mvm-agentd/src/main.rs"),
+            "fn main() { println!(\"v2\"); }",
+        )
+        .unwrap();
+        let after_edit = as_a_new_process();
+        crate::source_stamp::record_fingerprints_in(None);
+        assert_ne!(after_edit, first, "an edited input must reach the answer");
+        assert_eq!(
+            after_edit,
+            compute_guest_source_fingerprint(dir.path()).unwrap()
         );
     }
 

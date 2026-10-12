@@ -75,6 +75,26 @@ Regex engines may also treat `$` as matching before a final newline; the Rust
 validator rejects those characters in identity names and versions. SDKs must
 apply the wire rules above, not rely solely on their schema engine's regex.
 
+## Language SDKs
+
+Every authoring SDK is a thin builder over this contract and must emit the
+bytes in `canonical/<fixture>.json` for the matching fixture; the digest in
+`canonical/<fixture>.sha256` is the `spec_sha256` a lock records. No SDK carries
+its own resolver, compiler or signer, and every SDK reports the same failure
+codes (`missing`, `identity`, `package`, `path`, `entrypoint`, `resources`).
+
+| SDK | Builder | Spec schema | Golden check |
+| --- | --- | --- | --- |
+| Rust | `mvm_sdk::pack::pack` | `mvm.pack-spec/v1` | `cargo test -p mvm-sdk pack::` |
+| Kotlin (JVM) | `com.runmvm.packs.pack` | `mvm.pack-spec/v1` | `just sdk::test-kotlin` |
+| Python | in progress | `mvm.pack-spec/v1` | not yet |
+| TypeScript | in progress | `mvm.pack-spec/v1` | not yet |
+
+Locks (`mvm.pack-lock/v1`) are derived only by `mvm_compiler::pack` from the
+canonical spec and the source snapshot, so a spec that matches its golden
+locks identically whichever language authored it. Custom Nix modules are not
+part of `mvm.pack-spec/v1`; no SDK can express one until the contract does.
+
 ## Boundaries
 
 PackSpec is **authored** intent. A future **resolved/locked** record must bind

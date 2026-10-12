@@ -12,22 +12,11 @@ Use one-shot mode for isolated code execution. Use named-VM commands when you ar
 
 ## One-shot run
 
-An unnamed one-shot run claims a prepared warm standby booted from the same
-image and sizing, and refuses rather than cold-booting when none is ready, so
-prepare one per image first. A `python` command infers `python:3.12-alpine`
-(see [runtime detection](/reference/cli-commands/#runtime-detection)), so it
-needs a standby of that image:
-
 ```sh
-export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
-mvmctl pool warm                              # the bundled default image
-mvmctl pool warm --image python:3.12-alpine   # the image python commands infer
 mvmctl run -- uname -a
 mvmctl run --profile restrictive -- python -c 'print("hello")'
 mvmctl run --timeout 30 --receipt /tmp/run-receipt.json -- python task.py
 ```
-
-Add `--name` to boot a run cold instead; a named run never claims a standby.
 
 `mvmctl run` produces a transient sandbox. It can write a signed receipt with invocation hashes, output hashes, and exit status. Raw argv, env values, stdout, stderr, and host paths are not stored in the receipt.
 
