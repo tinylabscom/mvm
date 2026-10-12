@@ -270,6 +270,7 @@ fn wasm_grants_from_config(config: &VmStartConfig) -> Result<Grants> {
             egress: None,
             drive: None,
             display_input: None,
+            application_terminal: None,
         }),
     }
 }

@@ -455,6 +455,7 @@ mod tests {
                 verbs: Vec::new(),
                 drive: None,
                 tool_mediation: None,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         }
@@ -847,6 +848,7 @@ mod tests {
             verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -1010,6 +1012,7 @@ mod tests {
                 verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
                 drive: None,
                 tool_mediation: None,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         };

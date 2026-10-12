@@ -409,6 +409,48 @@ mvmctl trust audit verify
 including across rotated segments. It cannot detect entries removed from the
 end of the log.
 
+## Application terminals
+
+An interactive agent such as Claude Code runs in a terminal. A plan can admit
+exactly one such program with an `application_terminal` grant, in a
+`--grants-file` or the manifest's `[grants]`:
+
+```json
+{ "application_terminal": { "argv": ["/usr/bin/claude"] } }
+```
+
+`argv[0]` must be an absolute path; it is not resolved on the guest. The
+grant is carried in the signed plan and, as a digest of the argv, in the
+host-signed verb grant the guest agent pins at boot.
+
+`mvmctl machine attach <name>` then opens that program rather than a shell.
+It runs as the workload user under the workload's seccomp tier, with the
+image's declared environment plus the environment the host provisioned for
+the machine: the egress proxy, the CA bundle and the `--secret` placeholders.
+Raw credentials stay on the host and are substituted on the way out, exactly
+as for an entrypoint call, and every request is audited the same way. Resize,
+detach and reattach, `--detach-timeout`, and the exit code work as they do for
+the shell.
+
+What it refuses:
+
+- A different argv, an empty argv (the default shell), and `--env`, on the
+  host before anything is sent.
+- The same, plus any dynamic-loader variable (`LD_*`), in the guest agent,
+  against the host-signed grant rather than the request.
+- Any terminal at all on a sealed production image. The console verbs remain
+  development-only; the grant narrows what a development terminal may run and
+  opens nothing on a sealed one.
+
+A plan with an application terminal gets a closed verb grant, as a drive
+grant does: name any other agent verbs the run needs with `--agent-verb`.
+
+Whether a given agent can authenticate this way depends on it honouring the
+proxy environment and reading its key from the placeholder variable. An
+`x-api-key` request through the substitution path is covered above; a
+subscription sign-in flow is not, and no interactive Claude session is
+claimed by these tests.
+
 ## What this does not protect against
 
 - **Use of the credential through the placeholder.** A compromised agent can

@@ -282,6 +282,7 @@ mod tests {
                 command_map_digest: ToolMediationGrant::digest_commands(commands)
                     .expect("valid map"),
             }),
+            application_terminal: None,
             sig: Vec::new(),
         }
     }

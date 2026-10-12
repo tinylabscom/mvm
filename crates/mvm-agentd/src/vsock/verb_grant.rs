@@ -71,6 +71,32 @@ pub fn enforce_drive_grant(
     None
 }
 
+/// Hold a terminal open to exactly the argv the signed plan admitted.
+///
+/// Runs after the profile gate, so it only ever narrows: a sealed production
+/// guest has already refused every console verb, whatever its grant carries.
+/// Under an application-terminal grant a console open must name the granted
+/// argv, gets no default shell, and may not set a dynamic-loader variable.
+/// Without one
+/// the console keeps its ordinary development behaviour.
+pub fn enforce_application_terminal_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    let GuestRequest::ConsoleOpen { argv, env, .. } = req else {
+        return None;
+    };
+    let binding = grant.and_then(|grant| grant.application_terminal.as_ref())?;
+    let refusal = binding
+        .admit(argv, env.iter().map(|(name, _)| name.as_str()))
+        .err()?;
+    // The argv is not logged: it can carry user-typed secrets.
+    eprintln!("[audit] console-open refused under the application-terminal grant: {refusal}");
+    Some(GuestResponse::Error {
+        message: format!("application terminal refused: {refusal}"),
+    })
+}
+
 fn path_is_in_drive_roots(path: &str, drive: &mvm_contract::grants::DriveGrant) -> bool {
     let Ok(path) = mvm_contract::grants::WorkspaceRoot::parse(path) else {
         return false;
@@ -472,6 +498,7 @@ mod tests {
             verbs: Vec::new(),
             drive: Some(drive_grant()),
             tool_mediation: None,
+            application_terminal: None,
             sig: Vec::new(),
         }
     }
@@ -624,6 +651,7 @@ mod tests {
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         // listed => allowed
@@ -656,6 +684,7 @@ mod tests {
             verbs: vec![VerbId::new("readiness-status").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         let request = GuestRequest::RunEntrypoint {
@@ -697,6 +726,7 @@ mod tests {
                 command_map_digest: None,
             }),
             sig: vec![],
+            application_terminal: None,
         };
         let alternate = [
             GuestRequest::Exec {
@@ -791,6 +821,7 @@ mod tests {
                 command_map_digest: None,
             }),
             sig: vec![],
+            application_terminal: None,
         };
         let mediated = GuestRequest::MediatedExec(MediatedExecCall {
             tool: "shell".into(),
@@ -819,6 +850,7 @@ mod tests {
                 .collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         let requests = [
@@ -1001,6 +1033,7 @@ mod tests {
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         good.sig = {
@@ -1088,6 +1121,7 @@ mod tests {
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1147,6 +1181,7 @@ mod tests {
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1740,6 +1775,7 @@ mod tests {
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
@@ -1966,5 +2002,118 @@ mod tests {
         let grant = result.expect("matching lineage must allow a host-signed grant rotation");
         assert_eq!(grant.session_id, "child-vm-session");
         assert!(grant.permits("run-entrypoint"));
+    }
+
+    fn verb_grant_with_terminal(argv: &[&str]) -> mvm_core::plan::VerbGrant {
+        let terminal = mvm_contract::grants::ApplicationTerminalGrant::new(
+            argv.iter().map(|arg| arg.to_string()).collect(),
+        )
+        .unwrap();
+        mvm_core::plan::VerbGrant {
+            application_terminal: Some((&terminal).into()),
+            drive: None,
+            ..verb_grant_with_drive()
+        }
+    }
+
+    fn console_open(argv: &[&str], env: Vec<(String, String)>) -> GuestRequest {
+        GuestRequest::ConsoleOpen {
+            cols: 80,
+            rows: 24,
+            env,
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+            detach_timeout_secs: None,
+        }
+    }
+
+    fn refusal_message(response: Option<GuestResponse>) -> String {
+        match response {
+            Some(GuestResponse::Error { message }) => message,
+            other => panic!("expected an application terminal refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_application_terminal_grant_admits_only_its_exact_argv() {
+        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        assert!(
+            enforce_application_terminal_grant(
+                &console_open(&["/usr/bin/claude"], Vec::new()),
+                Some(&grant)
+            )
+            .is_none()
+        );
+        let shell = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(shell.contains("not a shell"), "{shell}");
+        let other = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/bin/sh"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(other.contains("application_terminal grant"), "{other}");
+        let env = refusal_message(enforce_application_terminal_grant(
+            &console_open(
+                &["/usr/bin/claude"],
+                vec![("LD_PRELOAD".into(), "/tmp/x.so".into())],
+            ),
+            Some(&grant),
+        ));
+        assert!(env.contains("dynamic-loader"), "{env}");
+        assert!(
+            enforce_application_terminal_grant(
+                &console_open(
+                    &["/usr/bin/claude"],
+                    vec![("HTTPS_PROXY".into(), "http://127.0.0.1:3128".into())],
+                ),
+                Some(&grant)
+            )
+            .is_none(),
+            "the host-provisioned egress environment passes"
+        );
+    }
+
+    #[test]
+    fn without_an_application_terminal_grant_the_console_is_unchanged() {
+        let request = console_open(&[], Vec::new());
+        assert!(enforce_application_terminal_grant(&request, None).is_none());
+        assert!(
+            enforce_application_terminal_grant(&request, Some(&verb_grant_with_drive())).is_none()
+        );
+        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        assert!(
+            enforce_application_terminal_grant(
+                &GuestRequest::ConsoleResize {
+                    session_id: 1,
+                    cols: 80,
+                    rows: 24
+                },
+                Some(&grant)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_application_terminal_grant_lets_console_verbs_past_the_verb_gate_only() {
+        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        assert!(
+            enforce_verb_grant(
+                &console_open(&["/usr/bin/claude"], Vec::new()),
+                Some(&grant)
+            )
+            .is_none()
+        );
+        assert!(enforce_verb_grant(&GuestRequest::ConsoleList, Some(&grant)).is_none());
+        let exec = GuestRequest::Exec {
+            command: "id".into(),
+            stdin: None,
+            timeout_secs: None,
+        };
+        assert!(matches!(
+            enforce_verb_grant(&exec, Some(&grant)),
+            Some(GuestResponse::VerbNotAuthorized { .. })
+        ));
     }
 }
