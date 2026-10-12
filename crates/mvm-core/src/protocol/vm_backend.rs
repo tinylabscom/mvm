@@ -226,6 +226,17 @@ pub struct VmStartConfig {
     /// Optional host GPU ordinal pinned to this VM. The endpoint exposes the
     /// selected host device as guest ordinal zero and hides every other GPU.
     pub gpu_device: Option<u32>,
+    /// The admission's audit sync, when it is still in flight.
+    ///
+    /// `None` means the admission was durable before this config was built,
+    /// which is what every launch that does not opt in still does. When it is
+    /// set, the VMM may start before the sync finishes, but nothing the plan
+    /// authorizes may run until [`AdmissionDurability::wait`] succeeds: the
+    /// workload runner waits for it immediately before activation, and a
+    /// boot path that has no activation step waits for it before it boots.
+    ///
+    /// [`AdmissionDurability::wait`]: crate::admission_durability::AdmissionDurability::wait
+    pub admission_durability: Option<crate::admission_durability::AdmissionDurability>,
 }
 
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.

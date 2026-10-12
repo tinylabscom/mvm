@@ -715,7 +715,14 @@ fn run_inner(
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
     // exit status instead of waiting for a vsock console.
-    let run_outcome = if backend.name() == "wasm" {
+    // Every boot path waits for the admission's audit sync before the workload
+    // can run. Waiting again costs nothing once it has, and refuses to dispatch
+    // anything if a path did not; the teardown below runs either way.
+    let admission_durable =
+        mvm_core::admission_durability::wait_for(start_config.admission_durability.as_ref());
+    let run_outcome = if let Err(error) = admission_durable {
+        Err(error)
+    } else if backend.name() == "wasm" {
         match run_wasm_module(&backend, &vm_name) {
             Ok(code) => Ok((Either::Left(code), None)),
             Err(e) => Err(e),
@@ -1439,6 +1446,7 @@ pub fn resolve_launch(
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
+        start_config.admission_durability = sub.durability;
         for volume in &mut start_config.volumes {
             if sub.read_only_materialized_images.contains(&volume.host)
                 || volume

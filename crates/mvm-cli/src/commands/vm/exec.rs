@@ -720,7 +720,10 @@ pub(in crate::commands) fn run_secure_started(
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
-        let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        // Every refusal is made before this returns; the audit sync is left
+        // running beside the VMM boot, and activation waits for it.
+        let configured_images_dir = mvm_build::image_source::configured_images_dir();
+        let params = super::up::AdmitPlanForBootParams {
             gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
@@ -731,7 +734,7 @@ pub(in crate::commands) fn run_secure_started(
             vm_name,
             kernel_path: kernel,
             backend_name: &admit_backend,
-            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
+            configured_images_dir: configured_images_dir.as_deref(),
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
@@ -769,7 +772,8 @@ pub(in crate::commands) fn run_secure_started(
                 admit_has_argv,
             ),
             assets: assets.to_vec(),
-        })?;
+        };
+        let (c, durability) = super::up::admit_plan_for_boot_syncing_beside_boot(params)?;
         // Persist the bare plan so the pre-start moat / endpoint can read it
         // on the backends that consume it from disk (mirrors the invoke path).
         if super::up::persists_plan_before_start(&admit_backend) {
@@ -805,6 +809,7 @@ pub(in crate::commands) fn run_secure_started(
                 .filter(|share| share.read_only)
                 .map(|share| share.host_path.clone())
                 .collect(),
+            durability: Some(durability),
         };
         // Bind the OCI provenance to the plan that was just admitted, before
         // the backend starts. Claim 14 wants the image's origin in the chain

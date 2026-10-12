@@ -43,6 +43,12 @@ pub struct SessionAuditSubstrate {
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
     /// Frozen host-directory images admission hardened to read-only.
     pub read_only_materialized_images: Vec<String>,
+    /// The admission's audit sync, when the admission left it running beside
+    /// the boot. Carried onto [`VmStartConfig::admission_durability`]; `None`
+    /// when the admission was already durable.
+    ///
+    /// [`VmStartConfig::admission_durability`]: mvm_core::vm_backend::VmStartConfig::admission_durability
+    pub durability: Option<mvm_core::admission_durability::AdmissionDurability>,
 }
 
 /// Admission callback: given what the boot resolved, produce the substrate the
@@ -284,6 +290,7 @@ pub fn boot_session_vm(
     start_config.plan_json = Some(substrate.plan_json);
     start_config.bundle_json = substrate.bundle_json;
     start_config.config_files.extend(substrate.config_files);
+    start_config.admission_durability = substrate.durability;
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;
