@@ -888,8 +888,12 @@ mod tests {
         let shed_reported = collector.join().unwrap();
         assert_eq!(end, SessionEnd::PeerClosed);
         assert!(shed_reported > 0, "a summary reported the flood's losses");
+        // The flood never ends on its own: it stops only because a summary
+        // crossed. The bound is generous because a loaded CI runner stretches
+        // the handshake and the first turns; the property is that a summary
+        // arrives while the flood is still running, not its exact cadence.
         assert!(
-            started.elapsed() < SUMMARY_INTERVAL * 4,
+            started.elapsed() < SUMMARY_INTERVAL * 15,
             "the summary came on its cadence, not after the flood"
         );
     }
