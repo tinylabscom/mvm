@@ -767,78 +767,70 @@ jobs:
   # ext4 + `*.verity` + `*.roothash` sidecars, and the roothash must
   # actually authenticate the ext4 through that hash tree. If the seal is
   # disabled or broken on the prod path, this gate fails before the
-  # verity claim breaks silently. Images are built and signed in
-  # mvm-images, so the subject is the bytes every installed mvmctl boots:
-  # the runtime overlay member of the image set `images.lock` pins, which
-  # every microVM attaches at boot and which is sealed the same way the
-  # rootfs is. The rootfs/OCI seal itself is unit-tested in
-  # `mvm_build::oci_to_rootfs::verity`.
+  # verity claim breaks silently. The subject is the runtime overlay every
+  # microVM attaches at boot, sealed the same way the rootfs is. `mvmctl`
+  # assembles it on the host from its guest runtime — a source build's
+  # from its tree, a release binary's from the signed archive its release
+  # ships, through one assembler — so the lane assembles it from this tree
+  # and asserts on those bytes. The rootfs/OCI seal itself is unit-tested
+  # in `mvm_build::oci_to_rootfs::verity`.
   verified-boot-artifacts:
     name: Verified boot artifacts (ADR-001 §W3.4)
     runs-on: ubuntu-latest
+    env:
+      # A home of the job's own, so the overlay asserted on is the one this
+      # run assembled and not one a cache restored.
+      MVM_HOME: ${{ github.workspace }}/.overlay-witness-home
+      # Launch acquisition defaults to the published pieces; the overlay
+      # under test is this tree's.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
 
       # veritysetup, to check the roothash against the tree rather than
       # only its shape.
       - uses: ./.github/actions/apt-deps
         with:
-          packages: cryptsetup-bin
+          packages: cryptsetup-bin lld
 
-      - name: Resolve the locked image set
-        # The one pin, read rather than copied, exactly as ci.yml's
-        # boot-latency lane reads it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # The guest binaries are static musl, cross-compiled with the pinned
+      # toolchain the build script and `mvmctl` both use.
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: verified-boot-artifacts
+
+      - name: Assemble the runtime overlay from this tree
+        # The overlay every launch attaches is assembled on the host from the
+        # CLI's guest runtime: a source build's from its tree, a release
+        # binary's from the signed archive its release ships, through the same
+        # assembler. The image set carries no overlay a launch reads, so this
+        # witness asserts on the bytes `mvmctl` itself writes: the pure-Rust
+        # ext4 writer and the in-process verity tree, in a home of the job's
+        # own so no cache stands in for them.
         run: |
           set -euo pipefail
-          {
-            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
-            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
-            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
-            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
-            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
-            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
-          } >> "$GITHUB_ENV"
-
-      - name: Fetch and verify the locked runtime overlay
-        # Root digest against the lock, root signature against the lock's
-        # identity, member digest against the root, then the archive's own
-        # manifest — the chain an installed mvmctl walks before it boots these
-        # bytes. A substituted overlay fails here rather than being asserted on.
-        env:
-          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/locked-overlay && cd /tmp/locked-overlay
-          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
-          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
-          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
-          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
-          cosign verify-blob \
-            --bundle image-set.json.bundle \
-            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-            image-set.json
-          f=runtime-overlay-x86_64.tar.gz
-          curl -fL --retry 3 -o "$f" "$base/$f"
-          jq -r --arg name "$f" '
-            .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
-            select(.name == $name) | "\(.sha256)  \(.name)"
-          ' image-set.json > expected.txt
-          test -s expected.txt
-          sha256sum -c expected.txt
-          mkdir -p overlay && tar -C overlay -xzf "$f"
-          ( cd overlay && sha256sum -c checksums-sha256.txt )
+          mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
+          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          test "${#dirs[@]}" -eq 1
+          ( cd "${dirs[0]}" && sha256sum -c checksums-sha256.txt )
+          mkdir -p /tmp/assembled-overlay/overlay
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
+            cp -L "${dirs[0]}/$f" "/tmp/assembled-overlay/overlay/$f"
+          done
 
       - name: Assert the overlay's verity seal authenticates it
         run: |
           set -euo pipefail
-          out=/tmp/locked-overlay/overlay
+          out=/tmp/assembled-overlay/overlay
           for f in overlay.ext4 overlay.verity overlay.roothash; do
             if [ ! -s "$out/$f" ]; then
-              echo "::error::missing $f in the locked runtime overlay" >&2
+              echo "::error::missing $f in the assembled runtime overlay" >&2
               echo "ADR-001 §W3.4 requires the production verity-sealed image" >&2
               echo "to ship {ext4,verity,roothash}; a missing sidecar usually" >&2
               echo "means the dm-verity seal was disabled on the prod path." >&2
@@ -862,8 +854,8 @@ jobs:
   # dispatcher (Plan 76 Phase 1 + the `sealed-prod-allowlist` CI
   # lane in `ci.yml`). This lane is the static counterpart: it
   # mounts the verity-sealed runtime overlay (the mvm-controlled
-  # filesystem attached to every microVM) — the locked, signed image-set
-  # member an installed mvmctl boots — and fails if any SSH artifact is
+  # filesystem attached to every microVM), assembled from this tree by the
+  # assembler every `mvmctl` uses, and fails if any SSH artifact is
   # present.
   #
   # No untrusted GitHub event input flows into any step; all
@@ -877,62 +869,57 @@ jobs:
   sealed-prod-no-ssh:
     name: Sealed-prod rootfs has no SSH (plan 76 Phase 8)
     runs-on: ubuntu-latest
+    env:
+      # A home of the job's own, so the overlay asserted on is the one this
+      # run assembled and not one a cache restored.
+      MVM_HOME: ${{ github.workspace }}/.overlay-witness-home
+      # Launch acquisition defaults to the published pieces; the overlay
+      # under test is this tree's.
+      MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
 
-      - name: Resolve the locked image set
-        # The one pin, read rather than copied, exactly as ci.yml's
-        # boot-latency lane reads it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # The guest binaries are static musl, cross-compiled with the pinned
+      # toolchain the build script and `mvmctl` both use.
+      - uses: ./.github/actions/install-zigbuild
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: sealed-prod-no-ssh
+
+      - name: Assemble the runtime overlay from this tree
+        # The overlay every launch attaches is assembled on the host from the
+        # CLI's guest runtime: a source build's from its tree, a release
+        # binary's from the signed archive its release ships, through the same
+        # assembler. The image set carries no overlay a launch reads, so this
+        # witness asserts on the bytes `mvmctl` itself writes: the pure-Rust
+        # ext4 writer and the in-process verity tree, in a home of the job's
+        # own so no cache stands in for them.
         run: |
           set -euo pipefail
-          {
-            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
-            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
-            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
-            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
-            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
-            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
-          } >> "$GITHUB_ENV"
-
-      - name: Fetch and verify the locked runtime overlay
-        # Root digest against the lock, root signature against the lock's
-        # identity, member digest against the root, then the archive's own
-        # manifest — the chain an installed mvmctl walks before it boots these
-        # bytes. A substituted overlay fails here rather than being asserted on.
-        env:
-          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/locked-overlay && cd /tmp/locked-overlay
-          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
-          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
-          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
-          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
-          cosign verify-blob \
-            --bundle image-set.json.bundle \
-            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
-            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-            image-set.json
-          f=runtime-overlay-x86_64.tar.gz
-          curl -fL --retry 3 -o "$f" "$base/$f"
-          jq -r --arg name "$f" '
-            .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
-            select(.name == $name) | "\(.sha256)  \(.name)"
-          ' image-set.json > expected.txt
-          test -s expected.txt
-          sha256sum -c expected.txt
-          mkdir -p overlay && tar -C overlay -xzf "$f"
-          ( cd overlay && sha256sum -c checksums-sha256.txt )
+          mkdir -p "$MVM_HOME" && chmod 0700 "$MVM_HOME"
+          cargo run -q --bin mvmctl -- build runtime-overlay build --source build --arch x86_64
+          mapfile -t dirs < <(find "$MVM_HOME/cache/runtime-overlay" -mindepth 2 -maxdepth 2 -type d -name x86_64)
+          test "${#dirs[@]}" -eq 1
+          ( cd "${dirs[0]}" && sha256sum -c checksums-sha256.txt )
+          mkdir -p /tmp/assembled-overlay/overlay
+          for f in overlay.ext4 overlay.verity overlay.roothash; do
+            cp -L "${dirs[0]}/$f" "/tmp/assembled-overlay/overlay/$f"
+          done
 
       - name: Assert no SSH on the sealed overlay
         run: |
           set -euo pipefail
-          rootfs=/tmp/locked-overlay/overlay/overlay.ext4
+          rootfs=/tmp/assembled-overlay/overlay/overlay.ext4
           if [ ! -f "$rootfs" ]; then
-            echo "::error::overlay.ext4 missing from the locked runtime overlay" >&2
+            echo "::error::overlay.ext4 missing from the assembled runtime overlay" >&2
             exit 1
           fi
 

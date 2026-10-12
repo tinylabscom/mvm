@@ -604,6 +604,11 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     })?);
     let want = compat_for_launch(p.launch)?;
     let have = pool.idle_count_compatible(&want)? as u32;
+    if have < p.target {
+        // Every parent is captured into an encrypted checkpoint, so a host
+        // with no snapshot key yet gets one before the first capture.
+        super::shared::ensure_snapshot_key()?;
+    }
     let pool_root = mvm_core::config::mvm_pool_dir()?;
     let vms_root = mvm_core::config::vms_dir();
     let checkpoints = CheckpointStore::open();
@@ -2234,10 +2239,63 @@ mod tests {
         );
     }
 
+    /// The first warm on a host that has never held a snapshot key provisions
+    /// one under the mvm key directory and captures under it, rather than
+    /// refusing the capture.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn the_first_warm_on_a_fresh_home_provisions_the_snapshot_key() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        env.remove(mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV);
+        let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"warm-kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"warm-rootfs").unwrap();
+        let signing_key = tmp.path().join("host-signer.ed25519");
+        std::fs::write(&signing_key, b"fake-key").unwrap();
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
+        let backend = AnyBackend::Mock(mvm_runtime::mock::MockBackend::new().with_standby());
+
+        let result = warm_to_target(
+            &pool,
+            &WarmParams {
+                backend: &backend,
+                signer_id: "host:test",
+                signing_key_path: &signing_key,
+                target: 1,
+                launch: &cfg,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.spawned, 1, "{:?}", result.failures);
+        let key = tmp.path().join("keys").join("local.key");
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&key).unwrap().len(), 32);
+    }
+
     #[cfg(feature = "test-support")]
     #[test]
     fn warm_to_target_counts_failures_when_spawn_errors() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
+        // A warm below target provisions the host snapshot key; keep it in
+        // this test's own home.
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(tmp.path());
+        env.remove(mvm_runtime::vm::instance_snapshot::SNAPSHOT_TENANT_KEY_ENV);
         let pool = SupervisorStandbyPool::at(tmp.path().join("pool"));
         let kernel = tmp.path().join("vmlinux");
         std::fs::write(&kernel, b"k").unwrap();

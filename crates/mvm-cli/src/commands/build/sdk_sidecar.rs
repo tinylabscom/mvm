@@ -1,12 +1,12 @@
-//! `mvmctl build sdk-sidecar build` — explicitly build and cache the
-//! guest-facing host-services sidecar images from the selected `mvm-images`
-//! checkout.
+//! `mvmctl build sdk-sidecar build` — explicitly populate the SDK sidecar
+//! cache for both guest libcs, packed on the host from a guest runtime: this
+//! checkout's archive, or the published one of this CLI's version. The image
+//! set carries no sidecar.
 
-use anyhow::Result;
-use clap::{Args as ClapArgs, Subcommand};
+use anyhow::{Context, Result};
+use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
 use crate::ui;
-use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 
@@ -20,236 +20,214 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Cmd {
-    /// Build both libc variants from the selected mvm-images checkout and
-    /// populate the version-matched cache.
+    /// Populate the version-matched cache with both libc variants.
+    Build(BuildArgs),
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+struct BuildArgs {
+    /// Which guest runtime the sidecars are packed from. `build` packs them
+    /// from this checkout's guest-runtime archive, building the archive first
+    /// if it is not cached; `auto` does the same in a source checkout and
+    /// otherwise packs from the published guest runtime of this version — on
+    /// a release binary, the one its own release ships.
+    #[arg(long, value_enum, default_value_t = Source::Auto)]
+    source: Source,
+
+    /// Repack even when a matching sidecar is already cached.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Auto,
     Build,
+}
+
+/// The acquisition a request resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Route {
+    /// Pack from the guest-runtime archive of the checkout at this root.
+    Archive(std::path::PathBuf),
+    /// Pack from the published guest runtime of this CLI's version.
+    ReleaseArchive,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.cmd {
-        Cmd::Build => run_build(),
+        Cmd::Build(build) => run_build(build),
     }
 }
 
-/// Build both libc variants from the pair's `runtime-overlay` sidecar targets
-/// and install them into the version-matched cache, stamped with the pair
-/// identity so launches under this pair trust them.
-fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -> Result<()> {
+fn run_build(args: BuildArgs) -> Result<()> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
-    for (libc, attr) in [
-        (GuestLibc::Glibc, "sdk-sidecar-image"),
-        (GuestLibc::Musl, "sdk-sidecar-image-musl"),
-    ] {
-        let target = mvm_build::image_source::ImageBuildTarget {
-            role: mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-            attr: mvm_build::image_source::FlakeAttr::new(attr)
-                .expect("a literal attribute is valid"),
-        };
-        let build = crate::commands::env::builder_vm::ensure_pair_built(checkout, target)?;
-        install_pair_sidecar(&build, &cache_root, version, arch, libc)?;
+    match route(
+        args.source,
+        mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root(),
+    )? {
+        Route::Archive(workspace_root) => {
+            pack_from_archive(&cache_root, version, arch, &workspace_root, args.force)
+        }
+        Route::ReleaseArchive => {
+            let runtime =
+                crate::release_guest_runtime::installed_for_running_binary(&cache_root, arch)?;
+            pack_from_runtime(&cache_root, version, arch, &runtime, args.force)
+        }
+    }
+}
+
+/// `auto` builds wherever there is a checkout to build from, and otherwise
+/// packs from the published guest runtime of this version — a release
+/// binary's own. An explicit `build` without a checkout is refused with the
+/// way out named.
+fn route(source: Source, checkout: Option<std::path::PathBuf>) -> Result<Route> {
+    match (source, checkout) {
+        (Source::Build | Source::Auto, Some(root)) => Ok(Route::Archive(root)),
+        (Source::Auto, None) => Ok(Route::ReleaseArchive),
+        (Source::Build, None) => anyhow::bail!(
+            "--source build packs the sidecars from the guest runtime cargo builds in an mvm \
+             source checkout, and this binary has none; run it from a contributor build, set {} \
+             to an mvm checkout, or use --source auto to pack them from the published guest \
+             runtime of this version",
+            mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
+        ),
+    }
+}
+
+/// Pack both variants from the checkout's guest-runtime archive: the same
+/// archive, and the same packing, that bootstrap and the launch path use.
+fn pack_from_archive(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &std::path::Path,
+    force: bool,
+) -> Result<()> {
+    let phase = crate::ui::activity::start(format!(
+        "Resolving the guest runtime for {arch} from {}",
+        workspace_root.display()
+    ));
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        workspace_root,
+    )
+    .context("resolving the shared guest runtime")?;
+    phase.finish();
+    pack_from_runtime(cache_root, version, arch, &runtime, force)
+}
+
+/// Pack both variants from `runtime`, repacking when `force`.
+fn pack_from_runtime(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    runtime: &mvm_build::guest_runtime::GuestRuntime,
+    force: bool,
+) -> Result<()> {
+    use mvm_build::runtime_pieces::{
+        RuntimePiece, SDK_SIDECAR_LIBCS, discard_local_piece, pack_sdk_sidecars, short_digest,
+    };
+
+    if force {
+        for libc in SDK_SIDECAR_LIBCS {
+            discard_local_piece(cache_root, version, arch, RuntimePiece::SdkSidecar(libc))
+                .with_context(|| format!("discarding the cached {libc} SDK sidecar"))?;
+        }
+    }
+    for artifact in pack_sdk_sidecars(cache_root, version, arch, runtime)? {
         ui::success(&format!(
-            "SDK sidecar ({libc}) built from the selected image checkout and cached."
+            "SDK sidecar ({}) for {arch} cached from guest runtime archive {}: {}",
+            artifact.libc,
+            short_digest(&runtime.digest),
+            artifact.image.display()
         ));
     }
     Ok(())
 }
 
-/// Install one libc variant from a pair-built sidecar entry, stamped with the
-/// pair identity. The entry's files carry the producer's manifest names, so
-/// this goes through the same staging install the launch path uses rather
-/// than handing the entry directory to the fixed-layout installer.
-fn install_pair_sidecar(
-    build: &mvm_build::image_source::PairBuild,
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: GuestArch,
-    libc: GuestLibc,
-) -> Result<()> {
-    let fingerprint = build.key.digest().as_str().to_string();
-    mvm_client::launch::pair_stage::install_pair_sidecar(
-        &build.entry,
-        &fingerprint,
-        cache_root,
-        version,
-        arch,
-        libc,
-    )?;
-    Ok(())
-}
-
-fn run_build() -> Result<()> {
-    build_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref())
-}
-
-/// Build both libc variants from the selected checkout — or, when the caller
-/// set `MVM_FETCH_UNCHANGED_IMAGES`, adopt the pinned set's verified sidecar
-/// members instead: under `1` only when they were built from exactly this
-/// tree's sources, under `pinned` whatever they were built from. Without
-/// either there is nothing to build from: the sidecars are image-set members,
-/// and image construction lives in `mvm-images`.
-fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
-    use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
-    let request = ArmRequest::for_host(PinnedMembers::SdkSidecars);
-    if request.mode != FetchMode::Off {
-        // Said at notice level whichever arm runs: the documented-surface e2e
-        // records which one did, and an unannounced fall-through is
-        // indistinguishable from the knob doing nothing.
-        let arm = fetch::resolve_arm(request)?;
-        ui::notice(&arm.report(request));
-        if let fetch::Arm::Adopt { set, .. } = arm {
-            return adopt_sidecars(&set, request.arch);
-        }
-    }
-    match checkout {
-        Some(checkout) => build_pair_sidecars(checkout),
-        None => Err(sidecar_needs_a_checkout()),
-    }
-}
-
-/// Install both libc variants from the verified set. A failure is final: the
-/// verified bytes were asked for and refused, which must not silently fall
-/// back to a local build.
-fn adopt_sidecars(
-    set: &mvm_build::published_image_set::PublishedImageSet,
-    arch: GuestArch,
-) -> Result<()> {
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    mvm_build::fetch_unchanged::fetch_sidecars_from_set(set, arch, &cache_root).map_err(|e| {
-        anyhow::anyhow!(
-            "adopting the SDK sidecars of the pinned image set {} failed: {e}",
-            set.release_tag()
-        )
-    })?;
-    ui::success(&format!(
-        "SDK sidecars (glibc, musl) installed from the pinned image set {}; no build run.",
-        set.release_tag()
-    ));
-    Ok(())
-}
-
-fn sidecar_needs_a_checkout() -> anyhow::Error {
-    mvm_build::image_source::ImageConstructionRefused::new("the SDK sidecar").into()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::{Cli, Commands, build::group as build_group};
+    use clap::Parser;
+    use std::path::PathBuf;
 
+    /// Without a checkout there is nothing to build from, so `auto` packs
+    /// from the published guest runtime of this version — never the image
+    /// set, which carries no sidecar.
     #[test]
-    fn a_sidecar_build_without_an_image_checkout_is_refused() {
-        let err = build_from(None).expect_err("nothing can build the sidecar");
-
-        let rendered = format!("{err:#}");
-        assert!(
-            rendered.contains("the SDK sidecar is built from an mvm-images checkout"),
-            "{rendered}"
-        );
-        assert!(
-            rendered.contains("image construction lives in mvm-images"),
-            "{rendered}"
-        );
+    fn without_a_checkout_auto_packs_from_the_published_guest_runtime() {
+        assert_eq!(route(Source::Auto, None).unwrap(), Route::ReleaseArchive);
     }
 
-    /// A pair-built sidecar entry names its files the way the image
-    /// repository's manifest emitter does (`sdk-sidecar-<libc>-<arch>-sdk.ext4`
-    /// and so on), not by the canonical names the sidecar installer reads. The
-    /// explicit `build sdk-sidecar build` verb must install from such an entry
-    /// for both libc variants, the same as the launch path does.
     #[test]
-    fn a_pair_built_sidecar_entry_installs_both_libc_variants() {
-        use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact};
-        use mvm_build::image_source::{ImageBuildRole, PairBuild};
-        use mvm_core::image_set::ImageSetRole;
-        use mvm_core::packs::Sha256Hex;
-        use mvm_core::util::test_env::TestEnv;
-
-        let mut env = TestEnv::new();
-        let pair = Pair::new();
-        let home = pair.tmp.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        env.set("MVM_HOME", &home);
-        let version = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-
-        for (libc, attr) in [
-            (GuestLibc::Glibc, "sdk-sidecar-image"),
-            (GuestLibc::Musl, "sdk-sidecar-image-musl"),
+    fn the_build_verb_parses_its_source_and_force() {
+        for argv in [
+            vec!["mvmctl", "build", "sdk-sidecar", "build"],
+            vec![
+                "mvmctl",
+                "build",
+                "sdk-sidecar",
+                "build",
+                "--source",
+                "build",
+                "--force",
+            ],
         ] {
-            let image = sidecar_ext4_bytes(libc);
-            let version_file = format!("{version}\n");
-            let checksums = format!(
-                "{}  sdk.ext4\n{}  VERSION\n",
-                Sha256Hex::from_bytes(&image).as_str(),
-                Sha256Hex::from_bytes(version_file.as_bytes()).as_str(),
-            );
-            let entry = pair.publish(
-                ImageBuildRole::RuntimeOverlay,
-                attr,
-                &[(
-                    ImageSetRole::SdkSidecar(libc),
-                    None,
-                    vec![
-                        TestArtifact {
-                            name: "sdk.ext4",
-                            bytes: image,
-                            format: "ext4",
-                        },
-                        TestArtifact {
-                            name: "VERSION",
-                            bytes: version_file.into_bytes(),
-                            format: "text",
-                        },
-                        TestArtifact {
-                            name: "checksums-sha256.txt",
-                            bytes: checksums.into_bytes(),
-                            format: "text",
-                        },
-                    ],
-                    &["virtio_blk"],
-                )],
-            );
-            let build = PairBuild {
-                key: entry.key.clone(),
-                entry,
-                built: true,
+            let cli = Cli::try_parse_from(&argv).expect("parse");
+            let Commands::Build(group) = cli.command else {
+                panic!("expected build group");
             };
-
-            install_pair_sidecar(&build, &cache_root, version, arch, libc)
-                .unwrap_or_else(|error| panic!("installing the {libc} sidecar: {error:#}"));
-
-            let resolved =
-                mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.into())
-                    .resolve(&arch.to_string(), libc)
-                    .unwrap_or_else(|error| panic!("the {libc} sidecar resolves: {error:#}"));
-            assert_eq!(resolved.version, version);
+            assert!(matches!(group.action, build_group::BuildCmd::SdkSidecar(_)));
         }
     }
 
-    /// A minimal sidecar ext4 whose cdylib names `libc`, the one property the
-    /// resolver proves about the payload.
-    fn sidecar_ext4_bytes(libc: GuestLibc) -> Vec<u8> {
-        use mvm_fs::ext4::{Node, Owner};
-        let nodes = vec![
-            Node::Dir {
-                path: "/lib".into(),
-                mode: 0o555,
-                xattrs: Vec::new(),
-                owner: Owner::ROOT,
-            },
-            Node::File {
-                path: "/lib/libmvm_host_services.so".into(),
-                mode: 0o555,
-                data: mvm_fs::elf::test_fixture::shared_object(&[
-                    "libgcc_s.so.1",
-                    libc.libc_soname().expect("a fixture names a real libc"),
-                ]),
-                xattrs: Vec::new(),
-                owner: Owner::ROOT,
-            },
-        ];
-        mvm_fs::ext4::build_image(nodes, &Default::default()).expect("build sidecar ext4 fixture")
+    /// The image set carries no sidecar, so there is nothing to download.
+    #[test]
+    fn source_download_is_no_longer_accepted() {
+        Cli::try_parse_from([
+            "mvmctl",
+            "build",
+            "sdk-sidecar",
+            "build",
+            "--source",
+            "download",
+        ])
+        .expect_err("--source download names a retired image-set member");
+    }
+
+    #[test]
+    fn a_source_checkout_packs_from_the_archive_by_default() {
+        let root = PathBuf::from("/checkout");
+        assert_eq!(
+            route(Source::Auto, Some(root.clone())).unwrap(),
+            Route::Archive(root.clone())
+        );
+        assert_eq!(
+            route(Source::Build, Some(root.clone())).unwrap(),
+            Route::Archive(root)
+        );
+    }
+
+    /// The sidecar no longer comes from an image checkout or the builder VM, so
+    /// an explicit build without a source checkout names what is missing and
+    /// the published alternative, not an image-checkout variable.
+    #[test]
+    fn an_explicit_build_without_a_checkout_names_the_way_out() {
+        let error = route(Source::Build, None).unwrap_err().to_string();
+        assert!(error.contains("--source auto"), "{error}");
+        assert!(
+            error.contains(mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV),
+            "{error}"
+        );
+        assert!(
+            !error.contains(mvm_build::image_source::MVM_IMAGES_DIR_ENV),
+            "{error}"
+        );
     }
 }

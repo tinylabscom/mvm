@@ -85,7 +85,7 @@ allowed to run inside those layers at all.
 
 | #   | Claim                                                                      | Defends layer            | How it's enforced                                                                                                                                        |
 | --- | -------------------------------------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | No host-fs access from a guest beyond explicit shares                      | L2 / L5                  | Per-service uid + seccomp `standard` default + setpriv bounding-set drop; user-volume allow-list defaulting to read-only                                 |
+| 1   | No host-fs access from a guest beyond explicit shares                      | L2 / L5                  | Per-service uid + the admitted seccomp tier on every workload process + setpriv bounding-set drop; user-volume allow-list defaulting to read-only        |
 | 2   | No guest binary can elevate to uid 0                                       | L2 / L4                  | `setpriv --no-new-privs` in launch path; `/etc/{passwd,group}` are read-only bind-mounts                                                                 |
 | 3   | A tampered rootfs ext4 fails to boot                                       | L3                       | dm-verity sidecar + roothash on cmdline + a verity-aware initramfs owning the boot pivot                                                                 |
 | 4   | A production-safe run cannot invoke DevOnly guest-agent verbs              | L4                       | Runtime profile + signed `VerbGrant` intersection; grant and conformance tests enforce the full DevOnly set                                              |
@@ -121,7 +121,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 
-This does **not** add a second seccomp implementation or new execution capability inside the sandbox. Runtime syscall filtering still comes from `mvm-runtime`'s `security/seccomp.rs` filter selection and the `mvm_core::crypto::seccomp::SeccompTier` syscall tiers. The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under.
+The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under, and that same tier is what the guest enforces. The host names it on the guest kernel cmdline, and the guest agent compiles the `mvm_core::crypto::seccomp::SeccompTier` allowlist once at activation and installs it, with `no_new_privs`, in every process it starts for the workload. Admission raises a tier below `network` to `network` when the run admits egress, an ingress mapping or a host service, because the workload needs sockets to use any of them.
 
 ## Per-backend tier matrix
 

@@ -33,6 +33,8 @@ use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore, key_id_fr
 const ROOTFS: &[u8] = b"an ext4 image the flake built";
 const KERNEL: &[u8] = b"a kernel the flake built";
 const SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true}"#;
+const SEALED_SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true,"sealed":true}"#;
+const INITRD: &[u8] = b"an initrd the flake built";
 const HOST_KEY_FILE: &str = "host-signer.ed25519";
 
 /// What the guest does with an output member.
@@ -48,6 +50,10 @@ enum Member {
 struct TarGuest {
     scratch: PathBuf,
     rootfs: Member,
+    /// A sealed image with an initrd. Its output also carries a dm-verity pair
+    /// that matches nothing, the way a pair copied from the Nix output would
+    /// once the job had rewritten the rootfs.
+    sealed: bool,
 }
 
 impl TarGuest {
@@ -62,7 +68,14 @@ impl TarGuest {
             }
         }
         std::fs::write(tree.join("vmlinux"), KERNEL).unwrap();
-        std::fs::write(tree.join(SIDECAR_FILENAME), SIDECAR).unwrap();
+        if self.sealed {
+            std::fs::write(tree.join(SIDECAR_FILENAME), SEALED_SIDECAR).unwrap();
+            std::fs::write(tree.join("initrd"), INITRD).unwrap();
+            std::fs::write(tree.join("rootfs.verity"), b"a stale tree").unwrap();
+            std::fs::write(tree.join("rootfs.roothash"), "ab".repeat(32)).unwrap();
+        } else {
+            std::fs::write(tree.join(SIDECAR_FILENAME), SIDECAR).unwrap();
+        }
         let outcome = JobOutcome {
             contract_version: BUILDER_JOB_CONTRACT_VERSION,
             exit_code: 0,
@@ -187,6 +200,14 @@ impl Publisher {
         TarGuest {
             scratch: self.path("guest"),
             rootfs,
+            sealed: false,
+        }
+    }
+
+    fn sealed_guest(&self) -> TarGuest {
+        TarGuest {
+            sealed: true,
+            ..self.guest(Member::Bytes(ROOTFS))
         }
     }
 }
@@ -333,4 +354,52 @@ fn a_guest_that_links_its_rootfs_to_the_host_key_gets_nothing_signed() {
             path.display()
         );
     }
+}
+
+/// dm-verity's root hash over `rootfs`, as the guest computes it at boot.
+fn boot_root_hash(rootfs: &[u8]) -> String {
+    mvm_fs::ext4::verity::to_hex(&mvm_fs::ext4::verity::root_hash(
+        rootfs, &[0u8; 32], 4096, 4096,
+    ))
+}
+
+#[test]
+fn a_sealed_build_ships_a_verity_pair_over_its_final_rootfs_and_its_initrd() {
+    let publisher = Publisher::new();
+    let signer = publisher.signer();
+
+    let sealed =
+        build_and_export_bundle_on(&publisher.request(), &signer, &publisher.sealed_guest())
+            .expect("the build is sealed");
+
+    let consumer = tempfile::tempdir().unwrap();
+    let trust = trust_only(
+        &consumer.path().join("trusted-publishers"),
+        &signer.verifying_key(),
+    );
+    let installed = BundleRegistry::new(consumer.path().join("bundles"))
+        .install_file(&sealed.bundle_path, &trust, false)
+        .expect("installs");
+    let artifacts = installed.root.join("artifacts");
+
+    let rootfs = std::fs::read(artifacts.join("rootfs.ext4")).unwrap();
+    assert_eq!(rootfs, ROOTFS);
+    assert_eq!(std::fs::read(artifacts.join("initrd")).unwrap(), INITRD);
+
+    // The pair the guest returned matched nothing; the bundle carries the one
+    // the host computed over the rootfs it ships.
+    let verity = installed
+        .manifest
+        .verity
+        .as_ref()
+        .expect("the manifest binds a root hash");
+    assert_eq!(verity.roothash, boot_root_hash(&rootfs));
+    let tree = std::fs::read(artifacts.join(&verity.sidecar_artifact)).unwrap();
+    let expected = mvm_fs::ext4::verity::format(&rootfs, &[0u8; 32], 4096, 4096);
+    assert_eq!(tree, expected.hash_tree);
+
+    // And a rootfs changed by one byte would not boot under that root hash.
+    let mut tampered = rootfs.clone();
+    tampered[0] ^= 0x01;
+    assert_ne!(boot_root_hash(&tampered), verity.roothash);
 }

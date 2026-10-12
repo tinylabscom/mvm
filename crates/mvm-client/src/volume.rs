@@ -67,7 +67,306 @@ mod tests {
     use crate::profile::RunProfile;
 
     fn service() -> LocalVolumeService {
-        LocalVolumeService::new()
+        super::test_support::service()
+    }
+
+    // --- storage policy for managed volume plaintext -------------------------
+
+    use super::test_support::unverified_service;
+
+    fn files_in(dir: &Path) -> Vec<PathBuf> {
+        match fs::read_dir(dir) {
+            Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn append_byte(path: &Path, byte: u8) -> Vec<u8> {
+        let mut image = fs::OpenOptions::new().write(true).open(path).unwrap();
+        image.seek(SeekFrom::End(-1)).unwrap();
+        image.write_all(&[byte]).unwrap();
+        image.sync_all().unwrap();
+        fs::read(path).unwrap()
+    }
+
+    fn jit_launch(owner: &str) -> LaunchLeaseRequest {
+        LaunchLeaseRequest::builder(owner)
+            .unwrap()
+            .profile(RunProfile::Dev)
+            .unlock(UnlockPolicy::JustInTime)
+            .build()
+    }
+
+    #[test]
+    fn create_refuses_default_and_custom_roots_without_verified_storage() {
+        let home = TestVolumeHome::new();
+        for custom in [false, true] {
+            let mut builder = CreateBlockVolumeRequest::builder("work")
+                .unwrap()
+                .capacity_mib(16);
+            let root = if custom {
+                let root = home.path().join("custom");
+                builder = builder.root(&root);
+                root
+            } else {
+                super::lifecycle::default_mvm_volume_root()
+            };
+            let request = builder.build().unwrap();
+            for svc in [LocalVolumeService::new(), unverified_service()] {
+                let error = svc.create_block_volume(&request).unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains("not verified encrypted"), "{message}");
+                assert!(
+                    message
+                        .contains(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV),
+                    "the refusal names the override: {message}"
+                );
+                assert!(LocalVolumeCatalog::load().unwrap().get("work").is_none());
+                assert!(
+                    !super::lifecycle::local_master_key_dir().exists(),
+                    "no key minted"
+                );
+                assert!(files_in(&root.join("unlocked")).is_empty(), "no plaintext");
+                assert!(
+                    files_in(&root.join("encrypted")).is_empty(),
+                    "no ciphertext"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn create_and_unlock_probe_the_private_plaintext_directory_of_a_custom_root() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let home = TestVolumeHome::new();
+        let root = home.path().join("custom");
+        let unlocked = root.join("unlocked");
+        fs::create_dir_all(&unlocked).unwrap();
+        // Directories that already exist loosely are tightened before the probe.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&unlocked, fs::Permissions::from_mode(0o755)).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let observed = seen.clone();
+        let svc =
+            LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(move |path| {
+                assert_eq!(mode(path), 0o700, "probed only once private");
+                observed.lock().unwrap().push(path.to_path_buf());
+                Ok(())
+            }));
+        let request = CreateBlockVolumeRequest::builder("work")
+            .unwrap()
+            .capacity_mib(16)
+            .root(&root)
+            .build()
+            .unwrap();
+        svc.create_block_volume(&request).unwrap();
+        svc.unlock_volume("work").unwrap();
+        assert_eq!(*seen.lock().unwrap(), vec![unlocked.clone(), unlocked]);
+        assert_eq!(mode(&root), 0o700);
+        assert_eq!(mode(&host_path("work")), 0o600);
+    }
+
+    #[test]
+    fn unlock_on_unverified_storage_keeps_the_volume_locked_and_its_ciphertext_intact() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        let ciphertext = fs::read(ciphertext_path("work")).unwrap();
+        for svc in [LocalVolumeService::new(), unverified_service()] {
+            let error = svc.unlock_volume("work").unwrap_err();
+            assert!(
+                format!("{error:#}").contains("not verified encrypted"),
+                "{error:#}"
+            );
+            assert_eq!(managed_state("work"), LocalVolumeState::Locked);
+            assert!(!host_path("work").exists(), "no plaintext");
+            assert!(!super::lifecycle::unlock_staging_path(&host_path("work")).exists());
+            assert_eq!(fs::read(ciphertext_path("work")).unwrap(), ciphertext);
+        }
+    }
+
+    #[test]
+    fn attach_rechecks_storage_and_never_loses_writable_data() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        let bytes = append_byte(&host_path("work"), 0x7a);
+
+        let error = unverified_service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("not verified encrypted"),
+            "{error:#}"
+        );
+        assert!(service().list_attachments("vm-1").unwrap().is_empty());
+        assert_eq!(fs::read(host_path("work")).unwrap(), bytes);
+
+        // Sealing needs no probe: it writes only ciphertext. The data survives
+        // the round trip.
+        unverified_service().lock_volume("work").unwrap();
+        service().unlock_volume("work").unwrap();
+        assert_eq!(fs::read(host_path("work")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn attach_tightens_an_unlocked_image_another_user_could_read() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        fs::set_permissions(host_path("work"), fs::Permissions::from_mode(0o644)).unwrap();
+        service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
+            .unwrap();
+        assert_eq!(mode(&host_path("work")), 0o600);
+    }
+
+    #[test]
+    fn launch_rechecks_an_explicitly_unlocked_volume_before_leasing() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
+            .unwrap();
+        let bytes = fs::read(host_path("work")).unwrap();
+        for svc in [LocalVolumeService::new(), unverified_service()] {
+            let error = svc.acquire_launch_lease(&dev_launch("vm-1")).unwrap_err();
+            assert!(format!("{error:#}").contains("storage policy"), "{error:#}");
+            assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
+            assert_eq!(
+                managed_state("work"),
+                LocalVolumeState::Unlocked,
+                "explicit unlock persists"
+            );
+            assert_eq!(fs::read(host_path("work")).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn a_just_in_time_failure_relocks_the_volumes_unlocked_before_it() {
+        let home = TestVolumeHome::new();
+        for name in ["first", "second"] {
+            let request = CreateBlockVolumeRequest::builder(name)
+                .unwrap()
+                .capacity_mib(16)
+                .root(home.path().join(name))
+                .build()
+                .unwrap();
+            service().create_block_volume(&request).unwrap();
+            service().unlock_volume(name).unwrap();
+            service()
+                .prepare_attachment(&attach(
+                    "vm-1",
+                    name,
+                    &format!("/data/{name}"),
+                    AccessMode::ReadOnly,
+                ))
+                .unwrap();
+            service().lock_volume(name).unwrap();
+        }
+        let denied_root = home.path().join("second");
+        let svc =
+            LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(move |path| {
+                if path.starts_with(&denied_root) {
+                    anyhow::bail!("synthetic failed backing probe");
+                }
+                Ok(())
+            }));
+        let error = svc.acquire_launch_lease(&jit_launch("vm-1")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("synthetic failed backing probe"),
+            "{error:#}"
+        );
+        for name in ["first", "second"] {
+            assert_eq!(managed_state(name), LocalVolumeState::Locked, "{name}");
+            assert!(!host_path(name).exists(), "{name} has no plaintext left");
+        }
+        assert!(AttachmentLeaseCatalog::load().unwrap().leases.is_empty());
+    }
+
+    #[test]
+    fn release_recovery_and_sealing_need_no_probe() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        service()
+            .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
+            .unwrap();
+        service().lock_volume("work").unwrap();
+        let mut prepared = service().acquire_launch_lease(&jit_launch("vm-1")).unwrap();
+        prepared.commit();
+        drop(prepared);
+        let bytes = append_byte(&host_path("work"), 0x5a);
+
+        let denied = LocalVolumeService::new();
+        let released = denied.release_owner_leases("vm-1").unwrap();
+        assert_eq!(released.relocked, vec!["work"]);
+        service().unlock_volume("work").unwrap();
+        assert_eq!(fs::read(host_path("work")).unwrap(), bytes);
+
+        // An interrupted seal recovers to the writable image without a probe.
+        let mut catalog = LocalVolumeCatalog::load().unwrap();
+        super::lifecycle::set_local_volume_state(&mut catalog, "work", LocalVolumeState::Locking)
+            .unwrap();
+        catalog.save().unwrap();
+        denied.recover().unwrap();
+        assert_eq!(managed_state("work"), LocalVolumeState::Unlocked);
+        assert_eq!(fs::read(host_path("work")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn sealing_leaves_nothing_but_ciphertext_beside_the_archive() {
+        let home = TestVolumeHome::new();
+        home.create_block("work", 16);
+        service().unlock_volume("work").unwrap();
+        append_byte(&host_path("work"), 0x33);
+        service().lock_volume("work").unwrap();
+        let ciphertext = ciphertext_path("work");
+        let beside = files_in(ciphertext.parent().unwrap());
+        assert_eq!(
+            beside,
+            vec![ciphertext.clone()],
+            "only the archive: {beside:?}"
+        );
+        assert_eq!(mode(&ciphertext), 0o600);
+    }
+
+    #[test]
+    fn the_override_admits_every_entry_point_and_audits_each_use() {
+        let mut home = TestVolumeHome::new();
+        home.allow_unverified_storage();
+        let svc = unverified_service();
+        let request = CreateBlockVolumeRequest::builder("work")
+            .unwrap()
+            .capacity_mib(16)
+            .build()
+            .unwrap();
+        svc.create_block_volume(&request).expect("create");
+        svc.unlock_volume("work").expect("unlock");
+        svc.prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
+            .expect("attach");
+        let mut prepared = svc
+            .acquire_launch_lease(&dev_launch("vm-1"))
+            .expect("launch");
+        prepared.commit();
+        drop(prepared);
+        svc.release_owner_leases("vm-1").unwrap();
+
+        let log = fs::read_to_string(mvm_core::policy::audit::default_audit_log()).unwrap();
+        let uses = log
+            .lines()
+            .filter(|line| line.contains("\"volume_storage_override\""))
+            .count();
+        assert_eq!(uses, 4, "create, unlock, attach, launch:\n{log}");
+        assert!(log.contains("purpose=managed volume"), "{log}");
     }
 
     fn attach(owner: &str, volume: &str, guest: &str, access: AccessMode) -> AttachmentRequest {
@@ -680,7 +979,7 @@ mod tests {
         drop(prepared);
 
         // A brand-new service instance sees the persisted lease.
-        let fresh = LocalVolumeService::new();
+        let fresh = service();
         assert_eq!(
             fresh.describe_volume("work").unwrap().attached_to,
             Some("vm-1".to_string())
@@ -723,7 +1022,9 @@ mod tests {
         let home = TestVolumeHome::new();
         let root = home.path().join("plain");
         fs::create_dir(&root).unwrap();
-        let err = service().require_host_encryption(&root).unwrap_err();
+        let err = LocalVolumeService::new()
+            .require_host_encryption(&root)
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("no host encryption probe"),
             "got: {err:#}"
@@ -906,7 +1207,7 @@ mod tests {
 
         // The launch-time recheck runs with the deny-all probe: the host
         // backing can no longer be verified, so the launch is refused.
-        let err = service()
+        let err = LocalVolumeService::new()
             .acquire_launch_lease(&dev_launch("vm-1"))
             .unwrap_err();
         assert!(

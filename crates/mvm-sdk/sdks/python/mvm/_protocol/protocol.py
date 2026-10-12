@@ -1628,6 +1628,31 @@ class RuntimeOverlayConfig:
     roothash: str
 
 
+class SeccompTier1(Enum):
+    essential = 'essential'
+
+
+class SeccompTier2(Enum):
+    minimal = 'minimal'
+
+
+class SeccompTier3(Enum):
+    standard = 'standard'
+
+
+class SeccompTier4(Enum):
+    network = 'network'
+
+
+class SeccompTier5(Enum):
+    unrestricted = 'unrestricted'
+
+
+SeccompTier = Union[
+    SeccompTier1, SeccompTier2, SeccompTier3, SeccompTier4, SeccompTier5
+]
+
+
 ServiceId = str
 
 
@@ -2010,6 +2035,7 @@ class PostRestoreAck:
     detail: Optional[str] = None
     reseed_shortfall: Optional[ReseedShortfall] = None
     reseeded: Optional[bool] = False
+    seccomp_tier: Optional[SeccompTier] = None
 
 
 @dataclass
@@ -2138,6 +2164,7 @@ class PostRestore:
     grant_envelope: Optional[VerbGrantEnvelope] = None
     host_epoch_secs: Optional[int] = None
     hostname: Optional[str] = None
+    seccomp_tier: Optional[SeccompTier] = None
     token: Optional[List[TokenItem]] = field(
         default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     )

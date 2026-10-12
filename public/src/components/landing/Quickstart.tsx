@@ -4,7 +4,7 @@ import { Reveal } from "./primitives/Reveal";
 import { InstallTabs } from "./InstallTabs";
 
 const TERMINAL_LINES = [
-  { text: "$ mvmctl machine run --image alpine -- uname -a", dim: false, accent: false },
+  { text: "$ mvmctl machine run --name demo --image alpine -- uname -a", dim: false, accent: false },
   { text: "  Preparing a private root from alpine...", dim: true, accent: false },
   { text: "  Booted. Own kernel. Network: deny-all.", dim: false, accent: true },
   { text: "  Linux mvm 6.12.0 #1 SMP aarch64 GNU/Linux", dim: false, accent: false },

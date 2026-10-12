@@ -98,8 +98,11 @@ Three commands. That's the user model.
 mvmctl init .              # scaffold mvm.toml + flake.nix in cwd
 $EDITOR mvm.toml           # tweak sizing / profile to taste
 mvmctl machine build               # discover manifest, run nix build, persist artifacts
-mvmctl machine run --manifest .                  # boot the built microVM
+mvmctl machine run --name app --manifest .       # boot the built microVM
 ```
+
+The run is named because an unnamed run must claim a prepared warm standby,
+and `pool warm` prepares only OCI and default images; a named run boots cold.
 
 Repeated edits are just edits. The next `mvmctl machine build` re-reads `mvm.toml` and re-runs the build. Resource changes (`vcpus`, `mem`, `data_disk`) update silently; identity changes (`flake`, `profile`) trip a drift refusal that asks you to `--force` or rename — see [Drift detection](#drift-detection) below.
 
@@ -219,10 +222,13 @@ For running VMs (separate concern), continue to use `mvmctl machine ps` / `mvmct
 ## Booting
 
 ```bash
-mvmctl machine run --manifest .                            # boot from slot keyed by manifest at cwd
-mvmctl machine run --manifest /path/to/project           # explicit
-mvmctl machine run --manifest /path/to/project -- uname -a   # ephemeral one-shot
+mvmctl machine run --name app --manifest .                    # boot from slot keyed by manifest at cwd
+mvmctl machine run --name app --manifest /path/to/project     # explicit
+mvmctl machine run --name app --manifest /path/to/project -- uname -a   # ephemeral one-shot
 ```
+
+Each run is named, so it boots cold. Without `--name` it would have to claim a
+prepared warm standby, which `pool warm` cannot prepare for a manifest image.
 
 If no current revision exists, you get an error with a hint to run `mvmctl machine build`. If the manifest's `vcpus`/`mem` differ from what the slot's snapshot was taken at, the snapshot is ignored and a cold-boot from the rootfs proceeds (with a warning).
 

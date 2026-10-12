@@ -21,9 +21,11 @@ Feature: The documented flake build runs for real
   #
   # Shares this feature rather than the launch suite because the builder VM is
   # the expensive part and this scenario reuses what the one above just built.
+  # Named so it takes the cold path: an unnamed launch has to claim a prepared
+  # warm standby, and nothing warms one for a freshly built flake.
   @live @release_gate_flake
   Scenario: the documented entrypoint launch runs the compiled workload
-    When I run mvmctl in an isolated live home with "machine run --entrypoint --flake examples/exit_code"
+    When I run mvmctl in an isolated live home with "machine run --name bdd-documented-entrypoint --entrypoint --flake examples/exit_code"
     Then the command exits with code 7
 
   # The image a builder VM produced, sealed on the host that ran it and

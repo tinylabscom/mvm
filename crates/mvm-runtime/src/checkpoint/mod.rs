@@ -42,10 +42,15 @@ use restore_content::{
 };
 
 pub use gc::{ContentPruneReport, prune_unreferenced_content};
+pub use protection::verify_content_at_rest;
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
     retention_verdicts,
 };
+/// Chunk payloads decrypted from content directories under a root, for tests
+/// that must show a path decrypts nothing.
+#[cfg(test)]
+pub(crate) use sealed::chunk_opens;
 
 pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_NAME;
 
@@ -1287,10 +1292,18 @@ pub fn restore_checkpoint(
     verify_checkpoint_against_chain(anchor, &meta)?;
     verify_content_except(store, &meta, restore.verifies_on_load())?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
-    let materialized = tempfile::Builder::new()
-        .prefix(".restore-")
-        .tempdir_in(store.root())
-        .context("creating checkpoint restore materialization")?;
+    // A restore killed before it returned left its plaintext behind.
+    staging::reclaim_abandoned_restores(store.root());
+    let materialized =
+        crate::private_staging::create(store.root(), staging::RESTORE_MATERIALIZATION_PREFIX)
+            .context("creating checkpoint restore materialization")?;
+    // An interrupt exits without running destructors; remove it from there too.
+    let _remove_on_interrupt = {
+        let path = materialized.path().to_path_buf();
+        crate::interrupt_cleanup::on_interrupt("checkpoint restore staging", move || {
+            let _ = std::fs::remove_dir_all(&path);
+        })
+    };
     if meta.protection.is_sealed() {
         return protection::restore_protected(
             store,

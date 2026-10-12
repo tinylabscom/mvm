@@ -52,6 +52,69 @@ it could not acquire after repeated attempts as cancelled; the required
 aggregate correctly surfaced those infrastructure cancellations as `Checks
 failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
 
+On 2026-10-10, median pull-request CI was 58-106 minutes, against 2-6 minutes
+on 2026-10-01 and 2026-10-02. #3971 had moved the whole matrix onto pull
+requests, and #4117 then reduced the merge group to scope classification. A
+representative uncontended run (38099555037) had a 33-minute aarch64 lane, a
+26-minute `Lint feature coverage`, and a workspace suite whose shards could
+not start until the archive job finished an 8-minute nextest filter listing.
+Contended runs started lanes up to 40 minutes late. With the queue now
+batched (three groups building, up to five entries each), the #4117 shape also
+meant batched PRs were never tested together.
+
+## Policy since 2026-10-10: fast gate on the PR, full matrix in the queue
+
+A pull request runs the fast gate; the merge queue runs everything.
+
+| Lane | Pull request | Merge queue |
+|---|---|---|
+| Lint core (`cargo fmt --all`, clippy `--all-targets`, BDD target clippy) | yes | yes |
+| Lint feature combinations (clippy over the unified non-default features, verifier-absent, `mvm-sdk` no-defaults) | yes | yes |
+| Invariant (actionlint, `xtask check-all`, script gates) | yes | yes |
+| Windows compile check | yes | yes |
+| Build workspace tests + Test workspace (x86_64 shards) | yes | yes |
+| Feature test suites (default, test-support, embed-host-bins) | — | yes |
+| Workspace extras (doctests, man pages, nextest filter validation) | — | yes |
+| aarch64 workspace suite | — | yes |
+| Release-profile witness, musl confinement, eBPF, Linux coverage | — | yes |
+| BDD conformance (with the live PS-11 witness) | — | yes |
+| Boot latency ceiling, Nix flake check | — | yes |
+
+How this differs from #3893, which #3971 reverted: #3893 made PR admission
+compile-free, so a change that did not compile, failed clippy, or broke a unit
+test was first discovered in a merge group, where it marked every entry built
+on top of it red. The fast gate keeps exactly those failures on the PR: every
+workspace test target is compiled (including the Linux-gated ones and the BDD
+runner) and the unit suite runs before admission. What moves to the queue is
+the slow integration evidence — other architectures, other profiles and libcs,
+live witnesses, feature *test* suites — whose failures are rarer and are, by
+nature, properties of the merged tree.
+
+How this differs from #4117: the queue no longer reuses the PR's result. With
+batching, the PR's proof was for a commit that never merges; the queue's run is
+for the one that does.
+
+The `Test` aggregate enforces both tiers by event: a full-matrix lane that runs
+on a pull request is refused, as is any lane that skips in the queue. Merge
+groups no longer share a concurrency key, because the queue builds several at
+once. The queue-policy guard admits exactly two shapes: the singleton queue (one
+building, one per group, no wait) and the batched one (`ALLGREEN`, three
+building, up to five per group, minimum one, five-minute wait). Both stay
+admitted so the ruleset switch and this workflow change can land in either
+order without failing every queue run.
+
+A runner picker (`Pick runners`) sends the x86_64 workspace suite to the idle
+self-hosted KVM box when `RUNNER_PICKER_TOKEN` can see one, and to hosted
+runners otherwise. It never fails a run and never selects the box for a
+pull request from a fork. Routing is opt-in through the repository variable
+`RUNNER_PICKER_WORKSPACE=true`: the box's first run took 34 minutes (12.6 of
+them in the nextest filter listing) and failed three tests that pass hosted
+(`registry_pack::tests::verified_payload_refuses_a_symlink_even_when_its_target_matches`,
+`checkpoint::gc::tests::captures_racing_a_prune_always_link_a_verified_object`,
+`bundle_push_emits_bundle_push_and_the_printed_reference_fetches`).
+- [ ] Fix the self-hosted box's three failing tests and drop the filter listing
+      from its shard, then set `RUNNER_PICKER_WORKSPACE=true`.
+
 ## Work
 
 - [x] Add structural regression coverage for scope-first scheduling,
@@ -117,6 +180,9 @@ failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
       matrices live in the called publish workflows, runs last and alone.
 - [x] Fail in the scope job before fan-out when the live queue ruleset exceeds
       the `1/1/0` build/merge/wait runner budget.
+- [x] Split CI into a pull-request fast gate and a full merge-queue matrix, let
+      the queue batch (`ALLGREEN`, 3 building, 5 per group, 5-minute wait), and route the workspace suite to an idle
+      self-hosted runner when one is visible. See the policy section above.
 - [ ] Replace the broad `code` boolean with dependency-aware component scopes
       derived from the workspace graph. Each specialized lane should run for its
       owning component and reverse dependencies, failing closed on unknown paths.
@@ -138,8 +204,8 @@ failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
   which validates lint, policy, architecture, test, boot and scoped Nix results.
 - Paid plan changes, organization runner creation, and billing changes are not
   repository operations and require an organization owner.
-- Speculative width stays at one on the current 20-job pool. The 2026-10-05
-  incident demonstrated that width two already exceeds capacity for code-scoped
-  groups and turns unacquired runners into self-amplifying queue failures. Width
-  may rise only after dependency-aware fan-out reduces the measured peak or an
-  owner provides more capacity.
+- Speculative width was one until 2026-10-10. The 2026-10-05 incident showed
+  width two exceeding capacity for code-scoped groups, and that remains the risk
+  of the current three-group width: a group whose jobs cannot acquire runners
+  shows up as `Checks failed`. Watch for infrastructure cancellations in queue
+  runs, and narrow the width before deleting coverage.

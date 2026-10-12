@@ -19,7 +19,16 @@
 //!         mem.bin           (encrypted guest memory image, mode 0600)
 //!         integrity.json    (HMAC sidecar, mode 0600)
 //!         .epoch            (monotonic counter, mode 0600)
+//!     .capture-<pid>-*/     (a pause's private staging, mode 0700)
+//!     .restore-<pid>-*/     (a resume's decrypted copy, mode 0700)
+//!     .snapshot.previous/   (the replaced snapshot, only mid-publish)
 //! ```
+//!
+//! A pause captures, encrypts and seals inside its own staging and only then
+//! replaces `snapshot/`, so the published snapshot is always a complete one.
+//! Staging whose owning process died is reclaimed by the next pause, resume or
+//! reconcile; a publication interrupted between its renames is finished by
+//! [`recover_publication`].
 //!
 //! The directory itself is mode `0700` (consistent with the
 //! existing `~/.mvm` discipline). All snapshot files are
@@ -97,50 +106,189 @@ pub fn files_for(vm_name: &str) -> SnapshotFiles {
 /// the sealed sidecar so callers can record what they sealed.
 ///
 /// Callers admit the key first ([`admit_host_snapshot_key`]), before anything
-/// else touches the VM, so that without a usable key nothing is captured.
+/// else touches the VM, so that without a usable key nothing is captured, and
+/// hold the machine's lifecycle lock ([`lock_resume`]) for the whole call.
 ///
-/// 1. Ensure the snapshot dir exists (mode 0700).
-/// 2. Ask the IO impl to write `vmstate.bin` + `mem.bin`.
-/// 3. Tighten file modes to 0600.
-/// 4. Encrypt both artifacts in place under `key`.
-/// 5. Bump the per-instance epoch counter.
-/// 6. Seal the HMAC envelope over the ciphertext with the new epoch.
+/// The capture never touches the published snapshot until it is complete:
+///
+/// 1. Finish any publication an earlier pause was interrupted in, and reclaim
+///    capture staging whose owner died.
+/// 2. Create a private staging directory (mode 0700, owned by this process)
+///    beside the snapshot, before the VMM writes a byte.
+/// 3. Ask the IO impl to write `vmstate.bin` + `mem.bin` into it, tighten
+///    them to 0600, and encrypt both in place under `key`.
+/// 4. Record the next epoch and seal the HMAC envelope, still in staging.
+/// 5. Publish: move the previous snapshot aside, rename the staging into
+///    place, then drop the previous one.
+///
+/// A failure at any step removes the staging and leaves the previous snapshot,
+/// with its epoch, exactly as it was.
 pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(
     vm_name: &str,
     io: &IO,
     key: &SnapshotKey,
 ) -> Result<IntegritySidecar> {
-    let dir = prepare_instance_snapshot_dir(vm_name)?;
-    io.create_snapshot(&dir)
-        .with_context(|| format!("Firecracker create_snapshot({})", dir.display()))?;
-    tighten_snapshot_file_modes(&dir)?;
+    let dir = snapshot_dir(vm_name);
+    let parent = instance_dir(vm_name);
+    ensure_dir_with_mode(&parent, 0o700)?;
+    recover_publication(&dir)?;
+    reclaim_abandoned_staging(&parent);
+
+    let staged = crate::private_staging::create(&parent, CAPTURE_STAGING_PREFIX)
+        .with_context(|| format!("staging the capture of VM {vm_name:?}"))?;
+    // An interrupt exits without running destructors; the staging holds
+    // plaintext guest memory until it is encrypted, so remove it from there too.
+    let _remove_on_interrupt = {
+        let path = staged.path().to_path_buf();
+        crate::interrupt_cleanup::on_interrupt("capture staging", move || {
+            let _ = std::fs::remove_dir_all(&path);
+        })
+    };
+    let sidecar = seal_into(staged.path(), &dir, io, key)?;
+    publish(staged, &dir)?;
+    Ok(sidecar)
+}
+
+/// Capture, encrypt and seal into `staged`, numbering the epoch after the one
+/// published at `published`.
+fn seal_into<IO: SnapshotIO + ?Sized>(
+    staged: &Path,
+    published: &Path,
+    io: &IO,
+    key: &SnapshotKey,
+) -> Result<IntegritySidecar> {
+    io.create_snapshot(staged)
+        .with_context(|| format!("Firecracker create_snapshot({})", staged.display()))?;
+    tighten_snapshot_file_modes(staged)?;
 
     // The HMAC envelope below covers the ciphertext, so a tampered artifact
     // fails the seal check before AEAD decryption is attempted on resume.
-    encrypt_artifacts(&dir, key)
-        .with_context(|| format!("encrypting snapshot artifacts at {}", dir.display()))?;
+    encrypt_artifacts(staged, key)
+        .with_context(|| format!("encrypting snapshot artifacts at {}", staged.display()))?;
 
-    let key_path =
+    let hmac_path =
         mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
-    let key = load_or_init_key(&key_path)
-        .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
-    let files = files_in(&dir);
+    let hmac_key = load_or_init_key(&hmac_path)
+        .with_context(|| format!("loading HMAC key {}", hmac_path.display()))?;
+    let files = files_in(staged);
     let mvmctl_version = env!("CARGO_PKG_VERSION");
 
-    let store = EpochStore::new(dir.join(EPOCH_FILENAME));
-    let next_epoch = store
-        .next()
-        .with_context(|| format!("advancing epoch counter for {}", dir.display()))?;
+    let next_epoch = EpochStore::new(published.join(EPOCH_FILENAME))
+        .load()
+        .checked_add(1)
+        .context("snapshot epoch counter overflowed u64")?;
+    EpochStore::new(staged.join(EPOCH_FILENAME))
+        .advance(next_epoch)
+        .with_context(|| format!("recording epoch {next_epoch} in {}", staged.display()))?;
 
-    let sidecar = seal(
-        &dir,
+    seal(
+        staged,
         &files,
         next_epoch,
         mvmctl_version,
-        key.expose_secret(),
+        hmac_key.expose_secret(),
     )
-    .with_context(|| format!("sealing instance snapshot at {}", dir.display()))?;
-    Ok(sidecar)
+    .with_context(|| format!("sealing instance snapshot at {}", staged.display()))
+}
+
+/// Prefix of the private directory a pause captures into before publishing.
+const CAPTURE_STAGING_PREFIX: &str = ".capture-";
+
+/// Where the published snapshot waits while its replacement is renamed into
+/// place. Only a pause holding the machine's lifecycle lock creates it.
+fn previous_generation(dir: &Path) -> PathBuf {
+    let name = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    dir.with_file_name(format!(".{name}.previous"))
+}
+
+/// Replace the snapshot at `dir` with the complete, sealed `staged` one.
+///
+/// Every file is synced before the first rename. The previous snapshot is
+/// renamed aside, not removed, until its replacement is in place, so a crash
+/// between the two renames leaves it for [`recover_publication`] to put back.
+fn publish(staged: tempfile::TempDir, dir: &Path) -> Result<()> {
+    use mvm_core::util::atomic_io::{sync_dir, sync_file};
+    let parent = dir.parent().context("snapshot directory has no parent")?;
+    for entry in std::fs::read_dir(staged.path())? {
+        sync_file(&entry?.path())?;
+    }
+    sync_dir(staged.path())?;
+
+    let previous = previous_generation(dir);
+    let replaced = dir.exists();
+    if replaced {
+        std::fs::rename(dir, &previous)
+            .with_context(|| format!("setting aside the published snapshot {}", dir.display()))?;
+    }
+    if let Err(error) = std::fs::rename(staged.path(), dir) {
+        if replaced {
+            std::fs::rename(&previous, dir).with_context(|| {
+                format!(
+                    "restoring the previous snapshot after publication failed ({error});                      it is kept at {}",
+                    previous.display()
+                )
+            })?;
+        }
+        return Err(error).with_context(|| format!("publishing {}", dir.display()));
+    }
+    // The rename moved the staging; nothing is left for the guard to remove.
+    let _ = staged.keep();
+    sync_dir(parent)?;
+    if replaced && let Err(error) = std::fs::remove_dir_all(&previous) {
+        // Published either way; the next pause or reconcile removes it.
+        tracing::warn!(path = %previous.display(), %error, "could not remove the replaced snapshot");
+    }
+    Ok(())
+}
+
+/// Finish a publication a pause was interrupted in. The caller holds the
+/// machine's lifecycle lock, so no pause is publishing now.
+///
+/// - The previous generation set aside, and no snapshot published: the pause
+///   died between its two renames, so the previous snapshot is put back.
+/// - Both present: the new snapshot was published, so the previous one goes.
+///
+/// Returns what it did, for the caller to record.
+pub fn recover_publication(dir: &Path) -> Result<Option<PublicationRecovery>> {
+    let previous = previous_generation(dir);
+    if !previous.exists() {
+        return Ok(None);
+    }
+    if dir.exists() {
+        std::fs::remove_dir_all(&previous)
+            .with_context(|| format!("removing the replaced snapshot {}", previous.display()))?;
+        return Ok(Some(PublicationRecovery::ReplacedRemoved));
+    }
+    std::fs::rename(&previous, dir)
+        .with_context(|| format!("restoring the snapshot set aside at {}", previous.display()))?;
+    if let Some(parent) = dir.parent() {
+        mvm_core::util::atomic_io::sync_dir(parent)?;
+    }
+    Ok(Some(PublicationRecovery::PreviousRestored))
+}
+
+/// What [`recover_publication`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublicationRecovery {
+    /// A pause died before publishing its replacement; the snapshot it had set
+    /// aside is published again.
+    PreviousRestored,
+    /// A pause published its replacement but died before removing the
+    /// snapshot it replaced; that one is removed.
+    ReplacedRemoved,
+}
+
+impl PublicationRecovery {
+    /// The audit action for this recovery.
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::PreviousRestored => "snapshot_previous_restored",
+            Self::ReplacedRemoved => "snapshot_replaced_removed",
+        }
+    }
 }
 
 /// The lock file that serializes lifecycle transitions of one machine:
@@ -200,6 +348,10 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
     io: &IO,
 ) -> Result<IntegritySidecar> {
     let dir = snapshot_dir(vm_name);
+    // A pause interrupted between its two renames leaves the snapshot it was
+    // replacing set aside; publish it again before looking for one. The
+    // caller holds the machine's lifecycle lock, so no pause is mid-publish.
+    recover_publication(&dir)?;
     verify_and_resume_from_dir(&dir, io)
 }
 
@@ -258,7 +410,7 @@ pub fn verify_and_resume_from_dir<IO: SnapshotIO + ?Sized>(
     // load succeeded or not.
     // Staging left behind by a process that died mid-restore holds decrypted
     // guest memory; remove it on every restore, encrypted or not.
-    remove_abandoned_staging(dir.parent().unwrap_or(dir));
+    reclaim_abandoned_staging(dir.parent().unwrap_or(dir));
     let staged = stage_artifacts_for_load(dir)
         .with_context(|| format!("decrypting snapshot artifacts at {}", dir.display()))?;
     // An interrupt exits without running destructors, so the staging
@@ -402,15 +554,8 @@ fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
     };
 
     let parent = dir.parent().unwrap_or(dir);
-    let staged = tempfile::Builder::new()
-        .prefix(&format!("{RESTORE_STAGING_PREFIX}{}-", std::process::id()))
-        .tempdir_in(parent)
-        .with_context(|| {
-            format!(
-                "creating a restore staging directory in {}",
-                parent.display()
-            )
-        })?;
+    let staged = crate::private_staging::create(parent, RESTORE_STAGING_PREFIX)
+        .context("creating a restore staging directory")?;
     for (name, is_encrypted) in present {
         let copy = staged.path().join(name);
         std::fs::copy(dir.join(name), &copy)
@@ -425,43 +570,40 @@ fn stage_artifacts_for_load(dir: &Path) -> Result<Option<tempfile::TempDir>> {
     Ok(Some(staged))
 }
 
-/// Remove restore staging directories in `parent` whose owning process is
-/// gone. A process killed mid-restore, or one built to abort on panic, cannot
-/// remove its own, and each one holds decrypted guest memory. A directory whose
-/// owner is still alive belongs to a restore in progress and is left alone.
-/// Every restore runs this, and so does reconcile, for each machine's instance
-/// directory.
-pub fn remove_abandoned_staging(parent: &Path) {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(owner) = name
-            .to_str()
-            .and_then(|name| name.strip_prefix(RESTORE_STAGING_PREFIX))
-            .and_then(|rest| rest.split('-').next())
-            .and_then(|pid| pid.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        if !mvm_vmm::host::process_liveness::pid_is_alive(owner) {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
+/// Remove capture and restore staging in `parent` (a machine's instance
+/// directory) whose owning process is gone, and return what was removed.
+///
+/// A process killed mid-pause or mid-restore, or one built to abort on panic,
+/// cannot remove its own staging, and each holds plaintext guest memory: a
+/// capture's before it is encrypted, a restore's after it is decrypted. A
+/// directory whose owner is still alive belongs to an operation in progress
+/// and is left alone. Every pause and restore runs this, and so does
+/// reconcile, for each machine's instance directory.
+pub fn reclaim_abandoned_staging(parent: &Path) -> Vec<PathBuf> {
+    let mut reclaimed = crate::private_staging::reclaim_abandoned(parent, CAPTURE_STAGING_PREFIX);
+    reclaimed.extend(crate::private_staging::reclaim_abandoned(
+        parent,
+        RESTORE_STAGING_PREFIX,
+    ));
+    reclaimed
 }
 
 /// Drop the on-disk snapshot files + sidecar + epoch counter for
-/// one VM. The instance directory itself stays so other state
-/// (e.g. forwarded-port records) isn't disturbed. Returns `true` if
-/// anything was removed.
+/// one VM, along with a previous generation an interrupted pause set aside
+/// (left in place, a later recovery would publish it again). The instance
+/// directory itself stays so other state (e.g. forwarded-port records) isn't
+/// disturbed. Returns `true` if anything was removed.
 pub fn delete_instance_snapshot(vm_name: &str) -> Result<bool> {
     let dir = snapshot_dir(vm_name);
-    if !dir.exists() {
-        return Ok(false);
+    let mut removed = false;
+    for path in [previous_generation(&dir), dir] {
+        if path.exists() {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("removing {}", path.display()))?;
+            removed = true;
+        }
     }
-    std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
-    Ok(true)
+    Ok(removed)
 }
 
 /// One row of the snapshot listing. Cheap value type so callers
@@ -615,7 +757,7 @@ mod tests {
     }
 
     /// Admit the host's snapshot key and pause under it, as a pause does.
-    fn seal_under_host_key(vm: &str, io: &CannedIO) -> Result<IntegritySidecar> {
+    fn seal_under_host_key<IO: SnapshotIO + ?Sized>(vm: &str, io: &IO) -> Result<IntegritySidecar> {
         let key = admit_host_snapshot_key()?;
         pause_and_seal(vm, io, &key)
     }
@@ -1287,6 +1429,203 @@ mod tests {
         verify_and_resume("vm-stale", &canned()).expect("resumed");
         assert!(!abandoned.exists(), "the abandoned plaintext is removed");
         assert!(live.exists(), "a live owner's staging is left alone");
+    }
+
+    /// What a capture saw: the directory it wrote into and that directory's
+    /// mode at the moment the VMM wrote. Optionally fails after writing its
+    /// plaintext, as a VMM that dies mid-snapshot does.
+    struct CaptureProbe {
+        inner: CannedIO,
+        fail_after_write: bool,
+        seen: std::cell::RefCell<Option<(PathBuf, u32)>>,
+    }
+
+    impl CaptureProbe {
+        fn new(fail_after_write: bool) -> Self {
+            Self {
+                inner: CannedIO::new(b"next-vmstate".to_vec(), b"next-memory".to_vec()),
+                fail_after_write,
+                seen: std::cell::RefCell::new(None),
+            }
+        }
+    }
+
+    impl SnapshotIO for CaptureProbe {
+        fn create_snapshot(&self, dir: &Path) -> Result<()> {
+            let mode = std::fs::metadata(dir)?.permissions().mode() & 0o777;
+            *self.seen.borrow_mut() = Some((dir.to_path_buf(), mode));
+            self.inner.create_snapshot(dir)?;
+            if self.fail_after_write {
+                bail!("PUT /snapshot/create: connection reset");
+            }
+            Ok(())
+        }
+        fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
+            self.inner.load_snapshot_paused(dir)
+        }
+        fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()> {
+            self.inner.load_snapshot_for_fork_paused(dir)
+        }
+        fn restored_network_interface_count(&self) -> Result<usize> {
+            self.inner.restored_network_interface_count()
+        }
+        fn resume(&self) -> Result<()> {
+            self.inner.resume()
+        }
+        fn teardown_paused(&self) -> Result<()> {
+            self.inner.teardown_paused()
+        }
+    }
+
+    /// Entries of the instance directory other than the published snapshot
+    /// and the lifecycle lock.
+    fn leftovers(vm: &str) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(instance_dir(vm))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "snapshot" && name != "resume")
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_capture_writes_only_into_private_staging_it_then_publishes() {
+        let _g = DataDirGuard::new();
+        let probe = CaptureProbe::new(false);
+        seal_under_host_key("vm-stage", &probe).unwrap();
+        let (written, mode) = probe.seen.borrow().clone().expect("captured");
+        assert_eq!(mode, 0o700, "staging is private before the VMM writes");
+        assert_ne!(
+            written,
+            snapshot_dir("vm-stage"),
+            "never into the published dir"
+        );
+        assert_eq!(written.parent(), Some(instance_dir("vm-stage").as_path()));
+        assert!(
+            !written.exists(),
+            "the staging became the published snapshot"
+        );
+        assert!(
+            leftovers("vm-stage").is_empty(),
+            "{:?}",
+            leftovers("vm-stage")
+        );
+        verify_and_resume("vm-stage", &canned()).expect("the published snapshot resumes");
+    }
+
+    #[test]
+    fn capture_staging_is_private_under_a_permissive_umask() {
+        let _g = DataDirGuard::new();
+        // The umask is process-wide; nextest runs each test in its own process.
+        let previous = unsafe { libc::umask(0) };
+        let probe = CaptureProbe::new(false);
+        let sealed = seal_under_host_key("vm-umask", &probe);
+        unsafe { libc::umask(previous) };
+        sealed.unwrap();
+        assert_eq!(probe.seen.borrow().as_ref().unwrap().1, 0o700);
+        let dir = snapshot_dir("vm-umask");
+        for name in [VMSTATE_FILENAME, MEM_FILENAME, SIDECAR_FILENAME] {
+            let mode = std::fs::metadata(dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_failed_capture_keeps_the_previous_snapshot_and_removes_its_plaintext() {
+        let _g = DataDirGuard::new();
+        let first = seal_under_host_key("vm-fail", &canned()).unwrap();
+        let before = std::fs::read(snapshot_dir("vm-fail").join(MEM_FILENAME)).unwrap();
+
+        let probe = CaptureProbe::new(true);
+        let err = seal_under_host_key("vm-fail", &probe).unwrap_err();
+        assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
+
+        assert!(
+            leftovers("vm-fail").is_empty(),
+            "{:?}",
+            leftovers("vm-fail")
+        );
+        let after = std::fs::read(snapshot_dir("vm-fail").join(MEM_FILENAME)).unwrap();
+        assert_eq!(after, before, "the published snapshot is untouched");
+        let resumed = verify_and_resume("vm-fail", &canned()).expect("still resumes");
+        assert_eq!(resumed, first, "same generation and epoch");
+        // The next good pause numbers after the published one, not the failure.
+        assert_eq!(seal_under_host_key("vm-fail", &canned()).unwrap().epoch, 2);
+    }
+
+    #[test]
+    fn a_pause_interrupted_between_renames_is_rolled_back_on_resume() {
+        let _g = DataDirGuard::new();
+        let sealed = seal_under_host_key("vm-torn", &canned()).unwrap();
+        let dir = snapshot_dir("vm-torn");
+        // The state a pause leaves when it dies after setting the published
+        // snapshot aside and before renaming its replacement into place.
+        std::fs::rename(&dir, previous_generation(&dir)).unwrap();
+
+        let resumed = verify_and_resume("vm-torn", &canned()).expect("recovered");
+        assert_eq!(resumed, sealed);
+        assert!(!previous_generation(&dir).exists());
+    }
+
+    #[test]
+    fn recovery_restores_or_drops_the_previous_generation() {
+        let _g = DataDirGuard::new();
+        seal_under_host_key("vm-rec", &canned()).unwrap();
+        let dir = snapshot_dir("vm-rec");
+        assert_eq!(recover_publication(&dir).unwrap(), None, "nothing to do");
+
+        std::fs::rename(&dir, previous_generation(&dir)).unwrap();
+        assert_eq!(
+            recover_publication(&dir).unwrap(),
+            Some(PublicationRecovery::PreviousRestored)
+        );
+        assert!(dir.exists());
+
+        // Published, but the replaced generation was never removed.
+        std::fs::create_dir(previous_generation(&dir)).unwrap();
+        assert_eq!(
+            recover_publication(&dir).unwrap(),
+            Some(PublicationRecovery::ReplacedRemoved)
+        );
+        assert!(dir.exists() && !previous_generation(&dir).exists());
+    }
+
+    #[test]
+    fn abandoned_capture_staging_is_reclaimed_by_the_next_pause() {
+        let _g = DataDirGuard::new();
+        seal_under_host_key("vm-crash", &canned()).unwrap();
+        let parent = instance_dir("vm-crash");
+        // No process has this pid: it is above the kernel's pid limit.
+        let abandoned = parent.join(format!("{CAPTURE_STAGING_PREFIX}{}-x", i32::MAX));
+        std::fs::create_dir(&abandoned).unwrap();
+        std::fs::write(abandoned.join(MEM_FILENAME), b"plaintext guest memory").unwrap();
+        let live = parent.join(format!("{CAPTURE_STAGING_PREFIX}{}-x", std::process::id()));
+        std::fs::create_dir(&live).unwrap();
+
+        seal_under_host_key("vm-crash", &canned()).unwrap();
+        assert!(!abandoned.exists(), "a dead capture's plaintext is removed");
+        assert!(live.exists(), "a live owner's staging is left alone");
+    }
+
+    #[test]
+    fn deleting_a_snapshot_also_drops_a_generation_set_aside() {
+        let _g = DataDirGuard::new();
+        seal_under_host_key("vm-del", &canned()).unwrap();
+        let dir = snapshot_dir("vm-del");
+        std::fs::rename(&dir, previous_generation(&dir)).unwrap();
+        assert!(delete_instance_snapshot("vm-del").unwrap());
+        assert_eq!(
+            recover_publication(&dir).unwrap(),
+            None,
+            "nothing to resurrect"
+        );
+        assert!(!dir.exists());
     }
 
     #[test]

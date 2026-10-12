@@ -27,7 +27,7 @@ use mvm_client::profile::RunProfile;
 use mvm_client::volume::{
     AccessMode, AdmittedProfile, AttachmentRecord, AttachmentRequest, CreateBlockVolumeRequest,
     EncryptionState, LaunchLeaseRequest, LocalVolumeService, VolumeRecord, VolumeService,
-    VolumeSourceKind, probe_from_fn,
+    VolumeSourceKind,
 };
 use mvm_core::user_config::MvmConfig;
 
@@ -260,18 +260,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 }
 
-/// The local volume service, wired to the doctor's host-encryption diagnostics
-/// so a directory snapshotted by `--host` is checked before it is read.
+/// The local volume service, bound to the same storage detector `mvmctl
+/// doctor` reports from: managed volume plaintext and a directory snapshotted
+/// by `--host` are both checked before anything is written or read.
 #[cfg(not(test))]
 fn service() -> LocalVolumeService {
-    LocalVolumeService::with_host_encryption_probe(probe_from_fn(|path| {
-        crate::doctor::require_local_volume_host_path_encrypted(path)
-    }))
+    LocalVolumeService::with_system_host_encryption_probe()
 }
 
 #[cfg(test)]
 fn service() -> LocalVolumeService {
-    LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
+    LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| Ok(())))
 }
 
 fn create(volume_name: &str, root: Option<&str>, size: &str) -> Result<()> {
@@ -857,7 +856,9 @@ mod tests {
     }
 
     fn accepting_host_encryption_service() -> LocalVolumeService {
-        LocalVolumeService::with_host_encryption_probe(probe_from_fn(|_| Ok(())))
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(
+            |_| Ok(()),
+        ))
     }
 
     /// A launch with nothing mounted never opens the mount-image cache.

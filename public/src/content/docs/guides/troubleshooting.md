@@ -352,10 +352,12 @@ _transient_ runner: it streams the command's output back to the host but never
 forwards host stdin or allocates a terminal, so an interactive shell sees EOF on
 stdin and exits `0` right away.
 
-To get an interactive shell, add `-it` (dev-only):
+To get an interactive shell, add `-it` (dev-only). Unnamed, the run claims a
+standby prepared by `mvmctl pool warm --image <dev-image>` (with
+`MVM_RESIDENCY=warm`) and refuses without one; `--name` boots it cold:
 
 ```bash
-mvmctl machine run -it --image <dev-image> -- /bin/sh   # drops into a shell
+mvmctl machine run -it --name shell --image <dev-image> -- /bin/sh   # drops into a shell
 ```
 
 The command after `--` is the same command argv as a non-interactive run; `-it`
@@ -449,6 +451,41 @@ carries them in its `egress_denials` array instead. For a run that already ended
 refusals. The full reason table is in
 [Network egress policy](/guides/network-egress-policy/#when-a-destination-is-refused).
 
+### "refusing to place managed volume plaintext … the storage is not verified encrypted"
+
+The same refusal reads "writable disk image" for a `HOST.img:/GUEST:SIZE:rw`
+mount.
+
+**Cause**: unlocking a managed volume, or creating or attaching a writable disk
+image, would put plaintext on storage mvm cannot show is encrypted. On macOS
+that means the APFS volume does not report FileVault on (hardware "encrypted at
+rest" alone does not count). On Linux it means the location is not on ext4 over
+dm-crypt/LUKS, uses an external journal, or `tune2fs -l` could not read the
+device to prove the journal is internal. The error ends with the detector's own
+reason. `mvmctl doctor` shows the verdict for the default volume location on
+its `volume storage (encrypted backing)` line.
+
+**Fix**: enable FileVault (`sudo fdesetup enable`) or move the data onto a LUKS
+volume. To keep the default location, point the volumes elsewhere with
+`mvmctl machine volume create <name> --root /path/on/encrypted/storage`, or
+pass a disk image path on encrypted storage. On Linux, run with read access to
+the block device if only `tune2fs` failed.
+
+On a development host where that is not possible, set
+`MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1`. It is audited on every use and
+`--prod` refuses it. Nothing is lost while the refusal stands: locked volumes
+stay locked, an unlocked image is never deleted, and `mvmctl machine volume
+lock` still works.
+
+### "refusing to attach writable disk image …: other users can access it"
+
+**Cause**: an existing `HOST.img` given with `:rw` has group or other
+permission bits, or sits in a directory other users can write to. mvm creates
+new images `0600` itself but never changes the mode of a file you already own.
+
+**Fix**: `chmod 600 HOST.img`, and keep the image in a directory only you can
+write to (`chmod go-w <dir>`).
+
 ### Can't access project files inside microVM
 
 The Firecracker microVM has an **isolated filesystem** and there's no shell into the builder VM to bridge it. Pass host shares explicitly with `--mount HOST:GUEST[:rw]` (see [Sandboxed Exec](/guides/exec/)).
@@ -468,13 +505,15 @@ mvmctl bootstrap
 
 ### Wrong backend selected
 
-Force a specific backend:
+Force a specific backend. A flake or manifest run is named here because an unnamed run must claim a
+prepared warm standby, and `pool warm` prepares only OCI and default images;
+a named run boots cold.
 
 ```bash
-mvmctl machine run --flake . --hypervisor firecracker
-mvmctl machine run --flake . --hypervisor hvf
-mvmctl machine run --flake . --hypervisor libkrun
-mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
+mvmctl machine run --name app --flake . --hypervisor firecracker
+mvmctl machine run --name app --flake . --hypervisor hvf
+mvmctl machine run --name app --flake . --hypervisor libkrun
+mvmctl machine run --name app --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
@@ -489,7 +528,7 @@ The release installer signs the supervisor during installation. Standard builds 
 What you'll see on the first run:
 
 ```
-$ mvmctl machine run --flake . --hypervisor hvf
+$ mvmctl machine run --name app --flake . --hypervisor hvf
 INFO Signing binary with hypervisor entitlement...
 …starts the VM…
 ```
@@ -520,7 +559,7 @@ Hitting `KVM not available` on a cloud instance? Three options, in order of reco
 **Option 2 — Use the QEMU dev/test backend.** On a Linux host without `/dev/kvm`, run the software-emulated QEMU/TCG backend. It's a real microVM but **Tier 2 dev/test** — slower, larger TCB, partial verified boot (see the [Matryoshka model](/security/matryoshka)) — so use it for local dev/test, not production or untrusted workloads.
 
 ```bash
-mvmctl machine run --flake . --hypervisor qemu
+mvmctl machine run --name app --flake . --hypervisor qemu
 ```
 
 **Option 3 — PVM (advanced, external).** [SlicerVM's PVM mode](https://docs.slicervm.com/tasks/pvm/) runs real microVMs without `/dev/kvm` via a patched Firecracker plus a `kvm_pvm` host kernel module. mvm doesn't ship this — the maintenance cost (kernel patch + custom guest images, x86_64 only) is outside mvm's scope. If you need real microVM isolation on a non-nested-virt cloud VM and Option 1 isn't available, SlicerVM is the working answer in the ecosystem today.

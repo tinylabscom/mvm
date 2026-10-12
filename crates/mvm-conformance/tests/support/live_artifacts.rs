@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use mvm_build::guest_libc::GuestLibc;
-use mvm_build::published_image_set::SetMemberCache;
 use mvm_core::arch::GuestArch;
 use mvm_fs::sdk_sidecar::SdkSidecarResolver;
 
@@ -21,18 +20,14 @@ pub(crate) fn built_manifest_slot(stdout: &[u8]) -> Option<String> {
     })
 }
 
-/// Probe the same two installed artifact sources a live launch can resolve.
-/// Pinned image-set members live under their root digest, not the CLI cache.
-/// Resolution is cache-only and retains the artifact integrity checks.
+/// Probe the one installed artifact source a live launch resolves: the
+/// version-keyed sidecar this CLI assembled from its guest runtime. Resolution
+/// is cache-only and retains the artifact integrity checks.
 pub(crate) fn sdk_sidecar_cached_in(cache: &Path) -> bool {
-    let arch = GuestArch::host();
-    let arch_dir = arch.to_string();
-    let set = SetMemberCache::locked();
+    let arch_dir = GuestArch::host().to_string();
     [GuestLibc::Glibc, GuestLibc::Musl].into_iter().any(|libc| {
         SdkSidecarResolver::new(cache.to_path_buf(), env!("CARGO_PKG_VERSION").into())
             .resolve(&arch_dir, libc)
             .is_ok()
-            || mvm_build::sdk_sidecar::image_set_sidecar_resolver(cache, &set, arch, libc)
-                .is_ok_and(|resolver| resolver.resolve(&arch_dir, libc).is_ok())
     })
 }

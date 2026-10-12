@@ -65,11 +65,10 @@ use atomic_sync::AtomicSyncBatch;
 pub(crate) use atomic_sync::AtomicSyncState;
 #[cfg(test)]
 use atomic_sync::atomic_sync_is_batched;
+use atomic_sync::defer_atomic_sync;
 
 mod atomic_write;
-#[cfg(test)]
-pub(crate) use atomic_write::write_atomic_batched;
-pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
+pub(crate) use atomic_write::{write_atomic, write_atomic_batched, write_atomic_unsynced};
 
 mod session_events;
 mod stream_input_refusal;
@@ -1095,10 +1094,20 @@ impl AuditEmitter {
         // History first. A crash between the two leaves a history entry with
         // no matching sidecar, which a reader can reconcile; the reverse
         // leaves a published root that no consistency check will ever see.
-        append_root_history(&self.audit_dir, tenant, &signed)?;
+        //
+        // Inside a [`Self::batched`] scope both files join that scope's single
+        // concurrent flush instead of syncing one after the other here. The
+        // scope's entries are not durable until that flush either, so syncing
+        // the root ahead of them only ordered it before the entries it covers,
+        // and it cost two serial fsyncs on the admission path.
+        append_root_history(&self.audit_dir, tenant, &signed, &self.atomic_sync_state)?;
         let path = audit_root_path_for_tenant(&self.audit_dir, tenant);
-        write_atomic(&path, serde_json::to_vec_pretty(&signed)?.as_slice())
-            .with_context(|| format!("publishing signed root to {}", path.display()))?;
+        write_atomic_batched(
+            &path,
+            serde_json::to_vec_pretty(&signed)?.as_slice(),
+            &self.atomic_sync_state,
+        )
+        .with_context(|| format!("publishing signed root to {}", path.display()))?;
         Ok(signed)
     }
 
@@ -1400,7 +1409,12 @@ impl AuditEmitter {
 /// One JSON object per line, fsynced before returning: a root that is not on
 /// disk when the next one is published is a hole in the very sequence the
 /// consistency check walks.
-fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot) -> Result<()> {
+fn append_root_history(
+    audit_dir: &Path,
+    tenant: &str,
+    signed: &SignedAuditRoot,
+    sync_state: &AtomicSyncState,
+) -> Result<()> {
     use std::io::Write as _;
 
     let path = audit_root_history_path_for_tenant(audit_dir, tenant);
@@ -1413,6 +1427,9 @@ fn append_root_history(audit_dir: &Path, tenant: &str, signed: &SignedAuditRoot)
         .with_context(|| format!("opening root history at {}", path.display()))?;
     file.write_all(&line)
         .with_context(|| format!("appending to root history at {}", path.display()))?;
+    if defer_atomic_sync(sync_state, &path) {
+        return Ok(());
+    }
     file.sync_data()
         .with_context(|| format!("syncing root history at {}", path.display()))?;
     Ok(())
@@ -1514,6 +1531,56 @@ mod tests {
                 Ok(())
             })
             .expect("the audit-chain barrier remains durable");
+    }
+
+    /// Admission publishes a root inside its durability batch. Both root files
+    /// must join that batch's one concurrent flush rather than each waiting on
+    /// stable storage in turn ahead of it, and both must be in place and
+    /// verifiable once the batch closes.
+    #[test]
+    fn a_root_published_inside_a_batch_joins_its_flush() {
+        use mvm_contract::merkle::verify_signed_root;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key = SigningKey::from_bytes(&[35; 32]);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-batched-root");
+        let history = audit_root_history_path_for_tenant(dir.path(), "local");
+        let sidecar = audit_root_path_for_tenant(dir.path(), "local");
+
+        let signed = emitter
+            .batched(|| {
+                emitter.emit_admitted(&plan, "host:test")?;
+                let before = atomic_sync::deferred_path_count(&emitter.atomic_sync_state);
+                let signed = emitter.publish_root("local")?;
+                assert_eq!(
+                    atomic_sync::deferred_path_count(&emitter.atomic_sync_state),
+                    before + 2,
+                    "the root history and the root sidecar must both wait for the batch flush"
+                );
+                Ok(signed)
+            })
+            .unwrap();
+
+        assert!(!atomic_sync_is_batched(&emitter.atomic_sync_state));
+        assert_eq!(verify_signed_root(&signed, &vk), Ok(()));
+        let on_disk: SignedAuditRoot =
+            serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+        assert_eq!(on_disk, signed);
+        let history = std::fs::read_to_string(&history).unwrap();
+        let last = history.lines().last().unwrap();
+        assert_eq!(
+            serde_json::from_str::<SignedAuditRoot>(last).unwrap(),
+            signed
+        );
+
+        // Outside a batch nothing is deferred: the root is durable on return.
+        emitter.publish_root("local").unwrap();
+        assert_eq!(
+            atomic_sync::deferred_path_count(&emitter.atomic_sync_state),
+            0
+        );
     }
 
     #[test]

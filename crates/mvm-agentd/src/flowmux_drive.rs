@@ -82,7 +82,7 @@ pub fn baked_root_bundle_candidates() -> [&'static Path; 3] {
 /// The certificate is read out of `run_dir` rather than off the kernel cmdline:
 /// `/proc/cmdline` is world-readable, logged, and length-bounded, and a boot
 /// binding many destinations would silently lose the tail of a PEM. It is
-/// [`provision_identity_from_drive`] that puts it there, so this runs after.
+/// [`provision_identity_from_drive_for_uid`] that puts it there, so this runs after.
 ///
 /// **The bundle is written whether or not a certificate arrived.** The host
 /// exports `SSL_CERT_FILE` at this path from its own side of the boot, and
@@ -285,7 +285,7 @@ impl std::fmt::Display for IdentityDriveError {
 impl std::error::Error for IdentityDriveError {}
 
 #[cfg(target_os = "linux")]
-pub use linux::{provision_identity_from_drive, provision_identity_from_drive_for_uid};
+pub use linux::provision_identity_from_drive_for_uid;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -302,26 +302,21 @@ mod linux {
     /// visible filesystem for any longer than the copy takes.
     const MOUNTPOINT: &str = "/run/mvm-identity";
 
-    /// Mount the identity drive, copy its two files into `/run/mvm`, unmount.
+    /// Mount the identity drive, copy its files into `/run/mvm`, unmount, and
+    /// hand the signing key to `signing_key_uid`, the egress service that is
+    /// its one reader.
     ///
     /// Copying rather than leaving it mounted keeps the guest's steady state
     /// the same whether the material arrived on a drive or, historically, some
     /// other way — every reader looks only at `/run/mvm`.
-    pub fn provision_identity_from_drive() -> Result<(), IdentityDriveError> {
-        provision_identity_from_drive_with_owner(None)
-    }
-
-    /// Provision the identity for a dedicated non-root service uid.
     ///
-    /// The short-lived caller must still have mount and ownership privileges.
-    /// Only the secret signing key changes owner; the trust anchor and ingress
-    /// map remain world-readable public inputs.
-    pub fn provision_identity_from_drive_for_uid(uid: u32) -> Result<(), IdentityDriveError> {
-        provision_identity_from_drive_with_owner(Some(uid))
-    }
-
-    fn provision_identity_from_drive_with_owner(
-        signing_key_uid: Option<u32>,
+    /// The caller must still have mount and ownership privileges. Only the
+    /// secret signing key changes owner; the trust anchor and ingress map
+    /// remain world-readable public inputs. There is deliberately no variant
+    /// that leaves the key with root: a root-owned 0400 key is readable only
+    /// by a client that kept root.
+    pub fn provision_identity_from_drive_for_uid(
+        signing_key_uid: u32,
     ) -> Result<(), IdentityDriveError> {
         let device = find_labeled_ext4_disk_among(virtio_block_devices(), IDENTITY_DRIVE_LABEL)
             .ok_or(IdentityDriveError::NotAttached)?;
@@ -338,13 +333,13 @@ mod linux {
         copied
     }
 
-    fn copy_identity_files(signing_key_uid: Option<u32>) -> Result<(), IdentityDriveError> {
+    fn copy_identity_files(signing_key_uid: u32) -> Result<(), IdentityDriveError> {
         std::fs::create_dir_all(RUN_MVM_DIR).map_err(io_err("create /run/mvm"))?;
         copy_one(
             GUEST_SIGNING_KEY_FILE,
             GUEST_SIGNING_KEY_MODE,
             "the guest signing key",
-            signing_key_uid,
+            Some(signing_key_uid),
         )?;
         copy_one(
             HOST_SIGNER_PUB_FILE,

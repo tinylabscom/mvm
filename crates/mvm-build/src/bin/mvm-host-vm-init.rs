@@ -456,13 +456,6 @@ use std::path::{Path, PathBuf};
 #[cfg(any(target_os = "linux", test))]
 use std::process::Command;
 
-/// The uid the guest agent is dropped to via setpriv. The agent is a
-/// long-lived RPC service, not a build step, so it gets its own uid —
-/// distinct from build commands' `BUILDER_UID` (902). Mirrors the
-/// workload `/init` fork in `nix/lib/mk-guest.nix`.
-#[cfg(any(target_os = "linux", test))]
-const AGENT_UID: u32 = 990;
-
 /// Candidate paths for the baked `mvm-guest-agent`, in preference order.
 /// The verity runtime overlay, when attached, bind-mounts the
 /// agent at `/mvm/runtime/agent`; prefer it over the rootfs-baked copy.
@@ -650,7 +643,7 @@ fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
 const SETPRIV: &str = "mvm-setpriv";
 
 /// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
-/// the agent uid. Mirrors the workload `/init` invocation in
+/// `agent_uid` (see `mvm_build::builder_agent_uid`). Mirrors the workload `/init` invocation in
 /// `nix/lib/mk-guest.nix`. `setpriv` is the helper resolved through
 /// `guest_host_binary`: the boot payload's copy, or on an image booted without
 /// one, the copy it bakes at `/sbin`.
@@ -658,12 +651,12 @@ const SETPRIV: &str = "mvm-setpriv";
 /// the authenticated agent to signal PID 1, and the latter corrects a
 /// restored wall clock. No workload process inherits either capability.
 #[cfg(any(target_os = "linux", test))]
-fn agent_spawn_command(setpriv: &Path, agent_bin: &Path) -> Command {
+fn agent_spawn_command(setpriv: &Path, agent_bin: &Path, agent_uid: u32) -> Command {
     let mut c = Command::new("/bin/busybox");
     c.arg("setsid")
         .arg(setpriv)
-        .arg(format!("--reuid={AGENT_UID}"))
-        .arg(format!("--regid={AGENT_UID}"))
+        .arg(format!("--reuid={agent_uid}"))
+        .arg(format!("--regid={agent_uid}"))
         .arg("--clear-groups")
         .arg("--securebits=keep-caps")
         .arg("--inh-caps=+kill")
@@ -783,6 +776,7 @@ mod tests {
         let cmd = agent_spawn_command(
             Path::new("/run/mvm/host-bins/mvm-setpriv"),
             Path::new("/usr/local/bin/mvm-guest-agent"),
+            mvm_build::builder_agent_uid::AGENT_UID,
         );
         assert_eq!(cmd.get_program().to_str().unwrap(), "/bin/busybox");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -791,8 +785,8 @@ mod tests {
             [
                 "setsid",
                 "/run/mvm/host-bins/mvm-setpriv",
-                "--reuid=990",
-                "--regid=990",
+                "--reuid=901",
+                "--regid=901",
                 "--clear-groups",
                 "--securebits=keep-caps",
                 "--inh-caps=+kill",
@@ -804,6 +798,60 @@ mod tests {
                 "/usr/local/bin/mvm-guest-agent",
             ]
         );
+    }
+
+    /// A builder image from before the fixed identity set names 990 and not
+    /// 901; the agent is dropped to the uid the selection picks for it.
+    #[test]
+    fn the_agent_is_dropped_to_the_uid_the_image_selected() {
+        let legacy = "root:x:0:0::/:/bin/sh\nmvm-agent:x:990:990::/:/bin/false\n";
+        let cmd = agent_spawn_command(
+            Path::new("/run/mvm/host-bins/mvm-setpriv"),
+            Path::new("/mvm/runtime/agent"),
+            mvm_build::builder_agent_uid::agent_uid_for_image(Some(legacy)),
+        );
+        let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args[2..4], ["--reuid=990", "--regid=990"]);
+    }
+
+    /// The body of `name` in the Linux-only module, comments dropped. That
+    /// module compiles nowhere else, so its spawn wiring is pinned here.
+    fn linux_body_of(name: &str) -> String {
+        include_str!("mvm-host-vm-init.rs")
+            .split_once(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} must exist"))
+            .1
+            .split("\n    }\n")
+            .next()
+            .expect("the body ends at the first closing brace")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_agent_uid_is_chosen_from_the_booted_image() {
+        let body = linux_body_of("fork_guest_agent");
+        assert!(body.contains("booted_image_agent_uid()"), "{body}");
+    }
+
+    /// PID 1 is root. An egress client it starts as-is keeps root for the life
+    /// of the builder while parsing every proxy and DNS request a build makes,
+    /// and a key provisioned for root is one only such a client can read.
+    #[test]
+    fn the_egress_client_and_its_key_belong_to_the_egress_identity() {
+        let body = linux_body_of("fork_vsock_egress_client_if_requested");
+        let provision = body
+            .find("provision_identity_from_drive_for_uid(identity.uid())")
+            .expect("the key is provisioned for the client's uid");
+        let spawn = body
+            .find("guest_bootstrap::egress_client_command(")
+            .expect("the client is started under its identity");
+        assert!(provision < spawn, "{body}");
+        assert!(body.contains("EGRESS_CLIENT_IDENTITY"), "{body}");
+        assert!(!body.contains("Command::new(&egress_client)"), "{body}");
     }
 
     /// An image that bakes `mvm-setpriv` (ABI 0 and 1) and is booted without
@@ -820,7 +868,7 @@ mod tests {
         let setpriv_arg = || {
             let setpriv =
                 mvm_build::builder_guest_paths::guest_host_binary_in(&run, &sbin, SETPRIV);
-            let cmd = agent_spawn_command(&setpriv, agent);
+            let cmd = agent_spawn_command(&setpriv, agent, 901);
             cmd.get_args().nth(1).map(PathBuf::from)
         };
 
@@ -1469,12 +1517,13 @@ mod linux {
             std::process::exit(1);
         };
         let setpriv = mvm_build::builder_boot::guest_host_binary(crate::SETPRIV);
-        let mut cmd = crate::agent_spawn_command(&setpriv, &agent_bin);
+        let agent_uid = mvm_build::builder_agent_uid::booted_image_agent_uid();
+        let mut cmd = crate::agent_spawn_command(&setpriv, &agent_bin, agent_uid);
         // BusyBox `setsid` puts the agent in a new session, matching the
         // workload init path. Stdio is inherited so logs reach the console.
         match cmd.spawn() {
             Ok(child) => eprintln!(
-                "mvm-host-vm-init: forked mvm-guest-agent pid={} from {}",
+                "mvm-host-vm-init: forked mvm-guest-agent pid={} uid={agent_uid} from {}",
                 child.id(),
                 agent_bin.display()
             ),
@@ -1517,15 +1566,25 @@ mod linux {
 
         // The client loads both keys before it binds, so provision the
         // identity first; otherwise a missing drive shows up as a proxy that
-        // never came up, with nothing naming the drive.
-        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive() {
+        // never came up, with nothing naming the drive. PID 1 is still root
+        // here, so it copies the key out and hands it to the egress client's
+        // uid; mode 0400 leaves the agent and every build step unable to read
+        // it.
+        let identity = mvm_agentd::guest_mount::EGRESS_CLIENT_IDENTITY;
+        if let Err(e) =
+            mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(identity.uid())
+        {
             refuse_boot(EgressProbe::IdentityMissing(e.to_string()));
         }
 
-        let mut cmd = Command::new(&egress_client);
+        // The client parses every proxy and DNS request a build sends, so it
+        // runs under its own identity rather than PID 1's root.
+        let mut cmd = mvm_agentd::guest_bootstrap::egress_client_command(&egress_client);
         if let Some(port) = crate::vsock_egress_port_from_cmdline(cmdline) {
             cmd.env(crate::VSOCK_EGRESS_PORT_ENV, port.to_string());
         }
+        // SAFETY: runs in the forked child before exec, after the identity
+        // hook; setsid is async-signal-safe and needs no privilege.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -1535,8 +1594,9 @@ mod linux {
         let mut child = match cmd.spawn() {
             Ok(child) => {
                 eprintln!(
-                    "mvm-host-vm-init: forked mvm-egress-client pid={} from {}",
+                    "mvm-host-vm-init: forked mvm-egress-client pid={} uid={} from {}",
                     child.id(),
+                    identity.uid(),
                     egress_client.display()
                 );
                 child
@@ -3644,18 +3704,11 @@ mod linux {
         Unshared,
     }
 
-    /// Unprivileged uid the dispatched build
-    /// runs as inside the persistent VM. Picked above the
-    /// `mvm-agent` (1900) / `mvm-worker` (1000) uids the rest of
-    /// the rootfs reserves so the
-    /// builder identity doesn't collide with any existing service.
-    ///
-    /// No `/etc/passwd` entry: the build runs as a bare numeric
-    /// uid, and `setpriv --clear-groups` (below) means no NSS
-    /// lookup is needed for supplementary groups either. Tools
-    /// that try `getlogin()` / `getpwuid()` get `None`; the build
-    /// is expected to be a flake / install pipeline that doesn't
-    /// rely on its own username.
+    /// Unprivileged uid the dispatched build runs as inside the persistent
+    /// VM: `mvm-builder`, the row the builder image adds to mkGuest's fixed
+    /// identity set. Distinct from the agent's uid and every service uid, so
+    /// a build step cannot signal or trace any of them. `setpriv
+    /// --clear-groups` (below) means no supplementary-group lookup happens.
     const BUILDER_UID: u32 = 902;
     const BUILDER_GID: u32 = 902;
 

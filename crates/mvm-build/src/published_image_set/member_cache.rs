@@ -257,7 +257,8 @@ mod tests {
     use super::*;
     use mvm_core::arch::GuestArch;
 
-    const OVERLAY: ImageSetRole = ImageSetRole::RuntimeOverlay;
+    const OVERLAY: ImageSetRole = mvm_core::plan::bundle::BOOT_ASSET_OVERLAY_ROLE;
+    const INITRAMFS: ImageSetRole = mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE;
     const AARCH64: MemberTarget = MemberTarget::Arch(GuestArch::Aarch64);
 
     fn root(fill: &[u8]) -> SetMemberCache {
@@ -382,12 +383,12 @@ mod tests {
             .unwrap();
         std::fs::copy(
             set.record_path(cache.path(), OVERLAY, AARCH64),
-            set.record_path(cache.path(), ImageSetRole::Initramfs, AARCH64),
+            set.record_path(cache.path(), INITRAMFS, AARCH64),
         )
         .unwrap();
 
         let err = set
-            .installed_version(cache.path(), ImageSetRole::Initramfs, AARCH64)
+            .installed_version(cache.path(), INITRAMFS, AARCH64)
             .unwrap_err();
         assert!(
             matches!(err, SetMemberCacheError::InvalidRecord { .. }),

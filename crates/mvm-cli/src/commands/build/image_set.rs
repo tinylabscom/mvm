@@ -2,9 +2,10 @@
 //! named by `MVM_IMAGES_DIR` inside the builder VM, against the mvm checkout
 //! this binary was compiled from, and publish it to the local image cache.
 //!
-//! It lives under `build` beside `kernel`, `runtime-overlay` and
-//! `sdk-sidecar`, which build members of the same image set; `image` acquires
-//! and manages images and builds none.
+//! It lives under `build` beside `kernel`, which builds a member of the same
+//! image set; `image` acquires and manages images and builds none. The runtime
+//! overlay and SDK sidecars are not image-set members: `build runtime-overlay`
+//! and `build sdk-sidecar` assemble them from a guest runtime.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -16,12 +17,12 @@ use super::Cli;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
-    /// The image role to build: builder-vm, default-tenant, rootless-tenant or runtime-overlay.
+    /// The image role to build: builder-vm, default-tenant or rootless-tenant.
     #[arg(value_parser = parse_role)]
     role: ImageBuildRole,
 
-    /// The flake attribute under the role (`sdk-sidecar-image` and
-    /// `sdk-sidecar-image-musl` select the SDK sidecars under runtime-overlay).
+    /// The flake attribute under the role (`dev` selects the writable
+    /// default-tenant image).
     #[arg(long, default_value = "default", value_parser = parse_attr)]
     attr: FlakeAttr,
 }

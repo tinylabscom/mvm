@@ -241,7 +241,10 @@ fixed:
 - `images.lock`'s `[compatibility] guest_agent_protocol` is replaced by a
   base-image contract version that the base root filesystem declares and
   `mvmctl` checks before boot. The guest-agent protocol becomes a property of
-  the CLI and its own guest runtime, which ship together.
+  the CLI and its own guest runtime, which ship together. *Landed:* the lock
+  no longer copies the range and nothing checks it;
+  `compatibility.base_image_contract` is checked at acquisition, an absent
+  declaration as the legacy contract 0. ADR-054 records the values.
 - The re-measure in `specs/plans/2026-09-27-release-e2e-under-image-target.md`
   is retargeted to this arrangement.
 

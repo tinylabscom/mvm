@@ -711,6 +711,36 @@ impl<'a> Default for SynthesisInputBuilder<'a> {
     }
 }
 
+/// The seccomp tier a launch is admitted under: `requested`, raised to
+/// `network` when the launch needs sockets.
+///
+/// The guest installs the admitted tier in every workload process, and every
+/// tier below `network` refuses `socket`. A workload reaches admitted egress
+/// through a loopback proxy and resolver it dials, answers an ingress mapping
+/// on a socket it listens on, and calls a host service over a vsock socket, so
+/// a launch with any of those would otherwise be admitted a tier that breaks
+/// it. Admission signs the raised tier into the plan and its audit labels, so
+/// what the guest enforces and what the audit chain records are the same
+/// value. Nothing here ever lowers a tier.
+#[must_use]
+pub fn workload_seccomp_tier(
+    requested: PlanSeccompTier,
+    network_policy: &crate::network_policy::NetworkPolicy,
+    ingress: &[IngressMapping],
+    services: &[mvm_contract::protocol::broker::ServiceId],
+) -> PlanSeccompTier {
+    let needs_sockets =
+        network_policy.admits_outbound() || !ingress.is_empty() || !services.is_empty();
+    match requested {
+        PlanSeccompTier::Essential | PlanSeccompTier::Minimal | PlanSeccompTier::Standard
+            if needs_sockets =>
+        {
+            PlanSeccompTier::Network
+        }
+        other => other,
+    }
+}
+
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
 ///
 /// Generates a fresh `nonce` (128 random bits) per invocation and
@@ -996,6 +1026,61 @@ fn audit_labels_for_profile(profile: &AdmissionProfile) -> BTreeMap<String, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launch the network can reach, or that reaches the network or a host
+    /// service, needs sockets; every tier below `network` refuses `socket`,
+    /// so admission raises it. A launch with none of those keeps the tier it
+    /// asked for, and nothing ever lowers one.
+    #[test]
+    fn admitted_seccomp_tier_grants_sockets_only_to_a_launch_that_needs_them() {
+        use crate::network_policy::{HostPort, NetworkPolicy};
+        use crate::plan::PlanSeccompTier as Tier;
+
+        let deny = NetworkPolicy::deny_all();
+        let allow = NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]);
+        let ingress = vec![
+            crate::plan::IngressMapping::builder()
+                .mapping_id(1)
+                .protocol(crate::plan::IngressProtocol::Tcp)
+                .host_addr("127.0.0.1")
+                .host_port(8080)
+                .guest_addr("127.0.0.1")
+                .guest_port(80)
+                .transform(crate::plan::IngressTransform::Opaque)
+                .build()
+                .expect("ingress mapping"),
+        ];
+        let services = vec![
+            mvm_contract::protocol::broker::ServiceId::parse("host.kv.v1").expect("service id"),
+        ];
+
+        for requested in [Tier::Essential, Tier::Minimal, Tier::Standard] {
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &[]),
+                requested,
+                "a launch with no socket surface keeps {requested}"
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &allow, &[], &[]),
+                Tier::Network
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &ingress, &[]),
+                Tier::Network
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &services),
+                Tier::Network
+            );
+        }
+        for requested in [Tier::Network, Tier::Unrestricted] {
+            assert_eq!(
+                workload_seccomp_tier(requested, &allow, &ingress, &services),
+                requested,
+                "{requested} already grants sockets"
+            );
+        }
+    }
 
     const DIGEST64: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 

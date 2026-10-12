@@ -413,7 +413,7 @@ impl StartHost for EmbedderStartHost {
             .profile(self.profile)
             .unlock(crate::volume::UnlockPolicy::JustInTime)
             .build();
-        crate::volume::LocalVolumeService::new()
+        super::launch_volume_service()
             .acquire_launch_lease(&request)
             .with_context(|| format!("volume leases for {name:?}"))
     }
@@ -697,7 +697,7 @@ mod tests {
     fn register_writable_managed_volume(home: &crate::volume::test_support::TestVolumeHome) {
         use crate::volume::VolumeService as _;
         home.create_block("state", 16);
-        let volumes = crate::volume::LocalVolumeService::new();
+        let volumes = crate::volume::test_support::service();
         volumes.unlock_volume("state").expect("unlock");
         let request = crate::volume::AttachmentRequest::builder("web", "state")
             .and_then(|b| {

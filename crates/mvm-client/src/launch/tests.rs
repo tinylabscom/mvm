@@ -1036,7 +1036,7 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
     let rootfs = home.rootfs();
 
     // A managed encrypted block volume, unlocked so it can be attached.
-    let volumes = crate::volume::LocalVolumeService::new();
+    let volumes = crate::volume::test_support::service();
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("work")
@@ -1096,7 +1096,7 @@ async fn launch_attaches_a_writable_managed_volume_under_standard_only_when_gran
     let home = Isolated::new();
     let client = mock_client();
     let rootfs = home.rootfs();
-    let volumes = crate::volume::LocalVolumeService::new();
+    let volumes = crate::volume::test_support::service();
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")

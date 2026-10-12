@@ -303,3 +303,26 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
         "the local Apple Silicon witness must retain the full unaccelerated build lifecycle"
     );
 }
+
+/// The hosted fixture rewrites `/etc/mvm/entrypoint` with debugfs, so nothing
+/// but this test ties the mode it stamps to the mode the guest agent demands
+/// of a sealed script marker. When the agent tightened that mode, the fixture
+/// kept stamping the old one; the agent then refused the entrypoint at boot
+/// and the lane reported exit 1 where it expected 7, a full nightly later.
+#[test]
+fn no_kvm_fixture_stamps_the_entrypoint_mode_the_guest_agent_requires() {
+    let required = mvm_agentd::entrypoint::EntrypointPolicy::sealed_script_marker().required_mode;
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+
+    let stamp = format!("sif /etc/mvm/entrypoint mode 0100{required:o}");
+    assert!(
+        workflow.contains(&stamp),
+        "the no-KVM fixture must stamp the sealed entrypoint marker mode {required:o}: expected `{stamp}`"
+    );
+    let assertion = format!("*\"Mode:  0{required:o}\"*");
+    assert!(
+        workflow.contains(&assertion),
+        "the no-KVM fixture must assert mode {required:o} before export: expected `{assertion}`"
+    );
+}

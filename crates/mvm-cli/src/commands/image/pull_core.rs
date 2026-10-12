@@ -22,9 +22,9 @@ use super::cache::{
 };
 use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present};
 use super::materialize::{
-    RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
-    inject_runtime_and_materialize, oci_entrypoint_from_cache_path, oci_runtime_tag,
-    prepare_rootfs_only_tree, rematerialize_cached_image,
+    RuntimeMaterializer, adopt_prepared_rootfs, cached_rootfs_is_current,
+    ensure_rootfs_verity_sidecars, inject_runtime_and_materialize, oci_entrypoint_from_cache_path,
+    oci_runtime_tag, prepare_rootfs_only_tree, rematerialize_cached_image,
 };
 use super::oci_types::{CachedOciImage, CachedOciLayer, OciTrustDecision, ResolvedOciRunImage};
 use super::source;
@@ -196,11 +196,14 @@ fn resolve_run_image_with(
         (Some(cached), Some(trust)) if cached_rootfs_is_current(&cached, &runtime_tag, prod) => {
             (cached, false, trust, None)
         }
-        (Some(cached), Some(_)) if acquisition == RunImageAcquisition::PreparedOnly => {
-            bail!(
-                "cached OCI image {} is not launch-ready; run `mvmctl image pull {reference}` first",
-                cached.reference
-            );
+        (Some(cached), Some(trust)) if acquisition == RunImageAcquisition::PreparedOnly => {
+            let cached_reference = cached.reference.clone();
+            match adopt_prepared_rootfs(cache_root, cached, &runtime_tag, prod)? {
+                Some(adopted) => (adopted, false, trust, None),
+                None => bail!(
+                    "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
+                ),
+            }
         }
         (Some(cached), Some(trust)) => {
             sweep_before_builder_vm();
@@ -1055,6 +1058,12 @@ mod tests {
         }
     }
 
+    fn refusing_runtime_materialize(
+        call: super::super::materialize::MaterializeCall<'_>,
+    ) -> Result<()> {
+        panic!("a launch materialized {}", call.rootfs_abs.display());
+    }
+
     fn fake_runtime_materialize(
         call: super::super::materialize::MaterializeCall<'_>,
     ) -> Result<()> {
@@ -1784,6 +1793,47 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         assert!(
             !tmp.path().join(dev_rootfs_rel(tmp.path(), digest)).exists(),
             "a launch materialized a rootfs"
+        );
+    }
+
+    /// A pull under a second guest runtime moves the index entry to that
+    /// runtime's rootfs and leaves the first one's on disk. A launch under the
+    /// first runtime boots the rootfs it prepared rather than refusing, and
+    /// materializes nothing to do it.
+    #[test]
+    fn a_launch_adopts_the_rootfs_a_pull_prepared_for_its_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let rel = seed_current_dev_image(tmp.path(), digest);
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        std::fs::create_dir_all(super::super::materialize::prepared_virtiofs_root(
+            tmp.path(),
+            digest,
+            &oci_runtime_tag(tmp.path()),
+        ))
+        .expect("the pull prepared this runtime's launch tree too");
+        let mut index = load_index(tmp.path()).expect("load index");
+        index.images[0].runtime_tag = Some("another-runtime".to_string());
+        index.images[0].rootfs_path = Some("rootfs/another-runtime/rootfs.ext4".to_string());
+        write_index(tmp.path(), &index);
+
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            refusing_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("a launch adopts the rootfs prepared for its runtime");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(&rel));
+        let entry = &load_index(tmp.path()).expect("load index").images[0];
+        assert_eq!(entry.rootfs_path.as_deref(), Some(rel.as_str()));
+        assert_eq!(
+            entry.runtime_tag.as_deref(),
+            Some(oci_runtime_tag(tmp.path()).as_str())
         );
     }
 

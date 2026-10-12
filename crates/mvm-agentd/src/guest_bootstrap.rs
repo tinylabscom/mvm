@@ -731,6 +731,15 @@ pub(crate) fn guest_helper_command(
     cmd
 }
 
+/// The command the vsock egress client is started with, by every guest init
+/// that starts it: [`guest_helper_command`] under
+/// [`EGRESS_CLIENT_IDENTITY`](crate::guest_mount::EGRESS_CLIENT_IDENTITY), the
+/// uid its FlowMux signing key is provisioned for.
+#[cfg(target_os = "linux")]
+pub fn egress_client_command(path: &Path) -> Command {
+    guest_helper_command(path, crate::guest_mount::EGRESS_CLIENT_IDENTITY)
+}
+
 pub fn cmdline() -> String {
     fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }

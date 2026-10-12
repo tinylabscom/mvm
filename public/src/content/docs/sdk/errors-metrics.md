@@ -92,7 +92,7 @@ hidden advanced verb: it works, but it does not appear in
 `mvmctl machine --help`.
 
 ```sh
-mvmctl run --receipt /tmp/receipt.json -- python task.py
+mvmctl run --name task --receipt /tmp/receipt.json -- python task.py   # named: boots cold
 mvmctl machine boot-report devbox --json
 mvmctl machine logs devbox
 mvmctl trust audit tail -n 20
