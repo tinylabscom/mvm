@@ -69,6 +69,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           python3 scripts/release/sign_macos.py --payload hostlib-out \
+            --skip-unconfigured \
             --report "${RUNNER_TEMP}/npm-notarization.json"
 
       - name: Retain macOS notarization evidence

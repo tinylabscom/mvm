@@ -877,6 +877,10 @@ fn macos_release_signing_precedes_archive_checksums() {
     assert!(signing.contains("--payload staging/mvmctl-aarch64-apple-darwin"));
     assert!(signing.contains("macos-notarization.json"));
     assert!(
+        signing.contains("--skip-unconfigured"),
+        "a tag build without Apple credentials must ship ad-hoc signed, not fail"
+    );
+    assert!(
         build.contains("--features mvm-client/release-channel"),
         "the published host library must acquire the matching signed runtime"
     );

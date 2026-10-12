@@ -333,6 +333,7 @@ jobs:
         run: |
           python3 scripts/release/sign_macos.py \
             --payload staging/mvmctl-aarch64-apple-darwin \
+            --skip-unconfigured \
             --report "${RUNNER_TEMP}/macos-notarization.json"
 
       - name: Retain macOS notarization evidence

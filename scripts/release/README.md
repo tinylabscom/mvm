@@ -17,6 +17,13 @@ the exact signed bytes. Upload the JSON report alongside CI evidence: it records
 the accepted submission ID, team, relative native paths and signed-file SHA-256.
 It contains no credentials.
 
+The release workflows pass `--skip-unconfigured`. Until the secrets below are
+provisioned, a tag build therefore succeeds with an ad-hoc-signed, unnotarized
+macOS payload: the step emits a warning and the report records
+`"status": "Unconfigured"` instead of a submission. A partial set of secrets is
+still a hard failure, so a missing or misspelled secret cannot quietly turn a
+notarized release into an unsigned one.
+
 ## Provisioning (release administrator)
 
 An Apple Developer Program team with Developer ID distribution access is

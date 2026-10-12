@@ -49,10 +49,21 @@ expected_version() {
 # pinned. Deliberately a second reader rather than install.sh's own, so a
 # fault in the installer's selection shows up as a mismatch instead of
 # agreeing with itself. Prints nothing when no release qualifies.
+#
+# Anonymous API reads share a small per-address budget that hosted runners
+# routinely exhaust, so a token in the environment is sent when present.
 newest_stable_release() {
-  newest_list="$(curl -fsSL --retry 3 --retry-delay 2 \
-    "${MVM_UPDATE_API_URL:-https://api.github.com}/repos/$REPO/releases?per_page=100")" \
-    || return 1
+  newest_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [ -n "$newest_token" ]; then
+    newest_list="$(curl -fsSL --retry 3 --retry-delay 2 \
+      -H "Authorization: Bearer $newest_token" \
+      "${MVM_UPDATE_API_URL:-https://api.github.com}/repos/$REPO/releases?per_page=100")" \
+      || return 1
+  else
+    newest_list="$(curl -fsSL --retry 3 --retry-delay 2 \
+      "${MVM_UPDATE_API_URL:-https://api.github.com}/repos/$REPO/releases?per_page=100")" \
+      || return 1
+  fi
   printf '%s\n' "$newest_list" | jq -r --arg archive "mvmctl-$1.tar.gz" '
         [ .[]
           | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
