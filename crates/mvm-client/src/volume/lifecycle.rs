@@ -11,7 +11,7 @@
 //! new lifecycle operation proceeds.
 
 use std::fs::{self, File};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -26,6 +26,59 @@ use rand::Rng;
 use secrecy::ExposeSecret;
 
 use super::lease::ensure_volume_not_attached;
+use super::service::HostEncryptionProbe;
+
+/// What the storage refusal and the override's audit entry call this data.
+const MANAGED_VOLUME_PURPOSE: &str = "managed volume";
+
+/// Require that managed-volume plaintext in `dir` would sit on verified
+/// encrypted storage, or that the operator accepted unverified storage with
+/// the audited development override.
+///
+/// `dir` itself is probed, not the volume root: a custom root can have a
+/// different filesystem mounted below it.
+pub(crate) fn admit_materialization_storage(
+    dir: &Path,
+    probe: &dyn HostEncryptionProbe,
+) -> Result<()> {
+    match probe.require_encrypted(dir) {
+        Ok(()) => Ok(()),
+        Err(refusal) => mvm_core::host_storage_encryption::admit_unverified_storage(
+            dir,
+            MANAGED_VOLUME_PURPOSE,
+            refusal,
+        ),
+    }
+}
+
+/// Re-admit plaintext that already exists (an unlocked volume about to be
+/// attached or launched): its directory is private and on admitted storage,
+/// and the image is a regular file readable only by its owner. The image is
+/// kept whatever the outcome, so a refusal never loses writable data.
+pub(crate) fn admit_materialized_volume(
+    path: &Path,
+    probe: &dyn HostEncryptionProbe,
+) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("materialized volume has no parent: {}", path.display()))?;
+    ensure_private_dir(parent)?;
+    admit_materialization_storage(parent, probe)?;
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("inspecting materialized volume {}", path.display()))?;
+    if !metadata.file_type().is_file() {
+        bail!(
+            "materialized volume must be a regular file: {}",
+            path.display()
+        );
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Root for mvm-managed encrypted volume state (`encrypted/` + `unlocked/`).
 pub(crate) fn default_mvm_volume_root() -> PathBuf {
     mvm_core::config::volumes_dir().join("mvm-managed")
@@ -242,6 +295,7 @@ pub(crate) fn create_mvm_managed(
     volume_name: &str,
     root: Option<&Path>,
     capacity_mib: u32,
+    probe: &dyn HostEncryptionProbe,
 ) -> Result<LocalVolumeEntry> {
     let root = match root {
         Some(root) => root.to_path_buf(),
@@ -258,6 +312,9 @@ pub(crate) fn create_mvm_managed(
     let plaintext_dir = root.join("unlocked");
     ensure_private_dir(&ciphertext_dir)?;
     ensure_private_dir(&plaintext_dir)?;
+    // Before a key is minted or a byte is written: this is where every later
+    // unlock of the volume puts its plaintext.
+    admit_materialization_storage(&plaintext_dir, probe)?;
 
     let ciphertext_path = ciphertext_dir.join(format!("{volume_name}.mvve"));
     let host_path = plaintext_dir.join(format!("{volume_name}.ext4"));
@@ -276,7 +333,7 @@ pub(crate) fn create_mvm_managed(
         .context("volume size overflow")?;
 
     let (mut wrapped_key, dek) = generate_wrapped_volume_key()?;
-    let mut scratch = tempfile::NamedTempFile::new_in(&root)
+    let mut scratch = tempfile::NamedTempFile::new_in(&plaintext_dir)
         .context("creating empty block-volume scratch file")?;
     scratch
         .as_file_mut()
@@ -469,42 +526,38 @@ pub(crate) fn unwrap_volume_key(entry: &LocalVolumeEntry) -> Result<secrecy::Sec
     Ok(secrecy::SecretBox::new(Box::new(dek)))
 }
 
+/// Prefix of the private directories a seal stages its ciphertext in.
+const SEAL_STAGING_PREFIX: &str = ".seal-";
+
+/// Seal `src_file` into `ciphertext_path`.
+///
+/// Only ciphertext is written: it is streamed from the plaintext into a
+/// private staging directory beside the destination and renamed into place, so
+/// no plaintext copy ever sits next to the ciphertext and a reader never sees
+/// a partial archive at `ciphertext_path`.
 pub(crate) fn write_encrypted_volume_file(
     src_file: &Path,
     ciphertext_path: &Path,
     dek: &[u8],
 ) -> Result<()> {
-    if let Some(parent) = ciphertext_path.parent() {
-        ensure_private_dir(parent)?;
-    }
-    let tmp = ciphertext_path.with_extension(format!("{}.plain.tmp", std::process::id()));
-    let result = (|| -> Result<()> {
-        fs::copy(src_file, &tmp).with_context(|| {
-            format!(
-                "copying block volume {} -> {}",
-                src_file.display(),
-                tmp.display()
-            )
-        })?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
-        mvm_core::crypto::snapshot_encryption::encrypt_file_in_place(&tmp, dek)
-            .context("encrypting block volume")?;
-        fs::rename(&tmp, ciphertext_path).with_context(|| {
-            format!(
-                "renaming encrypted block volume {} -> {}",
-                tmp.display(),
-                ciphertext_path.display()
-            )
-        })?;
-        fs::set_permissions(ciphertext_path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", ciphertext_path.display()))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    let parent = ciphertext_path
+        .parent()
+        .with_context(|| format!("ciphertext has no parent: {}", ciphertext_path.display()))?;
+    ensure_private_dir(parent)?;
+    mvm_runtime::private_staging::reclaim_abandoned(parent, SEAL_STAGING_PREFIX);
+    let staging = mvm_runtime::private_staging::create(parent, SEAL_STAGING_PREFIX)
+        .context("creating private seal staging")?;
+    let staged = staging.path().join("sealed.mvve");
+    mvm_core::crypto::snapshot_encryption::encrypt_file(src_file, &staged, dek)
+        .with_context(|| format!("encrypting block volume {}", src_file.display()))?;
+    fs::rename(&staged, ciphertext_path).with_context(|| {
+        format!(
+            "publishing encrypted block volume {} -> {}",
+            staged.display(),
+            ciphertext_path.display()
+        )
+    })?;
+    Ok(())
 }
 
 fn decrypt_volume_file(ciphertext_path: &Path, dest_file: &Path, dek: &[u8]) -> Result<()> {
@@ -519,16 +572,24 @@ fn decrypt_volume_file(ciphertext_path: &Path, dest_file: &Path, dek: &[u8]) -> 
         .with_context(|| format!("block volume path has no parent: {}", dest_file.display()))?;
     ensure_private_dir(parent)?;
     let tmp = unlock_staging_path(dest_file);
+    // Owner-only from creation: the file becomes plaintext in place below.
+    let mut staged = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("creating private unlock staging {}", tmp.display()))?;
     let result = (|| -> Result<()> {
-        fs::copy(ciphertext_path, &tmp).with_context(|| {
+        let mut ciphertext = File::open(ciphertext_path)
+            .with_context(|| format!("opening {}", ciphertext_path.display()))?;
+        std::io::copy(&mut ciphertext, &mut staged).with_context(|| {
             format!(
                 "copying encrypted block volume {} -> {}",
                 ciphertext_path.display(),
                 tmp.display()
             )
         })?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", tmp.display()))?;
+        drop(staged);
         mvm_core::crypto::snapshot_encryption::decrypt_file_in_place(&tmp, dek)
             .context("decrypting block volume")?;
         ext4_view::Ext4::load_from_path(&tmp)
@@ -558,6 +619,7 @@ fn decrypt_volume_file(ciphertext_path: &Path, dest_file: &Path, dek: &[u8]) -> 
 pub(crate) fn unlock_volume_locked(
     catalog: &mut LocalVolumeCatalog,
     volume_name: &str,
+    probe: &dyn HostEncryptionProbe,
 ) -> Result<()> {
     let entry = catalog
         .get(volume_name)
@@ -575,6 +637,12 @@ pub(crate) fn unlock_volume_locked(
             bail!("volume {volume_name:?} is host-backed and does not need unlock")
         }
     };
+    let plaintext_dir = Path::new(&entry.host_path)
+        .parent()
+        .with_context(|| format!("managed volume {volume_name:?} has no plaintext directory"))?;
+    ensure_private_dir(plaintext_dir)?;
+    admit_materialization_storage(plaintext_dir, probe)
+        .with_context(|| format!("unlocking volume {volume_name:?}"))?;
     set_local_volume_state(catalog, volume_name, LocalVolumeState::Unlocking)?;
     catalog.save()?;
     decrypt_volume_file(

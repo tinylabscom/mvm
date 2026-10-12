@@ -106,8 +106,7 @@ pub fn resolve_sdk_sidecar_attachment(
     let artifact = resolver.resolve(&arch.to_string(), libc).with_context(|| {
         format!(
             "this workload binds SDK host service(s) [{}], which need the {libc} SDK sidecar \
-             mounted read-only at {}. Populate {} from a source checkout with: \
-             mvmctl build sdk-sidecar build",
+             mounted read-only at {}. Populate {} with: mvmctl bootstrap",
             bound.join(", "),
             mvm_core::plan::SDK_SIDECAR_GUEST_PATH,
             layout.artifact_dir.display(),
@@ -293,7 +292,7 @@ mod tests {
         let rendered = format!("{err:#}");
         assert!(rendered.contains("host.kv.v1"), "{rendered}");
         assert!(
-            rendered.contains("mvmctl build sdk-sidecar build"),
+            rendered.contains("Populate") && rendered.contains("with: mvmctl bootstrap"),
             "{rendered}"
         );
         // The cache path the operator has to populate is named, not implied.

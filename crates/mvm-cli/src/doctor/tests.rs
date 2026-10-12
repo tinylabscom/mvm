@@ -285,3 +285,30 @@ fn an_unreadable_firecracker_version_is_not_reported_as_reclaiming() {
         assert!(check.info.starts_with("no"), "{output:?}: {}", check.info);
     }
 }
+
+#[test]
+fn the_snapshot_encryption_key_line_names_its_source() {
+    use mvm_client::snapshot::{SnapshotKeyError, SnapshotKeySource};
+    let status = super::security_checks::snapshot_encryption_key_status;
+
+    let (ok, info) = status(Ok(SnapshotKeySource::Explicit));
+    assert!(ok);
+    assert!(info.contains("MVM_TENANT_KEY_LOCAL"), "{info}");
+
+    let (ok, info) = status(Ok(SnapshotKeySource::HomeKeyFile));
+    assert!(ok);
+    assert!(
+        info.contains("local.key") && info.contains("provisioned"),
+        "{info}"
+    );
+
+    let (ok, info) = status(Err(SnapshotKeyError::Missing));
+    assert!(ok, "no key yet is informational");
+    assert!(info.contains("mvmctl bootstrap"), "{info}");
+
+    let (ok, info) = status(Err(SnapshotKeyError::Invalid {
+        origin: SnapshotKeySource::HomeKeyFile,
+    }));
+    assert!(!ok, "an unusable key is a finding");
+    assert!(info.contains("local.key"), "{info}");
+}

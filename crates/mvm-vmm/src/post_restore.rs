@@ -138,6 +138,10 @@ pub struct PostRestoreOutcome {
     /// from `acknowledged`: a guest that could not reseed still remounted its
     /// drives and restarted its services.
     pub reseed_shortfall: Option<mvm_agentd::vsock::ReseedShortfall>,
+    /// The workload seccomp tier the guest reports holding after this restore.
+    /// `None` when the request named no tier, or when the guest refused the
+    /// one it was handed.
+    pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
 }
 
 /// Turn the guest's answer into an outcome. Split out so the mapping — which
@@ -150,12 +154,14 @@ fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<P
             reseeded,
             clock_resynced,
             reseed_shortfall,
+            seccomp_tier,
         } => Ok(PostRestoreOutcome {
             acknowledged: success,
             detail,
             reseeded,
             clock_resynced,
             reseed_shortfall,
+            seccomp_tier,
         }),
         other => bail!("unexpected response to PostRestore: {other:?}"),
     }
@@ -251,6 +257,30 @@ pub fn signal_post_restore<S: PostRestoreSignal + ?Sized>(
     Ok(outcome)
 }
 
+/// What a restored child is handed before a claim on it commits: the fresh
+/// generation token it must reseed from, the signed verb grant it pins (when
+/// its plan carries one), and the seccomp tier its claiming plan admits.
+#[derive(Debug, Clone)]
+pub struct ChildIdentity {
+    /// Fresh VMGenID token bound to the child's content-address.
+    pub token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    /// Signed agent authority for the child, when its plan grants any.
+    pub grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    /// The tier every workload process in the child must run under. A standby
+    /// parent boots with no plan and holds no tier, so the child's has to
+    /// arrive here.
+    pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+}
+
+impl ChildIdentity {
+    /// The post-restore signal that delivers this identity.
+    #[must_use]
+    pub fn signal(self) -> VsockPostRestoreSignal {
+        VsockPostRestoreSignal::for_resumed_child(self.token, self.grant_envelope)
+            .with_seccomp_tier(self.seccomp_tier)
+    }
+}
+
 /// Production [`PostRestoreSignal`] — sends `GuestRequest::PostRestore` over
 /// the backend-agnostic vsock transport (Firecracker / libkrun / Apple
 /// Container, selected per VM by `vsock_transport::for_vm`). Not unit-tested
@@ -267,6 +297,10 @@ pub struct VsockPostRestoreSignal {
     /// Signed capability to pin while the restored guest adopts its fresh
     /// identity. Ordinary resume paths carry no new grant.
     pub grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    /// Workload seccomp tier the restored guest must admit before it
+    /// acknowledges. Set for a child restored out of a standby parent, which
+    /// booted with no plan and so holds no tier of its own.
+    pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
 }
 
 impl VsockPostRestoreSignal {
@@ -287,7 +321,18 @@ impl VsockPostRestoreSignal {
             token,
             hostname: None,
             grant_envelope,
+            seccomp_tier: None,
         }
+    }
+
+    /// Hand the restored guest the seccomp tier its claiming plan admits.
+    #[must_use]
+    pub fn with_seccomp_tier(
+        mut self,
+        seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    ) -> Self {
+        self.seccomp_tier = seccomp_tier;
+        self
     }
 
     pub fn request(&self, host_epoch_secs: u64) -> mvm_agentd::vsock::GuestRequest {
@@ -296,6 +341,7 @@ impl VsockPostRestoreSignal {
             hostname: self.hostname.clone(),
             host_epoch_secs: Some(host_epoch_secs),
             grant_envelope: self.grant_envelope.clone(),
+            seccomp_tier: self.seccomp_tier,
         }
     }
 }
@@ -424,6 +470,7 @@ mod tests {
                 reseeded: true,
                 clock_resynced: true,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             }),
         };
         let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
@@ -449,6 +496,7 @@ mod tests {
             reseeded: false,
             clock_resynced: true,
             reseed_shortfall: Some(mvm_agentd::vsock::ReseedShortfall::HelperMissing),
+            seccomp_tier: None,
         };
         let signal = MockSignalCount {
             calls: std::cell::RefCell::new(0),
@@ -487,6 +535,7 @@ mod tests {
                 reseeded: true,
                 clock_resynced: true,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             }),
         };
         let err = signal_post_restore("vm-1", &signal, Duration::from_millis(30)).unwrap_err();
@@ -572,6 +621,47 @@ mod tests {
         );
     }
 
+    /// A resumed child carries the claiming plan's tier on the request, and
+    /// the guest's report of what it admitted reaches the caller.
+    #[test]
+    fn a_resumed_child_is_handed_its_seccomp_tier_and_reports_it_back() {
+        use mvm_core::crypto::seccomp::SeccompTier;
+
+        let signal = VsockPostRestoreSignal::for_resumed_child(
+            [4u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            None,
+        )
+        .with_seccomp_tier(Some(SeccompTier::Standard));
+        let mvm_agentd::vsock::GuestRequest::PostRestore { seccomp_tier, .. } = signal.request(1)
+        else {
+            panic!("expected a PostRestore request");
+        };
+        assert_eq!(seccomp_tier, Some(SeccompTier::Standard));
+
+        let outcome = outcome_from_response(mvm_agentd::vsock::GuestResponse::PostRestoreAck {
+            success: true,
+            detail: None,
+            reseeded: true,
+            clock_resynced: true,
+            reseed_shortfall: None,
+            seccomp_tier: Some(SeccompTier::Standard),
+        })
+        .unwrap();
+        assert_eq!(outcome.seccomp_tier, Some(SeccompTier::Standard));
+    }
+
+    /// Without a tier the request serializes exactly as before the field
+    /// existed, so a plain resume still reaches an agent built without it.
+    #[test]
+    fn a_request_without_a_tier_omits_the_field_from_the_wire() {
+        let signal = VsockPostRestoreSignal::for_resumed_child(
+            [4u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+            None,
+        );
+        let json = serde_json::to_string(&signal.request(1)).unwrap();
+        assert!(!json.contains("seccomp_tier"), "{json}");
+    }
+
     #[test]
     fn post_restore_request_carries_the_child_grant_envelope() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
@@ -597,6 +687,7 @@ mod tests {
             token: [9u8; mvm_core::crypto::vmgenid::GENID_BYTES],
             hostname: Some("child-final".to_string()),
             grant_envelope: Some(envelope),
+            seccomp_tier: None,
         };
 
         let mvm_agentd::vsock::GuestRequest::PostRestore {
@@ -604,6 +695,7 @@ mod tests {
             hostname,
             host_epoch_secs,
             grant_envelope,
+            ..
         } = signal.request(42)
         else {
             panic!("post-restore signal built the wrong request variant");

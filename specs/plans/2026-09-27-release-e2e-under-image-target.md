@@ -134,6 +134,15 @@ build?"
       `MVM_FETCH_UNCHANGED_IMAGES=pinned` (decision above), so its image-prep
       phase no longer depends on a fingerprint match. This box still ticks
       only after two green release runs under that arm are measured.
+      *Retargeted 2026-10-11 (#4105):* fetch-when-unchanged is deleted, and
+      no guest-runtime piece is an image-set member any more. The arrangement
+      to measure is the pinned base set (kernels, base root filesystems, the
+      dev default image's members) booted with the guest runtime the CLI
+      under test assembles on the host — from its tree on a source-built
+      `mvmctl`, from its release asset on a published one. The image-prep
+      phase is then the base-set fetch plus the host assembly; the sidecar
+      phase has no pair build to time. The box ticks on two green release
+      runs measured that way, against the same W8 table.
 
 ## Decision 2026-10-04: the release lane boots the pinned set
 
@@ -183,8 +192,10 @@ assembles them from a guest-runtime asset each CLI release ships. The
 above is retargeted there to the pinned base set booted with the CLI's own
 guest runtime, and the merge-queue guest-image-boot lane this decision
 leaves untouched stops building from an `mvm-images` checkout under
-[#4108](https://github.com/tinylabscom/mvm/issues/4108). The wiring above
-describes the code until those land.
+[#4108](https://github.com/tinylabscom/mvm/issues/4108). *2026-10-11:* the
+CLI side of #4105 has landed; `MVM_FETCH_UNCHANGED_IMAGES` is read by nothing
+in `mvmctl`, so the workflow input and the runner's knob above are inert until
+#4108 removes them.
 
 Scenario dependence on newer guest behaviour, checked against
 `image-set/v0.2.4` (built from mvm `4e65b22`) by reading the range

@@ -4,6 +4,8 @@
 /// Loopback DNS resolver (`mvm-addon-dns`).
 #[cfg(feature = "addons")]
 pub mod addon_dns;
+/// Whether and how PID 1 starts the addon resolver.
+pub mod addon_dns_launch;
 /// Loopback TCP ↔ host-vsock bridge (`mvm-addon-vsock-bridge`).
 #[cfg(feature = "addons")]
 pub mod addon_vsock_bridge;
@@ -155,6 +157,10 @@ pub mod worker_protocol;
 /// Both the entrypoint runner and the interactive console read the image's
 /// declared runtime config through it.
 pub mod workload_env;
+
+/// The admitted seccomp tier, compiled once at activation and installed in
+/// every workload process the agent starts.
+pub mod workload_seccomp;
 
 /// Names the fixed workload uid/gid in the workload rootfs account databases,
 /// so `whoami`/`id`/`getpwuid` resolve inside images mvm did not build.

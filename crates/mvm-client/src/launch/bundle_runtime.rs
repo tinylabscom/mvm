@@ -238,7 +238,7 @@ mod tests {
     use mvm_bundler::{
         BootAssetsInputs, BundleExportInputs, BundleSigner, export_bundle_with_signer,
     };
-    use mvm_core::image_set::{ImageSetRole, ImageSetVersion, MemberTarget};
+    use mvm_core::image_set::{ImageSetVersion, MemberTarget};
     use mvm_core::packs::Sha256Hex;
     use mvm_core::util::test_env::TestEnv;
 
@@ -281,13 +281,13 @@ mod tests {
         );
         let mut manifest = ImageSetFixture::complete()
             .publish(
-                ImageSetRole::RuntimeOverlay,
+                mvm_core::plan::bundle::BOOT_ASSET_OVERLAY_ROLE,
                 MemberTarget::Arch(arch),
                 "overlay.tar.gz",
                 overlay_bytes.clone(),
             )
             .publish(
-                ImageSetRole::Initramfs,
+                mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE,
                 MemberTarget::Arch(arch),
                 "initramfs.tar.gz",
                 initramfs_bytes.clone(),

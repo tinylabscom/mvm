@@ -78,8 +78,11 @@ Compile and inspect:
 ```sh
 mvmctl build compile tool.py --out /tmp/agent-tool
 mvmctl machine build --flake /tmp/agent-tool
-mvmctl machine run --flake /tmp/agent-tool
+mvmctl machine run --name agent-tool --flake /tmp/agent-tool
 ```
+
+The run is named so it boots cold; an unnamed run must claim a prepared warm
+standby, which `pool warm` cannot prepare for a flake image.
 
 ## Why static compile matters
 

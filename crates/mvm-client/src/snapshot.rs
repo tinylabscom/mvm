@@ -12,6 +12,19 @@
 use anyhow::{Context, Result};
 
 pub use mvm_runtime::vm::instance_snapshot::{InstanceSnapshotEntry, list_instance_snapshots};
+pub use mvm_runtime::vm::snapshot_key::{
+    HostSnapshotKey, SnapshotKeyError, SnapshotKeyProvisionError, SnapshotKeySource,
+    ensure_host_snapshot_key,
+};
+
+/// Which source supplies the host snapshot key, or why none does. Reads only;
+/// never provisions one.
+pub fn host_snapshot_key_source() -> std::result::Result<SnapshotKeySource, SnapshotKeyError> {
+    use mvm_runtime::vm::snapshot_key::{SNAPSHOT_TENANT_ID, SnapshotKeyResolver};
+    SnapshotKeyResolver::host()
+        .admit_naming_source(SNAPSHOT_TENANT_ID)
+        .map(|(_, source)| source)
+}
 
 /// Remove a machine's sealed instance snapshot. Returns `true` when a
 /// snapshot existed and was removed, `false` when the machine has none.

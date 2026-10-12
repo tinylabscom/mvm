@@ -93,6 +93,9 @@ pub mod mock;
 #[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
 pub mod netinit_audit;
+/// Private, pid-owned staging directories for transient plaintext, and the
+/// sweep that reclaims those whose owner died.
+pub mod private_staging;
 /// QEMU workload runtime backend (dev/test).
 /// Process-local reservation and rollback for resident warm parents.
 pub mod resident_pool;

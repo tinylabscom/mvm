@@ -63,7 +63,7 @@ mod linux {
     use std::net::{SocketAddr, TcpStream};
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
+    use std::process::{Child, Command, ExitCode, ExitStatus};
     use std::time::{Duration, Instant};
 
     use crate::seed::{find_seed_bin, find_seed_cacert, seed_store_has_required_runtime};
@@ -369,16 +369,18 @@ mod linux {
         if is_qemu() {
             best_effort_load_qemu_vsock_modules();
         }
-        let mut cmd = Command::new(egress_client);
-        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+        // The client parses every proxy and DNS request the bootstrap build
+        // sends, so it runs under its own identity rather than PID 1's root.
+        let mut cmd = mvm_agentd::guest_bootstrap::egress_client_command(egress_client);
         if let Some(port) = vsock_egress_port_from_cmdline(cmdline) {
             cmd.env(VSOCK_EGRESS_PORT_ENV, port.to_string());
         }
         match cmd.spawn() {
             Ok(child) => {
                 eprintln!(
-                    "stage0-init: forked mvm-egress-client pid={} from {}",
+                    "stage0-init: forked mvm-egress-client pid={} uid={} from {}",
                     child.id(),
+                    mvm_agentd::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
                     egress_client.display()
                 );
                 Ok(child)
@@ -436,8 +438,11 @@ mod linux {
         }
         // The identity must be in /run/mvm before the client starts: it loads
         // both keys before it binds, so a missing drive surfaces as a proxy
-        // that never came up rather than as anything naming the drive.
-        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive() {
+        // that never came up rather than as anything naming the drive. The
+        // key is handed to the client's uid while PID 1 is still root.
+        if let Err(e) = mvm_agentd::flowmux_drive::provision_identity_from_drive_for_uid(
+            mvm_agentd::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
+        ) {
             let why = egress_readiness_outcome(EgressProbe::IdentityMissing(e.to_string()))
                 .expect_err("IdentityMissing is a refusing probe");
             eprintln!("stage0-init: {why}");
@@ -1760,5 +1765,53 @@ mod linux {
             assert!(!copied.join("vmlinux").exists());
             assert!(!copied.join("rootfs.ext4").exists());
         }
+    }
+}
+
+/// The egress start-up lives in the Linux-only module, so its identity
+/// handling is pinned from the source, where every host can check it.
+#[cfg(test)]
+mod egress_identity_tests {
+    fn body_of(name: &str) -> String {
+        include_str!("stage0-init.rs")
+            .split_once(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} must exist"))
+            .1
+            .split("\n    }\n")
+            .next()
+            .expect("the body ends at the first closing brace")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PID 1 is root. A client it starts as-is keeps root for the whole
+    /// bootstrap build while parsing every proxy and DNS request that build
+    /// makes.
+    #[test]
+    fn the_egress_client_runs_under_its_own_identity() {
+        let body = body_of("fork_vsock_egress_client");
+        assert!(
+            body.contains("guest_bootstrap::egress_client_command("),
+            "{body}"
+        );
+        assert!(!body.contains("Command::new("), "{body}");
+    }
+
+    /// The key is mode 0400, so it has to belong to the uid the client runs
+    /// as, and it has to be handed over before the client starts.
+    #[test]
+    fn the_signing_key_is_handed_to_the_egress_client_before_it_starts() {
+        let body = body_of("start_vsock_egress_if_requested");
+        let provision = body
+            .find("provision_identity_from_drive_for_uid(")
+            .expect("the key is provisioned for the client's uid");
+        let fork = body
+            .find("fork_vsock_egress_client(")
+            .expect("the client is started");
+        assert!(provision < fork, "{body}");
+        assert!(body.contains("EGRESS_CLIENT_IDENTITY.uid()"), "{body}");
     }
 }

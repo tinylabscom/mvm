@@ -363,7 +363,7 @@ fn an_image_without_mvm_binaries_is_not_keyed_on_setprivs_source() {
 #[test]
 fn other_roles_still_key_on_the_whole_mvm_checkout() {
     let pair = Pair::new();
-    let before = pair.key_for(ImageBuildRole::RuntimeOverlay);
+    let before = pair.key_for(ImageBuildRole::RootlessTenant);
     assert_eq!(
         before.mvm,
         MvmSourceIdentity::Checkout(pair.whole_checkout())
@@ -374,7 +374,7 @@ fn other_roles_still_key_on_the_whole_mvm_checkout() {
         "pub fn g() {}\n",
     );
 
-    assert_ne!(pair.key_for(ImageBuildRole::RuntimeOverlay), before);
+    assert_ne!(pair.key_for(ImageBuildRole::RootlessTenant), before);
 }
 
 #[test]

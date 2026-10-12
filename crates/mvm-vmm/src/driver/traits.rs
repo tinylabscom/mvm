@@ -8,15 +8,14 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use mvm_core::crypto::vmgenid::{GENID_BYTES, GenerationToken};
-use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+use mvm_core::crypto::vmgenid::GenerationToken;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, SnapshotCapability, StandbyError,
     StandbyHandle, StandbySpec, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 
 use crate::driver::spec::{VmmSpec, VsockPort};
-use crate::post_restore::{PostRestoreOutcome, VsockPostRestoreSignal, signal_post_restore};
+use crate::post_restore::{ChildIdentity, PostRestoreOutcome, signal_post_restore};
 
 /// What a driver needs to fork a materialized standby parent into a fresh child
 /// VMM. Grouped so the seam takes one value instead of a positional list.
@@ -222,11 +221,12 @@ pub trait VmmDriver: Send + Sync {
         })
     }
 
-    /// Hand a freshly forked child its generation token and optional signed
-    /// verb grant, then report verbatim what the guest agent says it did with
-    /// them — whether it acknowledged the signal, rotated its generation
-    /// identity (reseeding its CSPRNG off the parent's cloned state), and
-    /// resynchronized its wall clock off the host's.
+    /// Hand a freshly forked child its generation token, optional signed verb
+    /// grant and admitted seccomp tier, then report verbatim what the guest
+    /// agent says it did with them — whether it acknowledged the signal,
+    /// rotated its generation identity (reseeding its CSPRNG off the parent's
+    /// cloned state), resynchronized its wall clock off the host's, and which
+    /// seccomp tier it now holds admitted.
     ///
     /// The reported flags are the guest's own claims, not a verdict: judging
     /// them is the role layer's job, so a driver never decides whether a child
@@ -240,12 +240,11 @@ pub trait VmmDriver: Send + Sync {
     fn deliver_child_identity(
         &self,
         child_vm_name: &str,
-        token: [u8; GENID_BYTES],
-        grant_envelope: Option<VerbGrantEnvelope>,
+        identity: ChildIdentity,
     ) -> Result<PostRestoreOutcome> {
         signal_post_restore(
             child_vm_name,
-            &VsockPostRestoreSignal::for_resumed_child(token, grant_envelope),
+            &identity.signal(),
             crate::post_restore::POST_RESTORE_READY_TIMEOUT,
         )
     }

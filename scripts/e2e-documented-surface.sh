@@ -257,10 +257,11 @@ just payload::refresh
 # path uses the faster wrapper, which links aws-lc through the LLVM overrides in
 # .cargo/fast.toml.
 # Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
-# for the contributor path: that command must re-exec the isolated embedded
-# helper for the complete HVF/Nix build, not resume in this payload-free parent.
-# The main suite binary is then rebuilt with the payload because later workload
-# launches consume the extracted host helpers directly.
+# for the contributor path: a binary that carries no host payload must still
+# pack both sidecars on the host from the checkout's guest runtime, without
+# reaching for a builder VM. The main suite binary is then rebuilt with the
+# payload because later workload launches consume the extracted host helpers
+# directly.
 # `user` by default: released binaries are built with it (see
 # MVMCTL_RELEASE_FEATURES in release.yml), so a lane without it attests the
 # documented surface using a binary less capable than the one users get.
@@ -417,68 +418,32 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
-# Where the SDK sidecar and the dev default image come from. The two image
-# verbs below read `MVM_FETCH_UNCHANGED_IMAGES`, and this runner hands it to
-# them alone, so every scenario sees the environment it always has:
+# Nothing here is pair-built through an mvm-images checkout. The SDK sidecar is
+# guest runtime and comes from this tree; the dev default image is Linux layer
+# and comes from the pinned, signed image set.
 #
-#   1 (default)  build both from this tree through an mvm-images checkout,
-#                adopting the pinned set's members only when they were built
-#                from exactly this tree's sources. A published sidecar carries
-#                the C ABI of the mvm commit its image set was built from, so a
-#                tree that changed it gets a sidecar built from itself.
-#   pinned       adopt the pinned, signed set's members whatever they were
-#                built from — what a user of this CLI boots. No checkout is
-#                needed, and a set that is refused or lacks them fails the
-#                step rather than falling back to a build. The release lane
-#                runs this way; guest-source changes are pair-built and booted
-#                by the merge queue's guest-image-boot lane instead.
-E2E_FETCH_MODE="${MVM_FETCH_UNCHANGED_IMAGES:-1}"
-unset MVM_FETCH_UNCHANGED_IMAGES
-case "$E2E_FETCH_MODE" in
-  1|pinned) ;;
-  *)
-    echo "!!! MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE: this runner takes 1 or pinned." >&2
-    exit 1
-    ;;
-esac
-echo "    image source: MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE"
-
-# The image checkout is handed to these steps alone, so every other step keeps
-# resolving images from the pinned set, and it is kept out of the sibling path
-# an image checkout is discovered at for the same reason. Under `pinned` there
-# is none: nothing is built.
-E2E_IMAGE_ENV=(MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES="$E2E_FETCH_MODE")
-if [[ "$E2E_FETCH_MODE" != pinned ]]; then
-  E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
-  if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
-    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
-    echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
-    echo "!!! or MVM_FETCH_UNCHANGED_IMAGES=pinned to boot the pinned set's members." >&2
-    exit 1
-  fi
-  E2E_IMAGE_ENV+=(MVM_IMAGES_DIR="$E2E_IMAGES_DIR")
-fi
-
-# The service-plane scenarios load this sidecar. The verb reports which arm
-# ran and why, including how this tree's fingerprint compares with the set's.
+# The service-plane scenarios load the sidecar. `--source build` packs both
+# libc variants on the host from this checkout's guest-runtime archive,
+# compiling the archive first when it is not cached. The image set carries no
+# sidecar this CLI reads. No builder VM starts.
 e2e_phase sdk-sidecar
-echo "==> preparing the SDK sidecar through unembedded mvmctl"
-env "${E2E_IMAGE_ENV[@]}" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+echo "==> packing the SDK sidecar from this tree's guest runtime"
+MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
-# `image dev ensure` takes the same arm as the sidecar, and reports it. A
-# fetched install carries no pair identity, and the warm boot below must
-# answer from the completed cache, not rebuild it, so only the ensure step
-# sees the image environment. The one scenario that boots the dev image is
-# Firecracker-only (the cached dev rootfs must stay byte-identical across
-# launches), so only the Linux lane prepares it, into the warm home every
-# scenario shares.
+# With no image checkout selected, `image dev ensure` installs it from the
+# pinned set, and a set that is refused or lacks it fails the step rather than
+# falling back to a build. The one scenario that boots the dev image is Firecracker-only (the cached dev
+# rootfs must stay byte-identical across launches), so only the Linux lane
+# prepares it, into the warm home every scenario shares.
 if [[ "$(uname -s)" == Linux ]]; then
   e2e_phase dev-image
-  echo "==> preparing the dev default image"
-  env "${E2E_IMAGE_ENV[@]}" "$MVMCTL" image dev ensure
+  echo "==> adopting the dev default image from the pinned image set"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
-  MVM_HOME="$E2E_HOME" "$MVMCTL" run --no-detect -- /bin/true
+  # Named, so it takes the cold path. An unnamed launch has to claim a
+  # prepared warm standby, and nothing has warmed one for the dev image.
+  MVM_HOME="$E2E_HOME" "$MVMCTL" run --name e2e-dev-image-warm --no-detect -- /bin/true
 fi
 
 # ---------------------------------------------------------------------------
@@ -544,6 +509,43 @@ warm_launch_artifacts() {
   fi
   rm -f "$warm_log"
 }
+# ---------------------------------------------------------------------------
+# Pull the OCI images the live scenarios boot.
+#
+# A launch is cache-only: it boots an image `image pull` already prepared and
+# refuses one that was not ("cached OCI image ... is not launch-ready"). The
+# live scenarios boot these in this home, through `machine run --image`, a
+# detected runtime (`rust` from Cargo.toml, `python` from the command), the
+# machine journey (`nginx`), or the warm-up below, so the home is prepared
+# here, the way an operator prepares one.
+#
+# A prepared rootfs is keyed by the guest runtime injected into it, and the
+# suite launches under two runtime sources in this one home: the `I launch`
+# steps and the journey resolve the published runtime, while the live-home
+# steps select this checkout's (`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build`). A
+# pull under one is not launch-ready under the other, so each image is
+# prepared under both.
+#
+# Fatal, not best-effort. A pull that failed here used to be reported as a
+# line in the log and then as a dozen scenarios refusing an unprepared image,
+# an hour later, each naming the image rather than the pull. The scenarios that
+# boot an image in a home of their own still prepare it themselves.
+# ---------------------------------------------------------------------------
+E2E_LIVE_IMAGES=(alpine nginx rust:1-alpine python:3.12 python:3.12-alpine curlimages/curl:8.21.0)
+E2E_RUNTIME_SOURCES=(download build)
+e2e_phase images
+for image in "${E2E_LIVE_IMAGES[@]}"; do
+  for runtime_source in "${E2E_RUNTIME_SOURCES[@]}"; do
+    echo "==> pulling $image (guest runtime: $runtime_source)"
+    if ! MVM_HOME="$E2E_HOME" MVM_RUNTIME_OVERLAY_ACQUIRE_MODE="$runtime_source" \
+      "$MVMCTL" image pull "$image"; then
+      echo "!!! image pull $image failed (guest runtime: $runtime_source); the live" >&2
+      echo "!!! scenarios that boot it cannot run." >&2
+      exit 1
+    fi
+  done
+done
+
 e2e_phase launch-artifacts
 warm_launch_artifacts
 
@@ -623,10 +625,22 @@ provision_guest_bin_dir
 provision_encrypted_backing_probes() {
   local probe_bin="$E2E_HOME/encrypted-backing-probe-bin"
   mkdir -p "$probe_bin"
-  printf '%s\n' '#!/bin/sh' "printf '%s\\n' /dev/mapper/mvm-e2e-crypt" > "$probe_bin/findmnt"
-  printf '%s\n' '#!/bin/sh' "printf '%s\\n' crypt" > "$probe_bin/lsblk"
+  # The shapes the shared storage detector parses: one ext4 mount with an
+  # internal journal on a dm-crypt mapping, and a FileVault-on APFS volume.
+  cat > "$probe_bin/findmnt" <<'PROBE'
+#!/bin/sh
+printf '%s\n' '{"filesystems":[{"source":"/dev/mapper/mvm-e2e-crypt","fstype":"ext4"}]}'
+PROBE
+  cat > "$probe_bin/tune2fs" <<'PROBE'
+#!/bin/sh
+printf '%s\n' 'Filesystem features: has_journal extents' 'Journal inode: 8'
+PROBE
+  cat > "$probe_bin/lsblk" <<'PROBE'
+#!/bin/sh
+printf '%s\n' '{"blockdevices":[{"type":"crypt"}]}'
+PROBE
   printf '%s\n' '#!/bin/sh' "printf '%s\\n' 'FileVault: Yes'" > "$probe_bin/diskutil"
-  chmod 755 "$probe_bin/findmnt" "$probe_bin/lsblk" "$probe_bin/diskutil"
+  chmod 755 "$probe_bin/findmnt" "$probe_bin/tune2fs" "$probe_bin/lsblk" "$probe_bin/diskutil"
   export PATH="$probe_bin:$PATH"
 }
 provision_encrypted_backing_probes

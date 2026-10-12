@@ -64,16 +64,19 @@ fn canonical_bdd_workflow_runs_the_full_suite() {
 }
 
 #[test]
-fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_on_prs() {
+fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_in_the_queue() {
     let required = workflow("bdd.yml");
     assert!(
         required.contains("ps11-live:")
             && required.contains("just bdd::live-ci ps11_live")
             && required.contains("timeout-minutes: 60"),
-        "the ordinary PR workflow must execute only the bounded PS-11 live witness"
+        "the required CI workflow must execute only the bounded PS-11 live witness"
     );
     let ci = workflow("ci.yml");
-    assert!(ci.contains("github.event_name != 'merge_group'"));
+    // BDD is full-matrix: the merge queue runs it, a pull request does not.
+    assert!(ci.contains(
+        "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'pull_request'"
+    ));
     assert!(ci.contains("run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}"));
 
     let extended = workflow("ci-full.yml");

@@ -3418,6 +3418,7 @@ dependencies = [
  "ext4-view",
  "flate2",
  "hex",
+ "hmac",
  "libc",
  "libkrun-sys",
  "mvm-agentd",

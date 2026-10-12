@@ -62,14 +62,22 @@ pub trait KeyProvider: Send + Sync {
 /// the env var name and the ID is uppercased.
 pub struct EnvKeyProvider;
 
+impl EnvKeyProvider {
+    /// The variable this provider reads `tenant_id`'s key from.
+    #[must_use]
+    pub fn variable_for(tenant_id: &str) -> String {
+        format!(
+            "MVM_TENANT_KEY_{}",
+            tenant_id.to_uppercase().replace('-', "_")
+        )
+    }
+}
+
 impl KeyProvider for EnvKeyProvider {
     fn get_data_key(&self, tenant_id: &str) -> Result<SecretBox<Vec<u8>>> {
         validate_shell_id(tenant_id)
             .with_context(|| format!("Invalid tenant_id for key lookup: {tenant_id:?}"))?;
-        let var = format!(
-            "MVM_TENANT_KEY_{}",
-            tenant_id.to_uppercase().replace('-', "_")
-        );
+        let var = Self::variable_for(tenant_id);
         let hex = std::env::var(&var)
             .with_context(|| format!("Missing encryption key env var: {var}"))?;
         let key = hex_decode(&hex).with_context(|| format!("Invalid hex in {var}"))?;

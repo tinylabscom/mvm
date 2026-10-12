@@ -313,6 +313,12 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Apply the machine's workspace changes at exit without asking.
     #[arg(long, requires = "attach", conflicts_with = "json")]
     pub apply: bool,
+    /// Internal (not a CLI flag): a fresh boot that names no source boots the
+    /// default image. `mvmctl run` sets it, so `mvmctl run -- <cmd>` keeps
+    /// booting the default image; `machine run` leaves it unset and requires
+    /// a source.
+    #[arg(skip)]
+    pub default_image_when_sourceless: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -344,6 +350,7 @@ impl Default for MachineRunArgs {
             stdin: None,
             attach: false,
             apply: false,
+            default_image_when_sourceless: false,
         }
     }
 }
@@ -402,6 +409,20 @@ impl MachineRunArgs {
             || self.ttl.is_some()
             || self.healthcheck.is_some()
             || !self.port.is_empty()
+    }
+
+    /// Whether this run may infer a boot source it was not given.
+    ///
+    /// Only a fresh transient boot infers. A persistent machine outlives the
+    /// command, so its base image is never guessed from the directory it was
+    /// started in, and `--attach` boots nothing at all: it dispatches into a
+    /// machine that is already running.
+    pub(in crate::commands) fn source_inference(&self) -> crate::commands::vm::exec::Inference {
+        if self.persistent() || self.attach {
+            crate::commands::vm::exec::Inference::ExplicitOnly
+        } else {
+            crate::commands::vm::exec::Inference::Enabled
+        }
     }
 
     /// Refuse environment overrides that the persistent machine spec cannot
@@ -492,9 +513,11 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image, manifest, flake, or runtime pack is mandatory.
+    /// back on, so an image, manifest, flake, or runtime pack is mandatory,
+    /// unless the verb boots the default image when none is named.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.run.image.is_none()
+        if !self.default_image_when_sourceless
+            && self.run.image.is_none()
             && self.run.manifest.is_none()
             && self.run.flake.is_none()
             && self.run.deployment.is_none()

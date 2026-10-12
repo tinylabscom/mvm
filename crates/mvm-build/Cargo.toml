@@ -97,7 +97,7 @@ sha2.workspace = true
 # format library is self-contained; the CLI passes the host
 # signer's key bytes in.
 ed25519-dalek.workspace = true
-# `download_runtime_overlay` stages files into a
+# Archive installs stage files into a
 # temp dir before atomic install into the cache. Promoted from a
 # dev-dep so lib code (not just tests) can reach it.
 tempfile.workspace = true
@@ -176,7 +176,7 @@ manifest-verify = ["mvm-core/manifest-verify"]
 contributor-bootstrap = []
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
-test-support = []
+test-support = ["mvm-fs/test-support"]
 
 [lints]
 workspace = true

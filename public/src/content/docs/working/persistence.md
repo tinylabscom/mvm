@@ -12,7 +12,8 @@ For stateful agent and service workspaces, see [Persistent workspaces](/guides/p
 | --- | --- | --- |
 | Files inside a running VM | VM runtime disk | Lost when the VM is destroyed unless captured or copied out. |
 | Host-mounted files | Mount or copy workflow | Host exposure depends on mount mode and path selection. |
-| Managed local volume | `mvmctl machine volume` | Encrypted at rest when locked. |
+| Managed local volume | `mvmctl machine volume` | Encrypted at rest when locked; while unlocked, plaintext must sit on verified encrypted storage. |
+| Writable disk image | `--mount HOST.img:/GUEST:SIZE:rw` | Never encrypted by mvm; created `0600` and refused on storage that is not verified encrypted. |
 | Machine state | pause/resume or checkpoint create/restore | May contain memory, files, processes, and credentials present in the guest. |
 
 ## Pause and resume
@@ -48,5 +49,8 @@ Stopping compute does not automatically erase every artifact. Check volumes, sna
 
 - Treat snapshots as sensitive state.
 - Avoid preserving browser sessions or agent workspaces unless required.
-- Lock managed volumes after use.
+- Lock managed volumes after use. An explicit `volume unlock` lasts until the
+  next `volume lock`; stopping a machine does not re-seal it.
+- Keep `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE` out of shared and production
+  environments; it exists for development hosts without disk encryption.
 - Prefer explicit destroy/cleanup steps in tutorials and automation.

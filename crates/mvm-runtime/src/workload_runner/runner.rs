@@ -17,7 +17,6 @@ use mvm_core::plan::{ExecutionPlan, SecretBinding};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
-use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, GuestChannelInfo, StandbyClaim, StandbyError,
     StandbyHandle, StandbySpec, StartMode, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo,
@@ -28,7 +27,8 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 use crate::checkpoint::{
     CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, VmFullControl,
     capture_vm_full_into_snapshot_store, capture_vm_full_to_trusted_snapshot_backend,
-    ensure_child_grants_within_parent, materialized_blob_sha256, verify_content, verify_lineage,
+    ensure_child_grants_within_parent, materialized_blob_sha256, verify_content_at_rest,
+    verify_lineage,
 };
 use crate::driver::{
     ChildForkRequest, PreloadChildRequest, RunningVm, RunningVmStopTiming, StandbyParentSpawn,
@@ -52,7 +52,7 @@ use mvm_vmm::host::network_endpoint_spawn::{
     EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
 };
 use mvm_vmm::host::spec_map::{WorkloadSpecInputs, workload_spec, workload_vsock_ports};
-use mvm_vmm::post_restore::PostRestoreOutcome;
+use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
 
 mod admission;
 mod backend;
@@ -67,7 +67,10 @@ mod warm_claim;
 use admission::{admitted_ingress, admitted_network_limits, admitted_tool_rules};
 pub use broker::RealBrokerRegistrar;
 use claim_lease::WarmClaimLease;
-use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
+use refusal::{
+    admitted_seccomp_tier, map_lineage_refusal, refuse, require_admitted_seccomp_tier,
+    require_fresh_child_identity,
+};
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
@@ -361,9 +364,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         {
             append_cmdline_token(&mut boot_cmdline, &token);
         }
-        if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
-            append_cmdline_token(&mut boot_cmdline, &token);
-        }
         if let Some(problem) = cmdline::cmdline_overflow(&boot_cmdline) {
             anyhow::bail!("refusing to start VM {}: {problem}", inputs.config.name);
         }
@@ -398,7 +398,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // than serializing its process setup after guest readiness.
         let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
-            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: inputs.redaction,
@@ -750,7 +750,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // with nothing else to show why.
         self.console_streamer.start(&ConsoleCapture {
             vm_name: &child.0,
-            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+            supervisor_owned: supervisor_owns_console(self.driver.kind()),
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: &redaction,
@@ -763,7 +763,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // of one parent that skipped this would draw identical randomness, which
         // is the whole reason a warm child needs a fresh identity — so a child
         // that cannot prove it is never admitted.
-        if let Err(refusal) = self.take_fresh_child_identity(&child.0, token, grant_envelope) {
+        //
+        // The same answer admits the child's seccomp tier. The parent booted
+        // with no plan and so holds none; the tier comes from the plan this
+        // claim was admitted under, and the guest must report holding exactly
+        // that tier before the claim commits and any workload process starts.
+        let identity = ChildIdentity {
+            token,
+            grant_envelope,
+            seccomp_tier: Some(admitted_seccomp_tier(&plan)),
+        };
+        if let Err(refusal) = self.take_fresh_child_identity(&child.0, identity) {
             // The child is live and still carrying its parent's random state.
             // Unwinding alone would leave running exactly the VM this refusal
             // exists to prevent, so stop it before returning. `force_stop`
@@ -796,19 +806,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     fn take_fresh_child_identity(
         &self,
         child_vm_name: &str,
-        token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
-        grant_envelope: Option<VerbGrantEnvelope>,
+        identity: ChildIdentity,
     ) -> std::result::Result<(), StandbyError> {
+        let requested_tier = identity.seccomp_tier;
         let outcome = self
             .driver
-            .deliver_child_identity(child_vm_name, token, grant_envelope)
+            .deliver_child_identity(child_vm_name, identity)
             .map_err(|e| {
                 StandbyError::ClaimFailed(format!(
                     "forked child '{child_vm_name}' never answered the post-restore identity \
-                     handshake: {e:#}"
+                     handshake: {e:#}; a guest agent too old to take the claim's seccomp tier \
+                     refuses this handshake, and the claim is refused rather than run \
+                     unfiltered — `mvmctl bootstrap` refreshes the guest runtime"
                 ))
             })?;
-        require_fresh_child_identity(child_vm_name, &outcome)
+        require_fresh_child_identity(child_vm_name, &outcome)?;
+        require_admitted_seccomp_tier(child_vm_name, requested_tier, &outcome)
     }
 
     /// Boot a standby parent, capture its whole live state, and release it.
@@ -1192,7 +1205,11 @@ fn reserve_and_verify_parent(
             )
             .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
     } else {
-        verify_content(ctx.checkpoints, &parent)
+        // Authenticated where it lies, not decrypted: a preloaded child was
+        // opened from this content when its standby was prepared, and a child
+        // materialized below is opened chunk by chunk as it is written. Either
+        // way a parent tampered with since capture is refused here.
+        verify_content_at_rest(ctx.checkpoints, &parent)
             .map_err(|_| quarantine(refuse(ClaimRefusal::ParentTampered)))?;
     }
     if !resident_handoff {
@@ -1429,6 +1446,15 @@ fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathB
         ))
     })
 }
+/// Whether the backend's own supervisor holds the console capture for the
+/// VM's whole life, so the launcher must not start a competing writer.
+///
+/// Only the HVF supervisor owns capture today. Every other backend leaves it
+/// to the launcher's follower.
+fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -> bool {
+    kind == mvm_core::vm_backend::BackendKind::Hvf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1581,12 +1607,18 @@ mod tests {
     #[derive(Default)]
     struct RecordingConsoleStreamer {
         started: Mutex<Vec<(String, PathBuf)>>,
+        /// `ConsoleCapture::supervisor_owned` of each `start`, in call order.
+        supervisor_owned: Mutex<Vec<bool>>,
         stopped: Mutex<Vec<String>>,
         captured_at_stop: Mutex<HashMap<String, Vec<u8>>>,
     }
 
     impl ConsoleStreamer for RecordingConsoleStreamer {
         fn start(&self, capture: &ConsoleCapture<'_>) {
+            self.supervisor_owned
+                .lock()
+                .unwrap()
+                .push(capture.supervisor_owned);
             self.started.lock().unwrap().push((
                 capture.vm_name.to_string(),
                 capture.console_log.to_path_buf(),
@@ -1609,6 +1641,20 @@ mod tests {
                     .unwrap()
                     .insert(vm_name.to_string(), bytes);
             }
+        }
+    }
+
+    #[test]
+    fn only_the_hvf_supervisor_owns_console_capture() {
+        use mvm_core::vm_backend::BackendKind;
+        assert!(supervisor_owns_console(BackendKind::Hvf));
+        for kind in [
+            BackendKind::Firecracker,
+            BackendKind::Libkrun,
+            BackendKind::Qemu,
+            BackendKind::Mock,
+        ] {
+            assert!(!supervisor_owns_console(kind), "{kind:?}");
         }
     }
 
@@ -1717,87 +1763,17 @@ mod tests {
     #[test]
     fn append_cmdline_token_separates_only_a_non_empty_cmdline() {
         let mut empty = String::new();
-        append_cmdline_token(&mut empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut empty, "mvm.telemetry=1");
         assert_eq!(
-            empty, "mvm.secret_env=ab",
+            empty, "mvm.telemetry=1",
             "no leading space on an empty cmdline"
         );
 
         let mut non_empty = "root=/dev/vda".to_string();
-        append_cmdline_token(&mut non_empty, "mvm.secret_env=ab");
+        append_cmdline_token(&mut non_empty, "mvm.telemetry=1");
         assert_eq!(
-            non_empty, "root=/dev/vda mvm.secret_env=ab",
+            non_empty, "root=/dev/vda mvm.telemetry=1",
             "a non-empty cmdline gets exactly one space separator"
-        );
-    }
-
-    #[test]
-    fn a_secret_env_token_rides_the_boot_cmdline() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_HOME", home.path());
-
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        let verity = rootfs_dir.path().join("rootfs.verity");
-        let initrd = rootfs_dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&verity, b"verity").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run(
-            "runner-secret-env-cmdline-spacing",
-            false,
-            true,
-        )
-        .write_to_dir(rootfs_dir.path())
-        .unwrap();
-
-        let vm_name = "runner-secret-env-cmdline-spacing";
-        seed_grant_sidecar_and_key(vm_name);
-        // A substitution env with one secret-shaped pair: the
-        // `mvm.secret_env` token must reach the booted spec's cmdline.
-        // (The separator rule itself is witnessed directly on
-        // `append_cmdline_token` — the runner path always pre-seeds the
-        // hostepoch token, so the base cmdline is never empty here.)
-        let state_dir = mvm_core::config::vm_state_dir(vm_name);
-        std::fs::create_dir_all(&state_dir).unwrap();
-        std::fs::write(
-            state_dir.join("substitution-env.json"),
-            br#"[["API_KEY","mvm-secret-test"]]"#,
-        )
-        .unwrap();
-
-        let cfg = VmStartConfig {
-            name: vm_name.into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
-                home.path(),
-            )),
-            verity_path: Some(verity.display().to_string()),
-            roothash: Some("a".repeat(64)),
-            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
-            ..Default::default()
-        };
-
-        let driver = MockDriver::default();
-        let guest = spawn_activation_guest(driver.clone(), vm_name);
-        let runner = WorkloadRunner::new(
-            driver,
-            RecordingSpawner::new("/run/ep.sock"),
-            RecordingBrokerRegistrar::new(),
-        );
-        runner.start(&cfg).expect("start succeeds");
-        guest.join().expect("guest thread");
-
-        let specs = runner.driver.booted_specs();
-        assert_eq!(specs.len(), 1);
-        let cmdline = &specs[0].cmdline;
-        assert!(
-            cmdline.contains("mvm.secret_env="),
-            "booted cmdline missing the secret-env token: {cmdline}"
         );
     }
 
@@ -1845,7 +1821,7 @@ mod tests {
     }
 
     #[test]
-    fn start_workload_threads_minted_placeholders_to_pid1_without_raw_secrets() {
+    fn start_workload_puts_no_secret_environment_on_the_kernel_cmdline() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
@@ -1884,10 +1860,14 @@ mod tests {
             })
             .expect("secret-bearing workload boots");
 
+        // The placeholders reach the workload with each `RunEntrypoint`, from
+        // the host's environment synthesis. The kernel cmdline used to carry
+        // them hex-encoded for a shell `/init` that no booted guest runs; any
+        // guest process can read `/proc/cmdline`, so nothing of them rides it.
         let specs = runner.driver.booted_specs();
         let cmdline = &specs[0].cmdline;
-        assert!(cmdline.contains("mvm.secret_env="), "{cmdline}");
-        assert!(cmdline.contains("4150495f4b45593d"), "{cmdline}");
+        assert!(!cmdline.contains("mvm.secret_env"), "{cmdline}");
+        assert!(!cmdline.contains("4150495f4b45593d"), "{cmdline}");
         assert!(!cmdline.contains("opaque-placeholder"), "{cmdline}");
     }
 
@@ -1932,6 +1912,12 @@ mod tests {
                 [("w-console".to_string(), expected_console_log.clone())]
             );
         }
+        // The mock backend has no supervisor that owns capture, so the
+        // launcher's follower is the writer and must be told so.
+        assert_eq!(
+            streamer.supervisor_owned.lock().unwrap().as_slice(),
+            [false]
+        );
         assert!(
             streamer.stopped.lock().unwrap().is_empty(),
             "must not stop before the workload ends"
@@ -3722,7 +3708,29 @@ mod tests {
         CheckpointId,
         CheckpointMeta,
     ) {
-        let checkpoints = CheckpointStore::at(store_root.join("checkpoints"));
+        seed_audited_parent_in(
+            CheckpointStore::at(store_root.join("checkpoints")),
+            store_root,
+            src_root,
+            with_overlay_sidecar,
+            grants,
+        )
+    }
+
+    /// Seed a warm parent into `checkpoints`, which decides whether the
+    /// capture is sealed.
+    fn seed_audited_parent_in(
+        checkpoints: CheckpointStore,
+        store_root: &Path,
+        src_root: &Path,
+        with_overlay_sidecar: bool,
+        grants: Option<mvm_contract::grants::Grants>,
+    ) -> (
+        CheckpointStore,
+        FsSnapshotStore,
+        CheckpointId,
+        CheckpointMeta,
+    ) {
         let snapshots = FsSnapshotStore::new(store_root.join("snapshots")).unwrap();
 
         let rootfs = src_root.join("rootfs.ext4");
@@ -3775,6 +3783,191 @@ mod tests {
         parent: &CheckpointMeta,
     ) -> String {
         materialized_blob_sha256(checkpoints, parent, mvm_core::checkpoint::ROOTFS_BLOB).unwrap()
+    }
+
+    /// A warm parent captured under the host key, as production captures it,
+    /// with a child preloaded from it by the runner's own pool-refill path.
+    struct ProtectedPreloadedParent {
+        _env: TestEnv,
+        _home: tempfile::TempDir,
+        store_root: tempfile::TempDir,
+        src: tempfile::TempDir,
+        checkpoints: CheckpointStore,
+        snapshots: FsSnapshotStore,
+        parent_id: CheckpointId,
+        parent_meta: CheckpointMeta,
+        pool: SupervisorStandbyPool,
+        handle: StandbyHandle,
+    }
+
+    impl ProtectedPreloadedParent {
+        fn seed(
+            runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
+        ) -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.set("MVM_HOME", home.path());
+            env.set(
+                crate::vm::snapshot_key::SNAPSHOT_TENANT_KEY_ENV,
+                "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            );
+            let store_root = tempfile::tempdir().unwrap();
+            let src = tempfile::tempdir().unwrap();
+            let sealed_store = CheckpointStore::at(store_root.path().join("checkpoints"))
+                .with_key_custody(std::sync::Arc::new(crate::checkpoint::HostKeyCustody));
+            let (checkpoints, snapshots, parent_id, parent_meta) =
+                seed_audited_parent_in(sealed_store, store_root.path(), src.path(), true, None);
+            assert!(parent_meta.protection.is_sealed());
+
+            let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+            let mut handle =
+                idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+            handle.parent_checkpoint = Some(parent_id.to_string());
+            let anchor = ClaimTestAnchor::audited(&parent_meta);
+            let opened_before = crate::checkpoint::chunk_opens::under(store_root.path());
+            runner
+                .preload_standby_child(
+                    &PreloadContext {
+                        checkpoints: &checkpoints,
+                        snapshots: &snapshots,
+                        anchor: &anchor,
+                        registry_path: &store_root.path().join("vm-names.json"),
+                    },
+                    &mut handle,
+                )
+                .expect("preload a child from the protected parent");
+            assert!(
+                crate::checkpoint::chunk_opens::under(store_root.path()) > opened_before,
+                "preparing the standby is where the parent's content is opened"
+            );
+            pool.record(&handle).unwrap();
+            Self {
+                _env: env,
+                _home: home,
+                store_root,
+                src,
+                checkpoints,
+                snapshots,
+                parent_id,
+                parent_meta,
+                pool,
+                handle,
+            }
+        }
+
+        fn claim(
+            &self,
+            runner: &WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar>,
+        ) -> std::result::Result<VmId, StandbyError> {
+            let parent_digest =
+                materialized_parent_rootfs_digest(&self.checkpoints, &self.parent_meta);
+            let registry_path = self.store_root.path().join("vm-names.json");
+            let anchor = ClaimTestAnchor::audited(&self.parent_meta);
+            let claim = admitted_child_claim(
+                &self.src.path().join("rootfs.ext4"),
+                signed_child_plan_json(&parent_digest),
+            );
+            let ctx = ClaimContext {
+                pool: &self.pool,
+                checkpoints: &self.checkpoints,
+                snapshots: &self.snapshots,
+                anchor: &anchor,
+                parent_checkpoint: &self.parent_id,
+                registry_path: &registry_path,
+                grant_issuer: None,
+            };
+            runner.claim_standby(&ctx, &self.handle, &claim)
+        }
+
+        fn chunk_objects(&self) -> Vec<PathBuf> {
+            // Everything in a sealed content dir that is not a blob's sealed
+            // index is a chunk object.
+            let mut objects = Vec::new();
+            let mut stack = vec![self.checkpoints.content_dir(&self.parent_id)];
+            while let Some(dir) = stack.pop() {
+                for entry in std::fs::read_dir(&dir).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_none_or(|ext| ext != "sealed") {
+                        objects.push(path);
+                    }
+                }
+            }
+            objects
+        }
+    }
+
+    fn claim_runner() -> WorkloadRunner<MockDriver, KeyingSpawner, RecordingBrokerRegistrar> {
+        WorkloadRunner::new(
+            MockDriver::default().with_preloaded_standby(),
+            KeyingSpawner::default(),
+            RecordingBrokerRegistrar::new(),
+        )
+    }
+
+    /// Pool refill opened the parent's sealed content into the preloaded child,
+    /// so a claim decrypts none of it again: it authenticates the sealed
+    /// objects where they lie and wakes the child that already holds them.
+    #[test]
+    fn a_warm_claim_on_a_protected_preloaded_parent_decrypts_no_chunk() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runner = claim_runner();
+        let parent = ProtectedPreloadedParent::seed(&runner);
+        assert!(
+            !parent.chunk_objects().is_empty(),
+            "the parent must hold sealed chunks for this to mean anything"
+        );
+        let before = crate::checkpoint::chunk_opens::under(parent.store_root.path());
+
+        let child = parent.claim(&runner).expect("claim a protected parent");
+
+        assert_eq!(
+            Some(child.0.as_str()),
+            parent.handle.preloaded_child_vm_name.as_deref(),
+            "the claim wakes the child prepared at refill"
+        );
+        assert_eq!(
+            crate::checkpoint::chunk_opens::under(parent.store_root.path()),
+            before,
+            "a warm claim must not decrypt the parent's content again"
+        );
+        assert_eq!(runner.driver.forked_children().len(), 1);
+    }
+
+    /// Not decrypting is not trusting: a sealed object changed after the
+    /// standby was prepared still refuses the claim and quarantines the parent.
+    #[test]
+    fn a_warm_claim_refuses_a_protected_parent_whose_sealed_object_changed() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runner = claim_runner();
+        let parent = ProtectedPreloadedParent::seed(&runner);
+        let object = parent.chunk_objects().pop().expect("a sealed chunk object");
+        let mut bytes = std::fs::read(&object).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x01;
+        // A fresh inode, as an editor or an attacker replacing the file would
+        // leave; the pool's other links keep the original bytes.
+        std::fs::remove_file(&object).unwrap();
+        std::fs::write(&object, &bytes).unwrap();
+
+        let error = parent
+            .claim(&runner)
+            .expect_err("a tampered sealed object must refuse the claim");
+
+        assert_eq!(
+            error.to_string(),
+            refuse(ClaimRefusal::ParentTampered).to_string()
+        );
+        assert!(
+            parent.pool.load("warm-parent").is_err(),
+            "a tampered parent is quarantined, never returned to the pool"
+        );
+        assert!(runner.driver.forked_children().is_empty());
     }
 
     #[test]
@@ -4159,6 +4352,15 @@ mod tests {
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].child_vm_name, child.0);
         assert_eq!(delivered[0].token, forks[0].genid.token);
+        // The parent booted with no plan and so holds no seccomp tier; the
+        // child's comes from the plan this claim was admitted under, on the
+        // same handshake, before the claim commits.
+        let plan = mvm_core::plan::plan_from_admitted_json(&claim.plan_json).unwrap();
+        assert_eq!(
+            delivered[0].seccomp_tier,
+            Some(plan.admission_profile.seccomp_tier.into()),
+            "the claimed child is handed its own plan's seccomp tier"
+        );
         let delivered_grant = delivered[0]
             .grant_envelope
             .as_ref()
@@ -4624,9 +4826,10 @@ mod tests {
 
     /// A forked child comes back resumed on its parent's saved memory, so until
     /// it answers the identity handshake it is still drawing on the parent's
-    /// CSPRNG and reading the parent's frozen clock. Every way that proof can
-    /// fail — the guest never answers, answers without acknowledging, without
-    /// rotating, or without resynchronizing its clock — must refuse the claim,
+    /// CSPRNG and reading the parent's frozen clock, and holds no seccomp tier.
+    /// Every way that proof can fail — the guest never answers, answers without
+    /// acknowledging, without rotating, without resynchronizing its clock, or
+    /// without holding exactly the plan's seccomp tier — must refuse the claim,
     /// stop the live child, return the healthy parent to claimable, and leave no
     /// child dir. Admitting on any of them would hand out a VM whose "random"
     /// values match every sibling forked from the same parent.
@@ -4639,6 +4842,7 @@ mod tests {
                 reseeded,
                 clock_resynced,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             })
         };
         let cases = [
@@ -4651,6 +4855,21 @@ mod tests {
             (
                 "guest did not resync its clock",
                 unproven(true, true, false),
+            ),
+            // A guest that proved a fresh identity but took no seccomp tier
+            // would run the workload unfiltered; one holding a different tier
+            // would run it under a filter the plan did not admit.
+            ("guest holds no seccomp tier", unproven(true, true, true)),
+            (
+                "guest holds another seccomp tier",
+                MockDriver::default().with_child_identity(PostRestoreOutcome {
+                    acknowledged: true,
+                    detail: None,
+                    reseeded: true,
+                    clock_resynced: true,
+                    reseed_shortfall: None,
+                    seccomp_tier: Some(mvm_core::crypto::seccomp::SeccompTier::Unrestricted),
+                }),
             ),
         ];
 
@@ -4696,6 +4915,7 @@ mod tests {
                 reseeded: false,
                 clock_resynced: true,
                 reseed_shortfall: None,
+                seccomp_tier: None,
             },
         ));
         assert!(out.result.is_err());
@@ -4742,6 +4962,15 @@ mod tests {
             "the console log must live under the child's own state dir, not the parent's"
         );
         drop(started);
+        assert_eq!(
+            out.console_streamer
+                .supervisor_owned
+                .lock()
+                .unwrap()
+                .as_slice(),
+            [false],
+            "a restored child's capture ownership follows its backend, as a cold boot's does"
+        );
         assert!(
             out.console_streamer.stopped.lock().unwrap().is_empty(),
             "a committed claim leaves the console streamer running for the \

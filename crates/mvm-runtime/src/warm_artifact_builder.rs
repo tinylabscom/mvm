@@ -219,18 +219,17 @@ impl WarmArtifactBuildPlan {
     /// Resolve the local universal initramfs and runtime overlay for this
     /// plan's architecture, building whichever is not cached.
     fn resolve_support_paths(&self) -> Result<WarmArtifactSupportPaths> {
-        let initramfs_cache = self.cache_root.join("initramfs");
+        let roots = SupportCacheRoots::under(&self.cache_root);
         let initramfs = mvm_build::initramfs::resolve_or_build_local_initramfs(
             &HostShellEnvironment,
-            &initramfs_cache,
+            &roots.initramfs,
             env!("CARGO_PKG_VERSION"),
             self.arch,
         )
         .context("resolve or build universal initramfs")?;
 
-        let overlay_cache = self.cache_root.join("runtime-overlay");
         let overlay = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-            &overlay_cache,
+            &roots.overlay,
             env!("CARGO_PKG_VERSION"),
             self.arch,
         )
@@ -264,9 +263,48 @@ fn ensure_regular_file(path: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The roots each support-artifact resolver is handed. They differ: the
+/// initramfs resolver files `<version>/<arch>` directly under its root, while
+/// the overlay resolver appends `runtime-overlay/` itself and assembles from
+/// the guest runtime beside it, so it takes the mvm cache root unchanged.
+#[derive(Debug, PartialEq, Eq)]
+struct SupportCacheRoots {
+    initramfs: PathBuf,
+    overlay: PathBuf,
+}
+
+impl SupportCacheRoots {
+    fn under(cache_root: &Path) -> Self {
+        Self {
+            initramfs: cache_root.join("initramfs"),
+            overlay: cache_root.to_path_buf(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The warm worker resolves the same cache entries bootstrap fills: the
+    /// initramfs under `<cache>/initramfs` and the overlay under
+    /// `<cache>/runtime-overlay`, not a second copy nested one level deeper.
+    #[test]
+    fn support_artifacts_resolve_where_bootstrap_installs_them() {
+        let cache = Path::new("/cache");
+        let roots = SupportCacheRoots::under(cache);
+        assert_eq!(
+            mvm_fs::initramfs::InitramfsResolver::new(&roots.initramfs, "1.2.3")
+                .artifact_dir("aarch64"),
+            cache.join("initramfs/1.2.3/aarch64")
+        );
+        assert_eq!(
+            mvm_fs::overlay::RuntimeOverlayLayout::under(&roots.overlay, "1.2.3", "aarch64")
+                .overlay_ext4,
+            cache.join("runtime-overlay/1.2.3/aarch64/overlay.ext4"),
+            "the overlay resolver is handed the cache root and appends its own directory"
+        );
+    }
 
     #[test]
     fn plan_rejects_missing_resolved_inputs_before_building_support_artifacts() {

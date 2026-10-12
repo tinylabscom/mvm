@@ -15,10 +15,9 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 use mvm_client::policy_profiles::{PolicyRef, ProfileFile, builtin};
-use mvm_core::packs::pack_path_is_safe;
 use mvm_core::registry_pack::{
-    InstalledRegistryPack, PackAdoption, PackReference, RegistryPackVerification,
-    VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
+    InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
+    RegistryPackVerification, VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
 };
 use mvm_core::registry_pack_store::{
     PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
@@ -200,33 +199,7 @@ impl FetchedPack {
     }
 }
 
-/// The manifest paths declared by a pack, from an unverified manifest.
-///
-/// Paths are checked with the same rule the verifier applies before they are
-/// joined into URLs or staging paths.
-fn declared_paths(manifest_bytes: &[u8]) -> Result<Vec<String>> {
-    #[derive(Deserialize)]
-    struct PathsOnly {
-        files: Vec<PathEntry>,
-    }
-    #[derive(Deserialize)]
-    struct PathEntry {
-        path: String,
-    }
-    let manifest: PathsOnly = serde_json::from_slice(manifest_bytes)
-        .context("parsing the pack manifest well enough to list its files")?;
-    let mut paths = Vec::with_capacity(manifest.files.len());
-    for file in manifest.files {
-        if !pack_path_is_safe(&file.path) {
-            bail!("pack manifest declares an unsafe file path {:?}", file.path);
-        }
-        paths.push(file.path);
-    }
-    Ok(paths)
-}
-
-/// Download a pack's manifest, signature bundle, and every declared payload
-/// file into a fresh staging directory.
+/// Download only trust metadata. Payload fetch waits for authentication.
 pub fn download_pack(
     config: &PackRegistryConfig,
     reference: &PackReference,
@@ -236,23 +209,118 @@ pub fn download_pack(
     let signature_url = pack_url(config, reference, SIGNATURE_FILE);
     let signature_bundle = block_on(fetch_bytes(&signature_url))?;
     let staged = TempDir::new().context("creating a staging directory for the pack")?;
-    for path in declared_paths(&manifest_bytes)? {
-        let url = pack_url(config, reference, &format!("{FILES_DIR}/{path}"));
-        let bytes = block_on(fetch_bytes(&url))?;
-        let destination = staged.path().join(&path);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        std::fs::write(&destination, bytes)
-            .with_context(|| format!("writing {}", destination.display()))?;
-    }
     Ok(FetchedPack {
         reference: reference.clone(),
         manifest_bytes,
         signature_bundle,
         staged,
     })
+}
+
+fn download_payload(
+    config: &PackRegistryConfig,
+    verified: &VerifiedRegistryPack,
+    destination: &Path,
+) -> Result<()> {
+    for file in verified.payload_files() {
+        let release = !verified
+            .manifest()
+            .files
+            .iter()
+            .any(|entry| entry.path == file.path);
+        let url = if release {
+            let Some(RegistryPackImage::Built(image)) = &verified.manifest().image else {
+                bail!("release asset without a built image descriptor");
+            };
+            format!(
+                "https://github.com/{}/releases/download/{}/{}",
+                image.release.repository.as_str(),
+                image.release.tag,
+                file.path
+            )
+        } else {
+            pack_url(
+                config,
+                &verified.manifest().reference,
+                &format!("{FILES_DIR}/{}", file.path),
+            )
+        };
+        let target = destination.join(&file.path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        download_payload_file(&url, &target, file.size, release)?;
+    }
+    Ok(())
+}
+
+fn allowed_release_url(url: &str) -> bool {
+    mvm_http::Url::parse(url).is_ok_and(|url| {
+        url.scheme() == "https"
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.port().is_none()
+            && url.fragment().is_none()
+            && matches!(
+                url.host_str(),
+                Some("github.com" | "release-assets.githubusercontent.com")
+            )
+    })
+}
+
+fn download_payload_file(url: &str, target: &Path, size: u64, release: bool) -> Result<()> {
+    use std::io::Read;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let mut source: Box<dyn Read> = if !release && let Some(path) = url.strip_prefix("file://") {
+        Box::new(std::fs::File::open(path)?)
+    } else {
+        let client = mvm_http::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .max_response_bytes(size.saturating_add(1))
+            .build()?;
+        let mut current = url.to_string();
+        let mut hops = 0;
+        loop {
+            if release && !allowed_release_url(&current) {
+                bail!("built image release origin refused");
+            }
+            let response = client.get(&current).send()?;
+            if release && response.status().is_redirection() {
+                if hops >= 3 {
+                    bail!("too many built image release redirects");
+                }
+                current = response
+                    .headers()
+                    .get("location")
+                    .context("release redirect has no location")?
+                    .to_str()?
+                    .to_string();
+                hops += 1;
+                continue;
+            }
+            if !response.status().is_success() {
+                bail!("pack asset download returned {}", response.status());
+            }
+            if response
+                .content_length()
+                .is_some_and(|length| length != size)
+            {
+                bail!("pack asset download size differs from signed declaration");
+            }
+            break Box::new(response) as Box<dyn Read>;
+        }
+    };
+    let copied = std::io::copy(
+        &mut source.by_ref().take(size.saturating_add(1)),
+        &mut output,
+    )?;
+    if copied != size {
+        bail!("pack asset download size differs from signed declaration");
+    }
+    Ok(())
 }
 
 /// What `mvmctl pull` did, for the caller to render.
@@ -457,21 +525,9 @@ fn pull_one(
         })?
     };
     check_registry_pack_revocations_if_configured(&verified)?;
-    if let Some(mvm_core::registry_pack::RegistryPackImage::Built(descriptor)) =
-        &verified.manifest().image
-    {
-        download_built_image_assets(descriptor, fetched.staged_path())?;
-        mvm_core::registry_pack::verify_registry_pack_contents(&verified, fetched.staged_path())?;
-        let verifier = mvm_core::registry_pack::verify_built_image_provenance(
-            &verified,
-            fetched.staged_path(),
-        )?;
-        crate::ui::info(&format!(
-            "built image provenance verified for {} (verifier {})",
-            verified.manifest().reference,
-            verifier.as_str()
-        ));
-    }
+    with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
+        download_payload(config, &verified, fetched.staged_path())
+    })?;
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.
@@ -489,7 +545,7 @@ fn pull_one(
             &lock_path,
         )?
     };
-    let files = verified.manifest().files.len();
+    let files = verified.payload_files().len();
     let dependencies = declared_pack_dependencies(&installed, &verified)?;
     Ok((
         PullSummary {
@@ -503,35 +559,14 @@ fn pull_one(
     ))
 }
 
-fn download_built_image_assets(
-    descriptor: &mvm_core::registry_pack_image::BuiltPackImageDescriptor,
-    staged: &Path,
-) -> Result<()> {
-    for asset in descriptor.assets() {
-        let url = built_image_asset_url(&descriptor.release, asset.name.as_str());
-        let destination = staged.join(asset.name.as_str());
-        let destination_str = destination
-            .to_str()
-            .with_context(|| format!("image asset path is not UTF-8: {}", destination.display()))?;
-        crate::commands::env::artifact_verify::download_file_bounded(
-            &url,
-            destination_str,
-            asset.size,
-        )
-        .with_context(|| format!("downloading signed pack image asset {}", asset.name))?;
+fn with_built_image_verifier_preflight<T>(
+    image: Option<&RegistryPackImage>,
+    download_payload: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if matches!(image, Some(RegistryPackImage::Built(_))) {
+        mvm_core::registry_pack::ensure_built_image_verifier_available()?;
     }
-    Ok(())
-}
-
-fn built_image_asset_url(
-    release: &mvm_core::registry_pack_image::BuiltImageRelease,
-    name: &str,
-) -> String {
-    format!(
-        "https://github.com/{}/releases/download/{}/{name}",
-        release.repository.as_str(),
-        release.tag,
-    )
+    download_payload()
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -553,11 +588,21 @@ async fn fetch_text(url: &str) -> Result<String> {
 }
 
 async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    const MAX_METADATA_BYTES: u64 = 1024 * 1024;
     if let Some(path) = url.strip_prefix("file://") {
-        return std::fs::read(path).with_context(|| format!("reading local registry file {url}"));
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(MAX_METADATA_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if u64::try_from(bytes.len())? > MAX_METADATA_BYTES {
+            bail!("pack registry metadata exceeds 1 MiB");
+        }
+        return Ok(bytes);
     }
     let client = mvm_http::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .max_response_bytes(MAX_METADATA_BYTES)
         .build()?;
     let response = client
         .get(url)
@@ -578,19 +623,6 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn built_image_assets_use_the_descriptor_pinned_release() {
-        let release = mvm_core::registry_pack_image::BuiltImageRelease {
-            repository: mvm_core::image_set::RepositorySlug::new("tinylabscom/mvm-packs")
-                .expect("fixed repository"),
-            tag: "pack-runtime-python-v1.0.0".to_string(),
-        };
-        assert_eq!(
-            built_image_asset_url(&release, "rootfs.ext4"),
-            "https://github.com/tinylabscom/mvm-packs/releases/download/pack-runtime-python-v1.0.0/rootfs.ext4"
-        );
-    }
 
     #[test]
     fn default_registry_points_to_the_official_packs_repository() {
@@ -651,17 +683,149 @@ mod tests {
     }
 
     #[test]
-    fn declared_paths_refuse_unsafe_manifest_paths() {
-        let manifest = br#"{"files":[{"path":"pack/profile.toml"},{"path":"../escape.toml"}]}"#;
-        let error = declared_paths(manifest).expect_err("unsafe path refuses");
-        assert!(error.to_string().contains("unsafe file path"));
+    fn release_urls_refuse_origin_substitution_and_credentials() {
+        for url in [
+            "http://github.com/asset",
+            "https://github.com.evil.test/asset",
+            "https://user@github.com/asset",
+            "https://github.com:8443/asset",
+            "file:///tmp/asset",
+            "https://evil.test/asset",
+        ] {
+            assert!(!allowed_release_url(url), "{url}");
+        }
+        assert!(allowed_release_url("https://github.com/asset"));
+        assert!(allowed_release_url(
+            "https://release-assets.githubusercontent.com/asset?sig=value"
+        ));
     }
 
     #[test]
-    fn declared_paths_lists_safe_manifest_paths() {
-        let manifest = br#"{"files":[{"path":"pack/profile.toml"},{"path":"pack/group.toml"}]}"#;
-        let paths = declared_paths(manifest).expect("safe paths");
-        assert_eq!(paths, vec!["pack/profile.toml", "pack/group.toml"]);
+    fn payload_download_enforces_exact_size_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::write(&source, b"abc").unwrap();
+        let url = format!("file://{}", source.display());
+        let target = dir.path().join("target");
+        download_payload_file(&url, &target, 3, false).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"abc");
+        assert!(download_payload_file(&url, &target, 3, false).is_err());
+        for size in [0, 2, 4] {
+            let target = dir.path().join(format!("size-{size}"));
+            assert!(download_payload_file(&url, &target, size, false).is_err());
+        }
+    }
+
+    #[test]
+    fn metadata_fetch_does_not_fetch_unverified_payloads() {
+        let registry = tempfile::tempdir().unwrap();
+        let pack = registry.path().join("packs/runtime/python/1.0.0");
+        std::fs::create_dir_all(&pack).unwrap();
+        let manifest = br#"{"files":[{"path":"../escape"}]}"#;
+        std::fs::write(pack.join(MANIFEST_FILE), manifest).unwrap();
+        std::fs::write(pack.join(SIGNATURE_FILE), b"unsigned").unwrap();
+        let config = PackRegistryConfig {
+            registry_url: format!("file://{}", registry.path().display()),
+        };
+        let fetched = download_pack(&config, &"runtime/python@1.0.0".parse().unwrap()).unwrap();
+        assert_eq!(fetched.manifest_bytes, manifest);
+        assert_eq!(std::fs::read_dir(fetched.staged_path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn built_image_verifier_refusal_precedes_payload_download() {
+        use mvm_core::image_set::{ArtifactName, ReleaseTag, RepositorySlug};
+        use mvm_core::packs::Sha256Hex;
+        use mvm_core::registry_pack_image::{
+            BuiltImageAsset, BuiltImageAssets, BuiltImageBaseSet, BuiltImagePlatform,
+            BuiltImageRelease, BuiltPackImageDescriptor,
+        };
+
+        let digest = Sha256Hex::from_bytes(b"test");
+        let asset = |name: &str| BuiltImageAsset {
+            name: ArtifactName::new(name).unwrap(),
+            sha256: digest.clone(),
+            size: 1,
+        };
+        let image = RegistryPackImage::Built(Box::new(BuiltPackImageDescriptor {
+            schema_version: 2,
+            platform: BuiltImagePlatform::LinuxX86_64,
+            base_set: BuiltImageBaseSet {
+                repository: RepositorySlug::new("tinylabscom/mvm-images").unwrap(),
+                release_tag: ReleaseTag::new("image-set/v0.2.4").unwrap(),
+                manifest_sha256: digest.clone(),
+            },
+            release: BuiltImageRelease {
+                repository: RepositorySlug::new("tinylabscom/mvm-packs").unwrap(),
+                tag: "pack-runtime-python-v1.0.0".to_string(),
+            },
+            assets: BuiltImageAssets {
+                rootfs: asset("rootfs.ext4"),
+                verity: asset("rootfs.verity"),
+                roothash: asset("rootfs.roothash"),
+                mvm_meta: asset("mvm-meta.json"),
+                rootfs_signature_bundle: asset("rootfs.signature.json"),
+                provenance_statement: asset("provenance.json"),
+                provenance_signature_bundle: asset("provenance.signature.json"),
+            },
+        }));
+        let mut payload_downloaded = false;
+
+        let error = with_built_image_verifier_preflight(Some(&image), || {
+            payload_downloaded = true;
+            Ok(())
+        })
+        .expect_err("missing compatible verifier must refuse the pull");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no trusted released image verifier compatible"),
+            "expected the verifier-unavailable error, got {error:#}"
+        );
+        assert!(
+            !payload_downloaded,
+            "payload fetch must not run after refusal"
+        );
+    }
+
+    #[test]
+    fn streamed_http_download_refuses_truncation_oversize_and_redirects() {
+        use std::io::{Read, Write};
+        for response in [
+            "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd",
+            "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nab",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nabcd\r\n0\r\n\r\n",
+            "HTTP/1.1 302 Found\r\nLocation: https://evil.test/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 4096);
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                let _ = stream.write_all(response.as_bytes());
+            });
+            let target = tempfile::tempdir().unwrap();
+            assert!(
+                download_payload_file(
+                    &format!("http://{address}/file"),
+                    &target.path().join("asset"),
+                    3,
+                    false,
+                )
+                .is_err()
+            );
+            server.join().unwrap();
+        }
     }
 
     #[test]

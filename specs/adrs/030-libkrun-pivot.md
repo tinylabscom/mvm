@@ -12,13 +12,16 @@ filesystems that carry no mvm binary and no mvm `/init`, the builder image
 and the Stage 0 seeds. The runtime overlay, the SDK sidecars and the
 initramfs stop being images `mvm-images` builds; `mvmctl` assembles them from
 the guest runtime each CLI release ships, or from a source build, so a
-selected `mvm-images` checkout no longer pair-builds them. Until those
-workstreams land, decision 4 describes the code with one correction: since
-2026-10-02 a selected checkout builds the builder image only when the
-operator opts in with `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` (`mvmctl build
---allow-local-builder-build` sets it for one invocation); otherwise the
-builder image is fetched from the pinned set even with a checkout selected.
-Decisions 1 to 3 are unchanged.
+selected `mvm-images` checkout no longer pair-builds them. That side has
+landed in this repository (#4105): the image-set contract names only the
+Linux layer, a set that still publishes the three pieces is read with them
+ignored, and no build of `mvmctl` fetches them from a set or falls back to
+one; decision 4 below therefore governs Linux-layer images only. One further
+correction: since 2026-10-02 a selected checkout builds the builder image
+only when the operator opts in with `MVM_ALLOW_LOCAL_BUILDER_BUILD=1`
+(`mvmctl build --allow-local-builder-build` sets it for one invocation);
+otherwise the builder image is fetched from the pinned set even with a
+checkout selected. Decisions 1 to 3 are unchanged.
 
 ## Context
 

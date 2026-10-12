@@ -45,8 +45,14 @@ tag_ref = "refs/tags/image-set/v0.2.4"
 # Copied from that exact signed manifest. Consumers compare this declaration
 # with the host before fetching a member; the pin-update workflow proves the
 # copy agrees with the signed root.
+#
+# `base_image_contract` is what the set's workload base root filesystems
+# promise the guest runtime this CLI ships. It is copied only when the root
+# declares it; a root published before the declaration existed (every set up to
+# image-set/v0.2.4) omits it, and `mvmctl` checks that absence as the legacy
+# contract 0. The guest-agent protocol range such roots still record is not
+# copied: the agent ships with `mvmctl`, so nothing decides on it.
 [compatibility]
-guest_agent_protocol = { min = 2, max = 2 }
 builder_cache_contract = 5
 builder_boot_abi = 1
 

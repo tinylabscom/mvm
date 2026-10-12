@@ -638,3 +638,93 @@ const RECORDED_V1_CHUNK: &str = concat!(
     "af9ef7b8a13249d1e8b318008413c2329df267e04e6e0fd4e2ed7557da8a5e1a",
     "a5",
 );
+
+#[test]
+fn an_untouched_object_authenticates_without_being_opened() {
+    let k = alice();
+    for kind in [ObjectKind::Chunk, ObjectKind::Index] {
+        let sealed = seal(&k, kind, b"at rest").unwrap();
+        assert_eq!(
+            authenticate(&k, &expect(&sealed, kind).plaintext_len(7), &sealed.bytes),
+            Ok(())
+        );
+    }
+    // The reference key is used only to recompute a reference from opened
+    // plaintext, so a wrong one is invisible here and fatal to `open`. That
+    // is what "without decrypting" means, made observable.
+    let sealed = seal(&k, ObjectKind::Chunk, b"at rest").unwrap();
+    let wrong_reference = keys(tenant("alice"), 1, 9);
+    let expected = expect(&sealed, ObjectKind::Chunk);
+    assert_eq!(
+        authenticate(&wrong_reference, &expected, &sealed.bytes),
+        Ok(())
+    );
+    assert_eq!(
+        open(&wrong_reference, &expected, &sealed.bytes),
+        Err(CheckpointObjectError::ReferenceMismatch)
+    );
+}
+
+#[test]
+fn authentication_refuses_every_flipped_byte() {
+    let k = alice();
+    let sealed = seal(&k, ObjectKind::Chunk, b"tamper target").unwrap();
+    let expected = expect(&sealed, ObjectKind::Chunk);
+    for i in 0..sealed.bytes.len() {
+        let mut bytes = sealed.bytes.clone();
+        bytes[i] ^= 0x01;
+        assert!(
+            authenticate(&k, &expected, &bytes).is_err(),
+            "flip at {i} was accepted"
+        );
+    }
+    let last = sealed.bytes.len() - 1;
+    let mut bytes = sealed.bytes.clone();
+    bytes[last] ^= 0x80;
+    assert_eq!(
+        authenticate(&k, &expected, &bytes),
+        Err(CheckpointObjectError::WrappedKeyAuth),
+        "a payload change is caught by the wrapped key's binding"
+    );
+}
+
+#[test]
+fn authentication_refuses_wrong_keys_domains_context_and_splices() {
+    let k = alice();
+    let a = seal(&k, ObjectKind::Chunk, b"same len a").unwrap();
+    let b = seal(&k, ObjectKind::Chunk, b"same len b").unwrap();
+    let expected = expect(&a, ObjectKind::Chunk);
+    assert_eq!(
+        authenticate(&keys(tenant("alice"), 9, 2), &expected, &a.bytes),
+        Err(CheckpointObjectError::WrappedKeyAuth)
+    );
+    assert_eq!(
+        authenticate(&keys(tenant("bob"), 1, 2), &expected, &a.bytes),
+        Err(CheckpointObjectError::ContextMismatch(ContextField::Domain))
+    );
+    // A valid object filed where another was expected.
+    assert_eq!(
+        authenticate(&k, &expected, &b.bytes),
+        Err(CheckpointObjectError::ContextMismatch(
+            ContextField::Reference
+        ))
+    );
+    assert_eq!(
+        authenticate(&k, &expect(&a, ObjectKind::Index), &a.bytes),
+        Err(CheckpointObjectError::ContextMismatch(ContextField::Kind))
+    );
+    assert_eq!(
+        authenticate(&k, &expected.plaintext_len(99), &a.bytes),
+        Err(CheckpointObjectError::ContextMismatch(
+            ContextField::PlaintextLen
+        ))
+    );
+    // b's payload under a's header and wrapped key.
+    let at = wrapped_key_at() + WRAPPED_KEY_LEN;
+    let mut spliced = a.bytes[..at].to_vec();
+    spliced.extend_from_slice(&b.bytes[at..]);
+    assert_eq!(
+        authenticate(&k, &expected, &spliced),
+        Err(CheckpointObjectError::WrappedKeyAuth)
+    );
+}

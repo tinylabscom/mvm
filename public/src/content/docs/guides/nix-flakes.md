@@ -60,10 +60,10 @@ You do not need to enter a dev shell to build a flake. The dev shell is only for
 | `vcpus` | Resource default (default: `1`) |
 | `memory_mib` | Resource default (default: `256`) |
 | `dev` | Explicit accessible-vs-sealed override (default: inferred from `entrypoint`) |
-| `uids` | `{ agent; entrypoint; }` privilege-model override |
+| `uids` | `{ agent; entrypoint; }` privilege-model override (default: both 901 in a sealed image; entrypoint 0 in a dev image) |
 | `extraFiles` | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs |
 | `kernel`, `bootCommand`, `builderUid`, `withAuditProbe` | Advanced overrides |
-| `withSetpriv` | Bake the static `mvm-setpriv` privilege helper (default: `true`). Only a builder image whose boot payload supplies the helper sets it `false` |
+| `withSetpriv` | Bake the static `mvm-setpriv` privilege helper (default: `true`). `/init` prefers the runtime overlay's copy when one is mounted. Only a builder image whose boot payload supplies the helper sets it `false` |
 | `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy); **required** per check |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
 | `healthChecks.<name>.healthTimeoutSecs` | Timeout for each check (default: 10) |
@@ -210,17 +210,37 @@ mvmctl machine logs <name> -f    # follow in real time
 
 ## Users
 
-The guest agent runs as uid **990**. The entrypoint runs as uid **1000** in a
-sealed (prod) image and uid **0** in a dev image; override either with the
-`uids` argument:
+Every root `mkGuest` builds names the same fixed set of guest identities in
+`/etc/passwd` and `/etc/group`:
+
+| uid | Account | Runs |
+|-----|---------|------|
+| 0 | `root` | PID 1 |
+| 901 | `mvm-worker` | The guest agent and the workload |
+| 987 | `mvm-dns` | The local addon resolver |
+| 988 | `mvm-crng` | The CRNG reseed helper |
+| 989 | `mvm-egress` | The vsock egress client |
+
+These are the numbers the guest drops to, whichever init boots it. The
+initramfs agent mounts the root read-only, so it cannot add accounts of its
+own; the names a workload resolves are the ones baked here.
+
+Under the image's own `/init`, the entrypoint runs as uid **901** in a sealed
+(prod) image and uid **0** in a dev image. Override it, or the agent's uid,
+with the `uids` argument; a uid outside the fixed set gets an account row of
+its own (`mvm-entrypoint`, `mvm-agent`). The service uids 987–989 are refused:
 
 ```nix
 mvm.lib.${system}.mkGuest {
   name = "my-app";
   entrypoint.command = [ "/usr/local/bin/serve" ];
-  uids = { agent = 990; entrypoint = 1000; };
+  uids = { entrypoint = 0; };   # rootful workload, rarely the right call
 };
 ```
+
+`/init` drops privilege through `mvm-setpriv`. The runtime overlay carries it
+at `/mvm/runtime/setpriv` and `/init` prefers that copy; the copy baked by
+`withSetpriv` serves a `rootfs_only` boot and an overlay that predates it.
 
 Secrets at `/mnt/secrets` are owned by `root:<group>` with mode `0440`, so only
 members of the service group can read them.

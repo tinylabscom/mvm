@@ -50,7 +50,7 @@ command = "mvmctl machine run --image alpine --cpus 2 --memory 512M --allow-host
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--cpus, --memory and --allow-host on one launch"
 
 [[example]]
-command = "mvmctl machine run --flake . -- ./app"
+command = "mvmctl machine run --name app --flake . -- ./app"
 witness = "suites/s5_lifecycle/transient_sandbox_boot.feature::machine run boots a transient sandbox from a Nix flake"
 
 # ── Persistent machines ──────────────────────────────────────────────────────

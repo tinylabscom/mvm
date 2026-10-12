@@ -596,6 +596,13 @@ fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
             "signer never appended actual bytes"
         );
         if boundary == Boundary::PartialAppend {
+            // A torn record, not a stray byte: the fault models a short write
+            // that left part of a real entry behind.
+            let torn = &after[before.len()..];
+            assert!(
+                torn.len() > 1 && torn.starts_with(b"{"),
+                "expected a partial record, got {torn:?}"
+            );
             assert!(!after.ends_with(b"\n"));
             assert!(reconcile_capture(f.context(), 605_000).is_err());
             assert!(

@@ -52,7 +52,16 @@ Lock the volume again after use:
 mvmctl machine volume lock agent-cache
 ```
 
-See [Persistent workspaces](/guides/persistent-workspaces/) for volume lifecycle, snapshots versus volumes, and cleanup policy.
+Unlocked plaintext, writable `HOST.img:/GUEST:SIZE:rw` disk images, and the
+snapshots made of shared directories must sit on storage that is verified
+encrypted (FileVault on macOS, dm-crypt/LUKS under
+ext4 on Linux). Otherwise `create`, `unlock`, `mount`, and the start that uses
+them refuse and say how to fix it. For local development only,
+`MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` accepts unverified storage; each use is
+audited and `--prod` refuses it. `mvmctl doctor` shows the verdict on its
+`volume storage (encrypted backing)` line.
+
+See [Persistent workspaces](/guides/persistent-workspaces/) for volume lifecycle, the storage rules, snapshots versus volumes, and cleanup policy.
 
 ## Security notes
 

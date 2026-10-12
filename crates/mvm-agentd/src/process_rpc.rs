@@ -474,6 +474,7 @@ fn build_command(
             Ok(())
         });
     }
+    crate::workload_seccomp::confine(&mut cmd);
 
     Ok(cmd)
 }

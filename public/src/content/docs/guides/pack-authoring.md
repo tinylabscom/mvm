@@ -319,8 +319,8 @@ document bytes under `trust.toml` before advancing the durable checkpoint.
 There is no built-in revocation identity or automatic feed fetch yet. This
 operator path does not confer official status on a pack.
 
-`pull` downloads the manifest, the bundle and each declared file, verifies the
-signature against the publisher trust policy, checks every file against the
+`pull` downloads the manifest and bundle, verifies the signature against the
+publisher trust policy, then downloads and checks every declared file against the
 manifest, installs the pack content-addressed under `$MVM_HOME/cache/registry-packs/`,
 and pins the manifest digest in `$MVM_HOME/registry/packs.lock.toml`:
 
@@ -335,6 +335,46 @@ manifest_sha256 = "e10d2c7f070e00a1b5d8c713568c0aebe608cc4e346c091a4cb25057ffd25
 The same verification runs again on every load. A cached file changed after
 installation no longer matches the manifest, and the pack is reported as not
 installed until `mvmctl pull` restores it.
+
+### Built-image release assets
+
+A signed schema-v2 `image` descriptor declares seven external release assets,
+separately from registry-local `files`: `rootfs.ext4`, `rootfs.verity`,
+`rootfs.roothash`, `mvm-meta.json`, `rootfs.signature.json`, `provenance.json`,
+and `provenance.signature.json`. Together they form one payload inventory;
+duplicate names and file/directory collisions are refused. The descriptor's
+base-set identity must match the client's compiled image lock before any
+payload download.
+
+The client fetches only those assets from the descriptor's public
+`tinylabscom/mvm-packs` GitHub release. `MVM_PACK_REGISTRY` changes the registry
+metadata source, not the image release origin. Private image releases and
+authenticated release downloads are not supported. Redirects are limited to
+HTTPS GitHub and its release-asset host; no credentials are attached.
+
+Every asset's exact size and SHA-256 are checked. The rootfs signature and
+provenance signature must authenticate under the already verified publisher.
+Provenance must bind the rootfs, pack reference, accepted base set, compiled
+image lock and build inputs. These checks run before atomic cache publication
+and again when installed contents are reopened, including host admission.
+No key bundled beside an artifact becomes a trust anchor.
+
+Built-image installation is currently unavailable: this client has no trusted
+released verifier compatible with its compiled image-set lock, so `mvmctl pull`
+refuses built-image packs before downloading payload assets. Do not publish or
+rely on a successful built-image pull until a compatible verifier release is
+verified and pinned.
+
+Downloads and verification are bounded: manifests and signature metadata are
+limited to 1 MiB, a built rootfs to 16 GiB, its verity tree to 1 GiB, and each
+remaining built-image asset to 1 MiB. The combined payload permits at most
+4096 files and 32 GiB. These ceilings apply in addition to signed exact sizes;
+large files are streamed, not buffered as a whole.
+
+Installation support does not enable booting built-image packs. Run paths
+still refuse them explicitly, with no source-build fallback. It also does not
+establish producer publishability or official release status; the producer
+publication guard and released pull/admission/boot evidence remain separate.
 
 ## Decide who may publish
 

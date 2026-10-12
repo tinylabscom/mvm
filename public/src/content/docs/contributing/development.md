@@ -293,6 +293,21 @@ The lane mirrored at `.github/workflows/ci.yml::core-demo-e2e` runs the same com
 
 The same gated convention covers `crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/sdks/python/tests/test_sandbox_exec.py`.
 
+### Running on the shared KVM box
+
+The self-hosted Linux KVM runner is one persistent machine that CI and
+contributors share, and nothing on it is cleaned up between sessions. Work by
+hand only inside a private `/srv/mvm/<name>` directory, with the checkout,
+`CARGO_TARGET_DIR`, `MVM_HOME` and `TMPDIR` all under it. Before you finish,
+stop every VM and process you started, by PID, and delete that directory.
+
+A CI job that can run there must end with an `if: always()` step running
+`nix/ops/hetzner/job-cleanup.sh`, which kills by PID whatever the job started
+and removes its isolated home, state and temporary directories;
+`tests/github_actions_self_hosted_runner.rs` fails the build if a job lacks
+it. An hourly sweep on the box removes stale temporary directories that both
+miss. `nix/ops/hetzner/README.md` has the details and the install steps.
+
 ## Profiling
 
 Functions carrying `#[instrument]` are timed when `MVM_SPAN_TIMINGS` is set.

@@ -155,7 +155,7 @@ const CHECKSUM_MANIFEST: &str = "checksums-sha256.txt";
 
 /// Per-version release directory the archive, its manifest, and both
 /// signature bundles are published under.
-fn release_base(tag: &str) -> String {
+pub(crate) fn release_base(tag: &str) -> String {
     format!(
         "{}/{}/releases/download/{}",
         github_download_base(),
@@ -696,13 +696,23 @@ pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
 }
 
 fn source_helper_commit() -> Result<Option<String>> {
-    if mvm_build::artifact_acquisition::compiled_channel()
-        == mvm_build::artifact_acquisition::DistributionChannel::Release
-    {
+    source_helper_commit_for(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        env!("MVM_SOURCE_COMMIT"),
+        env!("MVM_SOURCE_DIRTY"),
+    )
+}
+
+/// The commit a source build's host helpers must match, or `None` for a
+/// release build, whose helpers come from its own signed release.
+fn source_helper_commit_for(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    commit: &str,
+    dirty: &str,
+) -> Result<Option<String>> {
+    if channel == mvm_build::artifact_acquisition::DistributionChannel::Release {
         return Ok(None);
     }
-    let commit = env!("MVM_SOURCE_COMMIT");
-    let dirty = env!("MVM_SOURCE_DIRTY");
     validate_source_helper_identity(commit, dirty).map(Some)
 }
 
@@ -931,6 +941,7 @@ fn verify_archive_signature_at(
             train: mvm_build::release_signature::ReleaseTrain::Cli,
         },
     )
+    .map(|_| ())
     .with_context(|| {
         format!(
             "refusing to install {archive_name}: it is not signed by the {tag} release workflow"
@@ -1133,22 +1144,72 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     verify_signature_if_required(skip_verify, || {
         verify_signature(&latest_tag, &archive_name, &archive_path)
     })?;
+    // The CLI and its guest runtime are one release. The runtime is acquired
+    // and verified first, under its own signature whatever `--skip-verify`
+    // says, so a runtime that cannot be verified leaves the old binary in
+    // place rather than installing a CLI without one.
+    crate::release_guest_runtime::stage_for_update(&latest_tag)?;
     extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
     ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));
     ui::info("The binary has been replaced on disk.");
     ui::info("To verify: Open a new shell and run 'mvmctl --version'");
     ui::info("Or run: hash -r  (to clear your shell's command cache)");
+    ui::info(UPDATED_BINARY_BOOTSTRAP_NOTE);
 
     Ok(())
 }
 
+/// The updated binary assembles its runtime overlay, initramfs and SDK
+/// sidecars from the guest runtime just staged, and there is no other copy to
+/// boot: until it runs bootstrap, a launch refuses and names it.
+const UPDATED_BINARY_BOOTSTRAP_NOTE: &str = "Then run 'mvmctl bootstrap' once: the new version \
+     assembles its guest runtime from the archive this update staged before its first launch.";
+
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAction, decide_update, source_helper_marker_matches, validate_source_helper_bundle,
+        UPDATED_BINARY_BOOTSTRAP_NOTE, UpdateAction, decide_update, source_helper_commit,
+        source_helper_commit_for, source_helper_marker_matches, validate_source_helper_bundle,
         validate_source_helper_identity,
     };
+    use mvm_build::artifact_acquisition::DistributionChannel;
+
+    /// An updated binary has no assembled guest runtime of its own version
+    /// yet, and nothing to fall back to, so the update names the bootstrap.
+    #[test]
+    fn an_update_names_the_bootstrap_that_assembles_the_new_guest_runtime() {
+        assert!(UPDATED_BINARY_BOOTSTRAP_NOTE.contains("mvmctl bootstrap"));
+    }
+
+    #[test]
+    fn the_helper_commit_is_this_builds_own_channel_and_identity() {
+        let own = source_helper_commit_for(
+            mvm_build::artifact_acquisition::compiled_channel(),
+            env!("MVM_SOURCE_COMMIT"),
+            env!("MVM_SOURCE_DIRTY"),
+        );
+        assert_eq!(
+            source_helper_commit().map_err(|e| e.to_string()),
+            own.map_err(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn only_a_source_build_pins_its_helpers_to_a_commit() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Source, &commit, "false").unwrap(),
+            Some(commit.clone())
+        );
+        assert!(source_helper_commit_for(DistributionChannel::Source, &commit, "true").is_err());
+        // A release build takes its helpers from its own signed release, so
+        // even unidentified source metadata asks nothing of it.
+        assert_eq!(
+            source_helper_commit_for(DistributionChannel::Release, "", "true").unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn source_helper_identity_requires_a_clean_full_commit() {

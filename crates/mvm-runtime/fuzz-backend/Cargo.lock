@@ -1268,6 +1268,7 @@ dependencies = [
  "ed25519-dalek",
  "ext4-view",
  "hex",
+ "hmac",
  "libc",
  "mvm-agentd",
  "mvm-backends",

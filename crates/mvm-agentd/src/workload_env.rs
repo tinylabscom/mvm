@@ -36,6 +36,57 @@ pub const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 /// Terminal type reported to an interactive session.
 pub const INTERACTIVE_TERM: &str = "xterm-256color";
 
+/// Where the runtime overlay is mounted in the guest.
+pub const RUNTIME_OVERLAY_ROOT: &str = "/mvm/runtime";
+
+/// The variables a workload gets because the runtime overlay is mounted: the
+/// marker an SDK reads to know it runs under mvm, and the overlay's language
+/// SDK trees placed first on their interpreters' search paths, ahead of
+/// whatever the image or the caller already set.
+///
+/// Every process the agent starts for a workload carries them, whichever way
+/// it was started. An overlay without a `VERSION` file is not one mvm built,
+/// so it contributes nothing.
+fn runtime_overlay_assignments(
+    root: &Path,
+    existing: impl Fn(&str) -> Option<OsString>,
+) -> Vec<(&'static str, OsString)> {
+    if !root.join("VERSION").is_file() {
+        return Vec::new();
+    }
+    let mut out = vec![("MVM_RUNTIME_OVERLAY", OsString::from("1"))];
+    for (var, tree) in [("PYTHONPATH", "sdk-py"), ("NODE_PATH", "sdk-ts")] {
+        let dir = root.join(tree);
+        if dir.is_dir() {
+            let dir = dir.to_string_lossy().into_owned();
+            out.push((var, prepend_loader_dir(&dir, existing(var).as_deref())));
+        }
+    }
+    out
+}
+
+/// `env` with the runtime-overlay variables applied, for a workload whose
+/// environment the host supplies as pairs (`RunEntrypoint`, `RunDetached`).
+#[must_use]
+pub fn with_runtime_overlay_env(
+    mut env: Vec<(String, String)>,
+    root: &Path,
+) -> Vec<(String, String)> {
+    let assignments = runtime_overlay_assignments(root, |var| {
+        env.iter()
+            .find(|(k, _)| k == var)
+            .map(|(_, v)| OsString::from(v))
+    });
+    for (var, value) in assignments {
+        let value = value.to_string_lossy().into_owned();
+        match env.iter_mut().find(|(k, _)| k == var) {
+            Some(slot) => slot.1 = value,
+            None => env.push((var.to_string(), value)),
+        }
+    }
+    env
+}
+
 /// An image's declared runtime configuration, as materialized into its rootfs.
 ///
 /// `argv` is the flattened `Entrypoint` + `Cmd`. It is allowed to be empty:
@@ -147,6 +198,7 @@ pub struct WorkloadEnvironmentBuilder {
     vars: Vec<(OsString, OsString)>,
     working_dir: Option<OsString>,
     term: Option<&'static str>,
+    overlay_root: Option<std::path::PathBuf>,
 }
 
 impl WorkloadEnvironmentBuilder {
@@ -205,6 +257,14 @@ impl WorkloadEnvironmentBuilder {
         self
     }
 
+    /// Read the runtime overlay from `root` instead of
+    /// [`RUNTIME_OVERLAY_ROOT`]. Tests use it; the guest never moves it.
+    #[must_use]
+    pub fn runtime_overlay_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.overlay_root = Some(root.into());
+        self
+    }
+
     /// Mark the session interactive, which sets `TERM`.
     #[must_use]
     pub fn interactive(mut self) -> Self {
@@ -238,6 +298,14 @@ impl WorkloadEnvironmentBuilder {
                 prepend_loader_dir(&shim_dir, existing.as_deref()),
             );
         }
+        let overlay_root = self
+            .overlay_root
+            .take()
+            .unwrap_or_else(|| std::path::PathBuf::from(RUNTIME_OVERLAY_ROOT));
+        let assignments = runtime_overlay_assignments(&overlay_root, |var| self.get(var));
+        for (var, value) in assignments {
+            self.set(OsString::from(var), value);
+        }
         if let Some(term) = self.term {
             self.set(OsString::from("TERM"), OsString::from(term));
         }
@@ -251,6 +319,13 @@ impl WorkloadEnvironmentBuilder {
             vars: self.vars,
             working_dir,
         }
+    }
+
+    fn get(&self, key: &str) -> Option<OsString> {
+        self.vars
+            .iter()
+            .find(|(k, _)| k == OsStr::new(key))
+            .map(|(_, v)| v.clone())
     }
 
     fn has(&self, key: &str) -> bool {
@@ -423,6 +498,81 @@ mod tests {
             .into_iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v)
+    }
+
+    /// An overlay root with a `VERSION` file and the two SDK trees.
+    fn staged_overlay() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("VERSION"), "1\n").unwrap();
+        std::fs::create_dir(root.path().join("sdk-py")).unwrap();
+        std::fs::create_dir(root.path().join("sdk-ts")).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_mounted_overlay_marks_the_workload_and_puts_its_sdks_first() {
+        let root = staged_overlay();
+        let image = ImageRuntimeConfig {
+            env: vec!["PYTHONPATH=/app/lib".to_string()],
+            ..Default::default()
+        };
+        let env = WorkloadEnvironment::builder()
+            .image(&image)
+            .runtime_overlay_root(root.path())
+            .build();
+        let sdk_py = root.path().join("sdk-py").display().to_string();
+        let sdk_ts = root.path().join("sdk-ts").display().to_string();
+        assert_eq!(value(&env, "MVM_RUNTIME_OVERLAY").as_deref(), Some("1"));
+        assert_eq!(
+            value(&env, "PYTHONPATH"),
+            Some(format!("{sdk_py}:/app/lib"))
+        );
+        assert_eq!(value(&env, "NODE_PATH"), Some(sdk_ts));
+    }
+
+    #[test]
+    fn no_overlay_leaves_the_environment_untouched() {
+        let empty = tempfile::tempdir().unwrap();
+        let env = WorkloadEnvironment::builder()
+            .runtime_overlay_root(empty.path())
+            .build();
+        assert!(value(&env, "MVM_RUNTIME_OVERLAY").is_none());
+        assert!(value(&env, "PYTHONPATH").is_none());
+        // An overlay that ships one SDK tree adds only that tree.
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("VERSION"), "1\n").unwrap();
+        std::fs::create_dir(root.path().join("sdk-py")).unwrap();
+        let env = WorkloadEnvironment::builder()
+            .runtime_overlay_root(root.path())
+            .build();
+        assert!(value(&env, "PYTHONPATH").is_some());
+        assert!(value(&env, "NODE_PATH").is_none());
+    }
+
+    /// The host-supplied environment of an entrypoint call gets the same
+    /// variables, prepended to a value the host sent rather than replacing it.
+    #[test]
+    fn host_supplied_pairs_get_the_overlay_variables_too() {
+        let root = staged_overlay();
+        let env = with_runtime_overlay_env(
+            vec![
+                ("PYTHONPATH".to_string(), "/srv".to_string()),
+                ("API_KEY".to_string(), "mvm-secret-x".to_string()),
+            ],
+            root.path(),
+        );
+        let sdk_py = root.path().join("sdk-py").display().to_string();
+        assert!(env.contains(&("PYTHONPATH".to_string(), format!("{sdk_py}:/srv"))));
+        assert!(env.contains(&("API_KEY".to_string(), "mvm-secret-x".to_string())));
+        assert!(env.contains(&("MVM_RUNTIME_OVERLAY".to_string(), "1".to_string())));
+        assert_eq!(env.iter().filter(|(k, _)| k == "PYTHONPATH").count(), 1);
+
+        let empty = tempfile::tempdir().unwrap();
+        let untouched = vec![("A".to_string(), "b".to_string())];
+        assert_eq!(
+            with_runtime_overlay_env(untouched.clone(), empty.path()),
+            untouched
+        );
     }
 
     #[test]

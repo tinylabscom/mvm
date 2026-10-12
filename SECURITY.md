@@ -75,7 +75,7 @@ Security-relevant code:
 
 Every mvm release publishes:
 
-- **Keyless cosign signatures** over every release blob — the `mvmctl` tarballs, the boot-image artefacts, the checksum manifests, and the SBOM. There is no long-lived public key: each artefact ships a `.bundle` beside it carrying the Fulcio short-lived certificate and the Rekor inclusion proof.
+- **Keyless cosign signatures** over every release blob — the `mvmctl` tarballs, the guest runtime (`mvm-guest-bins-v<version>.tar.gz`) and its `.sha256` sidecar, the checksum manifests, and the SBOM. Boot images (kernels, root filesystems, the builder image) are not CLI release assets: they are members of the image set `mvmctl` pins, signed by [mvm-images](https://github.com/tinylabscom/mvm-images) and verified against that set's own signed root. There is no long-lived public key: each artefact ships a `.bundle` beside it carrying the Fulcio short-lived certificate and the Rekor inclusion proof.
 - **A Sigstore/Rekor inclusion proof** inside each bundle, so transparency-log membership is verified as part of signature verification rather than as a separate step.
 - **A CycloneDX SBOM** (`sbom.cdx.json`), itself signed.
 - **SHA-256 checksum manifests**, also signed.
@@ -90,7 +90,7 @@ cosign verify-blob \
   mvmctl-<target>.tar.gz
 ```
 
-Bundles use cosign's new bundle format, so verifying by hand needs cosign >= v2.4. `install.sh` and `mvmctl env update` run this automatically when `cosign` is on `PATH`. The full walkthrough is [Verifying a release](public/src/content/docs/guides/verify-release.md).
+Bundles use cosign's new bundle format, so verifying by hand needs cosign >= v2.4. `mvmctl env update` verifies in-process with no `cosign` needed, and refuses a missing or invalid signature; `install.sh` uses an installed `mvmctl` or `cosign`, and on a fresh host authenticates the archive against the hash the published installer carries before using it as the verifier. The full walkthrough is [Verifying a release](public/src/content/docs/guides/verify-release.md).
 
 ## Hardening status by claim
 

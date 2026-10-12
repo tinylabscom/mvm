@@ -430,7 +430,9 @@ fn parse_or_default_empty(request: &[u8]) -> Result<Empty, Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::status::{MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_NOT_FOUND, MVM_HOSTLIB_OK};
+    use crate::status::{
+        MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_INVALID_SPEC, MVM_HOSTLIB_NOT_FOUND, MVM_HOSTLIB_OK,
+    };
     use mvm_core::client::dto::{MachineSpec, MachineState};
     use mvm_core::client::mock::MockBackend;
 
@@ -567,6 +569,81 @@ mod tests {
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
         let outcome = run(dispatch(&client, TELEMETRY_RECORDS, br#"{"id":"nope"}"#));
         assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    /// A seeded mock serves records over the ABI in the served shape, with
+    /// the cursor the binding hands back to continue, and a status in the
+    /// collector's typed state.
+    #[test]
+    fn telemetry_from_a_seeded_mock_crosses_the_abi_in_the_served_shape() {
+        use mvm_core::client::{CollectorState, ReceivedRecord, TelemetryStatus};
+        use mvm_core::protocol::telemetry::{
+            Attributes, Level, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+        };
+        let (client, state) = with_machine("alpha");
+        let received = |sequence: u64| ReceivedRecord {
+            received_at_ms: Some(1_700_000_000_000 + sequence),
+            record: TelemetryRecord::builder()
+                .epoch(ProducerEpoch::new([5; 16]).unwrap())
+                .producer(1)
+                .sequence(sequence)
+                .monotonic_ns(sequence)
+                .source(SourceKind::GuestAgent)
+                .body(RecordBody::Event {
+                    context: None,
+                    level: Level::Info,
+                    name: "tick".try_into().unwrap(),
+                    attributes: Attributes::new(Vec::new()).unwrap(),
+                })
+                .build()
+                .unwrap(),
+        };
+        client.set_telemetry_status(
+            &state.id,
+            TelemetryStatus::Provisioned {
+                vm_name: "alpha".into(),
+                state: CollectorState::Connecting,
+                shed: 0,
+                snapshot_age_ms: None,
+                records_bytes: 0,
+            },
+        );
+        client.push_telemetry_records(&state.id, (1..=3).map(received));
+
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(
+            body(&outcome)["state"],
+            serde_json::json!({ "kind": "connecting" })
+        );
+
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "limit": 2 })).unwrap();
+        let first = body(&run(dispatch(&client, TELEMETRY_RECORDS, &request)));
+        assert_eq!(first["records"].as_array().unwrap().len(), 2);
+        assert_eq!(first["records"][0]["received_at_ms"], 1_700_000_000_001u64);
+        assert_eq!(first["exhausted"], false);
+
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": state.id.0,
+            "cursor": first["next_cursor"],
+        }))
+        .unwrap();
+        let rest = body(&run(dispatch(&client, TELEMETRY_RECORDS, &request)));
+        assert_eq!(rest["records"].as_array().unwrap().len(), 1);
+        assert_eq!(rest["records"][0]["record"]["sequence"], 3);
+        assert_eq!(rest["exhausted"], true);
+
+        // A cursor that is not a line boundary is the caller's error.
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": state.id.0,
+            "cursor": { "offset": 1 },
+        }))
+        .unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(body(&outcome)["code"], "INVALID_SPEC");
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_SPEC);
     }
 
     #[test]

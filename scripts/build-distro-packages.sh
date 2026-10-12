@@ -2,35 +2,40 @@
 # Build the .deb and .rpm for one Linux release target from its release
 # tarball, so the packages carry the tarball's bytes and nothing rebuilt.
 #
-#   build-distro-packages.sh <tarball> <target> <version> <out-dir>
+#   build-distro-packages.sh <tarball> <target> <version> <out-dir> <guest-runtime>
 #
 # <target> is the archive's target name (x86_64-unknown-linux-gnu or
 # aarch64-unknown-linux-gnu); it decides the package architecture. <version>
 # is the version the packages claim, without a leading `v`. The tarball's
 # mvmctl must report it, so a package cannot be labelled with a version its
 # contents are not — checked by running mvmctl only when the host can.
+# <guest-runtime> is the release's mvm-guest-bins-v<version>.tar.gz, with its
+# `.sha256` sidecar beside it; the packages install it, held to that digest,
+# under /usr/lib/mvmctl/guest-runtime/, where mvmctl in /usr/bin looks for the
+# guest runtime of its own version.
 #
 # The asset lists live in the root Cargo.toml ([package.metadata.deb] and
 # [package.metadata.generate-rpm]) and read from target/distro-pkg/, which
 # this script fills: bin/ with every file at the top of the archive except the
-# README, doc/ with the README, man/ with the man pages, and package-managed/
-# with one marker per format, naming it, which each package installs as
-# /usr/share/mvmctl/package-managed. Writes into <out-dir>
-# the two packages and one `<package>.sha256` per package, the format the
-# release's combined checksum manifest is assembled from, plus
+# README, doc/ with the README, man/ with the man pages, guest-runtime/ with
+# the guest runtime, and package-managed/ with one marker per format, naming
+# it, which each package installs as /usr/share/mvmctl/package-managed. Writes
+# into <out-dir> the two packages and one `<package>.sha256` per package, the
+# format the release's combined checksum manifest is assembled from, plus
 # `payload-<target>.sha256sums`: a `sha256sum -c` manifest of the files the
-# packages install into /usr/bin, which distro-package-smoke.sh checks the
-# installed files against.
+# packages install into /usr/bin and /usr/lib/mvmctl/guest-runtime, which
+# distro-package-smoke.sh checks the installed files against.
 #
 # Needs cargo-deb and cargo-generate-rpm (`cargo install --locked` at the
 # versions distro-packages.yml pins) and runs from the workspace root.
 set -euo pipefail
 
-[ $# -eq 4 ] || { sed -n '5p' "$0" | sed 's/^# *//' >&2; exit 2; }
+[ $# -eq 5 ] || { sed -n '5p' "$0" | sed 's/^# *//' >&2; exit 2; }
 tarball="$1"
 target="$2"
 version="$3"
 out_dir="$4"
+runtime="$5"
 
 case "${target}" in
   x86_64-unknown-linux-gnu)  build_target=x86_64-unknown-linux-musl;  host_arch=x86_64 ;;
@@ -41,6 +46,15 @@ case "${version}" in
   v*|"") echo "build-distro-packages: version must be bare, got '${version}'" >&2; exit 2 ;;
 esac
 [ -f "${tarball}" ] || { echo "build-distro-packages: ${tarball} not found" >&2; exit 1; }
+runtime_name="mvm-guest-bins-v${version}.tar.gz"
+[ "$(basename "${runtime}")" = "${runtime_name}" ] \
+  || { echo "build-distro-packages: ${runtime} is not ${runtime_name}" >&2; exit 1; }
+[ -f "${runtime}" ] && [ -f "${runtime}.sha256" ] \
+  || { echo "build-distro-packages: ${runtime} and its .sha256 are both required" >&2; exit 1; }
+runtime_want="$(awk -v name="${runtime_name}" '$2 == name {print $1}' "${runtime}.sha256")"
+runtime_got="$(shasum -a 256 "${runtime}" | cut -d' ' -f1)"
+[ -n "${runtime_want}" ] && [ "${runtime_want}" = "${runtime_got}" ] \
+  || { echo "build-distro-packages: ${runtime_name} hashes to ${runtime_got}, its .sha256 records '${runtime_want}'" >&2; exit 1; }
 if ! { [ -f Cargo.toml ] && grep -q '^\[package\.metadata\.deb\]' Cargo.toml; }; then
   echo "build-distro-packages: run from the workspace root" >&2
   exit 2
@@ -62,10 +76,11 @@ if [ "$(uname -s)/$(uname -m)" = "Linux/${host_arch}" ]; then
 fi
 
 rm -rf "${stage}"
-mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man" "${stage}/package-managed"
+mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man" "${stage}/guest-runtime" "${stage}/package-managed"
 find "${src}" -maxdepth 1 -type f ! -name README.md -exec cp -p {} "${stage}/bin/" \;
 cp -p "${src}/README.md" "${stage}/doc/"
 cp -p "${src}"/man/*.1 "${stage}/man/"
+cp -p "${runtime}" "${stage}/guest-runtime/"
 printf '%s\n' deb > "${stage}/package-managed/deb"
 printf '%s\n' rpm > "${stage}/package-managed/rpm"
 
@@ -87,9 +102,12 @@ rpms=("${rpm_dir}"/*.rpm)
 cp "${rpms[0]}" "${out_dir}/"
 rpm="${out_dir}/$(basename "${rpms[0]}")"
 
-( cd "${stage}/bin" && for f in *; do
-    printf '%s  /usr/bin/%s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
-  done ) > "${out_dir}/payload-${target}.sha256sums"
+{
+  ( cd "${stage}/bin" && for f in *; do
+      printf '%s  /usr/bin/%s\n' "$(shasum -a 256 "$f" | cut -d' ' -f1)" "$f"
+    done )
+  printf '%s  /usr/lib/mvmctl/guest-runtime/%s\n' "${runtime_got}" "${runtime_name}"
+} > "${out_dir}/payload-${target}.sha256sums"
 
 for package in "${deb}" "${rpm}"; do
   [ -f "${package}" ] || { echo "build-distro-packages: ${package} was not written" >&2; exit 1; }

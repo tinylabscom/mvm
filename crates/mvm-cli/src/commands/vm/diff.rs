@@ -16,6 +16,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use mvm_client::checkpoint::WorkspaceImage;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::{DiffLimits, TreeDiff, diff_images};
@@ -122,7 +123,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     for workspace in &workspaces {
         let old = image_for(&checkpoints, workspace, &from)?;
         let new = image_for(&checkpoints, workspace, &to)?;
-        let diff = diff_images(&old, &new, limits)
+        let diff = diff_images(old.path(), new.path(), limits)
             .with_context(|| format!("diffing workspace volume {:?}", workspace.volume))?;
         volumes.push(VolumeReport {
             volume: workspace.volume.clone(),
@@ -217,10 +218,10 @@ fn image_for(
     checkpoints: &mvm_client::checkpoint::Checkpoints,
     workspace: &Workspace,
     side: &Side,
-) -> Result<PathBuf> {
+) -> Result<WorkspaceImage> {
     match side {
-        Side::Baseline => baseline_image(workspace),
-        Side::Live => Ok(workspace.image.clone()),
+        Side::Baseline => baseline_image(workspace).map(WorkspaceImage::existing),
+        Side::Live => Ok(WorkspaceImage::existing(workspace.image.clone())),
         Side::Checkpoint { id } => {
             let id = mvm_core::checkpoint::CheckpointId::new(id.clone());
             checkpoints.workspace_image(&id, &workspace.volume)

@@ -69,6 +69,9 @@ serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
 sha2.workspace = true
+# Derives each checkpoint key domain's wrapping and reference keys from its
+# custody root.
+hmac.workspace = true
 # The Apple Container kernel's digest pin is BLAKE3 (the fetched kernel is
 # multi-hundred-MB; SHA-256 stays where it is contractually locked).
 blake3.workspace = true

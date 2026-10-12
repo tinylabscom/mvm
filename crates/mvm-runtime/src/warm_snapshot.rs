@@ -55,7 +55,11 @@ pub fn materialize_child_from_parent(
     dst: &Path,
 ) -> Result<CloneStrategy> {
     let parent = checkpoint_store.read_meta(parent_id)?;
-    verify_content(checkpoint_store, &parent)?;
+    // A protected parent's content is authenticated byte by byte as it is
+    // opened below, so hashing it here first would only decrypt it twice.
+    if parent.protection.is_unprotected() {
+        verify_content(checkpoint_store, &parent)?;
+    }
     verify_lineage(checkpoint_store, parent_id, anchor)?;
 
     let snapshot_id = parent.snapshot_id.as_deref().ok_or_else(|| {
@@ -76,6 +80,10 @@ pub fn materialize_child_from_parent(
 /// admitted and must materialize from a read view that cannot be modified by a
 /// later writer. The ordinary [`materialize_child_from_parent`] path remains
 /// available for unsealed backends and retains full verification.
+///
+/// A protected parent's publication holds only opaque objects, so the backend
+/// is trusted for nothing: its copy is followed by opening every blob from
+/// the checkpoint store, which authenticates each byte it releases.
 pub fn materialize_child_from_trusted_parent(
     checkpoint_store: &CheckpointStore,
     backend: &dyn TrustedSnapshotBackend,
@@ -89,7 +97,7 @@ pub fn materialize_child_from_trusted_parent(
         anyhow::anyhow!("checkpoint '{parent_id}' has no trusted snapshot binding")
     })?;
 
-    backend
+    let strategy = backend
         .materialize(&SnapshotId::new(snapshot_id), dst)
         .with_context(|| {
             format!(
@@ -97,7 +105,11 @@ pub fn materialize_child_from_trusted_parent(
                 dst.display(),
                 backend.name()
             )
-        })
+        })?;
+    if parent.protection.is_sealed() {
+        materialize_chunked_blobs(checkpoint_store, &parent, dst)?;
+    }
+    Ok(strategy)
 }
 
 #[cfg(test)]
