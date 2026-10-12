@@ -119,6 +119,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         ) {
             return false;
         }
+        let provisioning = std::time::Instant::now();
         let started = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
             req.vm_name,
             req.tenant,
@@ -133,6 +134,12 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             );
         })
         .is_ok();
+        tracing::debug!(
+            vm = req.vm_name,
+            started,
+            elapsed_us = provisioning.elapsed().as_micros() as u64,
+            "telemetry collector provisioning on the launch path"
+        );
         match mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(
             req.state_dir,
             started,
