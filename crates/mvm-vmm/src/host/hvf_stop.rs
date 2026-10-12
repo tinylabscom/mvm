@@ -17,7 +17,9 @@ use mvm_core::protocol::hvf_control::{
 use rand::Rng;
 
 use super::hvf_control_transport as wire;
-use super::process_exit::{ProcessExitObserver, ProcessExitWait, require_owned_child_custody};
+use super::process_exit::{
+    ProcessExitObserver, ProcessExitWait, collect_after_exit_event, require_owned_child_custody,
+};
 
 /// A fresh challenge has bound this connection to the armed observer.
 pub struct ConnectedInstance {
@@ -232,7 +234,7 @@ impl OwnedInstance {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
             ensure!(
-                child.try_wait()?.is_some(),
+                collect_after_exit_event(deadline, || child.try_wait())?.is_some(),
                 "owned child exit status is not ready"
             );
         }
@@ -271,7 +273,10 @@ impl OwnedInstance {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
             ensure!(
-                child.try_wait()?.is_some(),
+                collect_after_exit_event(Instant::now() + wire::CONNECTION_BUDGET, || {
+                    child.try_wait()
+                })?
+                .is_some(),
                 "owned child exit status is not ready"
             );
         }

@@ -70,12 +70,7 @@ fn valid_stop_dispatches_but_does_not_publish_terminal_or_remove_evidence() {
     );
     drop(owner);
     assert_eq!(wire::read_instance("dispatch").unwrap(), instance);
-    assert!(
-        wire::state_dir("dispatch")
-            .unwrap()
-            .join(wire::SOCKET_FILE)
-            .exists()
-    );
+    assert!(wire::socket_path("dispatch").unwrap().exists());
 }
 
 #[test]

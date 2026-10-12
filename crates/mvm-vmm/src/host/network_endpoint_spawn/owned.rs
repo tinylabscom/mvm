@@ -1,7 +1,7 @@
 //! Child-owned endpoint lifecycle. The detached compatibility path is separate.
 
 use super::*;
-use crate::host::process_exit::{ProcessExitObserver, ProcessExitWait};
+use crate::host::process_exit::{ProcessExitObserver, ProcessExitWait, collect_after_exit_event};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
@@ -146,8 +146,7 @@ impl OwnedEndpoint {
         self.exit_observed = true;
         // Never block in wait, even after an event. Only a collected status is
         // proof; an event with no collectable status remains an error.
-        let status = self
-            .collect()?
+        let status = collect_after_exit_event(deadline, || self.collect())?
             .ok_or_else(|| anyhow!("endpoint exit event has no collectable child status"))?;
         self.check_status(status)
     }
