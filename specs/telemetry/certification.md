@@ -15,7 +15,8 @@ that backend produced the evidence.
 |---|---|---|
 | Firecracker (Linux KVM) | **live** | Reference host (AMD Ryzen 5 3600, Linux 6.1), 2026-10-12. Detached machines with no egress (collector-only) and with egress (collector embedded in the endpoint) each reached `collecting`, held a sealed records file, and their collector exited on `machine stop`. An idle session stays one session (two coverage announcements in 40 s). With collection on by default, a detached machine's workload `stdout`/`stderr` lines appeared in `mvmctl machine telemetry` (`stdio 6` for three lines on each stream). |
 | HVF (macOS 26+, Apple Silicon) | **live** | Apple M4 Max, debug build, 2026-10-12. A detached machine reached `collecting` with a sealed records file; the collector exited on `machine stop`. |
-| HVF / Firecracker warm claim | unit-witnessed | `telemetry_follows_the_boot_that_asserted_it`, `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`. No live witness: neither host met the 300 ms warm ceiling during the run, with or without collection, so no claim completed. |
+| Firecracker warm claim | **live** | A transient `run` claimed from a standby parent booted with collection on reached `collecting` under the child's VM id, with the agent's records delivered, collected only after the claim succeeded. Unit witnesses: `telemetry_follows_the_boot_that_asserted_it`, `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`. |
+| HVF warm claim | unit-witnessed | The Mac's debug build did not meet the 300 ms warm ceiling with or without collection, so no claim completed there. |
 | libkrun, QEMU, `apple-container` | not certified | Same dial paths (per-port socket) as HVF; never booted with collection. |
 | Wasm | not applicable | No vsock; needs a separate host adapter (inventory row in `sources.toml`). |
 
@@ -83,12 +84,19 @@ sink, writes where a VM's collector writes, and reads back through
 
 Cold named boots on the Firecracker reference host, 15 interleaved pairs:
 median 860 ms with collection on, 872 ms off; the collector start runs beside
-the boot and its own work measured about 4 ms. Warm claims start no collector
-until the claim succeeds; blocked A/B runs showed no difference outside the
-host's ±10 ms noise once that was so.
+the boot and its own work measured about 4 ms.
+
+Warm claims start no collector until the claim succeeds. On the same host,
+from a fresh MVM home, eight warm launches with collection off and eight with
+it on (alternating blocks of four): startup medians 165 ms and 166 ms,
+`warm_claim` medians 76.6 ms and 75.8 ms — inside the 300 ms ceiling, and
+level with the same measurement of `main` (about 190 ms and 78 ms). The same
+build in a home that had served a day of test launches took about 270 ms to
+claim, collection on or off: warm-claim cost grows with the state a home has
+accumulated, independent of telemetry.
 
 ## Not certified
 
 - Spans: the contract carries them, but no guest producer emits them yet.
 - The interval before the guest agent starts (reported as unavailable).
-- libkrun, QEMU and `apple-container` live runs; a live warm-claim witness.
+- libkrun, QEMU and `apple-container` live runs; an HVF warm-claim witness.
