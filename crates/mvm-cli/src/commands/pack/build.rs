@@ -27,14 +27,13 @@ use mvm_core::plan::bundle::{
 };
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 use sha2::{Digest, Sha256};
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{TemplateExport, export_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
-use mvm_client::bundle::PostureInputs;
+use mvm_client::bundle::{PostureInputs, template_artifact_digests};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct BuildArgs {
@@ -252,15 +251,12 @@ struct SlotDigests {
 
 impl SlotDigests {
     fn read(slot: &str) -> Result<Self> {
-        let (_, vmlinux, initrd, rootfs, _) = tmpl::template_artifacts_dispatched(slot)
-            .with_context(|| format!("resolving the artifacts of slot {slot}"))?;
-        let (verity, _) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
-        let digest = |path: Option<&str>| path.map(|p| file_sha256(Path::new(p))).transpose();
+        let digests = template_artifact_digests(slot)?;
         Ok(Self::from_digests(
-            digest(Some(&vmlinux))?,
-            digest(initrd.as_deref())?,
-            digest(Some(&rootfs))?,
-            digest(verity.as_deref())?,
+            Some(digests.kernel),
+            digests.initrd,
+            Some(digests.rootfs),
+            digests.verity,
         ))
     }
 

@@ -100,12 +100,6 @@ pub(crate) fn render_flake_nix_at_url(
           exec ${{builtins.concatStringsSep " "
             (map shellQuote launch.entrypoint.command)}}
         '';
-      buildPreStart = pkgs: appPkg:
-        pkgs.writeShellScript "${{launch.workload_id}}-prestart" ''
-          set -eu
-          ${{pkgs.coreutils}}/bin/mkdir -p "$(${{pkgs.coreutils}}/bin/dirname ${{launch.entrypoint.working_dir}})"
-          ${{pkgs.coreutils}}/bin/ln -sfn ${{appPkg}} ${{launch.entrypoint.working_dir}}
-        '';
       isFunction = launch.entrypoint.kind == "function";
       # Factories live in mvm; the generated flake never bundles a local
       # fallback. If a pinned mvm revision doesn't expose the symbol, the rendered
@@ -165,11 +159,12 @@ pub(crate) fn render_flake_nix_at_url(
           # mkGuest writes it straight to /etc/mvm/entrypoint.
           # The command names programs from the declared packages, and the
           # process that runs this script may hand it a PATH that does not
-          # reach them, so the script carries its own.
+          # reach them, so the script carries its own. The app tree is baked
+          # at the working directory below rather than linked at boot: a
+          # sealed rootfs is read-only.
           cmdBootScript = pkgs.writeShellScript "${{launch.workload_id}}-boot" ''
             set -eu
             export PATH=${{pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}}''${{PATH:+:$PATH}}
-            ${{buildPreStart pkgs appPkg}}
             exec ${{buildEntrypoint pkgs}}
           '';
           mkGuestArgs =
@@ -191,6 +186,9 @@ pub(crate) fn render_flake_nix_at_url(
               packages = [ appPkg ] ++ imagePackages;
               uids.entrypoint = 0;
               entrypoint.command = [ "${{cmdBootScript}}" ];
+              extraFiles = {{
+                ${{launch.entrypoint.working_dir}} = {{ link = appPkg; }};
+              }};
             }};
         in {{
           default = mvm.lib.${{system}}.mkGuest mkGuestArgs;
@@ -351,14 +349,17 @@ mod tests {
     }
 
     #[test]
-    fn a_command_boot_script_reaches_its_packages_without_the_callers_path() {
+    fn a_command_workload_bakes_its_app_tree_and_carries_its_own_path() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(
             s.contains("export PATH=${pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}"),
             "the boot script puts the declared packages on its own PATH"
         );
-        assert!(s.contains("${pkgs.coreutils}/bin/mkdir -p"));
-        assert!(s.contains("${pkgs.coreutils}/bin/ln -sfn"));
+        assert!(
+            !s.contains("-prestart"),
+            "nothing links the app tree at boot; a sealed rootfs is read-only"
+        );
+        assert!(s.contains("${launch.entrypoint.working_dir} = { link = appPkg; };"));
     }
 
     #[test]
