@@ -267,20 +267,14 @@ reason = "Output pattern appears only inside a docstring example; the module its
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-agent"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "MVM_AGENT_BIN"
+launcher = "crates/mvm-build/src/initramfs.rs"
+anchor = "./init"
 activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-netinit"
 launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
 anchor = "NETINIT_OVERLAY"
-activation = "always"
-
-[[launch_edge]]
-producer = "mvm-agentd/mvm-guest-netinit"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "mvm-guest-netinit"
 activation = "always"
 
 [[launch_edge]]
@@ -292,8 +286,8 @@ condition = "kernel cmdline mvm.vsock_egress=1"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-addon-dns"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "MVM_ADDON_DNS_BIN"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "start_addon_dns"
 activation = "conditional"
 condition = "addons opt-in resolves an addon-dns binary"
 
@@ -317,9 +311,9 @@ activation = "on-demand"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-exit-report"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "exit-report"
-activation = "always"
+launcher = "crates/mvm-agentd/src/bin/mvm-guest-agent/interactive.rs"
+anchor = "EXIT_REPORT_OVERLAY"
+activation = "on-demand"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-seccomp-apply"

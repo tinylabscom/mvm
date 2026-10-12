@@ -28,9 +28,8 @@
             name = "agent-workload";
             packages = [ agent ];
             # Workload IR injects ANTHROPIC_API_KEY only into this per-call
-            # entrypoint. PID 1 receives neither the placeholder nor the proxy.
+            # entrypoint.
             entrypoint.command = idle;
-            bootCommand = idle;
             extraFiles."/etc/mvm/entrypoint" = {
               source = entrypoint;
               mode = "0755";

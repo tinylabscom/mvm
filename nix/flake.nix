@@ -270,7 +270,7 @@
       # `nix-flake-check` CI job.
       #
       # Scope: this covers the baked rootfs tree that ships inside the
-      # guest image (busybox, init, setpriv, and friends). The runtime
+      # guest image (busybox, setpriv, and friends). The runtime
       # overlay bind-mounted in at boot is gated by the
       # `runtime-overlay-no-glibc` CI step, which queries the closure of the
       # executables that flake stages; the glibc SDK cdylib now lives in the
@@ -315,7 +315,6 @@
             packages = [ functionApp ] ++ functionService.servicePackages;
             uids.entrypoint = 0;
             entrypoint.command = functionService.bootCommand;
-            bootCommand = functionService.bootCommand;
             extraFiles = functionService.extraFiles;
           };
         in

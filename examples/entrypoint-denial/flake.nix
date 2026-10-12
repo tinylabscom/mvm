@@ -25,7 +25,6 @@
             name = "entrypoint-denial";
             packages = [ pkgs.curl ];
             entrypoint.command = idle;
-            bootCommand = idle;
             extraFiles."/etc/mvm/entrypoint" = {
               source = deniedCall;
               mode = "0755";

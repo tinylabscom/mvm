@@ -122,8 +122,9 @@ fn slot_boots_oci_image_in(dir: &Path) -> Result<bool> {
 
 /// The proxy environment a workload needs when its launch boots an OCI image
 /// with egress on a backend that reaches the network only through the host
-/// vsock proxy. Empty otherwise: a `mkGuest` image exports its own, and a
-/// backend without the proxy has nothing to point at.
+/// vsock proxy. Empty otherwise: on any other root the guest agent fills in
+/// the same variables on an egress boot, and a backend without the proxy has
+/// nothing to point at.
 pub(crate) fn oci_proxy_env(
     boots_oci: bool,
     caps: &mvm_core::vm_backend::VmCapabilities,

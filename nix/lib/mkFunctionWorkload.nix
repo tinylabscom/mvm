@@ -130,21 +130,17 @@ let
     inherit hooks files;
   };
 in
-# PID 1 is the factory's idle boot command (stage source → before_start
-# hook → idle), passed via `bootCommand` so it lands at /etc/mvm/boot.
-# /etc/mvm/entrypoint stays the agent's per-call marker (the wrapper),
-# baked by `factory.extraFiles`. Routing PID 1 through a distinct file is
-# what stops `extraFiles` from clobbering it (the boot→ping panic).
+# /etc/mvm/entrypoint is the agent's per-call marker (the wrapper), baked by
+# `factory.extraFiles`; mkGuest renders no entrypoint of its own when the
+# caller supplies one.
 mkGuest {
   name = ir.id;
   inherit hypervisor vcpus memory_mib;
-  # `entrypoint` only drives classification here (sealed command form);
-  # mkGuest does not write it to disk when `bootCommand` is set — the
+  # `entrypoint` only drives classification here (sealed command form); the
   # factory's extraFiles owns /etc/mvm/entrypoint.
   entrypoint = {
     command = factory.bootCommand;
   };
-  bootCommand = factory.bootCommand;
   # uid 0: the boot script symlinks into `/` which is root-only. The
   # per-call wrapper drops privs internally via setpriv, so this is
   # the same posture the sealed function-workload path already uses;

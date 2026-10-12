@@ -40,7 +40,6 @@
           default = mvm.lib.${system}.mkGuest {
             name = "agent-prompt";
             entrypoint.command = idle;
-            bootCommand = idle;
             extraFiles."/etc/mvm/entrypoint" = {
               source = agent;
               mode = "0755";

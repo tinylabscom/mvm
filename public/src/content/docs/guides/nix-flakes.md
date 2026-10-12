@@ -62,8 +62,8 @@ You do not need to enter a dev shell to build a flake. The dev shell is only for
 | `dev` | Explicit accessible-vs-sealed override (default: inferred from `entrypoint`) |
 | `uids` | `{ agent; entrypoint; }` privilege-model override (default: both 901 in a sealed image; entrypoint 0 in a dev image) |
 | `extraFiles` | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs |
-| `kernel`, `bootCommand`, `builderUid`, `withAuditProbe` | Advanced overrides |
-| `withSetpriv` | Bake the static `mvm-setpriv` privilege helper (default: `true`). `/init` prefers the runtime overlay's copy when one is mounted. Only a builder image whose boot payload supplies the helper sets it `false` |
+| `kernel`, `builderUid`, `withAuditProbe` | Advanced overrides |
+| `withSetpriv` | Bake the static `mvm-setpriv` privilege helper (default: `true`). The runtime overlay carries its own copy at `/mvm/runtime/setpriv`. Only a builder image whose boot payload supplies the helper sets it `false` |
 | `healthChecks.<name>.healthCmd` | Health check command (exit 0 = healthy); **required** per check |
 | `healthChecks.<name>.healthIntervalSecs` | How often to run the check (default: 30) |
 | `healthChecks.<name>.healthTimeoutSecs` | Timeout for each check (default: 10) |
@@ -104,8 +104,8 @@ writes, independently of this argument.
 
 When you do declare a guest path that the host will later mount, note that the
 host-side mount policy (`mvm_core::crypto::policy::MountPathPolicy`) allows
-only paths under `/data` and `/work` — `/mnt` is deliberately excluded so a
-share cannot shadow the runtime's own `/mnt/config` and `/mnt/secrets` drives.
+only paths under `/data` and `/work`; `/mnt` and the runtime-reserved
+`/mnt/config` and `/mnt/secrets` are refused.
 
 **Reproducibility boundary:** volume *contents* do not influence the image hash. The flake hash captures the *declaration* of the mounts, not the data behind them. Volumes are the explicit mutable layer; the rootfs stays immutable + verity-protected.
 
@@ -115,18 +115,17 @@ share cannot shadow the runtime's own `/mnt/config` and `/mnt/secrets` drives.
 
 `mkGuest` handles everything automatically:
 
-- **Firecracker kernel** (vmlinux) — tuned for microVM workloads
-- **Busybox init** — sub-5s boot, no systemd overhead
-- **Overlay-aware runtime boot** — the `/init` path, `/mvm/runtime` mount
-  point, and policy needed to boot from a sealed runtime overlay
+- **A flat busybox root with no init of its own** — the universal initramfs
+  is PID 1 on every boot, on every backend. Its static guest agent activates
+  over vsock, verifies and mounts this root read-only, mounts the runtime
+  overlay and any volumes, pivots into the root and drops to uid 901. The
+  root contributes files, not a boot sequence.
+- **Overlay-aware layout** — the `/mvm/runtime` and `/mvm/sdk` mount points
+  the agent mounts the runtime overlay and SDK sidecar on
 - **Guest agent** — vsock-based health checks, status reporting, snapshot
-  coordination; baked into dev/fallback images and supplied by the runtime
-  overlay on sealed required-overlay boots
+  coordination; supplied by the runtime overlay, never baked into the root
 - **Networking** — none. A workload microVM boots with no guest NIC at all;
   egress leaves only over vsock to the per-VM `mvm-network-endpoint`.
-- **Drive mounting** — `/mnt/config` (ro, `/dev/vdb`), `/mnt/secrets` (ro,
-  `/dev/vdc`), `/mnt/data` (rw). These are drive images mounted by `/init`,
-  not host `--mount` shares.
 
 ## Runtime overlay contract
 
@@ -215,20 +214,21 @@ Every root `mkGuest` builds names the same fixed set of guest identities in
 
 | uid | Account | Runs |
 |-----|---------|------|
-| 0 | `root` | PID 1 |
+| 0 | `root` | The initramfs agent's setup, before it drops privilege |
 | 901 | `mvm-worker` | The guest agent and the workload |
 | 987 | `mvm-dns` | The local addon resolver |
 | 988 | `mvm-crng` | The CRNG reseed helper |
 | 989 | `mvm-egress` | The vsock egress client |
 
-These are the numbers the guest drops to, whichever init boots it. The
-initramfs agent mounts the root read-only, so it cannot add accounts of its
-own; the names a workload resolves are the ones baked here.
+These are the numbers the initramfs agent drops to. It mounts the root
+read-only, so it cannot add accounts of its own; the names a workload resolves
+are the ones baked here.
 
-Under the image's own `/init`, the entrypoint runs as uid **901** in a sealed
-(prod) image and uid **0** in a dev image. Override it, or the agent's uid,
-with the `uids` argument; a uid outside the fixed set gets an account row of
-its own (`mvm-entrypoint`, `mvm-agent`). The service uids 987–989 are refused:
+The agent runs the workload as uid **901**. `/etc/mvm/entrypoint` drops to the
+declared entrypoint uid only when something runs it as root: **901** in a
+sealed (prod) image and **0** in a dev image by default. Declare either with
+the `uids` argument; a uid outside the fixed set gets an account row of its
+own (`mvm-entrypoint`, `mvm-agent`). The service uids 987–989 are refused:
 
 ```nix
 mvm.lib.${system}.mkGuest {
@@ -238,12 +238,8 @@ mvm.lib.${system}.mkGuest {
 };
 ```
 
-`/init` drops privilege through `mvm-setpriv`. The runtime overlay carries it
-at `/mvm/runtime/setpriv` and `/init` prefers that copy; the copy baked by
-`withSetpriv` serves a `rootfs_only` boot and an overlay that predates it.
-
-Secrets at `/mnt/secrets` are owned by `root:<group>` with mode `0440`, so only
-members of the service group can read them.
+The entrypoint drops privilege through `mvm-setpriv`, the copy `withSetpriv`
+bakes. The runtime overlay carries its own at `/mvm/runtime/setpriv`.
 
 `mkGuest` has no `users` argument — there is no way to declare additional guest
 users from the flake today. `serviceGroup` is accepted but not enforced.
@@ -298,14 +294,11 @@ starter image to fork.
 
 Two things make this image different from a plain `entrypoint.command` image:
 
-- **The agent runs per call, not as PID 1.** The placeholder is injected only
-  into the entrypoint the guest agent launches for
-  `mvmctl machine run --entrypoint`. Nothing injects it into PID 1's
-  environment. In a plain `entrypoint.command` image the same file is both
-  PID 1's command and the per-call entrypoint, so the agent would also run at
-  boot, without a placeholder, and the VM powers off when it exits. Here PID 1
-  idles (`bootCommand`), and `/etc/mvm/entrypoint` is a separate script the
-  guest agent runs on each call.
+- **The agent runs per call.** The placeholder is injected only into the
+  entrypoint the guest agent launches for `mvmctl machine run --entrypoint`.
+  `/etc/mvm/entrypoint` is a separate script, supplied through `extraFiles`,
+  that the guest agent runs on each call; mkGuest renders no entrypoint of its
+  own when the flake supplies one.
 - **The per-call entrypoint starts with an empty environment.** It gets
   `HTTP_PROXY`/`HTTPS_PROXY` (and lowercase forms) pointing at the in-guest
   proxy, the placeholder variables, and nothing else. Set `HOME`, `PATH`, and
@@ -363,11 +356,9 @@ Two things make this image different from a plain `entrypoint.command` image:
     {
       packages.${system}.default = mvm.lib.${system}.mkGuest {
         name = "agent";
-        # PID 1 only keeps the VM up. `entrypoint.command` classifies the
-        # image as sealed; with `bootCommand` set, mkGuest does not write it
-        # to /etc/mvm/entrypoint.
+        # `entrypoint.command` classifies the image as sealed. The flake
+        # supplies /etc/mvm/entrypoint itself, so mkGuest does not render one.
         entrypoint.command = idle;
-        bootCommand = idle;
         extraFiles."/etc/mvm/entrypoint" = { source = entry; mode = "0755"; };
         packages = [ pkgs.python3 ];
       };

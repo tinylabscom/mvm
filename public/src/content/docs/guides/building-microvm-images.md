@@ -187,7 +187,7 @@ run on a non-dev profile receives the restricted ProdSafe grant; PTY and
 ad-hoc argv runs require DevOnly verbs. This keeps an OCI image's artifact
 metadata separate from the shape of the run that consumes it.
 
-The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no systemd) and emits an ext4 image directly. The boot path is: kernel → `/init` script → mounts `/proc` `/sys` `/dev` → execs your entrypoint. No service manager between the kernel and your code. mvm's security overlay (per-service uids, seccomp tier, dm-verity, read-only `/etc`) layers on top in Phase 6 without changing this base.
+The `mkGuest` library produces a flat busybox rootfs (no NixOS, no systemd, and no init of its own) and emits an ext4 image directly. The boot path is: kernel → the universal initramfs, whose static guest agent is PID 1 → activation over vsock → the agent verifies and mounts this root read-only, mounts the runtime overlay, pivots into the root and drops to uid 901 → the host asks the agent to run your entrypoint. No service manager between the kernel and your code.
 
 ## Boot-time targets
 
@@ -208,7 +208,7 @@ runtime maximum from raw samples. See the
 [cold-launch performance plan](https://github.com/tinylabscom/mvm/blob/main/specs/plans/299-cold-launch-performance.md)
 for the measured budgets and backend rationale.
 
-The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
+The floor is achievable because PID 1 is the static initramfs agent and the root is a flat busybox tree (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 
 ## What's inside the mvm repository (and why you don't touch it)
 
@@ -238,13 +238,13 @@ mvm runs Nix builds inside the project builder VM and copies the finished kernel
 
 ## Rootless workloads
 
-PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in production *does* — run non-root. mkGuest's `uids` knob controls the privilege drop:
+The initramfs agent starts as PID 1 at uid 0, does its root-only setup (mounts, identity provisioning, the helper launches) and then drops to uid 901 for the rest of the guest's life. mkGuest's `uids` knob declares the entrypoint uid that `/etc/mvm/entrypoint` drops to when it is run as root:
 
 | Process | Default uid | Role |
 |---|---|---|
-| `/init` (PID 1) | 0 | Mounts pseudofs, forks the agent in the background, drops privs, exec's the entrypoint |
-| `mvm-guest-agent` | 901 | Vsock RPC handler (never needs root); supervised by `/init` |
-| Entrypoint (workload) | **0 in dev**, **901 in prod** | Your service or shell |
+| Initramfs agent (PID 1) | 0, then 901 | Activates over vsock, mounts and verifies the root and overlay, pivots, drops privilege, serves vsock RPC |
+| Entrypoint (workload) | 901 | Run by the agent on request |
+| `/etc/mvm/entrypoint` run as root | **0 in dev**, **901 in prod** | The declared entrypoint uid |
 
 > **Agent binary status:** the agent is the cross-compiled Rust binary; `mkGuest` emits `passthru.mvm.agentBinary = "real"` unconditionally. The `"stub"` value is retained only as something a consumer may refuse — nothing produces it any more.
 
@@ -253,7 +253,7 @@ The dev/prod default split is intentional:
 - **Dev** keeps entrypoint as root because debug shells expect root: `apt install`, `mount`, `tcpdump`. Forcing rootless dev would break those flows on first try.
 - **Prod** drops to uid 901 by default — the same uid the initramfs agent runs every workload as — per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
 
-`/init` uses `setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
+The entrypoint script uses `mvm-setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
 
 ### Override
 

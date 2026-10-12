@@ -80,12 +80,11 @@ in
   metadata_propagates = (meta shellGuest).name == "shell-test"
     && (meta shellGuest).hypervisor == "firecracker";
 
-  # ── busybox-as-PID-1 invariants ───────────────────────────────
+  # ── No init in the root ───────────────────────────────────────
   #
-  # The boot-time budget pins the init system. Asserting it here so a
-  # future change that swaps back to NixOS+systemd (e.g., because it's
-  # "easier") fails this gate before merge.
-  init_system_is_busybox = (meta shellGuest).initSystem == "busybox";
+  # The universal initramfs agent is PID 1 on every boot; the root carries
+  # no init of its own.
+  init_system_is_the_initramfs = (meta shellGuest).initSystem == "initramfs";
 
   # Floor: every backend ≤ 300 ms cold p50. The metadata surfaces the
   # budget on every derivation; CI's xtask perf enforces. Guarding it
@@ -243,7 +242,7 @@ in
 
   # ── Privilege-drop binary provenance ─────────────────────────
   #
-  # The generated init must use the dedicated static-musl helper rather than
+  # The entrypoint must use the dedicated static-musl helper rather than
   # busybox's reduced applet or the much larger util-linux package.
   setpriv_is_custom_static_musl =
     (meta shellGuest).setprivHelperName == "mvm-setpriv"
@@ -252,12 +251,8 @@ in
   # ── Runtime overlay awareness ─────────────────────────────────
   #
   # Every image built by mkGuest must advertise that its rootfs
-  # carries the `/mvm/runtime` bind-mount target and that the
-  # init script prefers the overlay-provided agent. A future change
-  # that drops the overlay-aware code path (e.g. reverting the
-  # /init agent-resolution block) flips this metadata to `false`
-  # before the boot regression surfaces, giving CI a tight signal
-  # for the load-bearing invariant.
+  # carries the `/mvm/runtime` bind-mount target the initramfs agent
+  # mounts the runtime overlay on.
 
   overlay_aware_metadata_set_on_shell = (meta shellGuest).overlayAware == true;
   overlay_aware_metadata_set_on_command = (meta commandGuest).overlayAware == true;

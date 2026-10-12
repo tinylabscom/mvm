@@ -59,7 +59,8 @@ fn agent_workload_is_a_guest_image_with_a_per_call_entrypoint() {
     let flake = read(&example_file("flake.nix"));
 
     assert!(flake.contains("mkGuest"));
-    assert!(flake.contains("bootCommand"));
+    // The image carries no init, so there is no boot command to name.
+    assert!(!flake.contains("bootCommand"));
     assert!(flake.contains("/etc/mvm/entrypoint"));
     assert!(flake.contains("ANTHROPIC_API_KEY"));
     assert!(!flake.contains("cat /data/secrets"));

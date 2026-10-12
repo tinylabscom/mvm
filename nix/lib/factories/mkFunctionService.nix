@@ -145,10 +145,8 @@ let
     before_stop = hookScriptFor "before-stop" (hooks.before_stop or [ ]);
   };
 
-  # The legacy boot command and the sealed initramfs-agent path both use
-  # the source tree symlink staged into the immutable rootfs. PID 1 must
-  # not be the single-shot wrapper: it exits after one call. The agent
-  # execs that wrapper per RunEntrypoint.
+  # The source tree is a symlink staged into the immutable rootfs. The agent
+  # execs the single-shot wrapper per RunEntrypoint.
   bootScript = pkgs.writeShellScript "${workloadId}-boot" ''
     set -eu
     test "$(${pkgs.coreutils}/bin/readlink ${pkgs.lib.escapeShellArg sourcePath})" = ${pkgs.lib.escapeShellArg (toString appPkg)}
@@ -179,8 +177,8 @@ in
   # path (e.g. one aimed at /etc/mvm/hooks/before_start.sh) lose to the
   # reserved entry, so a declared file can never clobber the boot wiring.
   extraFiles = materializedFiles // {
-    # The sealed initramfs-agent path does not run /etc/mvm/boot. Make the
-    # source tree available before PID 1 starts, including on read-only images.
+    # Nothing in the guest stages the source tree at boot, so it is a symlink
+    # baked into the image, available on a read-only root.
     ${sourcePath} = {
       link = appPkg;
     };
@@ -237,8 +235,9 @@ in
     };
   };
 
-  # PID 1 idle boot command (see `bootScript`). Callers pass this to
-  # mkGuest's `bootCommand`; /etc/mvm/entrypoint stays the agent marker.
+  # The idle argv callers hand mkGuest as `entrypoint.command`, which sets
+  # the image's sealed classification. /etc/mvm/entrypoint is the agent's
+  # per-call marker from `extraFiles` above, so mkGuest renders none.
   bootCommand = [ "${bootScript}" ];
 
   servicePackages = lang.servicePackages;

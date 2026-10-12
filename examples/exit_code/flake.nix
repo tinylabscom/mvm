@@ -36,12 +36,8 @@
   #
   # The `command` form → mkGuest infers sealed/prod (dev = false),
   # builds the agent without `interactive` (no console, no do_exec),
-  # and writes the rendered command to /etc/mvm/entrypoint (mode 0500).
-  # /init sources it, captures $?, reports, poweroffs.
-  #
-  # No `bootCommand` is set — we want PID 1 to BE the one-shot command,
-  # not an idle boot loop + per-call agent dispatch. That is exactly the
-  # non-function-service sealed path.
+  # and writes the rendered command to /etc/mvm/entrypoint. The guest
+  # agent runs it when the host asks, and its exit status is the run's.
 
   inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix";
   inputs.nixpkgs.follows = "mvm/nixpkgs";
@@ -60,8 +56,8 @@
             name = "exit-code-7";
 
             # `command` form → sealed/prod image, no interactive.
-            # mkGuest renders this to /etc/mvm/entrypoint; /init sources it,
-            # captures $?, calls mvm-exit-report, poweroffs.
+            # mkGuest renders this to /etc/mvm/entrypoint; the guest agent
+            # runs it and reports its exit code to the host.
             # busybox is already in the rootfs as /bin/busybox.
             entrypoint.command = [ "/bin/busybox" "sh" "-c" "exit 7" ];
 

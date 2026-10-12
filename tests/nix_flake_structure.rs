@@ -37,7 +37,7 @@ fn mk_guest_sealed_entrypoint_is_executable_by_the_guest_agent() {
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
     assert!(
         content.contains(
-            "cp ${entrypointFile} \"$out/etc/mvm/entrypoint\"\n          chmod 0755 \"$out/etc/mvm/entrypoint\""
+            "cp ${entrypointFile} \"$out/etc/mvm/entrypoint\"\n      chmod 0755 \"$out/etc/mvm/entrypoint\""
         ),
         "the sealed script must use the executable mode required by the guest agent"
     );
@@ -903,7 +903,7 @@ fn mk_guest_eval_assertions_all_pass_when_nix_available() {
 }
 
 /// Plan 74 W1.4b (ADR-018) — `mkGuest` must carry the overlay-
-/// aware contract in its rootfs + /init script. We can't easily
+/// aware contract in its rootfs. We can't easily
 /// build the rootfs without Nix on the host, but the source of
 /// truth is a single file we can scan for the three load-bearing
 /// signals. A regression that removes any of them surfaces as a
@@ -914,13 +914,10 @@ fn mk_guest_eval_assertions_all_pass_when_nix_available() {
 /// 1. The rootfs tree creates `/mvm/runtime` (the bind-mount
 ///    target). Without this, the verity-init bind-mount fails at
 ///    boot and the agent never starts.
-/// 2. The /init script prefers `/mvm/runtime/agent` over the
-///    baked-in copy. Without this, the overlay-attached agent
-///    isn't used.
-/// 3. The mvmMeta passthru carries `overlayAware = true`. Without
+/// 2. The mvmMeta passthru carries `overlayAware = true`. Without
 ///    this, admission-time gates can't enforce overlay-aware
 ///    rootfs as a precondition.
-/// 4. The mvmMeta passthru carries `runtimeLean = true`. mkGuest bakes
+/// 3. The mvmMeta passthru carries `runtimeLean = true`. mkGuest bakes
 ///    no guest-runtime binaries into any rootfs, so every image is
 ///    runtime-lean; the required-overlay admission gate reads this to
 ///    refuse a rootfs that could silently degrade to a baked fallback.
@@ -939,26 +936,12 @@ fn mk_guest_carries_overlay_aware_contract() {
     );
 
     assert!(
-        content.contains("/mvm/runtime/agent"),
-        "mk-guest.nix /init must reference /mvm/runtime/agent (ADR-018). \
-         Without this resolution path the overlay-attached agent isn't \
-         exec'd and the rootfs falls back to the baked-in copy on every \
-         boot — defeating the W1.4b refactor."
-    );
-
-    assert!(
         content.contains("overlayAware = true"),
         "mk-guest.nix mvmMeta passthru must declare `overlayAware = true` \
          (Plan 74 W1.4b / ADR-018). Admission-time gates read this to \
          refuse boot of cached pre-W1.4b templates."
     );
 
-    assert!(
-        content.contains("mvm\\.chain_init=") && content.contains("exec \"$MVM_CHAIN_INIT\""),
-        "mk-guest.nix /init must support the builder-only chained-init \
-         handoff so the builder image can bootstrap through the generic \
-         busybox /init path before entering mvm-host-vm-init."
-    );
     assert!(
         content.contains("runtimeLean = true;"),
         "mk-guest.nix must surface `passthru.mvm.runtimeLean = true` for every \
@@ -969,258 +952,37 @@ fn mk_guest_carries_overlay_aware_contract() {
         !content.contains("$out/usr/local/bin/mvm-guest-agent"),
         "mk-guest.nix must not bake the guest-runtime binaries into the rootfs \
          tree ($out/usr/local/bin); the agent (and netinit/addon-dns/exit-report/\
-         egress-client) are sourced from the runtime overlay at /mvm/runtime. The \
-         /init resolution ladders may still name the runtime `/usr/local/bin` path \
-         for rootfs-only / prefer-overlay boots, but nothing is cp'd there."
+         egress-client) are sourced from the runtime overlay at /mvm/runtime."
     );
 }
 
-/// Render the `initText = ''…''` block of `mk-guest.nix` the way Nix
-/// renders an indented string: strip the common indentation, which Nix
-/// derives from the *least*-indented line that carries content.
-fn rendered_init_text(content: &str) -> String {
-    let open = "  initText = ''\n";
-    let start = content
-        .find(open)
-        .expect("mk-guest.nix must bind the /init body to `initText`")
-        + open.len();
-    let rest = &content[start..];
-    let end = rest
-        .find("\n  '';\n")
-        .expect("the `initText` block must be closed by a `'';` at two-space indentation");
-
-    let body = &rest[..end];
-    let baseline = body
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start_matches(' ').len())
-        .min()
-        .expect("the /init body is not empty");
-
-    body.lines()
-        .map(|line| {
-            if line.len() >= baseline {
-                &line[baseline..]
-            } else {
-                ""
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The kernel `exec()`s `/init` directly, so `#!` must be the first two
-/// bytes of the file. Nix takes an indented string's baseline from its
-/// least-indented line, so one line indented less than its neighbours
-/// shifts every other line — the shebang included — one column right, and
-/// the guest dies with `Kernel panic … Requested init /init failed (error
-/// -8)` before any userspace runs.
-///
-/// This asserts the rendered bytes rather than the source spelling. An
-/// earlier revision asserted a literal source substring instead, which
-/// stayed green while the emitted `/init` shipped a leading space for two
-/// releases.
+/// The base root carries no mvm init. The universal initramfs agent is PID 1
+/// on every boot and pivots into the root in-process, so a `/init` in the
+/// root would be a second, unreviewed boot path that nothing should reach.
 #[test]
-fn mk_guest_init_shebang_lands_at_byte_zero() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    let rendered = rendered_init_text(&content);
-    let first = rendered.lines().next().unwrap_or_default();
-    assert_eq!(
-        first, "#!/bin/sh",
-        "the rendered /init must open with the shebang at byte 0, got {first:?}. \
-         Some line in the `initText` block of nix/lib/mk-guest.nix is indented \
-         less than the rest, which moves the whole script right and makes the \
-         built rootfs unbootable (ENOEXEC)."
-    );
-}
-
-/// `mkGuest`'s `/init` must resolve `mvm-guest-netinit` from the
-/// runtime overlay before forking the agent. Without this, the
-/// guest-side defense (kernel blackhole routes for
-/// `MANDATORY_DENY_RANGES`) never installs, leaving the guest with
-/// no firewall at all. The source-grep here catches a regression
-/// that drops the /init invocation before it reaches a live VM boot.
-#[test]
-fn mk_guest_installs_netinit_at_boot() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        content.contains("/mvm/runtime/netinit"),
-        "mk-guest.nix /init must resolve the netinit binary from the \
-         runtime-overlay path (`/mvm/runtime/netinit`). A drop here means \
-         guest-side network defense never runs at boot, leaving the guest \
-         with no kernel-level defense against IMDS exfil."
-    );
-
-    assert!(
-        content.contains(
-            "echo \"mvm-init: runtime overlay required but /mvm/runtime/netinit is missing\""
-        ),
-        "mk-guest.nix /init netinit ladder must fail closed under \
-         required_overlay when the overlay binary is absent, matching the \
-         agent/egress-client ladders — never silently boot without netinit."
-    );
-
-    assert!(
-        content.contains("/mvm/runtime/egress-client"),
-        "mk-guest.nix /init must prefer the runtime-overlay path \
-         (`/mvm/runtime/egress-client`) for the vsock egress shim on \
-         overlay-backed boots."
-    );
-}
-
-#[test]
-fn mk_guest_assigns_ipv4_loopback_before_starting_guest_services() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-    let address = content
-        .find("ip addr replace 127.0.0.1/8 dev lo")
-        .expect("guest init assigns the canonical IPv4 loopback address");
-    let agent = content
-        .find("# Stage 2.5 — guest agent supervisor")
-        .expect("guest init starts the guest agent");
-
-    assert!(
-        address < agent,
-        "loopback must have an address before any guest service binds it"
-    );
-    assert!(
-        content.contains("ifconfig lo 127.0.0.1 netmask 255.0.0.0 up"),
-        "the no-ip-applet fallback must assign the same address"
-    );
-}
-
-/// The guest has one egress listener, and the proxy environment the init
-/// exports names it. A second listener is what made substitution depend on
-/// which variable a workload's toolchain happened to read.
-#[test]
-fn mk_guest_exports_a_proxy_environment_naming_one_loopback_listener() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        content.contains(r#"export ALL_PROXY="socks5h://127.0.0.1:1080""#),
-        "the exported proxy environment must name the tunnelling listener"
-    );
-    for var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-        assert!(
-            content.contains(&format!(r#"export {var}="$ALL_PROXY""#)),
-            "{var} must resolve to the same listener as ALL_PROXY"
-        );
-    }
-}
-
-/// Split a rendered `/init` block into its `mvm-setpriv` launches, each up to
-/// and including the `&` that backgrounds it.
-fn setpriv_launches(block: &str) -> Vec<&str> {
-    block
-        .match_indices("/bin/busybox setsid \"$MVM_SETPRIV_BIN\"")
-        .map(|(start, _)| {
-            let rest = &block[start..];
-            let end = rest.find(" &\n").expect("each launch is backgrounded");
-            &rest[..end]
-        })
-        .collect()
-}
-
-/// The CRNG reseed helper is the only process the init grants CAP_SYS_ADMIN,
-/// and the agent's own launch never carries it: the capability boundary is
-/// between two processes, not a hand-off inside the agent.
-#[test]
-fn mk_guest_gives_sys_admin_to_the_reseed_helper_and_never_the_agent() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-    let agent_start = content
-        .find("# Stage 2.5 — guest agent supervisor")
-        .expect("guest agent init block starts");
-    let agent_end = content[agent_start..]
-        .find("# Stage 3 — hostname + console")
-        .map(|offset| agent_start + offset)
-        .expect("hostname stage follows the agent block");
-    let launches = setpriv_launches(&content[agent_start..agent_end]);
-    use mvmctl::guest::crng_reseed::{HELPER_ARG, HELPER_SOCKET, LISTEN_ARG};
-    let helper_args = format!("{HELPER_ARG} {LISTEN_ARG}");
-    let socket_dir = Path::new(HELPER_SOCKET)
-        .parent()
-        .and_then(Path::to_str)
-        .expect("the helper socket has a parent directory");
-    let helper = launches
-        .iter()
-        .find(|launch| launch.ends_with(&format!("\"$MVM_AGENT_BIN\" {helper_args}")))
-        .expect("the init launches the reseed helper with the agent's own arguments");
-    let agent = launches
-        .iter()
-        .find(|launch| launch.ends_with("-- \"$MVM_AGENT_BIN\""))
-        .expect("the init launches the agent");
-
-    for flag in [
-        "--inh-caps=+sys_admin --ambient-caps=+sys_admin",
-        "--no-new-privs",
-        "--clear-groups",
+fn mk_guest_bakes_no_init_into_the_root() {
+    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
+        .expect("mk-guest.nix must be readable");
+    for retired in [
+        "initText",
+        "initScript",
+        r#""$out/init""#,
+        r#""$out/sbin/init""#,
+        "mvm.chain_init",
+        "/etc/mvm/boot",
+        "bootCommand",
+        "/mnt/config",
+        "/mnt/secrets",
     ] {
-        assert!(helper.contains(flag), "helper launch must carry {flag}");
-    }
-    for other in ["+kill", "+sys_time", "+net_bind_service"] {
         assert!(
-            !helper.contains(other),
-            "helper must hold only CAP_SYS_ADMIN, not {other}"
+            !content.contains(retired),
+            "mk-guest.nix must not carry {retired}: the root has no init of its own"
         );
     }
     assert!(
-        agent.contains("--inh-caps=+kill --ambient-caps=+kill")
-            && agent.contains("--inh-caps=+sys_time --ambient-caps=+sys_time")
-            && agent.contains("--no-new-privs"),
-        "agent launch keeps its restore capabilities"
-    );
-    assert!(
-        !agent.contains("sys_admin"),
-        "the agent must never be launched with CAP_SYS_ADMIN"
-    );
-
-    assert!(
-        helper.contains("--reuid=${toString crngReseedUid} --regid=${toString agentUid}"),
-        "the helper runs under its own uid, in the agent's group so the agent can connect"
-    );
-    assert!(
-        agent.contains("--reuid=${toString agentUid}"),
-        "the agent keeps its own uid"
-    );
-
-    let block = &content[agent_start..agent_end];
-    let dir_owned = block
-        .find(&format!(
-            "/bin/busybox chown ${{toString crngReseedUid}}:${{toString agentUid}} {socket_dir}\n"
-        ))
-        .expect("the socket directory belongs to the helper, readable by the agent's group");
-    let dir_private = block
-        .find(&format!("/bin/busybox chmod 0750 {socket_dir}\n"))
-        .expect("no other uid can enter the socket directory");
-    let helper_at = block.find(&helper_args).expect("helper launch");
-    assert!(
-        dir_owned < helper_at && dir_private < helper_at,
-        "the directory must be locked down before the helper binds in it"
-    );
-
-    // The uid the image reserves is the one the agent trusts on the socket, and
-    // the image refuses to build if anything else was given it.
-    let helper_uid = mvmctl::guest::guest_mount::CRNG_RESEED_HELPER_UID;
-    assert!(
-        content.contains(&format!("crngReseedUid = {helper_uid};")),
-        "mkGuest must reserve the uid the agent checks the helper against"
-    );
-    assert!(
-        content.contains(&format!(
-            "uid {helper_uid} is reserved for the CRNG reseed helper"
-        )) && content.contains("builtins.seq assertDedicatedCrngReseedUid"),
-        "a collision with the reserved uid must fail the image build"
+        content.contains(r#"callerOwnsEntrypoint = extraFiles ? "/etc/mvm/entrypoint";"#)
+            && content.contains("lib.optionalString (!callerOwnsEntrypoint)"),
+        "a caller-supplied /etc/mvm/entrypoint replaces the rendered one"
     );
 }
 
@@ -1275,158 +1037,6 @@ fn mk_guest_names_the_identities_the_initramfs_agent_uses() {
             && content
                 .contains(r#"printf '%s' ${lib.escapeShellArg groupText} > "$out/etc/group""#),
         "the account databases are written from the identity rows and nothing else"
-    );
-}
-
-/// The addon resolver runs under its own uid, as it does on the initramfs path,
-/// not the agent's.
-#[test]
-fn mk_guest_runs_addon_dns_under_its_own_uid() {
-    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
-        .expect("mk-guest.nix must be readable");
-    let start = content
-        .find("# Stage 2.48 — local addon DNS bootstrap")
-        .expect("addon DNS stage");
-    let end = start
-        + content[start..]
-            .find("# Stage 2.55")
-            .expect("egress opt-in stage follows");
-    let launches = setpriv_launches(&content[start..end]);
-    let [launch] = launches.as_slice() else {
-        panic!("one addon DNS launch, got {launches:?}");
-    };
-    assert!(
-        launch.contains("--reuid=${toString addonDnsUid} --regid=${toString addonDnsUid}")
-            && launch.ends_with("-- \"$MVM_ADDON_DNS_BIN\""),
-        "{launch}"
-    );
-}
-
-/// Every privilege drop in `/init` goes through the helper resolved once,
-/// after the runtime overlay is mounted, preferring the overlay's copy.
-#[test]
-fn mk_guest_init_drops_privilege_through_the_resolved_helper() {
-    let content = fs::read_to_string(nix_dir().join("lib/mk-guest.nix"))
-        .expect("mk-guest.nix must be readable");
-    assert!(
-        !content.contains("setsid ${setpriv}"),
-        "no launch may name the baked helper directly"
-    );
-    let mounted = content
-        .find("mounted runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime")
-        .expect("overlay mount stage");
-    let resolved = content
-        .find("MVM_SETPRIV_BIN=${setpriv}")
-        .expect("the baked helper is the fallback");
-    let preferred = content
-        .find("MVM_SETPRIV_BIN=/mvm/runtime/setpriv")
-        .expect("the overlay's helper is preferred");
-    let first_launch = content
-        .find("/bin/busybox setsid \"$MVM_SETPRIV_BIN\"")
-        .expect("launches use the resolved helper");
-    assert!(
-        mounted < resolved && resolved < preferred && preferred < first_launch,
-        "the helper must be resolved after the overlay mounts and before any launch"
-    );
-    assert!(
-        content.contains(
-            r#"[ "$MVM_RUNTIME_SOURCE_POLICY" != rootfs_only ] && [ -x /mvm/runtime/setpriv ]"#
-        ),
-        "a rootfs_only boot keeps the baked helper"
-    );
-    assert!(
-        content.contains(r#""\"\${MVM_SETPRIV_BIN:-${setpriv}}\" ""#),
-        "entrypoint fragments fall back to the baked helper outside /init"
-    );
-}
-
-#[test]
-fn mk_guest_provisions_vsock_egress_identity_before_privilege_drop() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-    let egress_start = content
-        .find("# Stage 2.6 — vsock egress shim")
-        .expect("vsock egress init block starts");
-    let agent_start = content[egress_start..]
-        .find("# Stage 2.5 — guest agent supervisor")
-        .map(|offset| egress_start + offset)
-        .expect("guest agent init block follows egress");
-    let egress_block = &content[egress_start..agent_start];
-
-    let loopback_up = egress_block
-        .find("ip link set lo up")
-        .expect("egress init raises loopback");
-    let resolver_seed = egress_block
-        .find("printf 'nameserver 127.0.0.1\\n' > /run/mvm/resolv.conf")
-        .expect("egress init seeds the loopback DNS stub");
-    let required_mode = egress_block
-        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for")
-        .expect("egress-enabled boots require the service identity");
-    let optional_mode = egress_block
-        .find("MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present")
-        .expect("other boots provision an attached identity without requiring one");
-    let provision = egress_block
-        .find(
-            "\"$MVM_EGRESS_CLIENT_BIN\" \"$MVM_IDENTITY_PROVISION_COMMAND\" ${toString egressUid}",
-        )
-        .expect("root init provisions according to the boot's egress requirement");
-    let spawn = egress_block
-        .find("--reuid=${toString egressUid} --regid=${toString egressUid}")
-        .expect("egress init spawns the client");
-
-    assert!(
-        required_mode < provision
-            && optional_mode < provision
-            && provision < loopback_up
-            && loopback_up < resolver_seed
-            && resolver_seed < spawn,
-        "the root-owned identity handoff and loopback must be ready before the egress client drops privilege"
-    );
-    assert!(
-        egress_block.contains("--inh-caps=+net_bind_service --ambient-caps=+net_bind_service")
-            && egress_block.contains("--no-new-privs"),
-        "the long-lived client must retain only its low-port bind capability"
-    );
-    assert!(
-        !egress_block.contains("--inh-caps=+sys_admin")
-            && !egress_block.contains("--ambient-caps=+sys_admin"),
-        "the long-lived client must not retain mount privilege"
-    );
-    assert!(
-        content.contains("egressUid = 989;")
-            && content.contains("uid 989 is reserved for the FlowMux egress service"),
-        "the dedicated service uid must be fixed and protected from workload, agent, or builder reuse"
-    );
-}
-
-#[test]
-fn mk_guest_deindents_pid1_script_before_writing_init() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        content.contains("${pkgs.gnused}/bin/sed -i '1s/^ *//' \"$out/init\""),
-        "mk-guest.nix must normalize the generated /init shebang to byte zero before \
-         sealing the rootfs. \
-         Without this, the rendered rootfs can carry a leading space before `#!`, \
-         and the kernel rejects PID 1 with exec format error."
-    );
-}
-
-#[test]
-fn mk_guest_mounts_config_drive_before_reading_host_signer_pubkey() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        content.contains(
-            "/bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config || true"
-        ),
-        "mk-guest.nix must mount the config drive at /mnt/config before any boot-time code \
-         reads host-signer.pub or security-policy.json from that path."
     );
 }
 
@@ -1518,82 +1128,6 @@ fn the_rootfs_closure_gate_pins_glibc_out_by_store_path() {
     assert!(
         root.contains(r"'/nix/store/[a-z0-9]+-glibc(-|$)'"),
         "the rootfs no-glibc gate must anchor its grep on the glibc store path"
-    );
-}
-
-/// The guest mounts the sidecar from the device the host names on the cmdline.
-/// Without the mountpoint on the read-only rootfs the mount fails with an
-/// unactionable EACCES, so both halves are pinned here.
-#[test]
-fn mk_guest_mounts_the_sdk_sidecar_read_only_from_the_host_named_device() {
-    let content = fs::read_to_string(nix_dir().join("lib").join("mk-guest.nix"))
-        .expect("nix/lib/mk-guest.nix must be present");
-
-    assert!(
-        content.contains(r"mvm\.sdk_dev="),
-        "the generated init must read the sidecar device from the kernel cmdline"
-    );
-    assert!(
-        content.contains(r#"mount -t ext4 -o ro,nosuid,nodev "$MVM_SDK_DEV" /mvm/sdk"#),
-        "the sidecar must be mounted read-only, nosuid, nodev"
-    );
-    assert!(
-        content.contains(r#"mkdir -p "$out/mvm/sdk""#),
-        "the read-only rootfs must carry the sidecar mountpoint"
-    );
-    // The cdylib is dlopen'd, so the mount must not be noexec — assert the
-    // option set explicitly rather than trusting the absence of a token.
-    assert!(
-        !content.contains(r#"mount -t ext4 -o ro,noexec,nosuid,nodev "$MVM_SDK_DEV""#),
-        "the sidecar mount must not be noexec: the workload dlopens the cdylib"
-    );
-}
-
-/// The egress CA reaches a flake guest on the identity drive, and nowhere else.
-///
-/// There used to be a second carrier — a `mvm.egress_ca=` kernel-cmdline token
-/// this init parsed in two encodings — that no host ever emitted. Asserting its
-/// absence keeps a boot from growing a channel the host does not write and the
-/// drive-copy ordering below does not cover.
-#[test]
-fn mk_guest_trusts_the_egress_ca_from_the_identity_drive_after_it_is_copied_out() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        !content.contains("mvm.egress_ca"),
-        "mk-guest.nix must not read the egress CA off the kernel cmdline: the \
-         certificate rides the per-boot identity drive and nothing emits that token."
-    );
-
-    let provision_at = content
-        .find("$MVM_IDENTITY_PROVISION_COMMAND")
-        .expect("mk-guest.nix must provision the FlowMux identity drive");
-    let trust_at = content
-        .find(r#""$MVM_EGRESS_CLIENT_BIN" install-egress-ca-trust"#)
-        .expect("mk-guest.nix must build the trust bundle through the shared Rust helper");
-    assert!(
-        provision_at < trust_at,
-        "the identity drive must be copied out before the certificate on it is read; \
-         reversed, every guest silently boots trusting nothing"
-    );
-
-    // `cat baked egress-ca.crt` fuses the two armor lines when the baked bundle
-    // has no trailing newline, and every PEM parser then reads one truncated
-    // certificate. The Rust helper separates them; the shell must not reimplement it.
-    assert!(
-        !content.contains("cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt"),
-        "the trust bundle must not be assembled by concatenation in the shell"
-    );
-
-    assert!(
-        content.contains("export SSL_CERT_FILE=/run/mvm/ca-bundle.crt"),
-        "mk-guest.nix must point the guest's TLS clients at the combined bundle"
-    );
-    assert!(
-        content.contains("export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt"),
-        "Node reads an extra certificate rather than a replacement bundle"
     );
 }
 

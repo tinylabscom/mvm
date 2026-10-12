@@ -7,14 +7,14 @@
 //! corresponding marker vanishes and CI fails here.
 //!
 //! There are two distinct launch mechanisms:
-//!   1. **mkGuest `/init`** (`nix/lib/mk-guest.nix`) — the workload and
-//!      interactive images. Forks the agent via `setpriv … -- "$MVM_AGENT_BIN"`.
-//!   2. **`mvm-host-vm-init`** — PID 1 of the libkrun builder VM. Forks
+//!   1. **The universal initramfs** — every workload and interactive boot.
+//!      The agent is PID 1 itself and activates the guest through
+//!      `init::apply_activation`; the base root carries no init.
+//!   2. **`mvm-host-vm-init`** — PID 1 of the builder VM. Forks
 //!      the agent via `fork_guest_agent()`.
 //!
-//! Source-grep, not a build: the launch paths are a Nix shell script and
-//! a `cfg(linux)` Rust binary, neither of which this gate can execute on
-//! a contributor host. Same shape as `check-claim-catalog` (witness must
+//! Source-grep, not a build: both launch paths are `cfg(linux)` Rust
+//! binaries this gate cannot execute on a contributor host. Same shape as `check-claim-catalog` (witness must
 //! exist) and `check-guest-agent-runtime-free`.
 
 use anyhow::{Context, Result, bail};
@@ -24,12 +24,11 @@ use std::path::Path;
 /// agent is forked there)`. The marker is chosen to be specific to the
 /// fork mechanism — removing the fork removes the marker.
 const AGENT_LAUNCHERS: &[(&str, &str, &str)] = &[
-    // mkGuest's /init resolves the agent into `$MVM_AGENT_BIN` and execs
-    // it under setpriv; the var exists only in the agent-fork block.
+    // The initramfs agent runs as PID 1 and activates the guest itself.
     (
-        "workload + interactive microVM (mkGuest /init)",
-        "nix/lib/mk-guest.nix",
-        "MVM_AGENT_BIN",
+        "workload + interactive microVM (universal initramfs agent)",
+        "crates/mvm-agentd/src/bin/mvm-guest-agent.rs",
+        "init::apply_activation",
     ),
     // The builder VM's PID 1 forks the agent via this fn.
     (
