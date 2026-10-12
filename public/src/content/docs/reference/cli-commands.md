@@ -1919,10 +1919,10 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-`pool warm` is optional. Unnamed runs already leave one standby of each image
-they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
-of an image is warm without it; `pool warm` makes the first one warm too, or
-holds more than one standby of an image:
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes, enable claims
+explicitly:
 
 ```bash
 mvmctl image pull alpine
