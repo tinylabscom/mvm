@@ -4,13 +4,21 @@ All notable changes to mvm are documented in this file.
 
 ## [Unreleased]
 
-## [0.24.0] — 2026-10-11
+## [0.24.0] — 2026-10-12
 
 v0.23.0 was tagged but never published: its release run did not pass the live gates. v0.23.1 was prepared but never tagged. This is the first release since v0.22.0, so it also ships everything listed under 0.23.0 below.
 
 **Upgrade note — `mvmctl env cleanup` in v0.22.0 (and earlier) emptied the host's `/tmp`.** On native Linux and on macOS 13–25 the dev-VM maintenance script ran as a plain host shell, so `mvmctl env cleanup` deleted everything under the host's `/tmp` and `/var/tmp` (with `sudo`) and collected the host's Nix store. Do not run `env cleanup` from v0.22.0 or older on those hosts. From this release the maintenance runs only when the Linux environment is a VM; on the host the command leaves `/tmp` and the Nix store alone and still prunes `~/.mvm/dev/builds` (#4334).
 
 ### Added
+- **cli**: Leave a standby behind every run instead of requiring one first: the first run of an image boots cold and prepares a standby, and `pool warm` is no longer a required step (#4392)
+- **images**: Consume the Linux-only base image contract (#4366)
+- **release**: Pair signed runtimes with native distributions (#4238)
+- **packs**: Admit built packs only under the host's image-set revocation list (#4365)
+- **packs**: Materialize copies and npm lockfiles, and add pack lock/compile (#4368)
+- **packs**: Add digest-bound scenarios with host-side grading (#4360)
+- **packs**: Add Rust and Kotlin PackSpec builders over shared goldens (#4361)
+- **bench**: Hold prepared-cold samples to the ceiling from invocation (#4359)
 - **images**: Check a base-image contract instead of the guest-agent range (#4349)
 - **volumes**: `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` accepts unverified storage on development hosts, for managed volumes, writable disk images, and directory snapshots alike. Off by default, recorded as `volume_storage_override` in the local audit log on every use (refused if it cannot be recorded), and refused by `--prod`.
 - **runtime**: Assemble source guest artifacts from one archive
@@ -63,6 +71,13 @@ v0.23.0 was tagged but never published: its release run did not pass the live ga
 - **release**: Publish only mvm-contract to crates.io
 
 ### Fixed
+- **fc**: Point a forked child at its own devices without a mount namespace, so warm standbys work without root (#4390)
+- **agent-prompt**: Provision the snapshot key before a prompt's step checkpoint (#4376)
+- **vmm**: Signal an endpoint only while it confirms the pid file's record (#4397)
+- **agentd**: Bound every wait in the telemetry capture session (#4383)
+- **packs**: Reserve the mvm namespace with mandatory revocation checks (#4246)
+- **conformance**: Stop every VM a scenario started, on every exit path (#4370)
+- **cli**: Give doctor's live builder-daemon tests a deadline the runner can meet (#4373)
 - **cleanup**: Never sweep the host's `/tmp` from `env cleanup` (#4334)
 - **snapshot**: Provision the host snapshot key on bootstrap and first warm (#4320)
 - **release**: Report the adopted guest runtime on a plain bootstrap (#4336)
@@ -124,6 +139,12 @@ v0.23.0 was tagged but never published: its release run did not pass the live ga
 - **client**: Remove the definition a failed persistent launch wrote
 
 ### Performance
+- **capture**: Confirm a fresh transcript opening without re-walking the audit chain (#4401)
+- **launch**: Reuse guest-runtime checks across launches, and stop syncing per-run plan copies (#4398)
+- **fc**: Hold kernel errors off the serial console until PID 1 runs (#4385)
+- **fc**: Probe the VMM pid without a shell, and poll local launch events finely (#4362)
+- **agent**: Keep a healthy activation off the serial console (#4386)
+- **audit**: Flush a run's exit records once and seal from the live segment (#4387)
 - **audit**: Publish the admission root inside the admission flush (#4351)
 - **vmm**: Write the per-boot identity drive without fsync (#4350)
 - **build**: Resolve the source guest runtime once per launch
@@ -137,6 +158,7 @@ v0.23.0 was tagged but never published: its release run did not pass the live ga
 - **compiler**: Extract shared workload compiler
 
 ### Documentation
+- **telemetry**: Decide the capture-queue overflow rule from a fixed-storage noisy-producer measurement (#4384)
 - **plans**: Rank the ways to start a cold workload under 300 ms (#4352)
 - **cli**: Make machine lifecycle guidance consistently canonical
 - Propose key custody and confidential execution boundary
@@ -146,6 +168,9 @@ v0.23.0 was tagged but never published: its release run did not pass the live ga
 - **claims**: Source claim 3's overlay roothash from host assembly; cover the guest runtime under claim 20
 
 ### Testing
+- **compiler**: Pin that no signing key can enter compilation (#4377)
+- **hostd**: Fail when musl's legacy open or rename is refused under confinement (#4367)
+- Speed up the test suite (#4364, #4371, #4380, #4381)
 - Exercise signed registry dependency pull from local mirror
 - Witness PS-11 signed instruction provenance
 - **telemetry**: Evaluate overflow retention policies
@@ -154,6 +179,7 @@ v0.23.0 was tagged but never published: its release run did not pass the live ga
 - **cli**: Pin the run alias falling through to the bundled default
 
 ### Other
+- **ci**: Drop the duplicated no-KVM build-arm env (#4310)
 - **ci**: Clean up after every job on the self-hosted KVM box (#4335)
 - Enforce tool-scoped routes and secrets against an attributed tool invocation
 - Bind mediated tool calls to signed executable paths
