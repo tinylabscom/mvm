@@ -512,9 +512,9 @@ Standby parents assert telemetry, so a warm-claimed child is collected, its
 collector started only after the claim succeeds. Live witnesses: Firecracker
 (KVM reference host) and HVF (macOS 26 Apple Silicon), collector-only and
 endpoint-embedded, each reaching `collecting` with a sealed records file and
-the collector exiting on `machine stop`. A warm-claimed child's collection is
-unit-tested; neither host met the 300 ms warm ceiling with or without
-telemetry during the run, so it has no live witness yet.
+the collector exiting on `machine stop`; and a Firecracker warm-claimed child
+reaching `collecting`, with warm startup unchanged by collection (165 ms vs
+166 ms median from a fresh home).
 
 - [x] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
@@ -522,7 +522,8 @@ telemetry during the run, so it has no live witness yet.
       unrelated control operations. Isolate slow terminal/follower/disk writes.
 - [x] Verify detached, cold, warm, restore and restart behavior; disk-full and
       collector-loss recovery; cross-tenant/forged-identity refusal and fairness.
-      Detached and cold: live on both backends. Warm/restore: unit witnesses
+      Detached and cold: live on both backends. Warm/restore: live on
+      Firecracker, with unit witnesses
       (`telemetry_follows_the_boot_that_asserted_it`,
       `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`).
       Restart: the records key is reused, so a restarted VM's earlier records
@@ -569,8 +570,9 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       and remaining unavailable intervals without claiming complete capture.
       On by default; `MVM_TELEMETRY_COLLECT=0` turns it off and no exporter is
       needed. Measured on the Firecracker reference host: cold-boot median
-      860 ms on vs 872 ms off (15 pairs); warm claims do no telemetry work until
-      the claim succeeds. What is not collected (spans, which no guest producer
+      860 ms on vs 872 ms off (15 pairs); warm launches 166 ms on vs 165 ms off
+      (median startup, fresh home), since no telemetry work happens until the
+      claim succeeds. What is not collected (spans, which no guest producer
       emits yet, and the pre-agent interval) is documented in the guest-agent
       reference, the observability guide and the studio contract.
 - [x] Update guest-agent/networking/observability references and CLI/help for any
