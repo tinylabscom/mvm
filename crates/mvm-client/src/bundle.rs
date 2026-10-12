@@ -149,3 +149,18 @@ pub fn seal_template_rootfs(template: &str) -> Result<Option<String>> {
     mvm_build::builder_output::seal_declared_rootfs(dir)
         .map_err(|e| anyhow::anyhow!("sealing the rootfs of {template}: {e}"))
 }
+
+/// The argv the image of `template`'s current revision runs, as its guest
+/// sidecar records it: the same resolution launch admission measures a
+/// bundle's signed environment against.
+pub fn template_entrypoint(template: &str) -> Result<Vec<String>> {
+    let (_, _, _, rootfs, _) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(template)
+            .with_context(|| format!("resolving the artifacts of {template}"))?;
+    match crate::admission::entrypoint_resolve::resolve_for_rootfs(Path::new(&rootfs)) {
+        crate::admission::entrypoint_resolve::ResolvedEntrypoint::Known { argv, .. } => Ok(argv),
+        unresolved => {
+            anyhow::bail!("the image of {template} records no entrypoint: {unresolved:?}")
+        }
+    }
+}

@@ -33,7 +33,9 @@ use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{TemplateExport, export_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
-use mvm_client::bundle::{PostureInputs, seal_template_rootfs, template_artifact_digests};
+use mvm_client::bundle::{
+    PostureInputs, seal_template_rootfs, template_artifact_digests, template_entrypoint,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct BuildArgs {
@@ -97,6 +99,9 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         "the built pack's image does not declare itself sealed; a pack must boot from a \
          dm-verity rootfs",
     )?;
+    // The argv the image records for itself, which is what the health boot
+    // runs and what a launch of the archive is measured against.
+    let image_argv = template_entrypoint(&slot)?;
     let built = SlotDigests::read(&slot)?;
     if built.missing("verity") {
         bail!("the built pack has no dm-verity hash tree beside its rootfs; nothing was signed");
@@ -123,7 +128,10 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     }
 
     // ---- 5. Seal and sign under the host key ----
-    let exported = export_template(&slot, pack_export(&args.out, &loaded.spec, &lock)?)?;
+    let exported = export_template(
+        &slot,
+        pack_export(&args.out, &loaded.spec, &lock, image_argv)?,
+    )?;
     // The exporter re-read the slot's files; what it sealed must be what the
     // health check booted.
     let sealed = SlotDigests::sealed(&exported.path)?;
@@ -205,12 +213,17 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
 /// What the archive records: the pack's identity as its label, the spec's
 /// sizing, a sealed-production posture with no egress and no volumes, the lock
 /// as the build's pinned input, and a signed environment naming the entrypoint
-/// the health check ran. The environment requires no capability, so it fits
+/// the health check ran, as the image records it. The environment requires no capability, so it fits
 /// inside that posture, and a launch of the archive is refused if the image it
 /// boots runs anything else.
-fn pack_export(out: &Path, spec: &PackSpec, lock: &PackLock) -> Result<TemplateExport> {
+fn pack_export(
+    out: &Path,
+    spec: &PackSpec,
+    lock: &PackLock,
+    image_argv: Vec<String>,
+) -> Result<TemplateExport> {
     Ok(TemplateExport {
-        environment: Some(pack_environment(spec, lock)),
+        environment: Some(pack_environment(spec, lock, image_argv)),
         label: Some(pack_ref(lock)),
         resources: Some(BundleResources {
             vcpus: u32::from(spec.resources.cpu_cores),
@@ -229,13 +242,17 @@ fn pack_export(out: &Path, spec: &PackSpec, lock: &PackLock) -> Result<TemplateE
 }
 
 /// The environment a launch of the built pack is held to.
-fn pack_environment(spec: &PackSpec, lock: &PackLock) -> EnvironmentDescriptor {
+fn pack_environment(
+    spec: &PackSpec,
+    lock: &PackLock,
+    image_argv: Vec<String>,
+) -> EnvironmentDescriptor {
     EnvironmentDescriptor {
         descriptor_version: ENVIRONMENT_DESCRIPTOR_VERSION,
         pack: Some(lock.identity.clone()),
         target: spec.target,
         entrypoint: EnvironmentEntrypoint {
-            argv: spec.entrypoint.clone(),
+            argv: image_argv,
             working_dir: None,
         },
         resources: Some(spec.resources.clone()),
@@ -478,7 +495,8 @@ mod tests {
             "../../../../mvm-contract/tests/fixtures/pack-lock-v1/minimal.json"
         ))
         .unwrap();
-        let export = pack_export(Path::new("/tmp/x.mvmpkg"), &spec, &lock).unwrap();
+        let boot = vec!["/nix/store/x-hello-boot".to_string()];
+        let export = pack_export(Path::new("/tmp/x.mvmpkg"), &spec, &lock, boot.clone()).unwrap();
         assert_eq!(export.label.as_deref(), Some("acme/hello@1.0.0"));
         assert_eq!(
             export.resources,
@@ -488,7 +506,7 @@ mod tests {
             })
         );
         let environment = export.environment.expect("a pack seals its environment");
-        assert_eq!(environment.entrypoint.argv, vec!["true".to_string()]);
+        assert_eq!(environment.entrypoint.argv, boot);
         assert_eq!(environment.target, spec.target);
         assert!(environment.capabilities.is_empty());
         environment
