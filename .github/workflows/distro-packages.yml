@@ -37,6 +37,8 @@ on:
         default: ""
   pull_request:
     paths:
+      - .githooks/pre-commit
+      - scripts/pre-commit.test.sh
       - .github/workflows/distro-packages.yml
       - scripts/build-distro-packages.sh
       - scripts/distro-package-smoke.sh
@@ -69,6 +71,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
+          bash scripts/pre-commit.test.sh
           python3 -m unittest discover -s scripts -p 'test_smoke_installed_release.py' -v
           python3 -m unittest discover -s tests -p 'test_published_installed_boot.py' -v
           python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
