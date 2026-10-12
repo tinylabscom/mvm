@@ -487,6 +487,7 @@ mod tests {
             vm_name: "quiet".into(),
             state: CollectorState::Collecting { generation: 2 },
             shed: 1,
+            losses: Default::default(),
             snapshot_age_ms: Some(400),
             records_bytes: 0,
         };

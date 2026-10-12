@@ -172,6 +172,7 @@ impl LocalTelemetryReader {
             vm_name: snapshot.vm_name,
             state,
             shed: snapshot.shed,
+            losses: snapshot.losses,
             snapshot_age_ms,
             records_bytes,
         })

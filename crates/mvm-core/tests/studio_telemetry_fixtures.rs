@@ -314,6 +314,7 @@ fn collector_statuses() -> Vec<TelemetryStatus> {
             vm_name: "web".into(),
             state: CollectorState::from_label(label, generation).expect("a collector label"),
             shed,
+            losses: Default::default(),
             snapshot_age_ms: None,
             records_bytes: 0,
         };
@@ -343,6 +344,7 @@ fn served(name: &str) -> serde_json::Value {
             vm_name: "web".into(),
             state: CollectorState::Collecting { generation: 1 },
             shed: 0,
+            losses: Default::default(),
             snapshot_age_ms: Some(640),
             records_bytes: 1_874,
         }),
@@ -352,6 +354,7 @@ fn served(name: &str) -> serde_json::Value {
                 code: "authentication-failed".into(),
             },
             shed: 37,
+            losses: Default::default(),
             snapshot_age_ms: Some(1_020),
             records_bytes: 0,
         }),

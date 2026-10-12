@@ -240,6 +240,9 @@ pub enum TelemetryStatus {
         state: CollectorState,
         /// Records the host shed after receipt (a full or failed sink).
         shed: u64,
+        /// The same sheds by reason; absent when nothing was shed.
+        #[serde(default, skip_serializing_if = "HostLosses::is_zero")]
+        losses: HostLosses,
         /// How long ago the snapshot was refreshed, when the host can tell.
         /// The collector rewrites it about once a second while it lives, so
         /// a large age means the process that owned the VM is gone.
@@ -486,6 +489,7 @@ mod tests {
                 code: "signer-unreachable".into(),
             },
             shed: 4,
+            losses: Default::default(),
             snapshot_age_ms: Some(900),
             records_bytes: 2_048,
         };
