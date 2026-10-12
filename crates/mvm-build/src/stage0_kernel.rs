@@ -562,7 +562,9 @@ mod tests {
     #[test]
     fn an_incompatible_lock_is_refused_before_the_transport_is_called() {
         let incompatible = mvm_core::image_set::ImageSetCompatibility {
-            guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
+            workload: mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(
+                mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
+            ),
             builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
             builder_boot_abi: None,
         };
@@ -600,7 +602,9 @@ mod tests {
         let mut host = current_image_set_protocol_support();
         host.builder_boot_abi = crate::builder_boot::baked_only_abis();
         let compatibility = |abi| mvm_core::image_set::ImageSetCompatibility {
-            guest_agent_protocol: host.guest_agent_protocol,
+            workload: mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(
+                host.guest_agent_protocol,
+            ),
             builder_cache_contract: host.builder_cache_contract,
             builder_boot_abi: abi,
         };

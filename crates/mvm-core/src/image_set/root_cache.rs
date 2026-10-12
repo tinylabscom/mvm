@@ -341,7 +341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let train = crate::image_set::image_train_lock();
         let host = HostProtocolSupport {
-            guest_agent_protocol: train.compatibility.guest_agent_protocol,
+            guest_agent_protocol: crate::image_set::ProtocolRange::new(2, 2).unwrap(),
             builder_cache_contract: train.compatibility.builder_cache_contract,
             builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
         };

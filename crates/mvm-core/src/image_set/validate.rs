@@ -37,14 +37,74 @@ pub fn validate_structure(manifest: &ImageSetManifest) -> Result<(), ImageSetErr
 }
 
 fn check_schema_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError> {
-    if manifest.schema_version == IMAGE_SET_SCHEMA_VERSION {
-        Ok(())
-    } else {
-        Err(ImageSetError::UnsupportedSchemaVersion {
-            found: manifest.schema_version,
-            supported: IMAGE_SET_SCHEMA_VERSION,
-        })
+    let expected = match manifest.schema_version {
+        super::LEGACY_IMAGE_SET_SCHEMA_VERSION => {
+            matches!(
+                manifest.compatibility.workload,
+                super::WorkloadCompatibility::LegacyGuestAgent(_)
+            )
+        }
+        IMAGE_SET_SCHEMA_VERSION => {
+            matches!(
+                manifest.compatibility.workload,
+                super::WorkloadCompatibility::BaseImageContract(_)
+            )
+        }
+        _ => {
+            return Err(ImageSetError::UnsupportedSchemaVersion {
+                found: manifest.schema_version,
+                supported: IMAGE_SET_SCHEMA_VERSION,
+            });
+        }
+    };
+    if !expected {
+        return Err(ImageSetError::WorkloadCompatibilitySchemaMismatch {
+            schema: manifest.schema_version,
+        });
     }
+    let legacy = manifest.schema_version == super::LEGACY_IMAGE_SET_SCHEMA_VERSION;
+    if manifest.mvm_source_commit.is_some() != legacy {
+        return Err(ImageSetError::SourceProvenanceSchemaMismatch {
+            schema: manifest.schema_version,
+            field: "mvm_source_commit",
+        });
+    }
+    if let Some(local) = manifest.producer.local_checkouts()
+        && local.mvm.is_some() != legacy
+    {
+        return Err(ImageSetError::SourceProvenanceSchemaMismatch {
+            schema: manifest.schema_version,
+            field: "producer.local_checkouts.mvm",
+        });
+    }
+    if !legacy
+        && let Some(member) = manifest
+            .members
+            .iter()
+            .find(|member| member.role.is_retired())
+    {
+        return Err(ImageSetError::RetiredRuntimeInLinuxSet { role: member.role });
+    }
+    if !legacy {
+        manifest.compatibility.builder_boot_abi_or_legacy()?;
+        for member in &manifest.members {
+            if matches!(member.role, ImageSetRole::WorkloadRootfs(_)) {
+                let roots = member
+                    .artifacts
+                    .iter()
+                    .filter(|artifact| artifact.format == ArtifactFormat::Ext4)
+                    .count();
+                if roots != 1 {
+                    return Err(ImageSetError::BaseRootArtifactCount {
+                        role: member.role,
+                        target: member.target,
+                        found: roots,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_members(members: &[ImageSetMember]) -> Result<(), ImageSetError> {
@@ -212,10 +272,12 @@ fn check_local_fields(
     if manifest.compatibility.builder_boot_abi.is_none() {
         return Err(ImageSetError::LocalBuilderBootAbiMissing);
     }
-    if manifest.mvm_source_commit != local.mvm.commit {
+    if let (Some(declared), Some(recorded)) = (&manifest.mvm_source_commit, &local.mvm)
+        && declared != &recorded.commit
+    {
         return Err(ImageSetError::LocalMvmCommitMismatch {
-            declared: manifest.mvm_source_commit.clone(),
-            recorded: local.mvm.commit.clone(),
+            declared: declared.clone(),
+            recorded: recorded.commit.clone(),
         });
     }
     Ok(())
@@ -370,14 +432,23 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    if !declared
-        .guest_agent_protocol
-        .overlaps(host.guest_agent_protocol)
-    {
-        return Err(ImageSetError::GuestAgentProtocolDisjoint {
-            set: declared.guest_agent_protocol,
-            host: host.guest_agent_protocol,
-        });
+    match declared.workload {
+        super::WorkloadCompatibility::LegacyGuestAgent(set) => {
+            if !set.overlaps(host.guest_agent_protocol) {
+                return Err(ImageSetError::GuestAgentProtocolDisjoint {
+                    set,
+                    host: host.guest_agent_protocol,
+                });
+            }
+        }
+        super::WorkloadCompatibility::BaseImageContract(set) => {
+            if set != super::BASE_IMAGE_CONTRACT_VERSION {
+                return Err(ImageSetError::BaseImageContractUnsupported {
+                    set,
+                    supported: super::BASE_IMAGE_CONTRACT_VERSION,
+                });
+            }
+        }
     }
     if declared.builder_cache_contract != host.builder_cache_contract {
         return Err(ImageSetError::BuilderCacheContractMismatch {
@@ -385,7 +456,7 @@ pub fn check_declared_protocol_compatibility(
             host: host.builder_cache_contract,
         });
     }
-    let abi = declared.builder_boot_abi_or_legacy();
+    let abi = declared.builder_boot_abi_or_legacy()?;
     if !host.builder_boot_abi.contains(abi) {
         return Err(ImageSetError::BuilderBootAbiUnsupported {
             set: abi,

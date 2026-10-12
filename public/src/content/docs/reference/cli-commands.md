@@ -542,6 +542,16 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl image revocations update --document <revocations.json> --bundle <revocations.json.bundle>` | Apply the signed image-set revocation list published at `https://github.com/tinylabscom/mvm-images/releases/download/revocations/revocations.json`. The bundle must name the mvm-images `revocations.yml` workflow at a `revocation-list/v<N>` tag under the GitHub Actions issuer; any other signer, including the registry-pack revocation authority, is refused. The list must be inside its own validity window (at most 62 days), and neither the publication number `N` nor `issued_at` may go back from the last applied list. Two different lists at the same `N` or `issued_at` are refused. A refused list leaves the local copy unchanged. No network. |
 | `mvmctl image revocations status [--json]` | Re-verify the applied image-set revocation list and report its publication, validity window, digest, signer, and entry count. A missing, expired, incomplete, or modified local copy exits nonzero and names the command that fixes it. |
 
+`image boot verify` also checks compatibility with this CLI. Legacy schema 2
+sets retain their guest-protocol declaration. Linux-only schema 3 sets must
+declare a supported `base_image_contract`; after authenticating each selected
+workload root's digest, the verifier checks its
+`/etc/mvm/base-image-contract` marker against that declaration. Missing,
+malformed, or mismatched markers fail verification. Legacy sets do not need
+the new marker. Successful JSON reports include `image_manifest_schema` and
+the authenticated `compatibility` declaration; selected-artifact verification
+still does not certify unselected roots.
+
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
 `$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
 keyless cosign identities. Production mode always requires signatures and

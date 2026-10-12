@@ -91,13 +91,13 @@ That direct Nix command is only for users who intentionally manage their own Nix
 | Field | Type | Purpose |
 |---|---|---|
 | `name` | `string` | Human-readable identifier; baked into the rootfs at `/etc/mvm/name`. |
-| `entrypoint` | `attrs` | The boot-time workload. Exactly one of three forms (see below). |
+| `entrypoint` | `attrs` | The host-dispatched workload. Exactly one of three forms (see below). |
 | `services` | `attrs` (optional) | Declared and recorded, but **not enforced** — the multi-service supervisor is not wired. |
 | `packages` | `[pkg]` (optional) | Extra Nix packages added to the rootfs closure. |
 | `hypervisor` | `string` (optional) | Override the default (`firecracker`). |
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
 | `dev` | `bool` (optional) | Explicit accessible-vs-sealed image default. Inferred from entrypoint by default; the launch profile and run shape still decide agent-verb grants. |
-| `uids` | `attrs` (optional) | `{ agent = 901; entrypoint = 0|901; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
+| `uids` | `attrs` (optional) | Account and direct-script drop declarations (default: both 901); not an override of the universal runtime identity. See [Rootless workloads](#rootless-workloads). |
 | `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` writes text, `{ source; mode?; }` copies a file, and `{ link; }` makes a symlink to a Nix store path. All are baked into the rootfs at build time. |
 
 SSH is not a template capability. `mkGuest` fails Nix evaluation if `packages`
@@ -187,7 +187,20 @@ run on a non-dev profile receives the restricted ProdSafe grant; PTY and
 ad-hoc argv runs require DevOnly verbs. This keeps an OCI image's artifact
 metadata separate from the shape of the run that consumes it.
 
-The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no systemd) and emits an ext4 image directly. The boot path is: kernel → `/init` script → mounts `/proc` `/sys` `/dev` → execs your entrypoint. No service manager between the kernel and your code. mvm's security overlay (per-service uids, seccomp tier, dm-verity, read-only `/etc`) layers on top in Phase 6 without changing this base.
+The `mkGuest` library composes a workload ext4 rootfs with static busybox
+utilities, packages and workload metadata, but **no mvm-authored shell `/init`**
+or `/sbin/init`. Both dev and sealed boots run the universal initramfs agent
+as PID 1. It activates over vsock, mounts the read-only root and runtime,
+then dispatches the entrypoint on the host's `RunEntrypoint` request. The
+entrypoint is not autostarted as PID 1; its exit does not kill PID 1.
+
+Every composition carries integer `passthru.mvm.baseImageContract = 1` and
+`/etc/mvm/base-image-contract` containing exactly `1\n`.
+Keep the declared entrypoint argv aligned with any wrapper supplied through
+`extraFiles`; the host uses `passthru.mvm.entrypointArgv` for admission.
+`bootCommand` and `/etc/mvm/boot` are no longer part of the interface.
+Workload composition here is separate from the canonical Linux bases,
+kernels and builder image owned by `mvm-images`.
 
 ## Boot-time targets
 
@@ -208,7 +221,9 @@ runtime maximum from raw samples. See the
 [cold-launch performance plan](https://github.com/tinylabscom/mvm/blob/main/specs/plans/299-cold-launch-performance.md)
 for the measured budgets and backend rationale.
 
-The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-030](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/030-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
+The boot path uses the static Rust initramfs agent rather than NixOS,
+systemd or OpenRC. Boot-time metadata is not a substitute for measurements
+on the selected backend.
 
 ## What's inside the mvm repository (and why you don't touch it)
 
@@ -238,46 +253,53 @@ mvm runs Nix builds inside the project builder VM and copies the finished kernel
 
 ## Rootless workloads
 
-PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in production *does* — run non-root. mkGuest's `uids` knob controls the privilege drop:
+The universal initramfs agent performs privileged activation as PID 1 and then
+drops to the fixed workload identity. It dispatches both dev and sealed
+workloads as uid 901; an accessible image is not a grant of root privilege.
 
 | Process | Default uid | Role |
 |---|---|---|
-| `/init` (PID 1) | 0 | Mounts pseudofs, forks the agent in the background, drops privs, exec's the entrypoint |
-| `mvm-guest-agent` | 901 | Vsock RPC handler (never needs root); supervised by `/init` |
-| Entrypoint (workload) | **0 in dev**, **901 in prod** | Your service or shell |
+| Initramfs agent (PID 1) | 0 → 901 | Activates and mounts the root, starts runtime services, then serves vsock RPC |
+| Entrypoint (workload) | 901 | Your service or shell |
+| Addon DNS / CRNG reseed / egress | 987 / 988 / 989 | Dedicated runtime services |
 
 > **Agent binary status:** the agent is the cross-compiled Rust binary; `mkGuest` emits `passthru.mvm.agentBinary = "real"` unconditionally. The `"stub"` value is retained only as something a consumer may refuse — nothing produces it any more.
 
-The dev/prod default split is intentional:
-
-- **Dev** keeps entrypoint as root because debug shells expect root: `apt install`, `mount`, `tcpdump`. Forcing rootless dev would break those flows on first try.
-- **Prod** drops to uid 901 by default — the same uid the initramfs agent runs every workload as — per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
-
-`/init` uses `setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
+The immutable root names `root` (0), `mvm-worker` (901), `mvm-dns` (987),
+`mvm-crng` (988) and `mvm-egress` (989). Optional `builderUid = 902` adds
+`mvm-builder`. No guest NIC is present; egress uses authenticated FlowMux
+over vsock and local adapters on loopback.
 
 ### Override
 
 ```nix
-# Rootless dev shell — forces non-root even in dev mode.
+# Declare the workload account and direct-script privilege drop.
 mkGuest {
   entrypoint.shell = "/bin/bash";
   uids = { entrypoint = 901; };
 }
 
-# Rootful prod workload — explicit override, rarely the right call.
-mkGuest {
-  entrypoint.command = [ "/usr/local/bin/serve" ];
-  uids = { entrypoint = 0; };
-}
-
-# Non-default agent uid (e.g. to avoid collisions with host-side ranges).
+# Add an account row outside the fixed set.
 mkGuest {
   entrypoint.command = [ "/bin/x" ];
   uids = { agent = 5000; };
 }
 ```
 
-The resolved values surface as `passthru.mvm.uids = { agent; entrypoint; }` and `passthru.mvm.rootlessEntrypoint :: bool` so `mvmctl machine inspect` can cross-check against `/proc/<pid>/status` at runtime.
+These declarations surface as `passthru.mvm.declaredUids`.
+`passthru.mvm.uids` reports the actual runtime's agent/workload uid 901 and
+`passthru.mvm.rootlessEntrypoint` is true. Overrides do not reconfigure the universal
+agent's uid or elevate an already-unprivileged workload. When a generated
+entrypoint script is invoked directly as root it uses `mvm-setpriv` for its
+declared drop; normal agent dispatch skips that second drop.
+The runtime provides `/mvm/runtime/setpriv`, and `withSetpriv` controls the
+additional baked helper.
+
+Function-workload compositions preserve their source symlink,
+`/etc/mvm/entrypoint`, wrapper/runtime JSON and lifecycle hook files.
+`before_start.sh` was previously called only by the shell boot script and is
+not dispatched on the universal path; it remains baked for lifecycle support,
+not a promise that startup hooks run today.
 
 ## Why no OCI
 

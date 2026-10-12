@@ -231,6 +231,104 @@ impl Pair {
         attr: &str,
         members: &[TestMember],
     ) -> mvm_build::image_source::CachedImageSet {
+        self.publish_with_base_contract(role, attr, members, None)
+    }
+
+    pub(crate) fn publish_linux_workload(
+        &self,
+        attr: &str,
+    ) -> mvm_build::image_source::CachedImageSet {
+        crate::test_boot_payload::register_fixture_payload();
+        use mvm_fs::ext4::{Node, Owner};
+        let root = mvm_fs::ext4::build_image(
+            vec![
+                Node::Dir {
+                    path: "/etc".into(),
+                    mode: 0o755,
+                    xattrs: Vec::new(),
+                    owner: Owner::ROOT,
+                },
+                Node::Dir {
+                    path: "/etc/mvm".into(),
+                    mode: 0o755,
+                    xattrs: Vec::new(),
+                    owner: Owner::ROOT,
+                },
+                Node::File {
+                    path: "/etc/mvm/base-image-contract".into(),
+                    mode: 0o444,
+                    data: b"1\n".to_vec(),
+                    xattrs: Vec::new(),
+                    owner: Owner::ROOT,
+                },
+            ],
+            &Default::default(),
+        )
+        .unwrap();
+        let profile = WorkloadImageProfile::DefaultTenant;
+        let mut metadata: serde_json::Value = serde_json::from_str(produced_sidecar()).unwrap();
+        metadata.as_object_mut().unwrap().remove("protocolVersion");
+        metadata["baseImageContract"] = serde_json::json!(1);
+        metadata["initSystem"] = serde_json::json!("cli-initramfs");
+        metadata["agentBinary"] = serde_json::json!("");
+        let mut artifacts = vec![
+            TestArtifact {
+                name: "rootfs.ext4",
+                bytes: root,
+                format: "ext4",
+            },
+            TestArtifact {
+                name: "mvm-meta.json",
+                bytes: serde_json::to_vec(&metadata).unwrap(),
+                format: "json",
+            },
+        ];
+        if attr == "default" {
+            artifacts.extend([
+                TestArtifact {
+                    name: "rootfs.verity",
+                    bytes: b"verity\n".to_vec(),
+                    format: "verity_hash_tree",
+                },
+                TestArtifact {
+                    name: "rootfs.roothash",
+                    bytes: b"root hash\n".to_vec(),
+                    format: "verity_root_hash",
+                },
+            ]);
+        }
+        self.publish_with_base_contract(
+            ImageBuildRole::DefaultTenant,
+            attr,
+            &[
+                (
+                    ImageSetRole::WorkloadKernel(profile),
+                    Some("linux_direct"),
+                    vec![TestArtifact {
+                        name: "vmlinux",
+                        bytes: b"kernel".to_vec(),
+                        format: "kernel:image",
+                    }],
+                    &["virtio_vsock"],
+                ),
+                (
+                    ImageSetRole::WorkloadRootfs(profile),
+                    None,
+                    artifacts,
+                    &["virtio_blk"],
+                ),
+            ],
+            Some(1),
+        )
+    }
+
+    fn publish_with_base_contract(
+        &self,
+        role: mvm_build::image_source::ImageBuildRole,
+        attr: &str,
+        members: &[TestMember],
+        base_contract: Option<u32>,
+    ) -> mvm_build::image_source::CachedImageSet {
         let target = Self::target(role, attr);
         let mvm_root = mvm_build::image_source::mvm_source_checkout(
             mvm_build::artifact_acquisition::compiled_channel(),
@@ -259,6 +357,32 @@ impl Pair {
             .current_checkouts(&mvm_root)
             .expect("the pair's checkouts read");
         Self::emit_set(staged.dir(), &checkouts, key.arch, members);
+        if let Some(version) = base_contract {
+            let path = staged
+                .dir()
+                .join(mvm_core::image_set::LOCAL_SET_MANIFEST_NAME);
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            manifest["schema_version"] = serde_json::json!(3);
+            manifest
+                .as_object_mut()
+                .unwrap()
+                .remove("mvm_source_commit");
+            manifest["producer"]["local_checkouts"]
+                .as_object_mut()
+                .unwrap()
+                .remove("mvm");
+            manifest["compatibility"]
+                .as_object_mut()
+                .unwrap()
+                .remove("guest_agent_protocol");
+            manifest["compatibility"]["base_image_contract"] = serde_json::json!(version);
+            manifest["compatibility"]["builder_boot_abi"] =
+                serde_json::json!(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY.get());
+            manifest["compatibility"]["builder_cache_contract"] =
+                serde_json::json!(mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION);
+            write(&path, &serde_json::to_vec(&manifest).unwrap());
+        }
         cache
             .publish(staged, &ctx)
             .expect("publish")
@@ -317,7 +441,7 @@ impl Pair {
             "set_version": "0.0.0-local",
             "issued_at": "2026-01-01T00:00:00Z",
             "producer": {"local_checkouts": checkouts},
-            "mvm_source_commit": checkouts.mvm.commit,
+            "mvm_source_commit": checkouts.mvm.as_ref().unwrap().commit,
             "compatibility": {
                 "guest_agent_protocol": {"min": 2, "max": 2},
                 "builder_cache_contract": 1,

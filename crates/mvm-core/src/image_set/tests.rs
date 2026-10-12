@@ -12,6 +12,201 @@ use crate::release_trust::{RELEASE_OIDC_ISSUER, accepted_boot_image_identities};
 const X86: MemberTarget = MemberTarget::Arch(GuestArch::X86_64);
 const ARM: MemberTarget = MemberTarget::Arch(GuestArch::Aarch64);
 
+#[test]
+fn base_image_declaration_is_explicit_exclusive_and_integer() {
+    let good = serde_json::json!({
+        "base_image_contract": 1,
+        "builder_cache_contract": 5,
+        "builder_boot_abi": 2
+    });
+    let parsed: ImageSetCompatibility = serde_json::from_value(good.clone()).unwrap();
+    assert_eq!(parsed.workload, WorkloadCompatibility::BaseImageContract(1));
+    assert_eq!(serde_json::to_value(parsed).unwrap(), good);
+    for contract in [
+        serde_json::Value::Null,
+        serde_json::json!("1"),
+        serde_json::json!(1.0),
+        serde_json::json!(-1),
+        serde_json::json!(true),
+    ] {
+        let mut bad = good.clone();
+        bad["base_image_contract"] = contract;
+        assert!(serde_json::from_value::<ImageSetCompatibility>(bad).is_err());
+    }
+    let mut absent = good.clone();
+    absent
+        .as_object_mut()
+        .unwrap()
+        .remove("base_image_contract");
+    assert!(serde_json::from_value::<ImageSetCompatibility>(absent).is_err());
+    let mut both = good.clone();
+    both["guest_agent_protocol"] = serde_json::json!({"min":2, "max":2});
+    assert!(serde_json::from_value::<ImageSetCompatibility>(both).is_err());
+    let mut null_legacy = good.clone();
+    null_legacy["guest_agent_protocol"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<ImageSetCompatibility>(null_legacy).is_err());
+    let mut unknown = good;
+    unknown["unrecognized_contract"] = serde_json::json!(1);
+    assert!(serde_json::from_value::<ImageSetCompatibility>(unknown).is_err());
+}
+
+#[test]
+fn schema_selects_base_contract_not_guest_protocol() {
+    let mut new = manifest();
+    new.schema_version = IMAGE_SET_SCHEMA_VERSION;
+    assert!(matches!(
+        validate_structure(&new),
+        Err(ImageSetError::WorkloadCompatibilitySchemaMismatch { .. })
+    ));
+    new.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    new.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+    assert!(matches!(
+        validate_structure(&new),
+        Err(ImageSetError::SourceProvenanceSchemaMismatch { .. })
+    ));
+    new.mvm_source_commit = None;
+    validate_structure(&new).unwrap();
+    let mut null_source = serde_json::to_value(&new).unwrap();
+    null_source["mvm_source_commit"] = serde_json::Value::Null;
+    assert!(serde_json::from_value::<ImageSetManifest>(null_source).is_err());
+    let mut unrelated_runtime = host();
+    unrelated_runtime.guest_agent_protocol = ProtocolRange::new(99, 99).unwrap();
+    check_protocol_compatibility(&new, &unrelated_runtime).unwrap();
+    new.compatibility.workload = WorkloadCompatibility::BaseImageContract(999);
+    assert!(matches!(
+        check_protocol_compatibility(&new, &host()),
+        Err(ImageSetError::BaseImageContractUnsupported {
+            set: 999,
+            supported: 1
+        })
+    ));
+    new.schema_version = LEGACY_IMAGE_SET_SCHEMA_VERSION;
+    assert!(matches!(
+        validate_structure(&new),
+        Err(ImageSetError::WorkloadCompatibilitySchemaMismatch { .. })
+    ));
+    let mut legacy = manifest();
+    legacy.mvm_source_commit = None;
+    assert!(matches!(
+        validate_structure(&legacy),
+        Err(ImageSetError::SourceProvenanceSchemaMismatch { .. })
+    ));
+}
+
+#[test]
+fn linux_root_members_declare_exactly_one_ext4_payload_independent_of_name() {
+    let mut base = manifest();
+    base.schema_version = IMAGE_SET_SCHEMA_VERSION;
+    base.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    base.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+    base.mvm_source_commit = None;
+    let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let root = base
+        .members
+        .iter_mut()
+        .find(|member| member.role == role && member.target == ARM)
+        .unwrap();
+    let ext4 = root
+        .artifacts
+        .iter_mut()
+        .find(|artifact| artifact.format == ArtifactFormat::Ext4)
+        .unwrap();
+    ext4.name = ArtifactName::new("root-with-no-extension").unwrap();
+    validate_structure(&base).unwrap();
+    let mut absent = base.clone();
+    let root = absent
+        .members
+        .iter_mut()
+        .find(|member| member.role == role && member.target == ARM)
+        .unwrap();
+    root.artifacts
+        .iter_mut()
+        .filter(|artifact| artifact.format == ArtifactFormat::Ext4)
+        .for_each(|artifact| artifact.format = ArtifactFormat::Text);
+    assert!(matches!(
+        validate_structure(&absent),
+        Err(ImageSetError::BaseRootArtifactCount { found: 0, .. })
+    ));
+    let root = base
+        .members
+        .iter_mut()
+        .find(|member| member.role == role && member.target == ARM)
+        .unwrap();
+    let mut extra = root
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.format == ArtifactFormat::Ext4)
+        .unwrap()
+        .clone();
+    extra.name = ArtifactName::new("second-root").unwrap();
+    root.artifacts.push(extra);
+    assert!(matches!(
+        validate_structure(&base),
+        Err(ImageSetError::BaseRootArtifactCount { found: 2, .. })
+    ));
+}
+
+#[test]
+fn linux_only_contract_requires_the_complete_builder_boot_payload_abi() {
+    let mut base = manifest();
+    base.schema_version = IMAGE_SET_SCHEMA_VERSION;
+    base.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+    base.mvm_source_commit = None;
+    for abi in [
+        None,
+        Some(BuilderBootAbi::LEGACY),
+        Some(BuilderBootAbi::PAYLOAD),
+        Some(BuilderBootAbi::new(99)),
+    ] {
+        base.compatibility.builder_boot_abi = abi;
+        assert!(matches!(
+            validate_structure(&base),
+            Err(ImageSetError::BaseBuilderBootAbiMismatch { .. })
+        ));
+        assert!(matches!(
+            check_declared_protocol_compatibility(&base.compatibility, &host()),
+            Err(ImageSetError::BaseBuilderBootAbiMismatch { .. })
+        ));
+    }
+    base.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+    validate_structure(&base).unwrap();
+    let mut future_host = host();
+    future_host.builder_boot_abi =
+        BuilderBootAbiRange::new(BuilderBootAbi::LEGACY, BuilderBootAbi::new(99)).unwrap();
+    base.compatibility.builder_boot_abi = Some(BuilderBootAbi::new(99));
+    assert!(check_declared_protocol_compatibility(&base.compatibility, &future_host).is_err());
+    let legacy = manifest();
+    assert_eq!(legacy.compatibility.builder_boot_abi, None);
+    validate_structure(&legacy).unwrap();
+    check_protocol_compatibility(&legacy, &host()).unwrap();
+}
+
+#[test]
+fn linux_only_schema_refuses_every_retired_guest_runtime_role() {
+    for retired in [
+        RetiredGuestRuntimeRole::RuntimeOverlay,
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+        RetiredGuestRuntimeRole::Initramfs,
+    ] {
+        let mut legacy = manifest();
+        let role = ImageSetRole::RetiredGuestRuntime(retired);
+        legacy.members.push(member(role, ARM));
+        validate_structure(&legacy).unwrap();
+        let parsed: ImageSetManifest =
+            serde_json::from_value(serde_json::to_value(&legacy).unwrap()).unwrap();
+        assert_eq!(parsed, legacy);
+        legacy.schema_version = IMAGE_SET_SCHEMA_VERSION;
+        legacy.compatibility.workload = WorkloadCompatibility::BaseImageContract(1);
+        legacy.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
+        legacy.mvm_source_commit = None;
+        assert!(matches!(
+            validate_structure(&legacy),
+            Err(ImageSetError::RetiredRuntimeInLinuxSet { role: rejected }) if rejected == role
+        ));
+    }
+}
+
 fn sha(seed: &str) -> Sha256Hex {
     Sha256Hex::from_bytes(seed.as_bytes())
 }
@@ -158,7 +353,7 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
 
 fn manifest_at(set_version: &str) -> ImageSetManifest {
     ImageSetManifest {
-        schema_version: IMAGE_SET_SCHEMA_VERSION,
+        schema_version: LEGACY_IMAGE_SET_SCHEMA_VERSION,
         set_version: version(set_version),
         issued_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
         producer: ImageSetProducer::Release(ReleaseProducer {
@@ -167,9 +362,9 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
             release_tag: ReleaseTag::new(format!("v{set_version}")).unwrap(),
             source_commit: commit('a'),
         }),
-        mvm_source_commit: commit('b'),
+        mvm_source_commit: Some(commit('b')),
         compatibility: ImageSetCompatibility {
-            guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
+            workload: WorkloadCompatibility::LegacyGuestAgent(ProtocolRange::new(2, 2).unwrap()),
             builder_cache_contract: 4,
             builder_boot_abi: None,
         },
@@ -1330,7 +1525,7 @@ mod protocol {
         let manifest = manifest();
         assert_eq!(manifest.compatibility.builder_boot_abi, None);
         assert_eq!(
-            manifest.compatibility.builder_boot_abi_or_legacy(),
+            manifest.compatibility.builder_boot_abi_or_legacy().unwrap(),
             BuilderBootAbi::LEGACY
         );
         check_protocol_compatibility(&manifest, &host()).unwrap();

@@ -501,11 +501,7 @@ fn read_entry(
         }
         other => EntryFault::Corrupt(other.to_string()),
     })?;
-    if set.manifest_sha256 != record.manifest_sha256 {
-        return Err(EntryFault::Corrupt(
-            "the manifest is not the one the entry was published with".to_string(),
-        ));
-    }
+    check_record_manifest(&record, key, &set.manifest_sha256).map_err(EntryFault::Corrupt)?;
     let mut expected = set_file_names(&set);
     expected.insert(ENTRY_RECORD_NAME.to_string());
     let names = without_launch_derived_files(names, &expected);
@@ -532,6 +528,30 @@ fn check_record(record: &EntryRecord, key: &LocalImageCacheKey) -> Result<(), St
         return Err("the entry was published under a different key".to_string());
     }
     Ok(())
+}
+
+fn check_record_manifest(
+    record: &EntryRecord,
+    key: &LocalImageCacheKey,
+    manifest_sha256: &Sha256Hex,
+) -> Result<(), String> {
+    check_record(record, key)?;
+    if &record.manifest_sha256 != manifest_sha256 {
+        return Err("the manifest is not the one the entry was published with".to_string());
+    }
+    Ok(())
+}
+
+/// Reuse the original cache record's full target and manifest binding when
+/// its verified entry is retained beside an installed workload.
+pub(crate) fn verify_local_cache_entry_record(
+    bytes: &[u8],
+    key: &LocalImageCacheKey,
+    manifest_sha256: &Sha256Hex,
+) -> Result<(), String> {
+    let record: EntryRecord = serde_json::from_slice(bytes)
+        .map_err(|error| format!("parsing {ENTRY_RECORD_NAME}: {error}"))?;
+    check_record_manifest(&record, key, manifest_sha256)
 }
 
 fn read_set(
@@ -586,7 +606,10 @@ fn verify_staged(
 fn records_the_keyed_checkouts(checkouts: &LocalCheckouts, key: &LocalImageCacheKey) -> bool {
     checkouts.images == key.images
         && match &key.mvm {
-            MvmSourceIdentity::Checkout(mvm) => &checkouts.mvm == mvm,
+            MvmSourceIdentity::Checkout(mvm) => checkouts
+                .mvm
+                .as_ref()
+                .is_none_or(|recorded| recorded == mvm),
             MvmSourceIdentity::ConsumedInputs(_) => true,
         }
 }

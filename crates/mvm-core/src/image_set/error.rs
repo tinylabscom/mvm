@@ -139,6 +139,34 @@ pub enum ImageSetError {
     },
     #[error("image set is incomplete; missing {}", join(.missing))]
     Incomplete { missing: Vec<RequiredMember> },
+    #[error("workload compatibility declaration does not match image manifest schema {schema}")]
+    WorkloadCompatibilitySchemaMismatch { schema: u32 },
+    #[error("source provenance field {field} does not match image manifest schema {schema}")]
+    SourceProvenanceSchemaMismatch { schema: u32, field: &'static str },
+    #[error("Linux-only image manifest contains retired guest-runtime role {role}")]
+    RetiredRuntimeInLinuxSet { role: ImageSetRole },
+    #[error(
+        "Linux-only image set declares builder boot ABI {declared:?}; explicit ABI {required} is required"
+    )]
+    BaseBuilderBootAbiMismatch {
+        declared: Option<BuilderBootAbi>,
+        required: BuilderBootAbi,
+    },
+    #[error(
+        "Linux-only workload {role}/{target} declares {found} ext4 roots; exactly one is required"
+    )]
+    BaseRootArtifactCount {
+        role: ImageSetRole,
+        target: MemberTarget,
+        found: usize,
+    },
+    #[error("base-image contract invalid in {artifact}: {reason}")]
+    BaseImageContractInvalid {
+        artifact: ArtifactName,
+        reason: String,
+    },
+    #[error("base-image contract {set} is unsupported; this host supports {supported}")]
+    BaseImageContractUnsupported { set: u32, supported: u32 },
     #[error("guest-agent protocol {set} declared by the set does not overlap host support {host}")]
     GuestAgentProtocolDisjoint {
         set: ProtocolRange,
@@ -353,6 +381,11 @@ impl ImageSetError {
             Self::SignatureInvalid { .. } => ImageSetStage::Signature,
             Self::UnparseableManifest { .. } => ImageSetStage::Parse,
             Self::UnsupportedSchemaVersion { .. }
+            | Self::WorkloadCompatibilitySchemaMismatch { .. }
+            | Self::SourceProvenanceSchemaMismatch { .. }
+            | Self::RetiredRuntimeInLinuxSet { .. }
+            | Self::BaseBuilderBootAbiMismatch { .. }
+            | Self::BaseRootArtifactCount { .. }
             | Self::NoMembers
             | Self::DuplicateMember { .. }
             | Self::DuplicateArtifactName { .. }
@@ -380,9 +413,11 @@ impl ImageSetError {
             | Self::SetVersionMismatch { .. } => ImageSetStage::LockMatch,
             Self::Incomplete { .. } => ImageSetStage::Completeness,
             Self::GuestAgentProtocolDisjoint { .. }
+            | Self::BaseImageContractUnsupported { .. }
             | Self::BuilderCacheContractMismatch { .. }
             | Self::BuilderBootAbiUnsupported { .. } => ImageSetStage::ProtocolCompatibility,
             Self::ArtifactMissing { .. }
+            | Self::BaseImageContractInvalid { .. }
             | Self::ArtifactNotRegularFile { .. }
             | Self::ArtifactUnreadable { .. }
             | Self::ArtifactSizeMismatch { .. }

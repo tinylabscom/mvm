@@ -63,7 +63,8 @@ pub use verify::{
     verify_image_set_root,
 };
 
-pub const IMAGE_SET_SCHEMA_VERSION: u32 = 2;
+pub const IMAGE_SET_SCHEMA_VERSION: u32 = 3;
+pub const LEGACY_IMAGE_SET_SCHEMA_VERSION: u32 = 2;
 
 /// The root object of one image set: a published release, or a set built
 /// locally from two checkouts. Both are read by the same parser and checked by
@@ -76,10 +77,14 @@ pub struct ImageSetManifest {
     pub set_version: ImageSetVersion,
     pub issued_at: DateTime<Utc>,
     pub producer: ImageSetProducer,
-    /// The `mvm` commit whose guest and builder binaries are embedded in the
-    /// images. Recorded apart from the producer commit because the image
-    /// repository checks `mvm` out at an exact commit rather than tracking it.
-    pub mvm_source_commit: GitCommit,
+    /// Legacy schema 2 runtime-source provenance. Required in that schema and
+    /// absent in schema 3: the Linux-only image producer reads no mvm source.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub mvm_source_commit: Option<GitCommit>,
     pub compatibility: ImageSetCompatibility,
     pub nix_inputs: NixInputs,
     /// Where revocations of a released set are published. Required of a
@@ -236,9 +241,9 @@ impl From<ImageSetProducer> for RawProducer {
 /// What a host must support to use the set, declared so an incompatible set is
 /// refused before acquisition rather than discovered at the guest handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "CompatibilityWire", into = "CompatibilityWire")]
 pub struct ImageSetCompatibility {
-    pub guest_agent_protocol: ProtocolRange,
+    pub workload: WorkloadCompatibility,
     /// The builder image cache layout. Exact rather than a range: a builder
     /// image laid out under a different contract is unusable, not degraded.
     pub builder_cache_contract: u32,
@@ -250,13 +255,134 @@ pub struct ImageSetCompatibility {
     pub builder_boot_abi: Option<BuilderBootAbi>,
 }
 
+/// A Linux base contract is not a guest-runtime protocol. Legacy signed sets
+/// retain their original declaration; new bases declare only their contract.
+pub const BASE_IMAGE_CONTRACT_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkloadCompatibility {
+    LegacyGuestAgent(ProtocolRange),
+    BaseImageContract(u32),
+}
+
+#[derive(Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum CompatibilityWire {
+    Legacy {
+        guest_agent_protocol: ProtocolRange,
+        builder_cache_contract: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builder_boot_abi: Option<BuilderBootAbi>,
+    },
+    Base {
+        base_image_contract: u32,
+        builder_cache_contract: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        builder_boot_abi: Option<BuilderBootAbi>,
+    },
+}
+
+impl<'de> Deserialize<'de> for CompatibilityWire {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Fields {
+            #[serde(default, deserialize_with = "deserialize_present")]
+            guest_agent_protocol: Option<ProtocolRange>,
+            #[serde(default, deserialize_with = "deserialize_present")]
+            base_image_contract: Option<u32>,
+            builder_cache_contract: u32,
+            #[serde(default)]
+            builder_boot_abi: Option<BuilderBootAbi>,
+        }
+        let fields = Fields::deserialize(deserializer)?;
+        match (fields.guest_agent_protocol, fields.base_image_contract) {
+            (Some(guest_agent_protocol), None) => Ok(Self::Legacy {
+                guest_agent_protocol,
+                builder_cache_contract: fields.builder_cache_contract,
+                builder_boot_abi: fields.builder_boot_abi,
+            }),
+            (None, Some(base_image_contract)) => Ok(Self::Base {
+                base_image_contract,
+                builder_cache_contract: fields.builder_cache_contract,
+                builder_boot_abi: fields.builder_boot_abi,
+            }),
+            (None, None) | (Some(_), Some(_)) => Err(serde::de::Error::custom(
+                "declare exactly one of guest_agent_protocol and base_image_contract",
+            )),
+        }
+    }
+}
+
+// Absent and null are different: a present declaration must be well formed,
+// never a null that erases a contradictory field.
+fn deserialize_present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
+}
+
+impl From<CompatibilityWire> for ImageSetCompatibility {
+    fn from(wire: CompatibilityWire) -> Self {
+        match wire {
+            CompatibilityWire::Legacy {
+                guest_agent_protocol,
+                builder_cache_contract,
+                builder_boot_abi,
+            } => Self {
+                workload: WorkloadCompatibility::LegacyGuestAgent(guest_agent_protocol),
+                builder_cache_contract,
+                builder_boot_abi,
+            },
+            CompatibilityWire::Base {
+                base_image_contract,
+                builder_cache_contract,
+                builder_boot_abi,
+            } => Self {
+                workload: WorkloadCompatibility::BaseImageContract(base_image_contract),
+                builder_cache_contract,
+                builder_boot_abi,
+            },
+        }
+    }
+}
+
+impl From<ImageSetCompatibility> for CompatibilityWire {
+    fn from(value: ImageSetCompatibility) -> Self {
+        match value.workload {
+            WorkloadCompatibility::LegacyGuestAgent(guest_agent_protocol) => Self::Legacy {
+                guest_agent_protocol,
+                builder_cache_contract: value.builder_cache_contract,
+                builder_boot_abi: value.builder_boot_abi,
+            },
+            WorkloadCompatibility::BaseImageContract(base_image_contract) => Self::Base {
+                base_image_contract,
+                builder_cache_contract: value.builder_cache_contract,
+                builder_boot_abi: value.builder_boot_abi,
+            },
+        }
+    }
+}
+
 impl ImageSetCompatibility {
-    /// The builder boot ABI the set's builder image declares, reading an
-    /// absent field as the legacy ABI a release published before the field
-    /// meant. A local set without it is refused before this is asked.
-    #[must_use]
-    pub fn builder_boot_abi_or_legacy(&self) -> BuilderBootAbi {
-        self.builder_boot_abi.unwrap_or(BuilderBootAbi::LEGACY)
+    /// Only a legacy declaration can omit its ABI and mean the baked ABI.
+    /// Linux-only bases require the complete, explicitly declared boot payload.
+    pub fn builder_boot_abi_or_legacy(&self) -> Result<BuilderBootAbi, ImageSetError> {
+        match self.workload {
+            WorkloadCompatibility::LegacyGuestAgent(_) => {
+                Ok(self.builder_boot_abi.unwrap_or(BuilderBootAbi::LEGACY))
+            }
+            WorkloadCompatibility::BaseImageContract(_) => {
+                let required = BuilderBootAbi::NO_MVM_BINARY;
+                if self.builder_boot_abi != Some(required) {
+                    return Err(ImageSetError::BaseBuilderBootAbiMismatch {
+                        declared: self.builder_boot_abi,
+                        required,
+                    });
+                }
+                Ok(required)
+            }
+        }
     }
 }
 

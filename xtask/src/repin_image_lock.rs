@@ -39,7 +39,7 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
 struct Pin {
     release_tag: String,
     manifest_sha256: Sha256Hex,
-    guest_agent_protocol: (u32, u32),
+    workload: mvm_core::image_set::WorkloadCompatibility,
     builder_cache_contract: u32,
     /// Absent when the root predates the field, and then absent from the lock
     /// too: the lock copies what the root declares, and does not invent a 0.
@@ -58,11 +58,10 @@ impl Pin {
             .into_iter()
             .map(|arch| Ok((arch, stage0_artifact(&manifest, arch)?)))
             .collect::<Result<Vec<_>>>()?;
-        let protocol = manifest.compatibility.guest_agent_protocol;
         Ok(Self {
             release_tag: release.release_tag.as_str().to_string(),
             manifest_sha256: Sha256Hex::from_bytes(bytes),
-            guest_agent_protocol: (protocol.min(), protocol.max()),
+            workload: manifest.compatibility.workload,
             builder_cache_contract: manifest.compatibility.builder_cache_contract,
             builder_boot_abi: manifest.compatibility.builder_boot_abi.map(|abi| abi.get()),
             stage0,
@@ -105,14 +104,6 @@ pub(crate) fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
         ),
         (
             "compatibility",
-            "guest_agent_protocol",
-            format!(
-                "{{ min = {}, max = {} }}",
-                pin.guest_agent_protocol.0, pin.guest_agent_protocol.1
-            ),
-        ),
-        (
-            "compatibility",
             "builder_cache_contract",
             pin.builder_cache_contract.to_string(),
         ),
@@ -121,6 +112,33 @@ pub(crate) fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
     ] {
         text = set_value(&text, section, key, &value)?;
     }
+    let (legacy, base) = match pin.workload {
+        mvm_core::image_set::WorkloadCompatibility::LegacyGuestAgent(range) => (
+            Some(format!(
+                "{{ min = {}, max = {} }}",
+                range.min(),
+                range.max()
+            )),
+            None,
+        ),
+        mvm_core::image_set::WorkloadCompatibility::BaseImageContract(version) => {
+            (None, Some(version.to_string()))
+        }
+    };
+    text = set_optional_value(
+        &text,
+        "compatibility",
+        "guest_agent_protocol",
+        "builder_cache_contract",
+        legacy,
+    )?;
+    text = set_optional_value(
+        &text,
+        "compatibility",
+        "base_image_contract",
+        "builder_cache_contract",
+        base,
+    )?;
     text = set_optional_value(
         &text,
         "compatibility",
@@ -240,8 +258,7 @@ fn check_reads_back(text: &str, pin: &Pin) -> Result<()> {
     {
         bail!("the rewritten lock does not pin the candidate root");
     }
-    let protocol = lock.compatibility.guest_agent_protocol;
-    if (protocol.min(), protocol.max()) != pin.guest_agent_protocol
+    if lock.compatibility.workload != pin.workload
         || lock.compatibility.builder_cache_contract != pin.builder_cache_contract
         || lock.compatibility.builder_boot_abi.map(|abi| abi.get()) != pin.builder_boot_abi
     {
@@ -405,6 +422,30 @@ mod tests {
             "2".repeat(64)
         );
         assert_eq!(lock.compatibility.builder_cache_contract, 5);
+    }
+
+    #[test]
+    fn base_contract_replaces_legacy_protocol_without_rewriting_the_checked_in_lock() {
+        let mut root: serde_json::Value = serde_json::from_slice(&next_root()).unwrap();
+        root["schema_version"] = serde_json::json!(3);
+        root.as_object_mut().unwrap().remove("mvm_source_commit");
+        root["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_agent_protocol");
+        root["compatibility"]["base_image_contract"] = serde_json::json!(1);
+        let bytes = serde_json::to_vec(&root).unwrap();
+        let rewritten = repin(&checked_in_lock(), &bytes).unwrap();
+        let lock = ImageTrainLock::parse(&rewritten).unwrap();
+        assert_eq!(
+            lock.compatibility.workload,
+            mvm_core::image_set::WorkloadCompatibility::BaseImageContract(1)
+        );
+        assert!(!rewritten.contains("guest_agent_protocol"));
+        assert_eq!(repin(&rewritten, &bytes).unwrap(), rewritten);
+        let restored = repin(&rewritten, &next_root()).unwrap();
+        assert!(restored.contains("guest_agent_protocol"));
+        assert!(!restored.contains("base_image_contract"));
     }
 
     #[test]

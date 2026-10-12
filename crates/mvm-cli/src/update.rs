@@ -2015,6 +2015,13 @@ mod tests {
 
     #[test]
     fn download_kernel_refuses_a_manifest_digest_that_does_not_match() {
+        if !crate::test_boot_payload::in_payload_capable_test_process(
+            module_path!(),
+            "download_kernel_refuses_a_manifest_digest_that_does_not_match",
+        ) {
+            return;
+        }
+        crate::test_boot_payload::register_fixture_payload();
         let (asset, _) = boot_image_kernel_assets("aarch64", "workload").expect("known assets");
         let server = loopback_release_server(1, move |line| {
             assert!(
