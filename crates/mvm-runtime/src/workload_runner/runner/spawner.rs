@@ -98,11 +98,33 @@ impl TelemetryStart {
 pub struct RealNetworkEndpointSpawner;
 
 fn telemetry_for_boot(collection_enabled: bool, identity: FlowMuxIdentitySource<'_>) -> bool {
-    // A restored guest keeps the standby parent's kernel command line. That
-    // parent deliberately booted without an endpoint or telemetry assertion,
-    // so adding a collector only on claim would create another listener/dialer
-    // mismatch. Fresh boots can assert telemetry after their endpoint spawns.
-    collection_enabled && matches!(identity, FlowMuxIdentitySource::Mint)
+    // A fresh boot asserts telemetry on its own command line. A restored guest
+    // keeps its standby parent's, so it serves the listener exactly when the
+    // parent asserted it; a collector for a child whose parent did not would
+    // dial a guest that never listens.
+    collection_enabled
+        && match identity {
+            FlowMuxIdentitySource::Mint => true,
+            FlowMuxIdentitySource::InheritFrom(parent) => {
+                mvm_vmm::host::telemetry_provisioning::boot_is_provisioned(parent)
+            }
+        }
+}
+
+/// Assert telemetry on a standby parent's command line when collection is on,
+/// and record it, so every child claimed from it serves the listener its own
+/// collector dials. The parent itself gets no collector: nothing it records
+/// before it is snapshotted belongs to a workload.
+pub(super) fn assert_standby_telemetry(state_dir: &Path, cmdline: &mut String) -> Result<()> {
+    let enabled = mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled();
+    mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(state_dir, enabled)?;
+    if enabled {
+        if !cmdline.is_empty() {
+            cmdline.push(' ');
+        }
+        cmdline.push_str("mvm.telemetry=1");
+    }
+    Ok(())
 }
 
 /// Provision a parent's guest key without tenant workload authority or egress.
@@ -486,14 +508,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn telemetry_is_provisioned_only_for_fresh_boots_that_can_assert_it() {
-        let parent = Path::new("/parent");
+    fn telemetry_follows_the_boot_that_asserted_it() {
+        let quiet = tempfile::tempdir().unwrap();
+        let asserted = tempfile::tempdir().unwrap();
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(asserted.path(), true)
+            .unwrap();
         assert!(telemetry_for_boot(true, FlowMuxIdentitySource::Mint));
+        assert!(!telemetry_for_boot(false, FlowMuxIdentitySource::Mint));
+        // A child serves the listener only when its parent asserted it.
         assert!(!telemetry_for_boot(
             true,
-            FlowMuxIdentitySource::InheritFrom(parent)
+            FlowMuxIdentitySource::InheritFrom(quiet.path())
         ));
-        assert!(!telemetry_for_boot(false, FlowMuxIdentitySource::Mint));
+        assert!(telemetry_for_boot(
+            true,
+            FlowMuxIdentitySource::InheritFrom(asserted.path())
+        ));
+        assert!(!telemetry_for_boot(
+            false,
+            FlowMuxIdentitySource::InheritFrom(asserted.path())
+        ));
     }
     use base64::Engine as _;
     use mvm_vmm::host::flowmux_identity::{
