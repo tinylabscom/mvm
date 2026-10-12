@@ -85,6 +85,46 @@ impl ReceivedRecord {
     }
 }
 
+/// Records the host shed after it received them, by why. The guest's own
+/// losses travel inside the stream as `Loss` records; these are the ones the
+/// guest cannot know about, because they happen on the host side of the
+/// session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLosses {
+    /// The collector's write queue was full: the records file's writer fell
+    /// behind the session, and the receive loop shed rather than waited.
+    #[serde(default)]
+    pub queue_full: u64,
+    /// The records file reached its byte cap.
+    #[serde(default)]
+    pub cap_reached: u64,
+    /// A write to the records file failed (a full disk, an I/O error). The
+    /// file is rolled back to its last whole line, so a failed write never
+    /// leaves a torn record behind.
+    #[serde(default)]
+    pub write_failed: u64,
+    /// The record carried a secret the host holds for this VM, so it was
+    /// withheld from the records file entirely.
+    #[serde(default)]
+    pub secret_withheld: u64,
+}
+
+impl HostLosses {
+    /// Every record shed, whatever the reason.
+    pub fn total(&self) -> u64 {
+        self.queue_full
+            .saturating_add(self.cap_reached)
+            .saturating_add(self.write_failed)
+            .saturating_add(self.secret_withheld)
+    }
+
+    /// Whether nothing has been shed.
+    pub fn is_zero(&self) -> bool {
+        self.total() == 0
+    }
+}
+
 /// The collector's standing for one VM, as its status snapshot reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

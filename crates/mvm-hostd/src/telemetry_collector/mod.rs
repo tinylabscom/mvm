@@ -15,16 +15,24 @@
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::{Signature, VerifyingKey};
+use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::net::telemetry::TelemetryReceiver;
-use mvm_core::protocol::telemetry::TelemetryRecord;
+use mvm_core::protocol::telemetry::served::HostLosses;
 use mvm_core::security::{SessionHello, SessionHelloAck};
 use mvm_vmm::host::telemetry_registration::{
     assert_peer_is_current, resolve_expected_telemetry_peer,
+};
+
+mod sink;
+
+pub use sink::{
+    CappedJsonlSink, IngestOutcome, LossClass, LossCounters, QueuedSink, RecordFile, RecordSink,
+    ScrubbingSink, WRITE_QUEUE_MAX_BYTES, WRITE_QUEUE_RECORDS,
 };
 
 /// Base of the reconnect backoff schedule.
@@ -48,20 +56,6 @@ pub enum CoverageStatus {
     Degraded { code: &'static str },
     /// The worker was asked to stop and has exited.
     Stopped,
-}
-
-/// What a sink did with one offered record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IngestOutcome {
-    Ingested,
-    /// The sink is full; the collector counts the shed and keeps receiving.
-    Shed,
-}
-
-/// A bounded, non-waiting home for received records. `try_ingest` must never
-/// block: a slow consumer costs shed records, not a stalled receive loop.
-pub trait RecordSink: Send {
-    fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome;
 }
 
 /// Everything one collector worker needs, built once and moved into its
@@ -112,7 +106,7 @@ where
 /// The running worker's handle: status snapshot, shed count, and stop.
 pub struct CollectorHandle {
     status: Arc<Mutex<CoverageStatus>>,
-    shed: Arc<AtomicU64>,
+    losses: Arc<LossCounters>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -129,7 +123,12 @@ impl CollectorHandle {
 
     /// Records the sink refused since the worker started.
     pub fn shed(&self) -> u64 {
-        self.shed.load(Ordering::Relaxed)
+        self.losses.total()
+    }
+
+    /// Records shed since the worker started, by reason.
+    pub fn losses(&self) -> HostLosses {
+        self.losses.snapshot()
     }
 
     /// Shared views for the embedded status writer, which reports on its own
@@ -138,8 +137,8 @@ impl CollectorHandle {
         &self.status
     }
 
-    fn shed_shared(&self) -> &Arc<AtomicU64> {
-        &self.shed
+    fn losses_shared(&self) -> &Arc<LossCounters> {
+        &self.losses
     }
 
     /// Ask the worker to stop and wait for it. Takes effect between attempts,
@@ -169,12 +168,32 @@ where
         + Send
         + 'static,
 {
+    spawn_collector_counting(config, sink, Arc::new(LossCounters::default()))
+}
+
+/// [`spawn_collector`] with the loss counters supplied, so a sink that sheds
+/// on another thread (a [`QueuedSink`]'s writer) counts into the same tally
+/// the handle reports.
+fn spawn_collector_counting<S, C, F>(
+    config: CollectorConfig<S, C, F>,
+    sink: impl RecordSink + 'static,
+    losses: Arc<LossCounters>,
+) -> std::io::Result<CollectorHandle>
+where
+    S: Read + Write + 'static,
+    C: FnMut() -> std::io::Result<S> + Send + 'static,
+    F: Fn(
+            &SessionHello,
+            &SessionHelloAck,
+        ) -> Result<Signature, mvm_core::net::session::SessionError>
+        + Send
+        + 'static,
+{
     let status = Arc::new(Mutex::new(CoverageStatus::Connecting));
-    let shed = Arc::new(AtomicU64::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let shared = WorkerShared {
         status: Arc::clone(&status),
-        shed: Arc::clone(&shed),
+        losses: Arc::clone(&losses),
         stop: Arc::clone(&stop),
     };
     let thread = std::thread::Builder::new()
@@ -182,7 +201,7 @@ where
         .spawn(move || run_worker(config, sink, &shared))?;
     Ok(CollectorHandle {
         status,
-        shed,
+        losses,
         stop,
         thread: Some(thread),
     })
@@ -190,7 +209,7 @@ where
 
 struct WorkerShared {
     status: Arc<Mutex<CoverageStatus>>,
-    shed: Arc<AtomicU64>,
+    losses: Arc<LossCounters>,
     stop: Arc<AtomicBool>,
 }
 
@@ -329,8 +348,8 @@ fn receive_until_end<S: Read + Write>(
         match receiver.receive(stream) {
             Ok(record) => {
                 received_any = true;
-                if sink.try_ingest(&record) == IngestOutcome::Shed {
-                    shared.shed.fetch_add(1, Ordering::Relaxed);
+                if let IngestOutcome::Shed(class) = sink.try_ingest(&record) {
+                    shared.losses.record(class);
                 }
             }
             Err(mvm_core::net::telemetry::TelemetryError::Closed) => {
@@ -351,7 +370,9 @@ mod tests {
     use base64::Engine as _;
     use ed25519_dalek::{Signer as _, SigningKey};
     use mvm_core::net::telemetry::{TelemetrySender, handshake_signing_bytes};
-    use mvm_core::protocol::telemetry::{CoverageState, ProducerEpoch, RecordBody, SourceKind};
+    use mvm_core::protocol::telemetry::{
+        CoverageState, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+    };
     use mvm_vmm::host::telemetry_registration::register_telemetry_boot;
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -403,7 +424,9 @@ mod tests {
         fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
             match self.0.try_send(record.clone()) {
                 Ok(()) => IngestOutcome::Ingested,
-                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => IngestOutcome::Shed,
+                Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                    IngestOutcome::Shed(LossClass::QueueFull)
+                }
             }
         }
     }
@@ -570,44 +593,6 @@ mod tests {
     }
 
     #[test]
-    fn the_capped_sink_persists_each_record_in_the_served_envelope() {
-        use mvm_core::protocol::telemetry::served::ReceivedRecord;
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("records.jsonl");
-        let record = record(1);
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        // Sized with a receive time of today's width, so the cap admits
-        // exactly two lines as the sink will stamp them.
-        let one_line = ReceivedRecord::encode_line(before, &record).unwrap().len() as u64;
-        let mut sink = CappedJsonlSink::create(&path, one_line * 2 + 1).unwrap();
-        assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
-        assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
-        assert_eq!(
-            sink.try_ingest(&record),
-            IngestOutcome::Shed,
-            "the third line would cross the cap"
-        );
-        let text = std::fs::read(&path).unwrap();
-        let lines: Vec<&[u8]> = text
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-            .collect();
-        assert_eq!(lines.len(), 2);
-        for line in lines {
-            let served = ReceivedRecord::decode_line(line).expect("the served envelope");
-            assert_eq!(served.record, record);
-            assert!(served.received_at_ms.is_some_and(|at| at >= before));
-        }
-        // Reopening appends: the cap counts what is already there.
-        let mut reopened = CappedJsonlSink::create(&path, one_line * 3).unwrap();
-        assert_eq!(reopened.try_ingest(&record), IngestOutcome::Ingested);
-        assert_eq!(reopened.try_ingest(&record), IngestOutcome::Shed);
-    }
-
-    #[test]
     fn a_full_sink_sheds_with_evidence_and_never_blocks_the_receive_loop() {
         let state = tempfile::tempdir().unwrap();
         let (guest_key, anchor_key) = keys();
@@ -704,57 +689,103 @@ mod tests {
         producer.join().unwrap();
         handle.stop();
     }
-}
 
-/// A size-capped JSONL sink: each record appends as one JSON line — the
-/// record inside the served envelope, stamped with the host receive time —
-/// until the cap, then sheds. This file exists so collection is observable
-/// through the read seam — retention and durable storage are their own
-/// workstream, and nothing here claims them. Writes are local file appends;
-/// a failed write is a shed, never a stall.
-pub struct CappedJsonlSink {
-    file: std::fs::File,
-    written: u64,
-    cap: u64,
-}
+    #[test]
+    fn a_sibling_vms_registered_guest_cannot_feed_this_vms_collector() {
+        // Two VMs, each with its own registered guest key. VM B's genuine
+        // guest reaching VM A's collector is a forged identity from A's side:
+        // A authenticates only the key A's own registration names.
+        let a_state = tempfile::tempdir().unwrap();
+        let b_state = tempfile::tempdir().unwrap();
+        let (a_guest, anchor_key) = keys();
+        let b_guest = SigningKey::from_bytes(&[44; 32]);
+        register(a_state.path(), "vm-a", &a_guest);
+        register(b_state.path(), "vm-b", &b_guest);
 
-impl CappedJsonlSink {
-    pub fn create(path: &std::path::Path, cap: u64) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
-        Ok(Self { file, written, cap })
-    }
-}
-
-impl RecordSink for CappedJsonlSink {
-    fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
-        use std::io::Write as _;
-        // The persisted line carries the host receive time beside the
-        // record: the guest's monotonic clock orders records within one
-        // producer and epoch, and only this stamp places them on a wall clock.
-        let received_at_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
-            .unwrap_or(0);
-        let Ok(line) = mvm_core::protocol::telemetry::served::ReceivedRecord::encode_line(
-            received_at_ms,
-            record,
-        ) else {
-            return IngestOutcome::Shed;
-        };
-        if self.written.saturating_add(line.len() as u64) > self.cap {
-            return IngestOutcome::Shed;
-        }
-        match self.file.write_all(&line) {
-            Ok(()) => {
-                self.written += line.len() as u64;
-                IngestOutcome::Ingested
+        let (feed_tx, feed_rx) = sync_channel(1);
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        feed_tx.send(host).unwrap();
+        let anchor = anchor_key.verifying_key();
+        let producer = std::thread::spawn(move || {
+            if let Ok(mut sender) = TelemetrySender::connect(&mut guest, b_guest, &anchor) {
+                let _ = sender.send(&mut guest, &record(1));
             }
-            Err(_) => IngestOutcome::Shed,
-        }
+        });
+
+        let (sink_tx, sink_rx) = sync_channel(16);
+        let handle = spawn_collector(
+            CollectorConfig::new(
+                a_state.path().to_path_buf(),
+                "vm-a",
+                anchor_key.verifying_key(),
+                fed_connector(feed_rx),
+                direct_signer(anchor_key.clone()),
+            ),
+            ChannelSink(sink_tx),
+        )
+        .unwrap();
+        wait_until("the sibling's session to be refused", || {
+            matches!(
+                handle.status(),
+                CoverageStatus::Degraded {
+                    code: "authentication-failed"
+                }
+            )
+        });
+        assert_eq!(sink_rx.try_iter().count(), 0, "no sibling record crosses");
+        producer.join().unwrap();
+        handle.stop();
+    }
+
+    #[test]
+    fn a_stalled_vms_collector_does_not_slow_another_vms_collector() {
+        // Each VM owns its own worker, queue and sink. VM A's sink never
+        // drains; VM B still receives every record its guest sends.
+        let (anchor_key, a_guest, b_guest) = (
+            SigningKey::from_bytes(&[42; 32]),
+            SigningKey::from_bytes(&[45; 32]),
+            SigningKey::from_bytes(&[46; 32]),
+        );
+        let start = |vm: &'static str, guest_key: SigningKey, sink: ChannelSink, count: u64| {
+            let state = tempfile::tempdir().unwrap();
+            register(state.path(), vm, &guest_key);
+            let (feed_tx, feed_rx) = sync_channel(1);
+            let (host, guest) = UnixStream::pair().unwrap();
+            feed_tx.send(host).unwrap();
+            let producer = guest_sends(guest, guest_key, anchor_key.verifying_key(), count);
+            let handle = spawn_collector(
+                CollectorConfig::new(
+                    state.path().to_path_buf(),
+                    vm,
+                    anchor_key.verifying_key(),
+                    fed_connector(feed_rx),
+                    direct_signer(anchor_key.clone()),
+                ),
+                sink,
+            )
+            .unwrap();
+            (state, producer, handle)
+        };
+
+        let (a_tx, _a_never_drained) = sync_channel(1);
+        let (b_tx, b_rx) = sync_channel(64);
+        let (_a_state, a_producer, a) = start("vm-a", a_guest, ChannelSink(a_tx), 50);
+        let (_b_state, b_producer, b) = start("vm-b", b_guest, ChannelSink(b_tx), 50);
+
+        let mut got = 0;
+        wait_until("all of B's records", || {
+            got += b_rx.try_iter().count();
+            got == 50
+        });
+        assert_eq!(b.shed(), 0, "B shed nothing");
+        wait_until("A to shed what its stalled sink could not take", || {
+            a.shed() == 49
+        });
+        assert_eq!(a.losses().queue_full, 49);
+        a_producer.join().unwrap();
+        b_producer.join().unwrap();
+        a.stop();
+        b.stop();
     }
 }
 
@@ -767,10 +798,19 @@ pub struct CollectorStatusSnapshot {
     /// Boot generation when a session is live; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// Every record the host shed after receipt; the sum of `losses`.
     pub shed: u64,
+    /// The same sheds by reason. Absent from a snapshot written before the
+    /// reasons were recorded, which reads as all zero.
+    #[serde(default, skip_serializing_if = "HostLosses::is_zero")]
+    pub losses: HostLosses,
 }
 
-fn status_snapshot(vm_name: &str, status: &CoverageStatus, shed: u64) -> CollectorStatusSnapshot {
+fn status_snapshot(
+    vm_name: &str,
+    status: &CoverageStatus,
+    losses: HostLosses,
+) -> CollectorStatusSnapshot {
     let (label, generation) = match status {
         CoverageStatus::Connecting => ("connecting".to_string(), None),
         CoverageStatus::Collecting { generation } => ("collecting".to_string(), Some(*generation)),
@@ -781,7 +821,8 @@ fn status_snapshot(vm_name: &str, status: &CoverageStatus, shed: u64) -> Collect
         vm_name: vm_name.to_string(),
         status: label,
         generation,
-        shed,
+        shed: losses.total(),
+        losses,
     }
 }
 
@@ -851,17 +892,20 @@ fn status_path(config: &TelemetryEmbedConfig) -> std::path::PathBuf {
 /// telemetry socket, authenticate through the delegated signer, persist
 /// records to the capped JSONL and a status snapshot on a fixed cadence.
 /// The first snapshot is written before anything is dialed, so a slow or
-/// absent guest never looks like a failed start.
+/// absent guest never looks like a failed start. `secret_fingerprints` are
+/// the endpoint's bound secrets: a record carrying one is withheld before it
+/// is queued or written.
 pub fn start_embedded(
     vm_name: &str,
     config: &TelemetryEmbedConfig,
+    secret_fingerprints: Vec<SecretFingerprint>,
 ) -> anyhow::Result<EmbeddedCollector> {
     use anyhow::Context as _;
 
     let status_file = status_path(config);
     write_status(
         &status_file,
-        &status_snapshot(vm_name, &CoverageStatus::Connecting, 0),
+        &status_snapshot(vm_name, &CoverageStatus::Connecting, HostLosses::default()),
     );
 
     let anchor_bytes: [u8; 32] = std::fs::read(&config.host_anchor_path)
@@ -870,13 +914,23 @@ pub fn start_embedded(
         .map_err(|_| anyhow::anyhow!("host anchor is not 32 bytes"))?;
     let host_anchor = VerifyingKey::from_bytes(&anchor_bytes).context("invalid host anchor")?;
 
-    let sink = CappedJsonlSink::create(
+    let records = CappedJsonlSink::create(
         &config
             .state_dir
             .join(mvm_vmm::host::telemetry_provisioning::TELEMETRY_RECORDS_FILE),
         config.records_byte_cap,
     )
     .context("opening the records file")?;
+    // The disk write runs on its own thread behind a bounded queue, so a
+    // slow or full disk sheds records instead of stalling the session; the
+    // secret scrub runs before the queue, so a withheld record is never
+    // buffered at all.
+    let losses = Arc::new(LossCounters::default());
+    let sink = ScrubbingSink::new(
+        secret_fingerprints,
+        QueuedSink::spawn(vm_name, WRITE_QUEUE_RECORDS, records, Arc::clone(&losses))
+            .context("starting the records writer")?,
+    );
 
     let telemetry_sock = config.telemetry_sock.clone();
     let connector = move || std::os::unix::net::UnixStream::connect(&telemetry_sock);
@@ -909,7 +963,7 @@ pub fn start_embedded(
             })
     };
 
-    let handle = spawn_collector(
+    let handle = spawn_collector_counting(
         CollectorConfig::new(
             config.state_dir.clone(),
             vm_name.to_string(),
@@ -918,13 +972,14 @@ pub fn start_embedded(
             signer,
         ),
         sink,
+        losses,
     )?;
 
     let status_stop = std::sync::Arc::new(AtomicBool::new(false));
     let status_thread = {
         let stop = std::sync::Arc::clone(&status_stop);
         let status = std::sync::Arc::clone(handle.status_shared());
-        let shed = std::sync::Arc::clone(handle.shed_shared());
+        let losses = std::sync::Arc::clone(handle.losses_shared());
         let vm_name = vm_name.to_string();
         std::thread::Builder::new()
             .name(format!("mvm-telemetry-status-{vm_name}"))
@@ -937,7 +992,7 @@ pub fn start_embedded(
                         .clone();
                     write_status(
                         &status_file,
-                        &status_snapshot(&vm_name, &current, shed.load(Ordering::Relaxed)),
+                        &status_snapshot(&vm_name, &current, losses.snapshot()),
                     );
                 }
             })?

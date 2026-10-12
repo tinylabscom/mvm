@@ -453,6 +453,21 @@ persisted records line now carries the host receive time
 (`studio_fixture_statuses_and_page_match_the_committed_vectors`). The
 contract is `specs/telemetry/studio-contract.md`.
 
+Host sink isolation (2026-10-11): the embedded collector's receive loop no
+longer writes to disk. Records pass a whole-field scrub against the
+fingerprints of the secrets the endpoint holds (a match is withheld before it
+is queued), then a bounded writer queue (`WRITE_QUEUE_RECORDS`, at most
+`WRITE_QUEUE_MAX_BYTES` pinned) in front of a dedicated writer thread. A full
+queue is a counted shed, never a wait; a failed append is rolled back to the
+last whole line, so a full disk leaves no torn record and writing resumes by
+itself when space returns. Sheds are counted by reason (`HostLosses`:
+queue full, cap reached, write failed, secret withheld) in the status
+snapshot. Witnesses: `a_stalled_writer_costs_counted_records_never_a_waiting_receive_loop`,
+`a_full_disk_leaves_no_torn_line_and_writing_resumes_when_space_returns`,
+`a_record_carrying_a_bound_secret_is_withheld_in_every_field_kind`,
+`a_sibling_vms_registered_guest_cannot_feed_this_vms_collector` and
+`a_stalled_vms_collector_does_not_slow_another_vms_collector`.
+
 - [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
 - [ ] Bound host resource usage and make saturation non-waiting for ingress and

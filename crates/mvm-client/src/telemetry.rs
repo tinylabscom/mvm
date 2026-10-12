@@ -349,6 +349,7 @@ mod tests {
             status: status.into(),
             generation,
             shed,
+            losses: Default::default(),
         };
         std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     }

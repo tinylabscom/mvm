@@ -107,6 +107,7 @@ fn the_reader_types_every_collector_snapshot_as_the_committed_status() {
                 status: state.label(),
                 generation,
                 shed: *shed,
+                losses: Default::default(),
             };
             std::fs::write(&status_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
         }

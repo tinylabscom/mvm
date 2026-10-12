@@ -2399,6 +2399,7 @@ mod tests {
                 status: "collecting".into(),
                 generation: Some(3),
                 shed: 1,
+                losses: Default::default(),
             })
             .unwrap(),
         )

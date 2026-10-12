@@ -98,10 +98,11 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
         records_byte_cap: 64 * 1024,
     };
     // Started the way the endpoint starts it, off the async runtime's thread.
-    let embedded = tokio::task::spawn_blocking(move || start_embedded("vm-e2e", &config))
-        .await
-        .unwrap()
-        .expect("embedded collector starts");
+    let embedded =
+        tokio::task::spawn_blocking(move || start_embedded("vm-e2e", &config, Vec::new()))
+            .await
+            .unwrap()
+            .expect("embedded collector starts");
 
     // The first status snapshot precedes any dialing; then the session's
     // effects: the coverage record persisted and status reaching collecting.

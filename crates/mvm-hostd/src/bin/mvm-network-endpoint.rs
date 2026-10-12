@@ -145,6 +145,8 @@ fn main() -> Result<()> {
             .context("fingerprinting the endpoint's secrets")?,
     };
     let fingerprinted = handshake.input_fingerprints.len();
+    // The embedded collector scrubs records against the same set.
+    let telemetry_fingerprints = handshake.input_fingerprints.clone();
     let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
 
     // One configured deadline for the forward leg. The UDS/vsock path honors it
@@ -195,14 +197,18 @@ fn main() -> Result<()> {
         // this VM its telemetry, never its egress: the ready handshake has
         // already gone out and the guest is booting against this process.
         let _telemetry = cfg.telemetry.as_ref().and_then(|telemetry| {
-            mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
-                .inspect_err(|error| {
-                    warn!(
-                        error = format!("{error:#}"),
-                        "embedded telemetry collector did not start; serving without it"
-                    );
-                })
-                .ok()
+            mvm_hostd::telemetry_collector::start_embedded(
+                &cfg.instance_id,
+                telemetry,
+                telemetry_fingerprints,
+            )
+            .inspect_err(|error| {
+                warn!(
+                    error = format!("{error:#}"),
+                    "embedded telemetry collector did not start; serving without it"
+                );
+            })
+            .ok()
         });
         serve(
             ServeParams::builder()

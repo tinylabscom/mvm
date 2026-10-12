@@ -142,6 +142,14 @@ impl SecretScanner {
         self.pending.len()
     }
 
+    /// Whether `buf`, scanned whole and on its own, contains any bound
+    /// secret. For a payload that arrives complete — a telemetry record's
+    /// field — rather than a stream chopped into frames, so there is no tail
+    /// to carry and nothing is withheld.
+    pub(crate) fn contains_bound_secret(&self, buf: &[u8]) -> bool {
+        self.first_match(buf).is_some()
+    }
+
     /// The category of the first bound fingerprint `buf` contains, longest
     /// secret first.
     fn first_match(&self, buf: &[u8]) -> Option<SecretCategory> {
