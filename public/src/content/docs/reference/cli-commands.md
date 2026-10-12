@@ -579,9 +579,10 @@ never the token value.
 When the machine's signed plan carries an `application_terminal` grant, an
 interactive attach opens that application instead of a shell: the granted
 argv runs as the workload user with the host-provisioned proxy, CA bundle and
-secret placeholders. `--env`, a different argv, and a dynamic-loader variable
-are refused, on the host and again by the guest agent against the host-signed
-grant. The grant never opens a terminal on a sealed image.
+secret placeholders. `--env` and a different argv are refused on the host, and
+the guest agent refuses any argv but the granted one, any variable outside
+that host-provisioned set, and a program path reached through a symlink or
+writable by anyone but root, against the host-signed grant. The grant never opens a terminal on a sealed image.
 
 In an interactive console, press Enter and then `~d` to detach (the shell keeps
 running) or `~.` to end the session. Closing the terminal or losing the

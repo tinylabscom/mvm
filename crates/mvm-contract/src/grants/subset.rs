@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn an_application_terminal_is_kept_or_dropped_never_added_or_changed() {
         let claude = ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()]).unwrap();
-        let shell = ApplicationTerminalGrant::new(vec!["/bin/sh".into()]).unwrap();
+        let shell = ApplicationTerminalGrant::new(vec!["/opt/other/bin/app".into()]).unwrap();
         let with = |grant: &ApplicationTerminalGrant| Grants {
             application_terminal: Some(grant.clone()),
             ..Grants::default()

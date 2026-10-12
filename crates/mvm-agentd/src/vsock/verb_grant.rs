@@ -87,14 +87,60 @@ pub fn enforce_application_terminal_grant(
         return None;
     };
     let binding = grant.and_then(|grant| grant.application_terminal.as_ref())?;
-    let refusal = binding
-        .admit(argv, env.iter().map(|(name, _)| name.as_str()))
-        .err()?;
+    let refusal = match binding.admit(argv, env) {
+        Ok(()) => program_identity_refusal(std::path::Path::new(&argv[0]))?,
+        Err(refusal) => refusal.to_string(),
+    };
     // The argv is not logged: it can carry user-typed secrets.
     eprintln!("[audit] console-open refused under the application-terminal grant: {refusal}");
     Some(GuestResponse::Error {
         message: format!("application terminal refused: {refusal}"),
     })
+}
+
+/// Why the granted program's path cannot be trusted to be the program the
+/// plan named, if it cannot.
+///
+/// The grant binds a path, so the path must be the file: no symlink anywhere
+/// along it, a regular executable file, and neither the file nor any
+/// directory above it writable by anyone but root, so the workload cannot
+/// swap or rewrite what the terminal runs.
+fn program_identity_refusal(program: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::canonicalize(program) {
+        Ok(resolved) if resolved == program => {}
+        Ok(_) => {
+            return Some(format!(
+                "{} is reached through a symbolic link; grant the path of the file itself",
+                program.display()
+            ));
+        }
+        Err(error) => return Some(format!("{}: {error}", program.display())),
+    }
+    let file = match std::fs::metadata(program) {
+        Ok(meta) => meta,
+        Err(error) => return Some(format!("{}: {error}", program.display())),
+    };
+    if !file.is_file() || file.mode() & 0o111 == 0 {
+        return Some(format!(
+            "{} is not an executable regular file",
+            program.display()
+        ));
+    }
+    for path in program.ancestors() {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => return Some(format!("{}: {error}", path.display())),
+        };
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Some(format!(
+                "{} can be changed by a user other than root, so the program it names \
+                 cannot be held to the grant",
+                path.display()
+            ));
+        }
+    }
+    None
 }
 
 fn path_is_in_drive_roots(path: &str, drive: &mvm_contract::grants::DriveGrant) -> bool {
@@ -2033,12 +2079,16 @@ mod tests {
         }
     }
 
+    /// A root-owned, canonical executable present on every supported host,
+    /// standing in for an application binary.
+    const ROOT_OWNED_PROGRAM: &str = "/usr/bin/id";
+
     #[test]
     fn an_application_terminal_grant_admits_only_its_exact_argv() {
-        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
         assert!(
             enforce_application_terminal_grant(
-                &console_open(&["/usr/bin/claude"], Vec::new()),
+                &console_open(&[ROOT_OWNED_PROGRAM], Vec::new()),
                 Some(&grant)
             )
             .is_none()
@@ -2053,19 +2103,25 @@ mod tests {
             Some(&grant),
         ));
         assert!(other.contains("application_terminal grant"), "{other}");
-        let env = refusal_message(enforce_application_terminal_grant(
-            &console_open(
-                &["/usr/bin/claude"],
-                vec![("LD_PRELOAD".into(), "/tmp/x.so".into())],
-            ),
-            Some(&grant),
-        ));
-        assert!(env.contains("dynamic-loader"), "{env}");
+        for env in [
+            ("LD_PRELOAD", "/tmp/x.so"),
+            ("NODE_OPTIONS", "--require /tmp/x.js"),
+            ("HTTPS_PROXY", "http://attacker.example:8080"),
+        ] {
+            let refused = refusal_message(enforce_application_terminal_grant(
+                &console_open(&[ROOT_OWNED_PROGRAM], vec![(env.0.into(), env.1.into())]),
+                Some(&grant),
+            ));
+            assert!(
+                refused.contains("host-provisioned environment"),
+                "{refused}"
+            );
+        }
         assert!(
             enforce_application_terminal_grant(
                 &console_open(
-                    &["/usr/bin/claude"],
-                    vec![("HTTPS_PROXY".into(), "http://127.0.0.1:3128".into())],
+                    &[ROOT_OWNED_PROGRAM],
+                    vec![("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into())],
                 ),
                 Some(&grant)
             )
@@ -2075,13 +2131,61 @@ mod tests {
     }
 
     #[test]
+    fn a_granted_path_reached_through_a_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let link = dir.join("app");
+        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM, &link).unwrap();
+        let link = link.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[link]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[link], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("symbolic link"), "{refused}");
+    }
+
+    #[test]
+    fn a_granted_program_the_workload_could_rewrite_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let program = dir.join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let program = program.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[program]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[program], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("other than root"), "{refused}");
+    }
+
+    #[test]
+    fn a_missing_or_non_executable_granted_program_is_refused() {
+        let grant = verb_grant_with_terminal(&["/nonexistent/app"]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/nonexistent/app"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("/nonexistent/app"), "{refused}");
+        let grant = verb_grant_with_terminal(&["/usr/bin"]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/usr/bin"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("not an executable"), "{refused}");
+    }
+
+    #[test]
     fn without_an_application_terminal_grant_the_console_is_unchanged() {
         let request = console_open(&[], Vec::new());
         assert!(enforce_application_terminal_grant(&request, None).is_none());
         assert!(
             enforce_application_terminal_grant(&request, Some(&verb_grant_with_drive())).is_none()
         );
-        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
         assert!(
             enforce_application_terminal_grant(
                 &GuestRequest::ConsoleResize {

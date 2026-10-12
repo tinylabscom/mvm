@@ -266,11 +266,7 @@ fn wasm_grants_from_config(config: &VmStartConfig) -> Result<Grants> {
         }
         None => Ok(Grants {
             cpu: config.cpu_grant,
-            wall_clock: None,
-            egress: None,
-            drive: None,
-            display_input: None,
-            application_terminal: None,
+            ..Grants::default()
         }),
     }
 }

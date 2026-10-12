@@ -273,7 +273,7 @@ mod tests {
         assert!(!round.permits("exec"));
         assert!(!round.permits("proc-start"));
 
-        let shell = ApplicationTerminalGrant::new(vec!["/bin/sh".into()]).unwrap();
+        let shell = ApplicationTerminalGrant::new(vec!["/opt/other/bin/app".into()]).unwrap();
         let mut redirected = round.clone();
         redirected.application_terminal = Some(ApplicationTerminalBinding::from(&shell));
         assert_eq!(
