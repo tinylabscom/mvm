@@ -267,20 +267,26 @@ reason = "Output pattern appears only inside a docstring example; the module its
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-agent"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "MVM_AGENT_BIN"
+launcher = "crates/mvm-build/src/initramfs.rs"
+anchor = 'CpioEntry::file("./init", 0o755, agent_bytes.to_vec())'
+activation = "always"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-guest-agent"
+launcher = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+anchor = "fork_guest_agent();"
 activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-netinit"
 launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
-anchor = "NETINIT_OVERLAY"
+anchor = 'run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");'
 activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-netinit"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "mvm-guest-netinit"
+launcher = "crates/mvm-agentd/src/bin/mvm-guest-agent/init.rs"
+anchor = "mvm_agentd::guest_bootstrap::provision_guest_environment()"
 activation = "always"
 
 [[launch_edge]]
@@ -292,10 +298,10 @@ condition = "kernel cmdline mvm.vsock_egress=1"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-addon-dns"
-launcher = "nix/lib/mk-guest.nix"
-anchor = "MVM_ADDON_DNS_BIN"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "start_addon_dns(vsock_egress);"
 activation = "conditional"
-condition = "addons opt-in resolves an addon-dns binary"
+condition = "baked addon zone is present and the runtime overlay supplies the addon-dns binary"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-addon-vsock-bridge"

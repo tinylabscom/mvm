@@ -623,7 +623,7 @@ fn main() -> Result<()> {
                 "  check-guest-agent-runtime-free          Plan 124 A: assert mvm-guest's Linux closure pulls no tokio/async-trait/rtnetlink"
             );
             eprintln!(
-                "  check-guest-agent-in-all-images         Plan 124 B: assert every bootable image's launch path forks mvm-guest-agent"
+                "  check-guest-agent-in-all-images         assert CLI runtime supplies every VM's agent, not base/application images"
             );
             eprintln!(
                 "  check-guest-images-no-builder-tools     assert mkGuest never bakes mvmctl / mvm-builderd into workload guest images"
@@ -805,17 +805,57 @@ fn default_man_dir() -> PathBuf {
 
 #[cfg(test)]
 mod guest_init_tests {
+    fn workload_stdin_is_isolated(source: &str) -> bool {
+        let code = crate::rust_source::strip_cfg_test_items(
+            &crate::rust_source::blank_comments_and_strings(source),
+        );
+        let Some((_, spawn)) = code.split_once("let mut cmd = Command::new(&program);") else {
+            return false;
+        };
+        let Some((command, _)) = spawn.split_once("let write_raw") else {
+            return false;
+        };
+        command.contains(".stdin(Stdio::piped())")
+            && !command.contains(".stdin(Stdio::inherit())")
+            && code.contains("child.stdin.take()")
+            && code.contains("pipe.write_all(stdin_data)")
+    }
+
+    fn entrypoint_source() -> String {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/mvm-agentd/src/entrypoint.rs"
+        );
+        std::fs::read_to_string(path).expect("read agent entrypoint runner")
+    }
+
     #[test]
     fn guest_init_detaches_workload_stdin_from_console() {
-        // The sealed-workload arm must source the boot command with stdin
-        // redirected away from the input-less serial console; otherwise a
-        // workload that reads stdin EOF-crashes shortly after boot.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../nix/lib/mk-guest.nix");
-        let init = std::fs::read_to_string(path).expect("read mk-guest.nix");
+        // Workloads receive authenticated host input through a dedicated pipe,
+        // never the input-less serial console inherited by the agent.
         assert!(
-            init.contains(". \"$MVM_BOOT\" </dev/null"),
-            "mk-guest.nix workload arm must redirect the workload's stdin to /dev/null"
+            workload_stdin_is_isolated(&entrypoint_source()),
+            "agent entrypoint runner must pipe host input without inheriting console stdin"
         );
+    }
+
+    #[test]
+    fn workload_stdin_gate_rejects_inheritance_and_commented_witnesses() {
+        let source = entrypoint_source();
+        for replacement in [
+            ".stdin(Stdio::inherit())",
+            "",
+            "/* .stdin(Stdio::piped()) */",
+            "/* outer /* .stdin(Stdio::piped()) */ still a comment */",
+            "// .stdin(Stdio::piped())",
+        ] {
+            assert!(!workload_stdin_is_isolated(
+                &source.replace(".stdin(Stdio::piped())", replacement)
+            ));
+        }
+        assert!(!workload_stdin_is_isolated(
+            &source.replace("pipe.write_all(stdin_data)", "pipe.write_all(&[])")
+        ));
     }
 }
 
