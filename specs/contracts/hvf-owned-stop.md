@@ -83,7 +83,11 @@ An owned launch handle can retain its child and kernel observer for natural
 exit. A later detached client that never established a lifetime observation
 cannot reconstruct that proof from a missing endpoint or PID file. It retains
 state and reports the uncertainty. Legacy detached instances without this
-control protocol fail closed rather than falling back to numeric signals.
+control protocol fail closed rather than falling back to numeric signals. A name no
+launch was attempted under is the exception: a launch takes its lock in the
+state directory before spawning a supervisor, and cleanup removes the directory
+only after a confirmed exit, so a name with neither that lock nor any runtime
+evidence reports stopped and a stop of it is a no-op.
 
 Missing roots, authentication failures, deadlines, observer failures, capture
 finalization failures and ambiguous status preserve runtime, control and session
