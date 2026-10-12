@@ -152,7 +152,11 @@ Before a record is queued for the records file, the host collector:
   on disk whole. Holding longer would delay every quiet stream's last line
   by as much, and the host cannot tell a secret's prefix from ordinary
   output (it holds fingerprints, not values). Encoded or derived forms of a
-  secret are not recognised, as on the stream plane.
+  secret are not recognised, as on the stream plane. Each stream is joined
+  across all of its chunks, whoever wrote them: two workload processes
+  writing the same stream at once interleave, and a secret one of them splits
+  across writes with enough of the other's output between the pieces is
+  joined to the other's bytes and missed.
 - **masks** every text and byte field through the stream plane's curated
   redaction seam (`XXX` in place of a match), the same rules the transcript
   uses. A field the seam cannot vouch for withholds the record.

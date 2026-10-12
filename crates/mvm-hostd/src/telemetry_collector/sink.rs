@@ -885,6 +885,53 @@ mod tests {
         )
     }
 
+    /// A chunk as the guest's stdio tap sends it: under the stream's own
+    /// producer (2 stdout, 3 stderr) and the stdio source.
+    fn tapped(stream: StdioStream, sequence: u64, text: &[u8]) -> TelemetryRecord {
+        TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([5; 16]).unwrap())
+            .producer(match stream {
+                StdioStream::Stdout => 2,
+                StdioStream::Stderr => 3,
+            })
+            .sequence(sequence)
+            .source(SourceKind::Stdio)
+            .body(RecordBody::Stdio {
+                stream,
+                bytes: BoundedList::new(text.to_vec()).unwrap(),
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn tapped_workload_output_split_across_reads_and_interleaved_with_stderr_is_withheld() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
+        let third = SECRET.len() / 3;
+        let (a, rest) = SECRET.as_bytes().split_at(third);
+        let (b, c) = rest.split_at(third);
+        sink.try_ingest(&tapped(StdioStream::Stdout, 1, a));
+        sink.try_ingest(&tapped(StdioStream::Stderr, 1, &[b'e'; 256]));
+        sink.try_ingest(&tapped(StdioStream::Stdout, 2, b));
+        sink.try_ingest(&tapped(StdioStream::Stderr, 2, &[b'e'; 256]));
+        assert_eq!(
+            sink.try_ingest(&tapped(StdioStream::Stdout, 3, c)),
+            IngestOutcome::Shed(LossClass::SecretWithheld),
+            "each stream is scanned joined to its own tail"
+        );
+        sink.release_held();
+        assert!(never_whole(&kept));
+        // The other stream's output is unaffected.
+        assert!(
+            kept.0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|record| record.producer() == 3)
+        );
+    }
+
     fn kept_sequences(kept: &Keep) -> Vec<u64> {
         kept.0
             .lock()

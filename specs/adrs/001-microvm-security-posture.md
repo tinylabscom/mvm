@@ -822,7 +822,9 @@ tuning decision.
   (defence in depth under claim 13, not a claim of its own). A secret split
   across stdio chunks is caught by joining each chunk to its stream's last
   bytes, but a guest that pauses more than 500 ms mid-secret gets the part
-  before the pause written; only the completing chunk is withheld. Holding
+  before the pause written; only the completing chunk is withheld, and two
+  processes writing one stream at once can separate a split secret's pieces
+  far enough to be missed. Holding
   output longer would delay every quiet stream, and the host holds
   fingerprints, not values, so it cannot recognise a secret's prefix. See
   `specs/telemetry/studio-contract.md`.
