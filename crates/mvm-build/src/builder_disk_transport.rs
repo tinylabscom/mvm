@@ -201,6 +201,32 @@ pub fn read_output_disk(disk_image: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Add search permission for group and others to each directory in `dirs`,
+/// leaving every other bit as it was.
+///
+/// The host packs `mvm-bins` from its payload cache, which it keeps at 0700,
+/// and the archive carries that mode into the guest. A guest helper that runs
+/// under its own uid and is executed from that tree, such as the Stage 0 egress
+/// client, then fails with `EACCES` at exec. The binaries inside are already
+/// 0755, so search permission on the directories leading to them is all the
+/// helper needs; read permission is not added, so the tree stays unlistable.
+pub fn grant_search(dirs: &[&Path]) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    for dir in dirs {
+        let mode = std::fs::metadata(dir)
+            .with_context(|| format!("stat {}", dir.display()))?
+            .permissions()
+            .mode();
+        let wanted = mode | 0o011;
+        if wanted != mode {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(wanted))
+                .with_context(|| format!("grant search on {}", dir.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Stream `source` as a raw tar archive onto an already-sized output disk.
 ///
 /// This is the guest-side inverse of [`read_output_disk`]. It deliberately
@@ -277,6 +303,47 @@ mod tests {
             );
         }
         assert!(saw_link);
+    }
+
+    /// The host's payload cache is 0700 and the archive carries that mode, so
+    /// an unpacked `mvm-bins` is not searchable by a guest helper's uid until
+    /// search permission is granted. Read permission stays off.
+    #[test]
+    fn a_0700_bins_tree_unpacks_unsearchable_until_search_is_granted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bins = dir.path().join("payload");
+        fs::create_dir_all(&bins).unwrap();
+        fs::write(bins.join("mvm-egress-client"), b"\x7fELF").unwrap();
+        fs::set_permissions(
+            bins.join("mvm-egress-client"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::set_permissions(&bins, fs::Permissions::from_mode(0o700)).unwrap();
+        let disk = dir.path().join("input.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "mvm-bins",
+                src: &bins,
+            }],
+            None,
+            &disk,
+            INPUT_DISK_MIN_BYTES,
+        )
+        .unwrap();
+
+        let staged = dir.path().join("staged");
+        read_output_disk(&disk, &staged).unwrap();
+        let unpacked = staged.join("mvm-bins");
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&unpacked), 0o700);
+
+        grant_search(&[&staged, &unpacked]).unwrap();
+        assert_eq!(mode(&unpacked), 0o711);
+        assert_eq!(mode(&staged) & 0o011, 0o011);
+        assert_eq!(mode(&unpacked.join("mvm-egress-client")), 0o755);
     }
 
     #[test]
