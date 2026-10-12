@@ -407,7 +407,6 @@ mod tests {
     use mvm_core::net::telemetry::outbox::Outbox;
     use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
     use mvm_core::protocol::telemetry::{Attributes, Level, MAX_RECORD_BYTES, TelemetryRecord};
-    use std::io::Read as _;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;

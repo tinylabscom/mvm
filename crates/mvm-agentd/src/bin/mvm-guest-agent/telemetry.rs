@@ -22,7 +22,6 @@
 //! endpoint asserts nothing, and the guest launches no thread and holds no
 //! port for it.
 
-use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -248,6 +247,7 @@ mod tests {
     use mvm_agentd::telemetry_service::AGENT_COVERAGE_CODE;
     use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
     use mvm_core::protocol::telemetry::{CoverageState, RecordBody, TelemetryRecord};
+    use std::io::Read as _;
     use std::os::unix::net::UnixStream;
 
     #[test]
