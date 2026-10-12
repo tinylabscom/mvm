@@ -533,14 +533,24 @@ telemetry during the run, so it has no live witness yet.
 
 ### W6 — Real-backend and security certification
 
-- [ ] Exercise the backend/source matrix with actual runtime witnesses, not mocks
+The certification record is [`specs/telemetry/certification.md`](../telemetry/certification.md).
+
+- [x] Exercise the backend/source matrix with actual runtime witnesses, not mocks
       alone. Prove early boot or retain an explicit uncertified coverage gap.
-- [ ] Use deterministic stopped readers, filled queues and cancellation barriers
+      Live on Firecracker and HVF; libkrun, QEMU and `apple-container` are
+      recorded as uncertified, the pre-agent interval as unavailable, and the
+      unwired sources as gaps.
+- [x] Use deterministic stopped readers, filled queues and cancellation barriers
       to verify latency/memory budgets; do not use sleeps as synchronization.
-- [ ] Verify synthetic-secret absence at wire/host/log/export boundaries, tamper,
+- [x] Verify synthetic-secret absence at wire/host/log/export boundaries, tamper,
       replay, malformed/flood input, restore identity, missing witnesses and gaps.
 - [ ] Add user-visible BDD for detached trace retrieval, standalone events, span
       correlation, loss visibility, slow-host operation and multi-VM isolation.
+      Landed: standalone events, guest diagnostics retrieved without the guest,
+      loss visibility (a withheld secret) and multi-VM isolation
+      (`@telemetry_collection`). Open: span correlation (no guest span
+      producer is wired yet), slow-host operation as an operator scenario, and
+      a detached machine's workload output (`@wip`).
 
 ### W7 — Default-on rollout, documentation and queued delivery
 

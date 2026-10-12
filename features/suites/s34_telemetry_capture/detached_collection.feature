@@ -4,23 +4,24 @@ Feature: A detached machine's output is collected for the VM lifetime
   CLI invocation that happened to boot it. A machine booted detached and later
   reached from another process must still leave a durable, readable record.
 
-  # BLOCKED — collection is process-local today. This is not an unwritten
-  # test; it is an unimplemented feature, and the scenario keeps the gap
-  # visible:
+  # BLOCKED — the collector is VM-lifetime now, but workload output is not
+  # one of its sources yet. This is not an unwritten test; it is an
+  # unimplemented feature, and the scenario keeps the gap visible:
   #
-  #   * `mvm-hostd`'s stream plane registers captures per process: a call
-  #     dispatched into a machine some other process booted gets a
-  #     record-nothing sink, so the bytes reach the caller and nothing else —
-  #     pinned by the gap regression
-  #     `a_machine_booted_by_another_process_has_no_durable_copy_here`, which
-  #     asserts today's deficient behavior and must flip into the positive
-  #     contract in the same change that lands the VM-lifetime collector.
-  #   * The per-VM Telemetry vsock endpoint is already provisioned on every
-  #     backend; what is missing is a guest listener and a host collector
-  #     supervised independently of any CLI attachment.
+  #   * Every fresh boot and every warm-claimed child has a host collector
+  #     owned for the VM's life, independent of the CLI that booted it; a
+  #     detached machine's agent diagnostics are durably readable through
+  #     `mvmctl machine telemetry` (see guest_diagnostics_collected.feature,
+  #     and the live Firecracker and HVF witnesses in
+  #     `specs/telemetry/certification.md`).
+  #   * The guest's stdout/stderr producers (`ProducerId::Stdout`/`Stderr`)
+  #     are reserved but unwired, so a detached workload's output reaches
+  #     neither the collector nor any other durable copy. The stream plane's
+  #     gap regression `a_machine_booted_by_another_process_has_no_durable_copy_here`
+  #     still holds.
   #
-  # Un-tag this and write the steps in the same change that lands the
-  # VM-lifetime host collector.
+  # Un-tag this and write the steps in the same change that wires workload
+  # stdio into guest capture.
   @wip
   Scenario: Output of a machine booted by another process is durably readable
     Given a scenario awaiting its step implementation
