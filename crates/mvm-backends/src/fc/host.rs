@@ -648,19 +648,22 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
 /// 2. Reads the parent's device anchors and bind-mounts the child's copies over
 ///    those paths in a private mount namespace, so the snapshot bitcode resolves
 ///    to the child's files without editing `vmstate.bin`.
-/// 3. Starts a fresh Firecracker and loads the cloned snapshot. The fork
-///    caller delivers the real generation token and optional grant over vsock
-///    after `restore_fork` returns.
+/// 3. Starts a fresh Firecracker and loads the cloned snapshot, then returns
+///    the calling thread to its own mount namespace; only that Firecracker
+///    keeps the remapped view. The fork caller delivers the real generation
+///    token and optional grant over vsock after `restore_fork` returns.
 pub struct FcForkRestorer;
 
 impl FcForkRestorer {
-    /// Prepare a forked child and return its paused Firecracker API handle.
+    /// Prepare a forked child: its Firecracker API handle, and the mount
+    /// namespace the calling thread entered to remap the parent's paths. The
+    /// caller loads the snapshot and then restores the namespace.
     fn prepare_fork_load(
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
         cpu_grant: Option<mvm_contract::grants::CpuGrant>,
-    ) -> anyhow::Result<super::io::FirecrackerIO> {
+    ) -> anyhow::Result<(super::io::FirecrackerIO, super::ForkMountNamespace)> {
         use anyhow::Context as _;
         // FC saves memory as `memory.bin`; the snapshot loader expects
         // `mem.bin`, Firecracker's canonical load filename.
@@ -717,7 +720,7 @@ impl FcForkRestorer {
             std::path::PathBuf::from(&child_vm_dir),
         ));
         std::fs::create_dir_all(child_dir.join("runtime")).ok();
-        super::remap_paths_for_fork(&mappings)
+        let namespace = super::remap_paths_for_fork(&mappings)
             .context("remapping parent device paths for FC fork")?;
 
         // The namespace is already active, so preserve the mounted child vsock
@@ -728,7 +731,25 @@ impl FcForkRestorer {
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
         // before the child executes anything. The claim resumes it only after
         // fresh host channels have been wired.
-        Ok(child_io(child_vm_name, child_dir, cpu_grant))
+        Ok((child_io(child_vm_name, child_dir, cpu_grant), namespace))
+    }
+
+    /// Run a snapshot load inside the fork's namespace, then leave it.
+    ///
+    /// Only the Firecracker the load starts keeps the remapped view. The thread
+    /// that ran the load goes back to the host's mounts whether or not it
+    /// succeeded, so a process forking child after child starts every remap
+    /// from the host's view rather than from the previous child's.
+    fn load_in_fork_namespace(
+        namespace: super::ForkMountNamespace,
+        load: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        let loaded = load();
+        let restored = namespace
+            .restore()
+            .context("leaving the Firecracker fork's mount namespace");
+        loaded.and(restored)
     }
 
     /// Load and guard a forked child without resuming it. Pool refill uses this
@@ -744,9 +765,12 @@ impl FcForkRestorer {
         child_vm_name: &str,
         child_dir: &std::path::Path,
     ) -> anyhow::Result<()> {
-        let io = self.prepare_fork_load(child_vm_name, child_dir, None)?;
-        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        let (io, namespace) = self.prepare_fork_load(child_vm_name, child_dir, None)?;
+        Self::load_in_fork_namespace(namespace, || {
+            mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+                format!("FC warm-restore for forked child '{child_vm_name}' failed")
+            })
+        })
     }
 }
 
@@ -777,9 +801,12 @@ impl FcForkRestorer {
         child_dir: &std::path::Path,
         cpu_grant: Option<mvm_contract::grants::CpuGrant>,
     ) -> anyhow::Result<()> {
-        let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
-        mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        let (io, namespace) = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
+        Self::load_in_fork_namespace(namespace, || {
+            mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir).with_context(|| {
+                format!("FC warm-restore for forked child '{child_vm_name}' failed")
+            })
+        })
     }
 }
 
