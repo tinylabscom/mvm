@@ -7,13 +7,14 @@
 //!
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
-//! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
+//! shape a shared parent can serve at all (`warm_eligible_launch` — read-only mounts only,
+//! through the parent's late-volume slots).
 //! Anything else boots cold, and records why. An unnamed run of an eligible shape
 //! leaves a standby of its image behind for the next run (`refill`). Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
-//! honouring an explicit `--name`/volumes are deferred follow-ups.
+//! honouring an explicit `--name` are deferred follow-ups.
 
 use std::path::Path;
 
@@ -959,8 +960,10 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 ///
 /// Excluded:
 ///
-/// - **extra volumes** — the attach threads only the rootfs, so a volume disk
-///   would be missing from the child;
+/// - **volumes no late-volume slot can serve** — a writable disk, a volume with
+///   no materialized image, or more volumes than the backend's parents boot
+///   slots for. A restored child inherits its parent's device model, so a
+///   volume reaches it only through a read-only slot the parent booted;
 /// - **bundle-owned boot assets** — the pool command cannot prepare a parent
 ///   from an archive's pinned runtime set, so claiming a host-prepared parent
 ///   would substitute boot assets the bundle did not select.
@@ -981,13 +984,23 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 /// its signed plan recorded, so a parent shared across claims carries no
 /// launch's allow-list to the next one.
 ///
-/// Materialized directory grants are included in the volume check. The current
-/// factory-parent path has no late attachment operation for their image, so
-/// they remain cold-path-only.
-fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
+/// Read-only materialized mounts (`--mount DIR:PATH:ro`) are keyed on nothing:
+/// the parent boots placeholder slots, and the claim points them at the
+/// launch's own images before the child resumes.
+fn warm_eligible_launch(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
     cfg.bundle_boot_assets.is_none()
-        && cfg.volumes.is_empty()
+        && late_volumes_attachable(cfg, late_volume_slots)
         && !mvm_vmm::host::egress_shared::launch_terminates_egress_tls(cfg)
+}
+
+/// Whether every volume of this launch can be attached to a claimed child
+/// through the backend's late-volume slots.
+fn late_volumes_attachable(cfg: &VmStartConfig, late_volume_slots: u8) -> bool {
+    cfg.volumes.len() <= usize::from(late_volume_slots)
+        && cfg
+            .volumes
+            .iter()
+            .all(|volume| volume.read_only && volume.materialized_image.is_some())
 }
 
 /// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby
@@ -1010,7 +1023,7 @@ pub fn try_warm_claim(
     cfg: &VmStartConfig,
     user_named: bool,
 ) -> Result<WarmClaimOutcome> {
-    if let Err(reason) = claim_gate(cfg, user_named) {
+    if let Err(reason) = claim_gate(cfg, user_named, backend.late_volume_slots()) {
         return Ok(WarmClaimOutcome::Cold(reason));
     }
     let Some(tenant) = cfg.tenant_id.clone() else {
@@ -1028,6 +1041,7 @@ pub fn try_warm_claim(
         }
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported));
     }
+    enforce_late_volume_shares(cfg, &plan_json)?;
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
     // admission just populated, so this costs a read, not a re-hash.
@@ -1070,6 +1084,20 @@ pub fn try_warm_claim(
         LaunchDecision::ColdBoot => Ok(WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)),
         LaunchDecision::Refused(refusal) => outcome_for_refusal(refusal, claim_required()),
     }
+}
+
+/// Re-check every volume a claim will attach against the shares its signed
+/// plan admitted, immediately before the claim, exactly as a cold boot checks
+/// them before it attaches anything: the volume must be named by the plan, and
+/// a directory whose content digest the plan pinned must still hash to it.
+fn enforce_late_volume_shares(cfg: &VmStartConfig, plan_json: &str) -> Result<()> {
+    if cfg.volumes.is_empty() {
+        return Ok(());
+    }
+    let plan = mvm_core::plan::plan_from_admitted_json(plan_json)
+        .context("a warm claim attaching volumes needs its admitted plan")?;
+    mvm_hostd::plan_admission::enforce_admitted_shares(&cfg.volumes, &plan)
+        .context("checking the volumes a warm claim attaches against its admitted shares")
 }
 
 fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<String> {
@@ -1233,7 +1261,7 @@ mod tests {
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
         assert_eq!(
-            claim_gate(&c, false),
+            claim_gate(&c, false, 0),
             Err(ColdStartReason::StandbysDisabled)
         );
         let b = AnyBackend::from_hypervisor("libkrun");
@@ -1246,10 +1274,10 @@ mod tests {
     #[test]
     fn a_named_launch_never_claims_and_an_eligible_unnamed_one_does() {
         let mut cfg = eligible_cfg();
-        assert_eq!(claim_gate(&cfg, false), Ok(()));
-        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
+        assert_eq!(claim_gate(&cfg, false, 0), Ok(()));
+        assert_eq!(claim_gate(&cfg, true, 0), Err(ColdStartReason::Named));
         cfg.warm_pool_size = 0;
-        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
+        assert_eq!(claim_gate(&cfg, true, 0), Err(ColdStartReason::Named));
     }
 
     /// Finding nothing to claim is the first run of an image, not an error.
@@ -1319,9 +1347,9 @@ mod tests {
         });
         for pool_size in [0, 2] {
             cfg.warm_pool_size = pool_size;
-            assert!(!warm_eligible_launch(&cfg));
+            assert!(!warm_eligible_launch(&cfg, 0));
             assert_eq!(
-                claim_gate(&cfg, false),
+                claim_gate(&cfg, false, 0),
                 Err(ColdStartReason::IneligibleShape)
             );
         }
@@ -1339,8 +1367,122 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            claim_gate(&cfg, false),
+            claim_gate(&cfg, false, 0),
             Err(ColdStartReason::IneligibleShape)
+        );
+    }
+
+    fn read_only_mount(guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: "/workspace".into(),
+            guest: guest.into(),
+            materialized_image: Some(format!("/cache{guest}.ext4")),
+            read_only: true,
+            ..Default::default()
+        }
+    }
+
+    /// A read-only directory mount is served by a parent's late-volume slot,
+    /// so on a backend with slots it requires a claim like any eligible shape.
+    #[test]
+    fn a_read_only_mount_is_warm_eligible_where_the_backend_boots_slots() {
+        let mut cfg = eligible_cfg();
+        cfg.volumes = vec![read_only_mount("/data"), read_only_mount("/work")];
+        assert!(warm_eligible_launch(&cfg, 4));
+        assert_eq!(claim_gate(&cfg, false, 4), Ok(()));
+        cfg.warm_pool_size = 0;
+        assert_eq!(
+            claim_gate(&cfg, false, 4),
+            Err(ColdStartReason::StandbysDisabled),
+            "an unwarmed mount launch boots cold, not refused"
+        );
+        assert!(
+            !warm_eligible_launch(&cfg, 0),
+            "a backend with no slots keeps every volume launch cold"
+        );
+    }
+
+    /// Only what a read-only slot can serve is attached late: a writable
+    /// mount, a disk with no materialized image, or more volumes than slots
+    /// keep the cold path.
+    #[test]
+    fn volumes_a_slot_cannot_serve_keep_their_cold_path() {
+        let mut writable = eligible_cfg();
+        let mut volume = read_only_mount("/data");
+        volume.read_only = false;
+        writable.volumes = vec![volume];
+
+        let mut disk = eligible_cfg();
+        let mut volume = read_only_mount("/data");
+        volume.materialized_image = None;
+        disk.volumes = vec![volume];
+
+        let mut too_many = eligible_cfg();
+        too_many.volumes = (0..5)
+            .map(|i| read_only_mount(&format!("/data/{i}")))
+            .collect();
+
+        for (why, cfg) in [
+            ("a writable mount", writable),
+            ("an unmaterialized disk", disk),
+            ("more volumes than slots", too_many),
+        ] {
+            assert!(!warm_eligible_launch(&cfg, 4), "{why}");
+            assert_eq!(
+                claim_gate(&cfg, false, 4),
+                Err(ColdStartReason::IneligibleShape),
+                "{why}"
+            );
+        }
+    }
+
+    /// A volume the signed plan never admitted is refused before any parent is
+    /// touched, and so is a launch with volumes whose plan cannot be read.
+    #[test]
+    fn a_volume_the_plan_did_not_admit_is_refused_before_the_claim() {
+        let mut cfg = eligible_cfg();
+        cfg.volumes = vec![read_only_mount("/data")];
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        let err = enforce_late_volume_shares(&cfg, &plan_json).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not named in the signed"),
+            "{err:#}"
+        );
+        assert!(enforce_late_volume_shares(&cfg, "not a plan").is_err());
+        assert!(enforce_late_volume_shares(&eligible_cfg(), "not a plan").is_ok());
+    }
+
+    /// The content digest a plan pinned for a mount is re-checked right before
+    /// the claim, as a cold boot re-checks it: an image whose bytes changed
+    /// after admission is refused, the unchanged one is attached.
+    #[test]
+    fn a_mount_whose_bytes_changed_after_admission_is_refused_before_the_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("mount.ext4");
+        std::fs::write(&image, b"admitted bytes").unwrap();
+        let mut cfg = eligible_cfg();
+        let mut volume = read_only_mount("/data");
+        volume.materialized_image = Some(image.display().to_string());
+        cfg.volumes = vec![volume.clone()];
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.shares = vec![mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: volume.host.clone(),
+            guest_path: volume.guest.clone(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
+        }];
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        enforce_late_volume_shares(&cfg, &plan_json).expect("unchanged bytes are attached");
+
+        std::fs::write(&image, b"changed after admission").unwrap();
+        assert!(
+            enforce_late_volume_shares(&cfg, &plan_json).is_err(),
+            "bytes the plan never vouched for must not reach a claimed child"
         );
     }
 
@@ -1605,7 +1747,7 @@ mod tests {
         // still declares it on its recorded spec, so the compat check keeps
         // comparing the field rather than assuming it.
         assert_eq!(key.root_strategy, RuntimeSourceRootStrategy::BlockExt4);
-        assert!(warm_eligible_launch(&cfg));
+        assert!(warm_eligible_launch(&cfg, 0));
     }
 
     #[test]
@@ -1717,20 +1859,20 @@ mod tests {
         })];
 
         assert!(
-            warm_eligible_launch(&eligible_cfg()),
+            warm_eligible_launch(&eligible_cfg(), 0),
             "the baseline launch shape must be warm-eligible, or this test proves nothing"
         );
         let b = AnyBackend::from_hypervisor("libkrun");
         for (why, cfg) in ineligible {
             assert!(
-                !warm_eligible_launch(&cfg),
+                !warm_eligible_launch(&cfg, 0),
                 "{why} must not be warm-eligible"
             );
             for size in [0, 2] {
                 let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
                 assert_eq!(
-                    claim_gate(&cfg, false),
+                    claim_gate(&cfg, false, 0),
                     Err(ColdStartReason::IneligibleShape),
                     "{why}"
                 );
@@ -1764,11 +1906,11 @@ mod tests {
                 mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg),
                 "{why} must boot the egress client, or this proves nothing"
             );
-            assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
-            assert_eq!(claim_gate(&cfg, false), Ok(()), "{why}");
+            assert!(warm_eligible_launch(&cfg, 0), "{why} must be warm-eligible");
+            assert_eq!(claim_gate(&cfg, false, 0), Ok(()), "{why}");
             cfg.warm_pool_size = 0;
             assert_eq!(
-                claim_gate(&cfg, false),
+                claim_gate(&cfg, false, 0),
                 Err(ColdStartReason::StandbysDisabled),
                 "{why} boots cold for want of standbys, not for its shape"
             );
@@ -1822,12 +1964,12 @@ mod tests {
             ("a bound secret", with_secret),
             ("an intercepted route", intercepting),
         ] {
-            assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
+            assert!(!warm_eligible_launch(&cfg, 0), "{why} must stay cold");
             for size in [0, 2] {
                 let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
                 assert_eq!(
-                    claim_gate(&cfg, false),
+                    claim_gate(&cfg, false, 0),
                     Err(ColdStartReason::IneligibleShape),
                     "{why}"
                 );
@@ -2279,7 +2421,7 @@ mod tests {
             "the warm key must name the rootfs, or it matches nothing"
         );
         assert!(
-            warm_eligible_launch(&warmed.start_config),
+            warm_eligible_launch(&warmed.start_config, 0),
             "the resolved warm shape must be one a shared parent can serve"
         );
     }

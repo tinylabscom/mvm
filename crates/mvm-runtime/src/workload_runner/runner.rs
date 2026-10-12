@@ -45,7 +45,7 @@ use crate::workload_runner::claim::{
     ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_claim_policy_to_plan,
     bind_plan_to_parent_digest, claim_parent_grant_bound, ensure_child_grants_within_host_ceiling,
 };
-use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
+use crate::workload_runner::standby_boot::{factory_parent_config, slotted_factory_parent_spec};
 use mvm_vmm::host::cmdline;
 use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use mvm_vmm::host::network_endpoint_spawn::{
@@ -69,7 +69,7 @@ pub use broker::RealBrokerRegistrar;
 use claim_lease::WarmClaimLease;
 use refusal::{
     admitted_seccomp_tier, map_lineage_refusal, refuse, require_admitted_seccomp_tier,
-    require_fresh_child_identity,
+    require_fresh_child_identity, require_late_volumes_mounted,
 };
 use sockets::standing_sockets;
 pub use spawner::{
@@ -299,6 +299,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     #[must_use]
     pub fn supports_preloaded_standby(&self) -> bool {
         self.driver.supports_preloaded_standby()
+    }
+
+    /// How many read-only volumes a claim on this runner's parents can attach.
+    #[must_use]
+    pub fn late_volume_slots(&self) -> u8 {
+        self.driver.late_volume_slots()
     }
 
     /// Pause/save-memory/resume control over a running VM this runner's VMM
@@ -628,6 +634,17 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // the overlay contract, then the child's own 0700 substitution endpoint
         // keyed on its fresh id (never a sibling's; the factory parent has none).
         let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        // The launch's read-only volumes go behind the late-volume slots the
+        // parent booted, and the guest is told to mount them before the claim
+        // commits. A launch with none attaches nothing.
+        let late_volumes = if child_cfg.volumes.is_empty() {
+            Vec::new()
+        } else {
+            mvm_vmm::host::late_volumes::attachments(&child_cfg, self.driver.late_volume_slots())
+                .map_err(|e| StandbyError::ClaimFailed(format!("late volumes: {e:#}")))?
+        };
+        let late_volume_configs = crate::microvm::activation::build_volume_configs(&child_cfg)
+            .map_err(|e| StandbyError::ClaimFailed(format!("late volumes: {e:#}")))?;
         let guards = ClaimGuards::new(&self.spawner);
         // Gate the image the claim was admitted for, not the clone the child
         // boots: the sidecar describes how the image was built and is not part
@@ -733,6 +750,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // The same admitted plan `claim_plan` decoded the bindings above
             // from, so the bounds the child's owner arms are the ones checked.
             admitted_plan: Some(&claim.plan_json),
+            late_volumes: &late_volumes,
         };
         let forked = if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)
@@ -781,6 +799,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             token,
             grant_envelope,
             seccomp_tier: Some(admitted_seccomp_tier(&plan)),
+            volumes: late_volume_configs,
         };
         if let Err(refusal) = self.take_fresh_child_identity(&child.0, identity) {
             // The child is live and still carrying its parent's random state.
@@ -818,6 +837,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         identity: ChildIdentity,
     ) -> std::result::Result<(), StandbyError> {
         let requested_tier = identity.seccomp_tier;
+        let requested_volumes = identity.volumes.len();
         let outcome = self
             .driver
             .deliver_child_identity(child_vm_name, identity)
@@ -830,7 +850,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 ))
             })?;
         require_fresh_child_identity(child_vm_name, &outcome)?;
-        require_admitted_seccomp_tier(child_vm_name, requested_tier, &outcome)
+        require_admitted_seccomp_tier(child_vm_name, requested_tier, &outcome)?;
+        require_late_volumes_mounted(child_vm_name, requested_volumes, &outcome)
     }
 
     /// Boot a standby parent, capture its whole live state, and release it.
@@ -885,9 +906,19 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |has_disk| {
-            self.driver.workload_base_bootargs(has_disk)
-        });
+        let slots = self.driver.late_volume_slots();
+        mvm_vmm::host::late_volumes::ensure_placeholders(&state_dir, slots).map_err(|e| {
+            StandbyError::SpawnFailed(format!(
+                "creating standby '{}' late-volume placeholders: {e:#}",
+                spec.id
+            ))
+        })?;
+        let boot = slotted_factory_parent_spec(
+            &parent_config,
+            &state_dir,
+            |has_disk| self.driver.workload_base_bootargs(has_disk),
+            slots,
+        );
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
         // memory rather than deriving its own, so a parent whose trailing tokens
@@ -4304,6 +4335,151 @@ mod tests {
     /// fresh, admitted child that carries a fresh identity on every axis the fork
     /// controls, its own isolated endpoint, the overlay gate a cold boot runs, and
     /// a fresh VMGenID delivered with the boot.
+    /// Seed an audited parent and claim it with `driver`, the claim's start
+    /// config carrying `volumes`.
+    fn claim_with_volumes(
+        driver: MockDriver,
+        volumes: Vec<mvm_core::vm_backend::VmVolume>,
+    ) -> (
+        std::result::Result<VmId, StandbyError>,
+        Vec<mvm_backends::mock::MockChildFork>,
+        Vec<mvm_backends::mock::DeliveredChildIdentity>,
+    ) {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let store_root = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let (checkpoints, snapshots, parent_id, parent_meta) =
+            seed_audited_parent(store_root.path(), src.path(), true);
+        let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+        let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
+        let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
+        pool.record(&handle).unwrap();
+        let registry_path = store_root.path().join("vm-names.json");
+        let anchor = ClaimTestAnchor::audited(&parent_meta);
+        let mut claim = admitted_child_claim(
+            &src.path().join("rootfs.ext4"),
+            signed_child_plan_json(&parent_digest),
+        );
+        if let Some(start) = claim.start_config.as_mut() {
+            start.volumes = volumes;
+        }
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let ctx = ClaimContext {
+            pool: &pool,
+            checkpoints: &checkpoints,
+            snapshots: &snapshots,
+            anchor: &anchor,
+            parent_checkpoint: &parent_id,
+            registry_path: &registry_path,
+            grant_issuer: None,
+        };
+        let result = runner.claim_standby(&ctx, &handle, &claim);
+        (
+            result,
+            runner.driver.forked_children(),
+            runner.driver.delivered_child_identities(),
+        )
+    }
+
+    fn read_only_mount(image: &str, guest: &str) -> mvm_core::vm_backend::VmVolume {
+        mvm_core::vm_backend::VmVolume {
+            host: "/host/project".into(),
+            guest: guest.into(),
+            materialized_image: Some(image.into()),
+            volume_label: Some("mvmmnt0".into()),
+            read_only: true,
+            ..Default::default()
+        }
+    }
+
+    /// A claim's read-only mount reaches the child through the slot its parent
+    /// booted: the driver points that slot at the launch's own image before the
+    /// child resumes, and the guest is told to mount it — read-only, by label —
+    /// before the claim commits.
+    #[test]
+    fn a_claim_attaches_its_read_only_mount_to_the_parents_slot_before_resume() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (result, forks, delivered) = claim_with_volumes(
+            MockDriver::default().with_late_volume_slots(4),
+            vec![read_only_mount("/cache/project.ext4", "/data")],
+        );
+        result.expect("a slotted parent serves a read-only mount");
+        assert_eq!(forks.len(), 1);
+        assert_eq!(
+            forks[0].late_volumes,
+            vec![crate::driver::LateVolumeAttach {
+                slot: 1,
+                source: PathBuf::from("/cache/project.ext4"),
+            }]
+        );
+        assert_eq!(delivered.len(), 1);
+        let mounted = &delivered[0].volumes;
+        assert_eq!(mounted.len(), 1);
+        assert_eq!(mounted[0].mountpoint, "/data");
+        assert!(mounted[0].read_only);
+        assert_eq!(mounted[0].label.as_deref(), Some("mvmmnt0"));
+        assert_eq!(mounted[0].device.as_deref(), Some("/dev/vdb"));
+    }
+
+    /// A backend whose parents boot no slots cannot attach a volume, so the
+    /// claim is refused before any child is forked.
+    #[test]
+    fn a_parent_without_slots_refuses_a_volume_claim_before_forking() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (result, forks, _) = claim_with_volumes(
+            MockDriver::default(),
+            vec![read_only_mount("/cache/project.ext4", "/data")],
+        );
+        let err = result.expect_err("no slot can serve the volume");
+        assert!(err.to_string().contains("late-volume slots"), "{err}");
+        assert!(
+            forks.is_empty(),
+            "nothing may be forked for a refused claim"
+        );
+    }
+
+    /// A guest that does not report mounting every attached volume is refused
+    /// rather than committed: its workload would start without its data.
+    #[test]
+    fn a_child_that_did_not_mount_its_volumes_is_refused() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut outcome = PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: true,
+            clock_resynced: true,
+            reseed_shortfall: None,
+            seccomp_tier: None,
+            volumes_mounted: None,
+        };
+        let admitted_tier =
+            mvm_core::plan::plan_from_admitted_json(&signed_child_plan_json(&"0".repeat(64)))
+                .unwrap()
+                .admission_profile
+                .seccomp_tier;
+        outcome.seccomp_tier = Some(admitted_tier.into());
+        let (result, _, _) = claim_with_volumes(
+            MockDriver::default()
+                .with_late_volume_slots(4)
+                .with_child_identity(outcome),
+            vec![read_only_mount("/cache/project.ext4", "/data")],
+        );
+        let err = result.expect_err("an unmounted volume must refuse the claim");
+        assert!(err.to_string().contains("mounted none of the 1"), "{err}");
+    }
+
     #[test]
     fn claim_produces_fresh_identity_and_isolated_endpoint() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
@@ -5065,6 +5241,7 @@ mod tests {
                 clock_resynced,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             })
         };
         let cases = [
@@ -5091,6 +5268,7 @@ mod tests {
                     clock_resynced: true,
                     reseed_shortfall: None,
                     seccomp_tier: Some(mvm_core::crypto::seccomp::SeccompTier::Unrestricted),
+                    volumes_mounted: None,
                 }),
             ),
         ];
@@ -5138,6 +5316,7 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             },
         ));
         assert!(out.result.is_err());

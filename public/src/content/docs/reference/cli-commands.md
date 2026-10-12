@@ -1930,9 +1930,22 @@ mvmctl pool warm --image alpine          # optional pre-warm
 mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
-A launch with no matching standby cold-boots rather than failing. Named launches
-and shapes with extra volumes (including directory mounts) always take the cold
-path. `MVM_RESIDENCY=cold` turns implicit standbys off.
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
+capacity and fail rather than silently cold-booting. Named launches and shapes
+with writable volumes or allowed egress retain their cold path, including when
+the pool size is zero.
+
+On Firecracker, a launch with up to four read-only directory mounts
+(`--mount DIR:PATH:ro`) claims the same standby a launch without them would.
+Every standby boots four read-only placeholder slots; the claim re-checks each
+mount against the shares its signed plan admitted, including the content digest
+the plan pinned, points a slot at the launch's own materialized image before the
+child resumes, and has the guest mount it read-only by its label before the
+claim commits. The guest's mount helper exists only in a standby's guest and
+exits on that first restore, before any workload process starts. A writable
+mount, a disk volume, or more than four mounts keeps the cold path, as does
+every volume launch on other backends.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left

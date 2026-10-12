@@ -261,6 +261,34 @@ pub fn factory_parent_spec(
     factory_parent_spec_inner(config, state_dir, base_bootargs, false)
 }
 
+/// [`factory_parent_spec`] plus `slots` read-only late-volume slots.
+///
+/// The slots go after every block the launch shape carries, so a child whose
+/// launch adds volumes finds each one at the device node the parent booted a
+/// placeholder in, and the cmdline declares the count so the guest starts the
+/// one helper that can mount them after restore. A parent with no slots is
+/// exactly the plain factory spec.
+pub(crate) fn slotted_factory_parent_spec(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool) -> String,
+    slots: u8,
+) -> VmmSpec {
+    let mut spec = factory_parent_spec(config, state_dir, base_bootargs);
+    if slots > 0 {
+        spec.blocks
+            .extend(mvm_vmm::host::late_volumes::parent_slot_blocks(
+                config, state_dir, slots,
+            ));
+        spec.cmdline = format!(
+            "{} {}",
+            spec.cmdline,
+            mvm_agentd::late_volumes::slots_token(slots)
+        );
+    }
+    spec
+}
+
 /// Build the factory parent shape for the native HVF live handoff. The stable
 /// paths are inert until a claim links them to the child's own host channels.
 #[cfg(test)]

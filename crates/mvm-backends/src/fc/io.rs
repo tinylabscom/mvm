@@ -66,6 +66,28 @@ impl FirecrackerIO {
         self
     }
 
+    /// Point the drive `drive_id` of a paused VMM at `path`.
+    ///
+    /// Firecracker reopens the file, takes its size, and raises a config
+    /// change for the guest, so a restored guest sees the new capacity the
+    /// moment it resumes. The drive keeps the read-only flag it booted with.
+    pub fn repoint_drive(&self, drive_id: &str, path: &Path) -> Result<()> {
+        self.ensure_socket()?;
+        let body = serde_json::json!({
+            "drive_id": drive_id,
+            "path_on_host": path.to_string_lossy(),
+        })
+        .to_string();
+        super::call(
+            &self.socket_path,
+            "PATCH",
+            &format!("/drives/{drive_id}"),
+            Some(&body),
+        )
+        .with_context(|| format!("PATCH /drives/{drive_id}"))?;
+        Ok(())
+    }
+
     /// The scope prefix the fresh VMM's launch line carries, or empty when
     /// this host cannot scope it. The launch uses this exact value, so reading
     /// it back is reading what the restored guest actually runs inside.
