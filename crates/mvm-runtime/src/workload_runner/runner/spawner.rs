@@ -71,22 +71,60 @@ pub trait NetworkEndpointSpawner: Send + Sync {
     }
 }
 
-/// What [`NetworkEndpointSpawner::start_telemetry_without_endpoint`] did: whether
-/// the boot asserts telemetry, and the collector start still in flight.
+/// What [`NetworkEndpointSpawner::start_telemetry_without_endpoint`] did:
+/// whether the boot asserts telemetry, and the collector start it owes.
 ///
-/// The start runs beside the boot rather than ahead of it, so it costs the
-/// launch nothing; whoever holds this joins it once the VM is up.
+/// A cold boot's start runs beside the boot, so it costs the launch nothing.
+/// A warm claim's is held until the claim has succeeded: the claim is the
+/// launch's critical path, and a collector starting during it competes with
+/// it for the host and the guest.
 #[derive(Default)]
 pub struct TelemetryStart {
     /// The boot is provisioned: its guest serves the telemetry listener.
     pub provisioned: bool,
-    /// The collector start, when one is still running.
-    pub pending: Option<std::thread::JoinHandle<()>>,
+    pending: Option<std::thread::JoinHandle<()>>,
+    deferred: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl TelemetryStart {
-    /// Wait for an in-flight collector start to finish.
-    pub fn join(&mut self) {
+    /// A provisioned boot with no collector start owed (a test double's).
+    pub fn provisioned(provisioned: bool) -> Self {
+        Self {
+            provisioned,
+            ..Self::default()
+        }
+    }
+
+    fn running(pending: std::thread::JoinHandle<()>) -> Self {
+        Self {
+            provisioned: true,
+            pending: Some(pending),
+            deferred: None,
+        }
+    }
+
+    fn deferred(start: Box<dyn FnOnce() + Send>) -> Self {
+        Self {
+            provisioned: true,
+            pending: None,
+            deferred: Some(start),
+        }
+    }
+
+    /// The launch succeeded: start a held collector now, beside the
+    /// workload, without waiting for it.
+    pub fn release(&mut self) {
+        if let Some(start) = self.deferred.take() {
+            let _ = std::thread::Builder::new()
+                .name("mvm-telemetry-start".into())
+                .spawn(start);
+        }
+    }
+
+    /// The launch failed: a held start is dropped, never begun; one already
+    /// running is waited for, so whoever reaps finds what it started.
+    pub fn abandon(&mut self) {
+        self.deferred = None;
         if let Some(pending) = self.pending.take() {
             let _ = pending.join();
         }
@@ -187,32 +225,33 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         let tenant = req.tenant.to_string();
         let state_dir = req.state_dir.to_path_buf();
         let redaction = req.redaction.clone();
-        let pending = std::thread::Builder::new()
-            .name("mvm-telemetry-start".into())
-            .spawn(move || {
-                let started = std::time::Instant::now();
-                let outcome = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
-                    &vm_name, &tenant, &state_dir, &redaction,
-                );
-                tracing::debug!(
+        let start = move || {
+            let started = std::time::Instant::now();
+            let outcome = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
+                &vm_name, &tenant, &state_dir, &redaction,
+            );
+            tracing::debug!(
+                vm = vm_name,
+                started = outcome.is_ok(),
+                elapsed_us = started.elapsed().as_micros() as u64,
+                "telemetry collector start"
+            );
+            if let Err(error) = outcome {
+                tracing::warn!(
                     vm = vm_name,
-                    started = outcome.is_ok(),
-                    elapsed_us = started.elapsed().as_micros() as u64,
-                    "telemetry collector start, beside the boot"
+                    error = format!("{error:#}"),
+                    "telemetry collector did not start; the VM runs without it"
                 );
-                if let Err(error) = outcome {
-                    tracing::warn!(
-                        vm = vm_name,
-                        error = format!("{error:#}"),
-                        "telemetry collector did not start; the VM runs without it"
-                    );
-                }
-            });
-        match pending {
-            Ok(pending) => TelemetryStart {
-                provisioned: true,
-                pending: Some(pending),
-            },
+            }
+        };
+        if matches!(req.identity, FlowMuxIdentitySource::InheritFrom(_)) {
+            return TelemetryStart::deferred(Box::new(start));
+        }
+        match std::thread::Builder::new()
+            .name("mvm-telemetry-start".into())
+            .spawn(start)
+        {
+            Ok(pending) => TelemetryStart::running(pending),
             Err(error) => {
                 tracing::warn!(vm = req.vm_name, error = %error, "telemetry start thread failed");
                 let _ = mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(

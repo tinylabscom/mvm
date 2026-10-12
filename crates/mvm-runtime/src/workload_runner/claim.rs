@@ -162,9 +162,14 @@ pub struct EndpointHandle {
 
 impl Drop for EndpointHandle {
     fn drop(&mut self) {
-        // Finish an in-flight collector start before the guard decides
-        // whether to reap it, so a failed launch never leaves one behind.
-        self.telemetry.join();
+        if self.guard.vm_name.is_none() {
+            // Defused: the VM is up, so a held collector start may begin.
+            self.telemetry.release();
+        } else {
+            // Armed: the launch failed. Begin nothing new, and let a running
+            // start finish before the guard reaps what it started.
+            self.telemetry.abandon();
+        }
     }
 }
 
@@ -340,10 +345,7 @@ mod tests {
             req: &NetworkEndpointSpawnRequest<'_>,
         ) -> TelemetryStart {
             *self.telemetry_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            TelemetryStart {
-                provisioned: self.collect_telemetry,
-                pending: None,
-            }
+            TelemetryStart::provisioned(self.collect_telemetry)
         }
 
         fn prepare_identity(
