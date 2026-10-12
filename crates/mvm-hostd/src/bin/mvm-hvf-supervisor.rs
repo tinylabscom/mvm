@@ -385,7 +385,7 @@ fn main() -> anyhow::Result<()> {
                 vm_state_dir,
                 pid_file: &cfg.pid_file,
             };
-            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor_with_killer(
+            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
                 timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             ) {
@@ -400,7 +400,7 @@ fn main() -> anyhow::Result<()> {
             // A session's idle timeout, for the same reason as the wall clock:
             // no client is left to enforce it once the one that started the
             // session has exited.
-            mvm_hostd::supervisor::session_expiry::arm_for_supervisor_with_killer(
+            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
                 &timer_inputs,
                 Box::new(timer_inputs.preserving_exit_killer()),
             );

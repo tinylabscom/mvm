@@ -263,7 +263,12 @@ fn startup_error_retains_child_and_redacted_reason() {
 fn shared_command_preserves_lifetime_arguments_without_owned_detachment() {
     let log = tempfile::tempfile().unwrap();
     let state = Path::new("/test/endpoint-state");
-    let command = endpoint_command(Path::new("/test/helper"), EndpointLifetime::Vm, state, log);
+    let command = endpoint_command(
+        mvm_core::env_hygiene::helper_command("/test/helper"),
+        EndpointLifetime::Vm,
+        state,
+        log,
+    );
     assert_eq!(command.get_program(), "/test/helper");
     assert_eq!(
         command.get_args().collect::<Vec<_>>(),

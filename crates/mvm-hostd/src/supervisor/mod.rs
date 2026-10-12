@@ -68,13 +68,13 @@ pub mod gateway_audit;
 pub mod egress_rate;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
+pub mod hvf_stop;
 pub mod icmp_audit;
 pub mod icmp_echo;
 pub mod icmp_handler;
 pub mod injection_guard;
 pub mod inspector;
 pub mod instance_sampler;
-pub mod hvf_stop;
 pub mod keystore;
 pub mod l7_proxy;
 pub mod lifecycle_hooks;

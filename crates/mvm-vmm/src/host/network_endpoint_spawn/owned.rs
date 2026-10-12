@@ -229,9 +229,14 @@ fn spawn_prepared(
 ) -> Result<OwnedEndpoint> {
     let deadline = handshake_deadline(timeout)?;
     let log = create_evidence(&endpoint_stderr_log_path(params.state_dir))?;
-    let child = endpoint_command(bin, params.lifetime, params.state_dir, log)
-        .spawn()
-        .context("spawn owned endpoint")?;
+    let child = endpoint_command(
+        mvm_core::env_hygiene::helper_command(bin),
+        params.lifetime,
+        params.state_dir,
+        log,
+    )
+    .spawn()
+    .context("spawn owned endpoint")?;
     let mut endpoint = OwnedEndpoint::new(child);
     let result: Result<()> = (|| {
         // Write evidence before any fallible handshake operation. This file is
@@ -260,13 +265,15 @@ fn spawn_prepared(
     Ok(endpoint)
 }
 
+/// Configure an endpoint command built by `helper_command`: its lifetime and
+/// stdio. Both spawn paths share it, so the endpoint's process shape cannot
+/// drift between them.
 pub(super) fn endpoint_command(
-    bin: &Path,
+    mut cmd: std::process::Command,
     lifetime: EndpointLifetime,
     state_dir: &Path,
     log_file: std::fs::File,
 ) -> std::process::Command {
-    let mut cmd = mvm_core::env_hygiene::helper_command(bin);
     select_lifetime(&mut cmd, lifetime, state_dir);
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

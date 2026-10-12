@@ -36,7 +36,7 @@ pub mod snapshot_upper;
 pub mod spec_map;
 pub mod telemetry_provisioning;
 pub mod telemetry_registration;
-pub mod ui;
 pub mod uds_peer;
+pub mod ui;
 pub mod vm_helpers;
 pub mod workload_wait;
