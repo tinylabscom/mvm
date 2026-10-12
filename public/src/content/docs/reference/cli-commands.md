@@ -1361,6 +1361,57 @@ The posture never grants anything: a bundle that allows egress still boots
 deny-all unless the launch asks for egress. A manifest edited on disk after
 install fails the signature check and refuses the boot.
 
+#### Environment descriptor
+
+`bundle export --environment FILE.json` seals a signed environment descriptor
+as the bundle's `environment` member. The descriptor is typed JSON with its own
+`descriptor_version` (currently `1`); unknown fields, capabilities, or versions
+are refused rather than ignored:
+
+```json
+{
+  "descriptor_version": 1,
+  "pack": { "name": "acme/agent", "version": "1.2.3" },
+  "target": "x86_64-linux",
+  "entrypoint": { "argv": ["/usr/bin/agent"], "working_dir": "/workspace" },
+  "resources": { "cpu_cores": 2, "memory_mb": 2048 },
+  "volumes": [{ "name": "workspace", "guest_path": "/workspace" }],
+  "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+  "capabilities": ["egress", "host_volumes"],
+  "services": [{ "name": "indexer", "argv": ["/usr/bin/indexer"] }]
+}
+```
+
+A bundle carrying the descriptor is stamped bundle schema 5; readers that
+predate it refuse it at the schema check. Bundles without one keep the schema
+their other members need and verify and launch as before. Verification refuses
+a descriptor whose `target` is not the bundle's architecture, and any required
+capability (`egress`, `host_volumes`, `interactive_terminal`) the bundle's
+`--posture` does not permit — a descriptor that requires a capability needs a
+posture beside it. Volumes require `host_volumes`. Secret slots are names only:
+a slot carrying a value, or an argv that passes a secret-shaped flag or a slot
+inline (`TOKEN=...`, `--api-key=...`), is refused.
+
+At launch of an installed bundle:
+
+- the descriptor's resources become the defaults for whichever of `--cpus` and
+  `--memory` the command line did not name; the host's memory ceiling and
+  admission budget still apply and refuse rather than clamp;
+- a required secret slot with no `--secret` binding refuses the launch; the
+  value stays on the host and is substituted at the endpoint, as for any
+  binding;
+- an image whose recorded entrypoint differs from the descriptor's refuses the
+  launch; an ad-hoc command replaces the entrypoint explicitly and is not
+  compared;
+- a capability beyond a posture the launch is held to refuses the launch.
+
+These refusals are recorded as `plan.failed` with class
+`bundle-environment-refused`. Application `services` are guest processes,
+distinct from the broker's host services named by `--host-service`; they are
+recorded and shown by `bundle fetch` but not yet started by the launcher.
+Volumes are the mount points the workload expects; the launch still attaches
+them with `--volume` under the posture's ceiling.
+
 `.mvmpkg` is the one extension for a runnable artifact. Being runnable is a
 property of the command, not of the file: the same archive `bundle export`,
 `bundle build`, and `artifact pack` write is the one `bundle install`,
@@ -1840,6 +1891,7 @@ running microVM.
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
 | `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
+| `mvmctl bundle export <t> --environment <file.json>`      | Seal a signed environment descriptor (entrypoint, advisory resources, volumes, secret slot names, required capabilities, application services); capabilities must be permitted by `--posture` |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`, streaming each artifact through its hash check rather than loading the archive into memory                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |

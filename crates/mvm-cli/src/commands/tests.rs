@@ -6540,3 +6540,43 @@ fn run_carries_machine_run_flags_and_the_sdk_transport() {
         "the SDK transport stays off machine run"
     );
 }
+
+/// What `run_command` does with a command line: parse, then record which
+/// resource flags were named.
+fn parse_recording_resources(argv: &[&str]) -> Cli {
+    let matches = cli_command()
+        .try_get_matches_from(argv)
+        .expect("command line parses");
+    let mut cli = Cli::from_arg_matches(&matches).expect("typed command");
+    record_explicit_run_resources(&matches, &mut cli);
+    cli
+}
+
+#[test]
+fn named_resource_flags_are_recorded_for_both_run_verbs() {
+    let cli = parse_recording_resources(&["mvmctl", "machine", "run", "--cpus", "4", "--", "x"]);
+    let Commands::Machine(machine) = cli.command else {
+        panic!("expected machine");
+    };
+    let machine::MachineAction::Run(run) = machine.action else {
+        panic!("expected machine run");
+    };
+    assert!(run.run.explicit_resources.cpus);
+    assert!(!run.run.explicit_resources.memory);
+
+    let cli = parse_recording_resources(&["mvmctl", "run", "--memory", "1G", "--", "x"]);
+    let Commands::Run(verb) = cli.command else {
+        panic!("expected run");
+    };
+    assert!(!verb.machine.run.explicit_resources.cpus);
+    assert!(verb.machine.run.explicit_resources.memory);
+
+    let cli = parse_recording_resources(&["mvmctl", "run", "--", "x"]);
+    let Commands::Run(verb) = cli.command else {
+        panic!("expected run");
+    };
+    assert_eq!(
+        verb.machine.run.explicit_resources,
+        vm::exec::environment_defaults::ExplicitResources::default()
+    );
+}

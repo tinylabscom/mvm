@@ -114,6 +114,12 @@ pub enum BundleVerifyError {
 
     #[error("bundle build provenance does not match its {artifact}: {reason}")]
     ProvenanceMismatch { artifact: String, reason: String },
+
+    #[error("bundle environment descriptor is malformed: {0}")]
+    MalformedEnvironment(#[from] mvm_contract::plan::environment::EnvironmentDescriptorError),
+
+    #[error("bundle environment descriptor is refused: {reason}")]
+    EnvironmentRefused { reason: String },
 }
 
 /// Validate that an archive-relative path is safe to extract: no
