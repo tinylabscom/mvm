@@ -5065,44 +5065,65 @@ fn test_pool_warm_parses_optional_count() {
 }
 
 #[test]
-fn test_pool_warm_default_flag_parses_and_conflicts_with_image() {
-    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "--default"]).unwrap();
-    match cli.command {
+fn test_pool_warm_parses_each_artifact_source() {
+    let source = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
         Commands::Pool(pool::Args {
             action:
                 pool::PoolAction::Warm {
                     image,
-                    default_image,
+                    manifest,
+                    flake,
+                    flake_profile,
                     ..
                 },
-        }) => {
-            assert!(default_image);
-            assert_eq!(image, None);
-        }
+        }) => (image, manifest, flake, flake_profile),
         _ => panic!("Expected Pool Warm command"),
-    }
-    assert!(
-        Cli::try_parse_from(["mvmctl", "pool", "warm", "--default", "--image", "alpine"]).is_err(),
-        "--default and --image name different images"
+    };
+    assert_eq!(
+        source(&["mvmctl", "pool", "warm", "--manifest", "./app.mvmpkg"]),
+        (None, Some("./app.mvmpkg".to_string()), None, None)
+    );
+    assert_eq!(
+        source(&[
+            "mvmctl",
+            "pool",
+            "warm",
+            "--flake",
+            "./app",
+            "--flake-profile",
+            "slim"
+        ]),
+        (
+            None,
+            None,
+            Some("./app".to_string()),
+            Some("slim".to_string())
+        )
     );
 }
 
 #[test]
-fn test_pool_warm_without_an_image_selects_neither_flag() {
-    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm"]).unwrap();
-    match cli.command {
-        Commands::Pool(pool::Args {
-            action:
-                pool::PoolAction::Warm {
-                    image,
-                    default_image,
-                    ..
-                },
-        }) => {
-            assert_eq!(image, None);
-            assert!(!default_image);
-        }
-        _ => panic!("Expected Pool Warm command"),
+fn test_pool_warm_takes_one_source() {
+    for argv in [
+        &[
+            "mvmctl",
+            "pool",
+            "warm",
+            "--image",
+            "alpine",
+            "--manifest",
+            "m",
+        ][..],
+        &[
+            "mvmctl", "pool", "warm", "--image", "alpine", "--flake", ".",
+        ][..],
+        &["mvmctl", "pool", "warm", "--manifest", "m", "--flake", "."][..],
+        &["mvmctl", "pool", "warm", "--flake-profile", "slim"][..],
+    ] {
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "{argv:?} must not parse"
+        );
     }
 }
 
