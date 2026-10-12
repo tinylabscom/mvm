@@ -190,14 +190,7 @@ pub fn stream_exec_mediated<F: FnMut(ExecEvent)>(
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
-    let leader = match command.binding {
-        Some(binding) => Leader::AttributedSession(binding),
-        // The host already decided this invocation on the authenticated
-        // control session; record that decision under the relay's pid so the
-        // shim it may turn out to be consults the marker instead of paying
-        // for a second host decision.
-        None => Leader::MediatedRelay,
-    };
+    let leader = leader_for(command.binding, program);
     stream_command_with_environment(
         builder,
         leader,
@@ -218,6 +211,23 @@ enum Leader<'a> {
     /// A host-decided MediatedExec without a binding: an ordinary process
     /// group spawn plus the decided marker the shim consults.
     MediatedRelay,
+}
+
+/// The spawn shape for one host-decided command.
+///
+/// A bound invocation leads an attributed session. An unbound declared tool
+/// — a path activation substituted with the shim — relays through the shim,
+/// which consults the decision marker recorded under the relay's pid rather
+/// than paying for a second host decision; that shim is the mediation control
+/// plane, whose helper handshake needs connect(2), which the standard workload
+/// seccomp tier refuses, so the relay is not confined. Any other program is
+/// workload code and starts under the admitted tier exactly like a plain exec.
+fn leader_for<'a>(binding: Option<&'a ToolInvocationBinding>, program: &str) -> Leader<'a> {
+    match binding {
+        Some(binding) => Leader::AttributedSession(binding),
+        None if crate::tool_install::is_substituted_path(program) => Leader::MediatedRelay,
+        None => Leader::ProcessGroup,
+    }
 }
 
 fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
@@ -642,6 +652,43 @@ mod tests {
         let mut events = Vec::new();
         let term = stream_exec("printf done", None, None, |e| events.push(e));
         assert!(matches!(term, ExecEvent::Exit { code: 0 }), "got {term:?}");
+    }
+
+    /// The relay dispatch: only a substituted declared path rides the
+    /// (unconfined) mediation shim; every other program is workload code and
+    /// starts under the admitted seccomp tier as a plain process group.
+    #[test]
+    fn the_relay_dispatch_separates_shim_paths_from_workload_code() {
+        let _guard = crate::tool_install::SUBSTITUTED_PATHS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let map = crate::tool_map::ToolMap {
+            tools: vec![crate::tool_map::ToolEntry {
+                tool: "dispatch-probe".into(),
+                executable: "/dispatch-test/python3".into(),
+                aliases: vec!["/dispatch-test/py3".into()],
+                stash: "/dispatch-test/stash".into(),
+                digest: "00".repeat(32),
+            }],
+        };
+        crate::tool_install::record_substituted_paths(&map);
+        assert!(matches!(
+            leader_for(None, "/dispatch-test/python3"),
+            Leader::MediatedRelay
+        ));
+        assert!(matches!(
+            leader_for(None, "/dispatch-test/py3"),
+            Leader::MediatedRelay
+        ));
+        assert!(matches!(leader_for(None, "/bin/sh"), Leader::ProcessGroup));
+        let binding =
+            mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
+                [7; 16],
+            );
+        assert!(matches!(
+            leader_for(Some(&binding), "/bin/sh"),
+            Leader::AttributedSession(_)
+        ));
     }
 
     #[test]

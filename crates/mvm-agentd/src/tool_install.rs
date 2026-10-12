@@ -28,6 +28,51 @@ use crate::tool_map::{TOOL_DIR, TOOL_MAP_PATH};
 pub const TOOL_SHIM_OVERLAY: &str = "/mvm/runtime/tool-shim";
 pub const TOOL_HELPER_OVERLAY: &str = "/mvm/runtime/tool-helper";
 
+/// The runnable paths activation substituted with the shim, recorded so the
+/// exec dispatch can tell a mediation shim from workload code: a shim's helper
+/// handshake needs `connect`, which the standard workload seccomp tier
+/// refuses, while any other child the agent starts is workload code that runs
+/// under the admitted tier.
+#[cfg(any(target_os = "linux", test))]
+static SUBSTITUTED_PATHS: std::sync::Mutex<Option<std::collections::BTreeSet<String>>> =
+    std::sync::Mutex::new(None);
+
+/// Whether `path` execs the shim because activation substituted it. `false`
+/// before any install and where mediation cannot run.
+#[cfg(any(target_os = "linux", test))]
+pub fn is_substituted_path(path: &str) -> bool {
+    SUBSTITUTED_PATHS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .is_some_and(|paths| paths.contains(path))
+}
+
+/// No mediation off-Linux: no path is a shim there.
+#[cfg(not(any(target_os = "linux", test)))]
+pub fn is_substituted_path(_path: &str) -> bool {
+    false
+}
+
+/// Serializes tests that replace the substituted-path set, which is process
+/// state by design (activation records it once).
+#[cfg(test)]
+pub(crate) static SUBSTITUTED_PATHS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Record the substituted set at activation, once the whole map is known good.
+/// `pub(crate)` so the exec dispatch's tests can exercise the seam.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn record_substituted_paths(map: &ToolMap) {
+    let paths: std::collections::BTreeSet<String> = map
+        .tools
+        .iter()
+        .flat_map(|entry| entry.paths().cloned())
+        .collect();
+    *SUBSTITUTED_PATHS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(paths);
+}
+
 /// Largest executable the installer will stash and the helper will hash.
 pub const MAX_TOOL_BYTES: u64 = 512 * 1024 * 1024;
 /// Total bytes the alias scan will hash across the whole install; a rootfs
@@ -414,6 +459,9 @@ pub fn install(commands: &BTreeMap<String, String>, root: &Path) -> Result<(), I
             substitute(path)?;
         }
     }
+    // Only once every path is substituted: the exec dispatch must agree with
+    // what is on disk, and a refused activation never reaches here.
+    record_substituted_paths(&map);
     spawn_helper()
 }
 
@@ -652,6 +700,22 @@ mod tests {
         std::fs::write(root.join("usr/local/bin/sh-copy"), b"busybox bytes").expect("write copy");
         std::fs::write(root.join("etc/other"), b"other bytes").expect("write other");
         (temp, root)
+    }
+
+    #[test]
+    fn the_substituted_path_set_answers_only_recorded_paths() {
+        let _guard = SUBSTITUTED_PATHS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (_temp, root) = rootfs();
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+        let map = build_tool_map(&commands, &root).expect("map builds");
+        record_substituted_paths(&map);
+        assert!(is_substituted_path("/bin/sh"));
+        assert!(is_substituted_path("/bin/busybox"));
+        assert!(is_substituted_path("/usr/local/bin/sh-copy"));
+        assert!(!is_substituted_path("/etc/other"));
+        assert!(!is_substituted_path("/bin/true"));
     }
 
     #[test]
