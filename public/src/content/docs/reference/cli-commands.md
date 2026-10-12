@@ -1930,6 +1930,15 @@ mvmctl pool warm --image alpine          # optional pre-warm
 mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
+`pool warm` takes the same source a launch names: `--image`, `--manifest`
+(a manifest, a built slot, an installed bundle sha256 or a signed `.mvmpkg`
+archive) or `--flake` with an optional `--flake-profile`. An archive is
+verified and installed exactly as `machine run` does it. Standbys are keyed by
+the verified bundle or slot digest and the image digest, so a launch of a
+different artifact, or of the same rootfs under the host runtime, never claims
+one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
+path: the guest runtime it pins predates the claim handshake.
+
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
 capacity and fail rather than silently cold-booting. Named launches and shapes
