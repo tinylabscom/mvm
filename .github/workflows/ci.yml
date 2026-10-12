@@ -34,6 +34,13 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # `.cargo/config.toml` caps `build.jobs` at 2 so concurrent agent and
+  # worktree builds on one workstation do not each schedule the whole machine.
+  # Every job here owns its runner, so that cap only halves the compile
+  # parallelism of a 4-vCPU hosted runner: the workspace test build ran with
+  # exactly two rustc processes alive at every point. `default` restores
+  # Cargo's own choice, one job per logical CPU.
+  CARGO_BUILD_JOBS: default
 
 jobs:
   # Classify each pull request, or the merge-group head against its target
