@@ -502,7 +502,7 @@ admission until their transports are wired.
 
 ## Guest Binaries
 
-The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. Each CLI release publishes the archive as a signed asset, version-locked to the CLI and listed in the release's signed checksum manifest. `install.sh` and the deb and rpm packages install it beside `mvmctl` (in the release directory's `guest-runtime/`, or `/usr/lib/mvmctl/guest-runtime/`), and `mvmctl bootstrap` on a downloaded binary otherwise fetches it, held to its digest and then its signature; `mvmctl env update` fetches the new version's archive before it replaces the binary. `mvmctl bootstrap` on a downloaded binary then assembles the runtime overlay, the initramfs and both SDK sidecars from that archive, as a source checkout does from its own, and `mvmctl doctor`'s `guest runtime` line names the archive each piece came from. A launch attaches only the pieces assembled this way and never an image set's copy: the image set's contract is the Linux layer, and a set that still publishes an overlay, sidecars or initramfs is read with those members ignored. Run `mvmctl bootstrap` to assemble a piece that is missing or fails verification, including on a binary that has not bootstrapped since it was installed or updated. The archive is not an `mvm-images` input; that repository still publishes its own guest artifacts until its side of the image boundary lands, and nothing in `mvmctl` reads them except a portable bundle's boot assets.
+The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. Each CLI release publishes the archive as a signed asset, version-locked to the CLI and listed in the release's signed checksum manifest. `install.sh` and the deb and rpm packages install it beside `mvmctl` (in the release directory's `guest-runtime/`, or `/usr/lib/mvmctl/guest-runtime/`), and `mvmctl bootstrap` on a downloaded binary otherwise fetches it, held to its digest and then its signature; `mvmctl env update` fetches the new version's archive before it replaces the binary. `mvmctl bootstrap` on a downloaded binary then assembles the runtime overlay, the initramfs and both SDK sidecars from that archive, as a source checkout does from its own, and `mvmctl doctor`'s `guest runtime` line names the archive each piece came from. Ordinary launches attach only the pieces assembled this way and never an image set's copy: the image set's contract is the Linux layer, and a set that still publishes an overlay, sidecars or initramfs is read with those members ignored. Run `mvmctl bootstrap` to assemble a piece that is missing or fails verification, including on a binary that has not bootstrapped since it was installed or updated. The archive is not an `mvm-images` input. Legacy schema 4 portable bundles retain their original signed image-set runtime selection; new schema 5 portable bundles instead carry their own authenticated CLI runtime release and prepared boot artifacts, with no ambient runtime-cache or download fallback at launch.
 
 | Command | Description |
 | ------- | ----------- |
@@ -1282,10 +1282,15 @@ mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
 ```
 
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
-metadata, universal initramfs, and runtime overlay. Runtime members are acquired
-from the existing authenticated image-set pin; the original image-set manifest
-is carried unchanged. Materialization finishes before the CLI loads its host
-signing key. The builder never receives the publisher key.
+metadata, universal initramfs, and runtime overlay. The kernel comes from the
+existing authenticated Linux image-set pin; its original manifest is carried
+unchanged. The guest runtime comes from the CLI-version-locked signed release
+archive, not retired image-set members or unsigned source output. The complete
+archive/checksum/signature-bundle quartet and the verified prepared overlay,
+verity sidecar and initramfs ship inside the package. Creation can use locally
+retained release inputs offline; a missing or invalid selected proof is an
+error, not permission to substitute unsigned bytes. Materialization finishes
+before the CLI loads its host signing key. The builder never receives that key.
 
 `--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
 Packaging currently requires the selected architecture to match the host;
@@ -1308,10 +1313,18 @@ never falls back to an untrusted builder or replaces that seal through one.
 `--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
 not currently supported by that shared exporter.
 
-Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
-They retain the original image-set identity while carrying only the selected
-architecture's runtime archives, not the full builder/base-image release set.
-Older readers refuse these packages. Existing schema 3 packages and full
+New portable OCI packages use bundle schema 5's explicit CLI boot-assets
+declaration. They retain the original Linux image-set and signed runtime
+release identities, including the selected architecture, protocol declaration
+and exact prepared artifact digests. Launch verifies the retained runtime
+archive with the release verifier and verifies the prepared bytes before the
+backend reads them. It does not download a runtime, consult the ambient CLI
+runtime cache or reassemble missing pieces. Tampered bytes, missing proofs and
+mixed legacy/new declarations are refused.
+
+Schema 4 remains a deliberately separate compatibility format: its signed
+original image-set overlay/initramfs selection is never reinterpreted as a CLI
+runtime. Older readers refuse schema 5. Existing schema 3 packages and full
 embedded image sets retain their existing semantics.
 
 Bundles carrying their own boot assets use the cold-boot path. The current

@@ -58,6 +58,26 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
         budget.admit(&artifact.path, artifact.size_bytes)?;
     }
     refuse_repeated_declarations(&manifest.members)?;
+    let cli_runtime = manifest.members.iter().find_map(|member| match member {
+        BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+        _ => None,
+    });
+    if let Some(runtime) = cli_runtime {
+        if manifest.schema_version != 5
+            || manifest.members.iter().any(|member| {
+                matches!(
+                    member,
+                    BundleMember::EmbeddedBootAssets { .. } | BundleMember::EmbeddedImageSet { .. }
+                )
+            })
+        {
+            return Err(BundleVerifyError::ManifestParse(
+                "CLI boot assets require schema 5 and cannot mix legacy or full image-set members"
+                    .into(),
+            ));
+        }
+        validate_cli_runtime(runtime, manifest)?;
+    }
     if manifest
         .members
         .iter()
@@ -71,14 +91,14 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
             "boot assets and full image-set declarations cannot be combined".into(),
         ));
     }
-    if manifest.schema_version < 4
+    if manifest.schema_version != 4
         && manifest
             .members
             .iter()
             .any(|member| matches!(member, BundleMember::EmbeddedBootAssets { .. }))
     {
         return Err(BundleVerifyError::ManifestParse(
-            "boot assets require bundle schema 4".into(),
+            "legacy boot assets require bundle schema 4".into(),
         ));
     }
     if let Some(cmdline) = manifest.kernel_cmdline() {
@@ -97,10 +117,80 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     match member {
         BundleMember::EmbeddedImageSet { .. } => None,
         BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
+        BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
     }
+}
+
+fn validate_cli_runtime(
+    runtime: &mvm_contract::plan::bundle::EmbeddedCliBootAssets,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+    if runtime.arch != manifest.arch
+        || !matches!(runtime.arch.as_str(), "x86_64" | "aarch64")
+        || runtime.version.is_empty()
+        || runtime.version.trim() != runtime.version
+        || runtime.protocol_version == 0
+        || runtime.min_supported_protocol_version == 0
+        || runtime.min_supported_protocol_version > runtime.protocol_version
+        || runtime.overlay_roothash.len() != 64
+        || !runtime
+            .overlay_roothash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(refused(
+            "invalid CLI runtime identity, protocol or verity root",
+        ));
+    }
+    let names = [
+        &runtime.manifest_artifact,
+        &runtime.archive_artifact,
+        &runtime.checksum_artifact,
+        &runtime.signature_bundle_artifact,
+        &runtime.checksum_signature_bundle_artifact,
+        &runtime.overlay_artifact,
+        &runtime.overlay_verity_artifact,
+        &runtime.initramfs_artifact,
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for name in names {
+        if !seen.insert(name) {
+            return Err(refused("CLI runtime members must name distinct artifacts"));
+        }
+        let artifact = manifest
+            .find_by_name(name)
+            .ok_or_else(|| refused("CLI runtime artifact missing"))?;
+        let role = if name == &runtime.initramfs_artifact {
+            ArtifactRole::Initrd
+        } else {
+            ArtifactRole::Other
+        };
+        if artifact.role != role || artifact.size_bytes == 0 {
+            return Err(refused("CLI runtime artifact has wrong role or is empty"));
+        }
+    }
+    if manifest
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.role == ArtifactRole::Initrd)
+        .count()
+        != 1
+        || manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.role == ArtifactRole::Kernel)
+            .count()
+            != 1
+    {
+        return Err(refused(
+            "CLI boot assets require exactly one kernel and initrd",
+        ));
+    }
+    Ok(())
 }
 
 /// Two postures in one bundle would leave the launcher to pick one, and
@@ -302,6 +392,7 @@ mod tests {
             manifest_artifact: "image-set.json".into(),
         };
         let mut m = manifest(Vec::new(), vec![boot.clone()]);
+        m.schema_version = 4;
         validate_declarations(&m).unwrap();
         m.schema_version = 3;
         assert!(validate_declarations(&m).is_err());

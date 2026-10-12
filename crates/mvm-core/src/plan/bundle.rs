@@ -76,9 +76,9 @@ use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleMember, BundleResources, BundleSecurityPosture, KeyId, MANIFEST_FILENAME,
-    MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
-    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
+    BundleMember, BundleResources, BundleSecurityPosture, EmbeddedCliBootAssets, KeyId,
+    MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES,
+    PlanArtifact, SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
 };
 
 use crate::arch::GuestArch;
@@ -772,20 +772,22 @@ pub struct VerifiedBundle {
     pub boot_assets: Option<VerifiedBootAssets>,
 }
 
-/// Architecture-bound runtime selection authenticated by the bundle publisher.
-/// This is not a complete image set and must never enter the full-set cache.
+/// Architecture-bound boot selection authenticated by the bundle publisher.
+/// Schema 4 binds retired runtime archives; schema 5 binds the original Linux
+/// kernel and a separate CLI runtime declaration. Neither is a complete image
+/// set and neither must enter the full-set cache.
 #[derive(Debug, Clone)]
 pub struct VerifiedBootAssets {
     pub arch: GuestArch,
     pub image_set: VerifiedEmbeddedImageSet,
+    pub cli_runtime: Option<EmbeddedCliBootAssets>,
 }
 
 /// The image-set role of the runtime overlay a bundle's boot assets carry.
 ///
-/// Boot assets are the one consumer of an image set's guest-runtime members:
-/// a portable bundle authenticates its overlay and initramfs through the set
-/// manifest it embeds, so it can only be built from a set that still publishes
-/// them. Every other path assembles the guest runtime from the CLI's own.
+/// Legacy schema-4 boot assets authenticate their overlay and initramfs through
+/// the unchanged original image-set manifest. New portable bundles select only
+/// a Linux kernel from that manifest and retain a signed CLI runtime separately.
 pub const BOOT_ASSET_OVERLAY_ROLE: ImageSetRole =
     ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::RuntimeOverlay);
 
@@ -794,7 +796,7 @@ pub const BOOT_ASSET_OVERLAY_ROLE: ImageSetRole =
 pub const BOOT_ASSET_INITRAMFS_ROLE: ImageSetRole =
     ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::Initramfs);
 
-/// Select the two portable Linux runtime archives from an original full manifest.
+/// Select the two legacy schema-4 runtime archives from an original full manifest.
 /// Actual launch still checks the target backend and host protocol support.
 pub fn select_boot_asset_members(
     manifest: &ImageSetManifest,
@@ -826,13 +828,41 @@ pub fn select_boot_asset_members(
     Ok(selected)
 }
 
-/// Check only the packaged runtime roles, not the unshipped workload image.
+/// Select only the original production Linux kernel for a CLI-runtime bundle.
+/// Runtime archives are deliberately not part of this image-set selection.
+pub fn select_cli_boot_kernel(
+    manifest: &ImageSetManifest,
+    arch: GuestArch,
+) -> Result<&crate::image_set::ImageSetMember, ImageSetError> {
+    validate_structure(manifest)?;
+    require_complete(manifest, &ImageSetRequirement::current_train())?;
+    let support = BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Qemu)
+        .expect("Qemu declares portable Linux image support");
+    select_member(
+        manifest,
+        ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+        arch,
+        &support,
+    )
+}
+
+/// Check the selected Linux kernel for schema 5, or the historical packaged
+/// runtime roles for schema 4, not an unshipped workload base image.
 pub fn check_boot_assets_for_backend(
     boot: &VerifiedBootAssets,
     backend: &BackendImageSupport,
     host_protocols: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
     check_protocol_compatibility(&boot.image_set.manifest, host_protocols)?;
+    if boot.cli_runtime.is_some() {
+        select_member(
+            &boot.image_set.manifest,
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            boot.arch,
+            backend,
+        )?;
+        return Ok(());
+    }
     for role in [BOOT_ASSET_OVERLAY_ROLE, BOOT_ASSET_INITRAMFS_ROLE] {
         select_member(&boot.image_set.manifest, role, boot.arch, backend)?;
     }
@@ -1058,11 +1088,17 @@ fn verify_embedded_image_sets(
             BundleMember::EmbeddedImageSet { manifest_artifact } => Some(manifest_artifact),
             BundleMember::KernelCmdline { .. }
             | BundleMember::EmbeddedBootAssets { .. }
+            | BundleMember::EmbeddedCliBootAssets(_)
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_) => None,
         })
         .map(|manifest_artifact| {
-            verify_embedded_image_set(bundle, artifacts, manifest_artifact, None)
+            verify_embedded_image_set(
+                bundle,
+                artifacts,
+                manifest_artifact,
+                ImageSetSelection::Full,
+            )
         })
         .collect()
 }
@@ -1071,13 +1107,20 @@ fn verify_boot_assets(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
 ) -> Result<Option<VerifiedBootAssets>, BundleVerifyError> {
-    let Some(manifest_artifact) = bundle.members.iter().find_map(|member| match member {
-        BundleMember::EmbeddedBootAssets { manifest_artifact } => Some(manifest_artifact),
-        BundleMember::EmbeddedImageSet { .. }
-        | BundleMember::KernelCmdline { .. }
-        | BundleMember::SecurityPosture(_)
-        | BundleMember::BuildProvenance(_) => None,
-    }) else {
+    let Some((manifest_artifact, cli_runtime)) =
+        bundle.members.iter().find_map(|member| match member {
+            BundleMember::EmbeddedBootAssets { manifest_artifact } => {
+                Some((manifest_artifact, None))
+            }
+            BundleMember::EmbeddedCliBootAssets(runtime) => {
+                Some((&runtime.manifest_artifact, Some(runtime)))
+            }
+            BundleMember::EmbeddedImageSet { .. }
+            | BundleMember::KernelCmdline { .. }
+            | BundleMember::SecurityPosture(_)
+            | BundleMember::BuildProvenance(_) => None,
+        })
+    else {
         return Ok(None);
     };
     let arch = match bundle.arch.as_str() {
@@ -1089,15 +1132,31 @@ fn verify_boot_assets(
             )));
         }
     };
-    let image_set = verify_embedded_image_set(bundle, artifacts, manifest_artifact, Some(arch))?;
-    Ok(Some(VerifiedBootAssets { arch, image_set }))
+    let selection = if cli_runtime.is_some() {
+        ImageSetSelection::CliKernel(arch)
+    } else {
+        ImageSetSelection::LegacyRuntime(arch)
+    };
+    let image_set = verify_embedded_image_set(bundle, artifacts, manifest_artifact, selection)?;
+    Ok(Some(VerifiedBootAssets {
+        arch,
+        image_set,
+        cli_runtime: cli_runtime.cloned(),
+    }))
+}
+
+#[derive(Clone, Copy)]
+enum ImageSetSelection {
+    Full,
+    LegacyRuntime(GuestArch),
+    CliKernel(GuestArch),
 }
 
 fn verify_embedded_image_set(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
     manifest_artifact: &str,
-    boot_arch: Option<GuestArch>,
+    selection: ImageSetSelection,
 ) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
     let declaration = bundle
         .artifacts
@@ -1129,16 +1188,19 @@ fn verify_embedded_image_set(
         }
     })?;
 
-    let members = if let Some(arch) = boot_arch {
-        select_boot_asset_members(&manifest, arch)
-            .map_err(|reason| BundleVerifyError::ImageSetRefused {
-                name: manifest_artifact.to_string(),
-                reason,
-            })?
-            .to_vec()
-    } else {
-        manifest.members.iter().collect()
+    let selected = match selection {
+        ImageSetSelection::Full => Ok(manifest.members.iter().collect()),
+        ImageSetSelection::LegacyRuntime(arch) => {
+            select_boot_asset_members(&manifest, arch).map(|members| members.to_vec())
+        }
+        ImageSetSelection::CliKernel(arch) => {
+            select_cli_boot_kernel(&manifest, arch).map(|member| vec![member])
+        }
     };
+    let members = selected.map_err(|reason| BundleVerifyError::ImageSetRefused {
+        name: manifest_artifact.to_string(),
+        reason,
+    })?;
     let mut artifact_paths = BTreeMap::new();
     for image_artifact in members
         .into_iter()
@@ -1148,7 +1210,12 @@ fn verify_embedded_image_set(
         let bundle_artifact = bundle
             .artifacts
             .iter()
-            .find(|artifact| artifact.name == name)
+            .find(|artifact| match selection {
+                ImageSetSelection::CliKernel(_) => artifact.role == ArtifactRole::Kernel,
+                ImageSetSelection::Full | ImageSetSelection::LegacyRuntime(_) => {
+                    artifact.name == name
+                }
+            })
             .ok_or_else(|| BundleVerifyError::ImageSetArtifactMissing {
                 name: name.to_string(),
             })?;
@@ -1533,6 +1600,7 @@ mod tests {
         }
         let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
         manifest.arch = arch.to_string();
+        manifest.schema_version = 4;
         manifest.members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: "image-set.json".into(),
         });
@@ -1609,6 +1677,46 @@ mod tests {
                 .join(full.embedded_image_sets[0].manifest_sha256.as_str())
                 .exists()
         );
+    }
+
+    #[test]
+    fn schema4_file_plan_artifact_pins_the_original_signed_archive() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let payload = boot_payload(&image_set, GuestArch::Aarch64, &bytes);
+        let archive = boot_bundle(&sk, &image_set, "aarch64", &payload);
+        let expected = PlanArtifact::new(
+            bundle_sha256(&archive),
+            &extract_manifest_signature(&archive).unwrap(),
+            key_id_from_pubkey(&sk.verifying_key()),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.mvmpkg");
+        std::fs::write(&path, &archive).unwrap();
+        let verified = verify_bundle_file(&path, &trust(&sk)).unwrap();
+        assert_eq!(verified.manifest.schema_version, 4);
+        assert!(verified.boot_assets.is_some());
+        assert_eq!(verified.plan_artifact(), expected);
+        let independently_verified = verify_plan_bundle(
+            &verified.plan_artifact(),
+            &FixedResolver(archive.clone()),
+            &trust(&sk),
+        )
+        .unwrap();
+        assert_eq!(independently_verified.manifest, verified.manifest);
+
+        let needle = b"\"schema_version\":4";
+        let position = archive
+            .windows(needle.len())
+            .position(|bytes| bytes == needle)
+            .unwrap();
+        let mut tampered = archive;
+        tampered[position + needle.len() - 1] = b'5';
+        std::fs::write(&path, tampered).unwrap();
+        assert!(matches!(
+            verify_bundle_file(&path, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
     }
 
     #[test]

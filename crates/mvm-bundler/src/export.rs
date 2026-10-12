@@ -68,6 +68,14 @@ pub fn export_bundle_with_signer(
         contents.push_boot_assets(boot, inputs.arch_label)?;
     }
 
+    if let Some(boot) = &inputs.cli_boot_assets {
+        anyhow::ensure!(
+            inputs.boot_assets.is_none(),
+            "cannot mix CLI and legacy boot assets"
+        );
+        contents.push_cli_boot_assets(boot, inputs.arch_label)?;
+    }
+
     let key_id = signer.key_id();
     let members = declarations_for(inputs, &contents.artifacts, verity.is_some());
     let manifest = manifest_for(inputs, signer, &key_id, contents.artifacts, members, verity);
@@ -196,6 +204,76 @@ impl BundleContents {
         Ok(())
     }
 
+    fn push_cli_boot_assets(
+        &mut self,
+        boot: &crate::CliBootAssetsInputs<'_>,
+        arch: &str,
+    ) -> Result<()> {
+        use mvm_core::arch::GuestArch;
+        use mvm_core::image_set::ImageSetManifest;
+        use mvm_core::plan::bundle::select_cli_boot_kernel;
+
+        anyhow::ensure!(
+            boot.manifest_bytes.len() as u64
+                <= mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES
+                && sha256_hex(boot.manifest_bytes) == boot.manifest_sha256.as_str(),
+            "CLI boot image-set manifest does not match its authenticated pin or size limit"
+        );
+        anyhow::ensure!(
+            boot.runtime.arch == arch && boot.runtime.manifest_artifact == BOOT_MANIFEST_NAME,
+            "CLI boot runtime architecture or manifest identity differs from export"
+        );
+        let arch = match arch {
+            "x86_64" => GuestArch::X86_64,
+            "aarch64" => GuestArch::Aarch64,
+            other => anyhow::bail!("unknown CLI boot architecture {other}"),
+        };
+        let manifest: ImageSetManifest = serde_json::from_slice(boot.manifest_bytes)?;
+        let member = select_cli_boot_kernel(&manifest, arch)?;
+        let [kernel] = member.artifacts.as_slice() else {
+            anyhow::bail!("CLI boot kernel must declare one artifact");
+        };
+        let bundled = self
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.role == ArtifactRole::Kernel)
+            .context("CLI boot kernel missing")?;
+        anyhow::ensure!(
+            bundled.sha256 == kernel.sha256.as_str() && bundled.size_bytes == kernel.size,
+            "CLI boot kernel differs from the original Linux image set"
+        );
+        self.push(
+            BOOT_MANIFEST_NAME,
+            ArtifactRole::Other,
+            boot.manifest_bytes.to_vec(),
+        )?;
+        let mut names = std::collections::BTreeSet::new();
+        for (name, path) in boot.artifacts {
+            anyhow::ensure!(names.insert(*name), "duplicate CLI boot artifact {name}");
+            if let Some(existing) = self
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.name == *name)
+            {
+                anyhow::ensure!(
+                    existing.role == ArtifactRole::Initrd
+                        && *name == boot.runtime.initramfs_artifact
+                        && existing.sha256 == sha256_file(path)?
+                        && existing.size_bytes == std::fs::metadata(path)?.len(),
+                    "CLI boot artifact {name} conflicts with an existing artifact"
+                );
+            } else {
+                self.push_file(
+                    name,
+                    ArtifactRole::Other,
+                    "CLI boot asset",
+                    path.to_str().context("CLI boot asset path is not UTF-8")?,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     /// Declare an input file, refusing it before it is read when it would put
     /// the bundle past a size cap. The file is hashed here, streaming, and
     /// read again only when the archive is written.
@@ -304,6 +382,9 @@ fn declarations_for(
             manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
         });
     }
+    if let Some(boot) = &inputs.cli_boot_assets {
+        members.push(BundleMember::EmbeddedCliBootAssets(boot.runtime.clone()));
+    }
     if let Some(cmdline) = inputs.cmdline {
         members.push(BundleMember::KernelCmdline {
             cmdline: cmdline.trim_end().to_string(),
@@ -360,8 +441,10 @@ fn manifest_for(
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
     BundleManifest {
-        schema_version: if inputs.boot_assets.is_some() {
+        schema_version: if inputs.cli_boot_assets.is_some() {
             BUNDLE_SCHEMA_VERSION
+        } else if inputs.boot_assets.is_some() {
+            4
         } else {
             3
         },
