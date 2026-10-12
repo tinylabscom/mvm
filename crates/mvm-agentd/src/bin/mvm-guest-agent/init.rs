@@ -45,6 +45,7 @@ pub(crate) fn early_setup() {
             if let Err(e) = guest_mount::mount_early_filesystems() {
                 fatal(&format!("early filesystem mount failed: {e}"));
             }
+            restore_quiet_console_loglevel();
             seed_wall_clock_from_host_epoch();
         }
         provision_host_signer_anchor();
@@ -68,6 +69,19 @@ pub(crate) fn early_setup() {
 pub(crate) fn start_orphan_reaper() {
     if is_pid1() {
         mvm_agentd::child_wait::install_orphan_reaper();
+    }
+}
+
+/// Let kernel errors reach the console again now that boot is over.
+///
+/// The Firecracker cmdline boots with `loglevel=3` so the kernel's early-boot
+/// error lines stay off its serial port; left there, the same level would hide
+/// a runtime OOM kill from `console.log`. A failure here costs diagnostics,
+/// not correctness, so it is reported and boot continues.
+#[cfg(target_os = "linux")]
+fn restore_quiet_console_loglevel() {
+    if let Err(error) = mvm_agentd::console_loglevel::restore_quiet_console_loglevel() {
+        eprintln!("mvm-guest-agent: console loglevel not restored: {error}");
     }
 }
 

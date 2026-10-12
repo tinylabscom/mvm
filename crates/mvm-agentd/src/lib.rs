@@ -30,6 +30,9 @@ pub mod child_wait;
 /// PTY-over-vsock console support. Access is enforced by the guest agent's
 /// runtime profile and signed verb grant before a request reaches this module.
 pub mod console;
+/// Restores the `quiet` console loglevel once PID 1 has `/proc`, after a boot
+/// that lowered it to keep early-boot kernel errors off a slow serial console.
+pub mod console_loglevel;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
