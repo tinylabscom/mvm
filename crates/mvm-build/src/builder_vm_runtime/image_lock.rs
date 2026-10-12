@@ -62,6 +62,17 @@ impl NixStoreImageLock {
     }
 }
 
+impl Drop for NixStoreImageLock {
+    fn drop(&mut self) {
+        // One-shot ownership ends with this guard. A concurrent fork can keep
+        // an inherited descriptor alive until exec, so close alone is not an
+        // immediate release. Persistent supervisors own separate raw handles.
+        if let Err(error) = std::fs::File::unlock(&self._file) {
+            tracing::warn!(%error, "failed to release one-shot store image lock");
+        }
+    }
+}
+
 /// Sidecar lock path for an image: `<image>.lock` (appended, not an
 /// extension swap, so `foo.img` → `foo.img.lock`). Ends in `.lock` so
 /// it never matches `cache info`'s `nix-store-*.img` glob.
