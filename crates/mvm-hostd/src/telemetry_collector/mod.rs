@@ -330,7 +330,10 @@ where
     shared.set_status(CoverageStatus::Collecting {
         generation: peer.generation,
     });
-    receive_until_end(&mut receiver, &mut stream, sink, shared)
+    let end = receive_until_end(&mut receiver, &mut stream, sink, shared);
+    // Nothing held for a later decision outlives its session.
+    sink.release_held();
+    end
 }
 
 fn receive_until_end<S: Read + Write>(
@@ -930,6 +933,7 @@ pub fn start_embedded(
         secret_fingerprints,
         QueuedSink::spawn(vm_name, WRITE_QUEUE_RECORDS, records, Arc::clone(&losses))
             .context("starting the records writer")?,
+        Arc::clone(&losses),
     );
 
     let telemetry_sock = config.telemetry_sock.clone();

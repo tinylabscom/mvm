@@ -7,7 +7,10 @@
 //! 1. [`ScrubbingSink`] — on the receive thread, a whole-field scan against
 //!    the fingerprints of the secrets this VM's endpoint holds. A record that
 //!    carries one is withheld before it is queued, so the plaintext never
-//!    reaches the queue, the disk or a reader.
+//!    reaches the queue, the disk or a reader. Stdio arrives in chunks, so a
+//!    VM with bound secrets also holds each stream's latest chunk back until
+//!    the next one has been scanned against its tail: a secret split across
+//!    two chunks withholds both.
 //! 2. [`QueuedSink`] — a bounded queue in front of a dedicated writer thread.
 //!    Admission is a single `try_send`; a full queue is a counted shed, never
 //!    a wait. A stalled disk costs records, not the session.
@@ -28,7 +31,7 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::protocol::telemetry::served::{HostLosses, ReceivedRecord};
 use mvm_core::protocol::telemetry::{
-    AttributeValue, Attributes, MAX_RECORD_BYTES, RecordBody, TelemetryRecord,
+    AttributeValue, Attributes, MAX_RECORD_BYTES, RecordBody, StdioStream, TelemetryRecord,
 };
 
 use crate::stream::secret_scan::SecretScanner;
@@ -66,6 +69,10 @@ pub enum IngestOutcome {
 /// block: a slow consumer costs shed records, not a stalled receive loop.
 pub trait RecordSink: Send {
     fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome;
+
+    /// Pass on anything held back for a later decision. Called when a session
+    /// ends; a sink that holds nothing does nothing.
+    fn release_held(&mut self) {}
 }
 
 /// Shed counts by reason, shared between the receive loop, the writer thread
@@ -106,6 +113,23 @@ impl LossCounters {
     }
 }
 
+/// How long a stdio chunk may be held back waiting for the next one before it
+/// is passed on anyway. Bounds the latency the straddle check adds; a secret
+/// whose halves arrive further apart than this is missed, exactly as the
+/// stream plane's idle release misses one split across a silence.
+pub const STDIO_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Stdio streams with a chunk held back at once. A guest has a handful of
+/// producers; past this the oldest hold is released early rather than grown.
+const MAX_HELD_STREAMS: usize = 8;
+
+/// A held stdio chunk: the record, and when it was held.
+struct Held {
+    key: (u32, StdioStream),
+    record: TelemetryRecord,
+    since: std::time::Instant,
+}
+
 /// Withholds any record whose text or bytes contain a secret bound to this
 /// VM, before the record goes anywhere else.
 ///
@@ -115,17 +139,33 @@ impl LossCounters {
 /// Either way the host is the last place it can be stopped. Each field is
 /// scanned whole; the limits are the scanner's own (no encoded or derived
 /// form of a secret is recognised).
+///
+/// Stdio is the one source that arrives chopped: a secret printed across a
+/// chunk boundary is whole in neither chunk. So, only on a VM with bound
+/// secrets, each stream's latest chunk is held until the next chunk of the
+/// same stream has been scanned together with its tail, or until
+/// [`STDIO_HOLD`] passes, or until the session ends. A straddling match
+/// withholds both chunks.
 pub struct ScrubbingSink<S> {
     scanner: Option<SecretScanner>,
     inner: S,
+    losses: Arc<LossCounters>,
+    held: Vec<Held>,
 }
 
 impl<S: RecordSink> ScrubbingSink<S> {
-    /// Scrub against `fingerprints`; an empty set scans nothing.
-    pub fn new(fingerprints: Vec<SecretFingerprint>, inner: S) -> Self {
+    /// Scrub against `fingerprints`; an empty set scans nothing and holds
+    /// nothing back. Sheds this sink decides on its own (a held chunk
+    /// withheld, or refused by `inner` when released) count into `losses`.
+    pub fn new(fingerprints: Vec<SecretFingerprint>, inner: S, losses: Arc<LossCounters>) -> Self {
         let scanner =
             (!fingerprints.is_empty()).then(|| SecretScanner::new(Arc::new(fingerprints)));
-        Self { scanner, inner }
+        Self {
+            scanner,
+            inner,
+            losses,
+            held: Vec::new(),
+        }
     }
 
     fn carries_secret(&self, record: &TelemetryRecord) -> bool {
@@ -138,14 +178,91 @@ impl<S: RecordSink> ScrubbingSink<S> {
         });
         found
     }
+
+    /// Hand a released record to the inner sink, counting its shed here,
+    /// since nobody else sees this outcome.
+    fn forward(&mut self, record: &TelemetryRecord) {
+        if let IngestOutcome::Shed(class) = self.inner.try_ingest(record) {
+            self.losses.record(class);
+        }
+    }
+
+    fn release_expired(&mut self, now: std::time::Instant) {
+        while let Some(at) = self
+            .held
+            .iter()
+            .position(|held| now.duration_since(held.since) >= STDIO_HOLD)
+        {
+            let held = self.held.remove(at);
+            self.forward(&held.record);
+        }
+    }
+
+    /// Decide a stdio chunk that passed the whole-field scan: check it against
+    /// the held tail of its stream, then hold it in turn.
+    fn ingest_stdio(
+        &mut self,
+        record: &TelemetryRecord,
+        key: (u32, StdioStream),
+        bytes: &[u8],
+    ) -> IngestOutcome {
+        let Some(scanner) = &self.scanner else {
+            return self.inner.try_ingest(record);
+        };
+        if let Some(at) = self.held.iter().position(|held| held.key == key) {
+            let previous = self.held.remove(at);
+            let straddles = stdio_bytes(&previous.record).is_some_and(|tail| {
+                let tail = &tail[tail.len().saturating_sub(scanner.carry())..];
+                let mut joined = Vec::with_capacity(tail.len() + bytes.len());
+                joined.extend_from_slice(tail);
+                joined.extend_from_slice(bytes);
+                scanner.contains_bound_secret(&joined)
+            });
+            if straddles {
+                self.losses.record(LossClass::SecretWithheld);
+                return IngestOutcome::Shed(LossClass::SecretWithheld);
+            }
+            self.forward(&previous.record);
+        }
+        if self.held.len() >= MAX_HELD_STREAMS {
+            let oldest = self.held.remove(0);
+            self.forward(&oldest.record);
+        }
+        self.held.push(Held {
+            key,
+            record: record.clone(),
+            since: std::time::Instant::now(),
+        });
+        IngestOutcome::Ingested
+    }
+}
+
+fn stdio_bytes(record: &TelemetryRecord) -> Option<&[u8]> {
+    match record.body() {
+        RecordBody::Stdio { bytes, .. } => Some(bytes.as_slice()),
+        _ => None,
+    }
 }
 
 impl<S: RecordSink> RecordSink for ScrubbingSink<S> {
     fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
+        self.release_expired(std::time::Instant::now());
         if self.carries_secret(record) {
             return IngestOutcome::Shed(LossClass::SecretWithheld);
         }
-        self.inner.try_ingest(record)
+        match record.body() {
+            RecordBody::Stdio { stream, bytes } => {
+                self.ingest_stdio(record, (record.producer(), *stream), bytes.as_slice())
+            }
+            _ => self.inner.try_ingest(record),
+        }
+    }
+
+    fn release_held(&mut self) {
+        for held in std::mem::take(&mut self.held) {
+            self.forward(&held.record);
+        }
+        self.inner.release_held();
     }
 }
 
@@ -349,7 +466,7 @@ mod tests {
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
     use mvm_core::protocol::telemetry::{
-        Attribute, CoverageState, Level, ProducerEpoch, SourceKind, StdioStream,
+        Attribute, BoundedList, CoverageState, Level, ProducerEpoch, SourceKind,
     };
     use std::sync::Mutex;
     use std::sync::mpsc::Sender;
@@ -424,10 +541,8 @@ mod tests {
                 3,
                 RecordBody::Stdio {
                     stream: StdioStream::Stdout,
-                    bytes: mvm_core::protocol::telemetry::BoundedList::new(
-                        format!("printing {text} to stdout").into_bytes(),
-                    )
-                    .unwrap(),
+                    bytes: BoundedList::new(format!("printing {text} to stdout").into_bytes())
+                        .unwrap(),
                 },
             ),
         ]
@@ -436,7 +551,7 @@ mod tests {
     #[test]
     fn a_record_carrying_a_bound_secret_is_withheld_in_every_field_kind() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone());
+        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
         for record in records_carrying(SECRET) {
             assert_eq!(
                 sink.try_ingest(&record),
@@ -454,17 +569,85 @@ mod tests {
     #[test]
     fn records_without_a_bound_secret_pass_through_untouched() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone());
+        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
         for record in records_carrying("not-the-secret") {
             assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
         }
+        // The stdio chunk is held for the straddle check until released.
+        assert_eq!(kept.0.lock().unwrap().len(), 2);
+        sink.release_held();
         assert_eq!(kept.0.lock().unwrap().len(), 3);
 
         // A VM with no bound secrets scans nothing at all.
-        let mut open = ScrubbingSink::new(Vec::new(), Keep::default());
+        let mut open = ScrubbingSink::new(Vec::new(), Keep::default(), Arc::default());
         for record in records_carrying(SECRET) {
             assert_eq!(open.try_ingest(&record), IngestOutcome::Ingested);
         }
+    }
+
+    fn stdout(sequence: u64, text: &[u8]) -> TelemetryRecord {
+        build(
+            sequence,
+            RecordBody::Stdio {
+                stream: StdioStream::Stdout,
+                bytes: BoundedList::new(text.to_vec()).unwrap(),
+            },
+        )
+    }
+
+    fn kept_sequences(kept: &Keep) -> Vec<u64> {
+        kept.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|r| r.sequence())
+            .collect()
+    }
+
+    #[test]
+    fn a_secret_split_across_two_stdio_chunks_withholds_both() {
+        let kept = Keep::default();
+        let losses = Arc::new(LossCounters::default());
+        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::clone(&losses));
+        let (head, tail) = SECRET.as_bytes().split_at(SECRET.len() / 2);
+        let first = [b"key: ".as_slice(), head].concat();
+        let second = [tail, b"\n".as_slice()].concat();
+
+        assert_eq!(sink.try_ingest(&stdout(1, &first)), IngestOutcome::Ingested);
+        assert_eq!(
+            sink.try_ingest(&stdout(2, &second)),
+            IngestOutcome::Shed(LossClass::SecretWithheld)
+        );
+        sink.release_held();
+        assert!(
+            kept_sequences(&kept).is_empty(),
+            "neither half reached the sink"
+        );
+        // One counted by the sink for the held half; the caller counts the
+        // returned shed.
+        assert_eq!(losses.snapshot().secret_withheld, 1);
+    }
+
+    #[test]
+    fn benign_stdio_chunks_pass_in_order_once_the_next_chunk_or_the_hold_clears_them() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
+        sink.try_ingest(&stdout(1, b"hello "));
+        assert!(kept_sequences(&kept).is_empty(), "the latest chunk is held");
+        sink.try_ingest(&stdout(2, b"world\n"));
+        assert_eq!(kept_sequences(&kept), vec![1], "the next chunk clears it");
+
+        // The hold is bounded in time, not only by the next chunk.
+        sink.release_expired(std::time::Instant::now() + STDIO_HOLD);
+        assert_eq!(kept_sequences(&kept), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_vm_without_bound_secrets_holds_no_stdio_back() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(Vec::new(), kept.clone(), Arc::default());
+        sink.try_ingest(&stdout(1, b"no secrets here"));
+        assert_eq!(kept_sequences(&kept), vec![1]);
     }
 
     /// A sink whose every ingest blocks until the test releases it — a disk

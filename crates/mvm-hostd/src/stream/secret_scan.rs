@@ -150,6 +150,12 @@ impl SecretScanner {
         self.first_match(buf).is_some()
     }
 
+    /// How many trailing bytes of one chunk a secret straddling into the
+    /// next can occupy: one short of the longest bound secret.
+    pub(crate) fn carry(&self) -> usize {
+        self.carry
+    }
+
     /// The category of the first bound fingerprint `buf` contains, longest
     /// secret first.
     fn first_match(&self, buf: &[u8]) -> Option<SecretCategory> {
