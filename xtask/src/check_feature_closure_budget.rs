@@ -90,7 +90,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// `mvm-agentd/addons`, is held at the release that shares the workspace's
 /// nix 0.29, so the second nix major leaves the closure. The other three nodes
 /// had already dropped out on `main` without the budget following them.
-const FEATURE_CLOSURE_BUDGET: usize = 485;
+///
+/// 486 (was 485): the first-party `mvm-compiler` extraction adds one workspace
+/// crate. All of its third-party dependencies were already present.
+const FEATURE_CLOSURE_BUDGET: usize = 486;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

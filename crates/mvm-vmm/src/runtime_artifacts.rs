@@ -14,6 +14,9 @@ pub struct RuntimeArtifact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeArtifacts {
+    /// Loaded kernel identity; historical observations did not measure it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<RuntimeArtifact>,
     pub initramfs: Option<RuntimeArtifact>,
     /// Only disks actually attached read-only. Writable disks are not evidence.
     pub disks: Vec<RuntimeArtifact>,

@@ -3,12 +3,13 @@
 //! slot-keyed, or bundle-sha256 path depending on its shape.
 
 use anyhow::{Context, Result};
-use mvm_core::manifest::{PersistedManifest, is_slot_hash_dirname, slot_dir, slot_revision_dir};
+use mvm_core::manifest::{PersistedManifest, is_slot_hash_dirname, slot_dir};
 use mvm_core::template::{SnapshotInfo, TemplateRevision, TemplateSpec};
 use tracing::instrument;
 
 use super::artifacts::{
-    bundle_artifacts_for_sha, current_revision_id_for_slot, template_artifacts_for_slot,
+    bundle_artifacts_for_sha, checked_revision_file, checked_slot_revision_dir,
+    current_revision_id_for_slot, template_artifacts_for_slot,
 };
 use super::slots::template_load_slot;
 
@@ -24,9 +25,9 @@ pub fn template_has_snapshot_for_slot(slot_hash: &str) -> Result<bool> {
 /// Load snapshot metadata for the slot's current revision.
 pub fn template_snapshot_info_for_slot(slot_hash: &str) -> Result<Option<SnapshotInfo>> {
     let rev = current_revision_id_for_slot(slot_hash)?;
-    let rev_dir = slot_revision_dir(slot_hash, &rev);
-    let meta_path = format!("{}/revision.json", rev_dir);
-    let data = std::fs::read_to_string(&meta_path)
+    let data = checked_slot_revision_dir(slot_hash, &rev)
+        .and_then(|dir| checked_revision_file(&dir, "revision.json"))
+        .and_then(|path| Ok(std::fs::read_to_string(path)?))
         .with_context(|| format!("Failed to read revision.json for slot {}", slot_hash))?;
     let revision: TemplateRevision = serde_json::from_str(&data)
         .with_context(|| format!("Corrupt revision.json for slot {}", slot_hash))?;

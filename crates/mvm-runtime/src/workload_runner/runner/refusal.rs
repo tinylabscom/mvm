@@ -55,6 +55,40 @@ pub(super) fn require_fresh_child_identity(
     )))
 }
 
+/// The seccomp tier a claimed child must run its workload under: the one its
+/// signed plan admits.
+pub(super) fn admitted_seccomp_tier(
+    plan: &mvm_core::plan::ExecutionPlan,
+) -> mvm_core::crypto::seccomp::SeccompTier {
+    plan.admission_profile.seccomp_tier.into()
+}
+
+/// Judge the forked child's report of which seccomp tier it now holds against
+/// the tier it was handed. A child restored out of a standby parent holds no
+/// tier until this handshake gives it one, so a report of none — or of another
+/// tier — means its workload would run under a filter nobody admitted, or none
+/// at all, and the claim is refused.
+pub(super) fn require_admitted_seccomp_tier(
+    child_vm_name: &str,
+    requested: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    outcome: &PostRestoreOutcome,
+) -> std::result::Result<(), StandbyError> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    if outcome.seccomp_tier == Some(requested) {
+        return Ok(());
+    }
+    let held = outcome
+        .seccomp_tier
+        .map_or_else(|| "no tier".to_string(), |tier| format!("tier {tier}"));
+    Err(StandbyError::ClaimFailed(format!(
+        "forked child '{child_vm_name}' reports {held} where its plan admits seccomp tier \
+         {requested}; refusing to admit a child whose workload would not run under the \
+         admitted filter"
+    )))
+}
+
 /// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
 /// [`StandbyError`] the claim seam returns. The refusal reasons stay distinct in
 /// the message so a caller can tell an un-audited parent from a plan mismatch.
@@ -93,6 +127,7 @@ mod tests {
             reseeded: true,
             clock_resynced: true,
             reseed_shortfall: None,
+            seccomp_tier: None,
         };
         assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
 
@@ -122,6 +157,48 @@ mod tests {
         }
     }
 
+    /// The child must report holding exactly the tier it was handed; a report
+    /// of none (an agent that took no tier) or of another tier refuses.
+    #[test]
+    fn a_child_must_report_holding_the_admitted_seccomp_tier() {
+        use mvm_core::crypto::seccomp::SeccompTier;
+        let reporting = |seccomp_tier| PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: true,
+            clock_resynced: true,
+            reseed_shortfall: None,
+            seccomp_tier,
+        };
+        assert!(
+            require_admitted_seccomp_tier(
+                "vm-a",
+                Some(SeccompTier::Standard),
+                &reporting(Some(SeccompTier::Standard))
+            )
+            .is_ok()
+        );
+        let none =
+            require_admitted_seccomp_tier("vm-a", Some(SeccompTier::Standard), &reporting(None))
+                .expect_err("a child holding no tier is refused");
+        assert!(none.to_string().contains("reports no tier"), "{none}");
+        let other = require_admitted_seccomp_tier(
+            "vm-a",
+            Some(SeccompTier::Standard),
+            &reporting(Some(SeccompTier::Unrestricted)),
+        )
+        .expect_err("a child holding another tier is refused");
+        assert!(
+            other.to_string().contains("tier unrestricted")
+                && other.to_string().contains("admits seccomp tier standard"),
+            "{other}"
+        );
+        assert!(
+            require_admitted_seccomp_tier("vm-a", None, &reporting(None)).is_ok(),
+            "a handshake that delivered no tier has nothing to check"
+        );
+    }
+
     /// An image with no reseed helper and a reseed that failed are refused
     /// with different advice, and each carries the guest's own reason.
     #[test]
@@ -134,6 +211,7 @@ mod tests {
                 reseeded: false,
                 clock_resynced: true,
                 reseed_shortfall: Some(shortfall),
+                seccomp_tier: None,
             };
             let err = require_fresh_child_identity("vm-a", &outcome)
                 .expect_err("an unreseeded child must be refused");

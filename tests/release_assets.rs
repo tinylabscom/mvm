@@ -31,22 +31,28 @@ fn just_module(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
-/// A tag dispatch rehearses the upload against a disposable draft. Branch
-/// builds cannot pass signed-runtime admission: the installed client trusts
-/// only its exact version-tag identity, never a branch or a test signer.
+/// The publish path must be reachable without pushing a tag.
+///
+/// Every release defect found while cutting v0.18.0-rc.1 lived in the publish
+/// job, and the publish job used to be unreachable except by a tag push: the
+/// dry run stopped after `build`. So each attempt surfaced exactly one defect,
+/// at roughly two and a half hours per discovery, four times over — a missing
+/// cross-compile target, an incomplete boot image, a transient 403, and a
+/// duplicate asset name that 422'd *after* the release had been created.
+///
+/// A dry run reaches `gh release create` against a throwaway draft, so those
+/// same failures surface in minutes. The draft is deleted afterwards, and
+/// `always()` on the cleanup matters: a create that succeeds and then fails
+/// uploading leaves a draft behind, which is exactly the case that produced the
+/// 422.
+///
+/// What a dry run cannot prove is asserted here too, by requiring the signing
+/// and downstream-trigger steps to stay tag-only: their keyless identity pins
+/// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
+/// a green dry run mean more than it does.
 #[test]
-fn a_tag_dispatch_rehearses_publication_without_publishing_a_release() {
+fn a_dry_run_reaches_the_publish_step_without_a_tag() {
     let workflow = release_workflow();
-    let runtime_signer = job_block(&workflow, "sign-guest-runtime");
-    assert!(
-        runtime_signer.contains("github.ref_type == 'tag'")
-            && runtime_signer.contains("environment: release-signing"),
-        "a full rehearsal needs a protected tag identity for the guest runtime"
-    );
-    assert!(
-        job_block(&workflow, "release").contains("needs.sign-guest-runtime.result == 'success'"),
-        "a branch-only build must never be mistaken for a signed-runtime release"
-    );
 
     let create = workflow
         .find("gh release create \"${publish_tag}\"")
@@ -76,20 +82,21 @@ fn a_tag_dispatch_rehearses_publication_without_publishing_a_release() {
          part-way through its uploads leaves the draft behind"
     );
 
-    // Tag dispatches can mint the same protected identity as a tag push.
-    // Branch dispatches cannot sign artifacts or reach the draft-upload job.
+    // A dry run runs from a branch, so anything minting or verifying a keyless
+    // signature pinned to `refs/tags/*` has to stay on the tag path.
     for step in [
         "Sign release tarballs, checksum manifests, and SBOM",
         "Attest build provenance for the release tarballs (release-provenance)",
+        "Trigger crates.io publish workflow",
     ] {
         let at = workflow
             .find(step)
             .unwrap_or_else(|| panic!("{step} must exist"));
         let window = &workflow[at..(at + 300).min(workflow.len())];
         assert!(
-            window.contains("github.ref_type == 'tag'"),
-            "{step} must be gated to tags: a branch cannot mint the \
-             version-tag identity required by installed artifacts"
+            window.contains("github.event_name == 'push'"),
+            "{step} must be gated to tag pushes: a dry run cannot mint a \
+             refs/tags identity, and must not publish or trigger anything real"
         );
     }
 }
@@ -451,36 +458,68 @@ fn public_cve_corpus_is_integrity_checked_and_non_certifying() {
     assert!(guide.contains("non-certifying"));
 }
 
-/// Every signed blob in the release uses the one bundle format this project
-/// ships: `--new-bundle-format`.
+/// The `cosign sign-blob` invocations in a workflow, each with every flag up to
+/// and including the line that ends its shell continuation.
+fn sign_blob_invocations(workflow: &str) -> Vec<String> {
+    workflow
+        .match_indices("cosign sign-blob")
+        .map(|(offset, _)| {
+            let mut invocation = Vec::new();
+            for line in workflow[offset..].lines() {
+                invocation.push(line);
+                if !line.trim_end().ends_with('\\') {
+                    break;
+                }
+            }
+            invocation.join("\n")
+        })
+        .collect()
+}
+
+/// Every blob signed for the in-binary verifier uses the one bundle format this
+/// project ships: `--new-bundle-format`.
 ///
 /// The in-binary Rust sigstore stack parses only that shape, and
 /// `cosign verify-blob --bundle` documents it as the preferred input — so a
 /// single format serves both consumers and there is no legacy fallback to keep
 /// in step. A bare `--bundle` left behind would sign an artifact the in-binary
-/// verifier cannot read, and nothing surfaces that until a real release ships.
+/// verifier cannot read, and nothing surfaces that until a consumer fetches it.
+///
+/// Two workflows feed that verifier: the tagged CLI release, and the rolling
+/// commit-addressed host helpers `mvmctl bootstrap` installs into a source
+/// build. The second once signed with a bare `--bundle`, and every source-built
+/// bootstrap on a host without a local helper build refused the result.
 #[test]
 fn every_signed_release_blob_uses_the_one_bundle_format() {
-    let workflow = release_workflow();
-    let mut checked = 0usize;
-    for (offset, _) in workflow.match_indices("cosign sign-blob") {
-        // The invocation is a line-continued shell command; its flags run up to
-        // the first line that is not a continuation.
-        let invocation: String = workflow[offset..]
-            .lines()
-            .take_while(|line| line.trim_end().ends_with('\\'))
-            .collect::<Vec<_>>()
-            .join("\n");
+    for workflow_path in [
+        ".github/workflows/release.yml",
+        ".github/workflows/source-host-helpers.yml",
+    ] {
+        let workflow = fs::read_to_string(workflow_path)
+            .unwrap_or_else(|error| panic!("failed to read {workflow_path}: {error}"));
+        let invocations = sign_blob_invocations(&workflow);
         assert!(
-            invocation.contains("--new-bundle-format"),
-            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+            !invocations.is_empty(),
+            "expected {workflow_path} to sign its artifacts with `cosign sign-blob`"
         );
-        checked += 1;
+        for invocation in invocations {
+            assert!(
+                invocation.contains("--new-bundle-format"),
+                "every `cosign sign-blob` in {workflow_path} must use --new-bundle-format; \
+                 found one without it:\n{invocation}"
+            );
+        }
     }
-    assert!(
-        checked >= 1,
-        "expected to find the release's signing invocation, found {checked}"
-    );
+}
+
+#[test]
+fn sign_blob_invocations_include_single_line_and_final_continuation_flags() {
+    let workflow = "run: |\n  cosign sign-blob --yes --bundle a.bundle a\n  cosign sign-blob \\\n    --yes \\\n    --bundle b.bundle b --new-bundle-format\n  echo done\n";
+    let invocations = sign_blob_invocations(workflow);
+    assert_eq!(invocations.len(), 2);
+    assert!(!invocations[0].contains("--new-bundle-format"));
+    assert!(invocations[1].contains("--new-bundle-format"));
+    assert!(!invocations[1].contains("echo done"));
 }
 
 /// Build provenance must cover the artifacts the release signs directly, and be
@@ -501,12 +540,11 @@ fn the_release_attests_build_provenance_for_the_signed_tarballs() {
          actions/attest-build-provenance records nothing without it"
     );
 
-    let release = job_block(&workflow, "release");
-    let attest = release
+    let attest = workflow
         .find("actions/attest-build-provenance")
         .expect("the release job must attest build provenance");
 
-    let step: String = release[attest..]
+    let step: String = workflow[attest..]
         .lines()
         .take(7)
         .collect::<Vec<_>>()
@@ -518,16 +556,13 @@ fn the_release_attests_build_provenance_for_the_signed_tarballs() {
         );
     }
 
-    let publish = release
+    let publish = workflow
         .find("gh release create")
         .expect("the release job must publish the tag");
     assert!(
         attest < publish,
         "provenance must be attested before `gh release create`, not after"
     );
-    let runtime = job_block(&workflow, "sign-guest-runtime");
-    assert!(runtime.contains("actions/attest-build-provenance"));
-    assert!(runtime.contains("subject-path: guest-runtime/*.tar.gz"));
 }
 
 /// The combined checksum manifest must be signed, and its bundle published.
@@ -584,7 +619,7 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 
     let job = job_block(&workflow, "distro-packages");
     assert!(
-        job.contains("needs: [build, sign-guest-runtime]")
+        job.contains("needs: [build, guest-runtime]")
             && job.contains("uses: ./.github/workflows/distro-packages.yml")
             && job.contains("tarballs: build"),
         "the release must package the tarballs its own build job produced:\n{job}"
@@ -646,14 +681,13 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 /// lock pins; a CLI release that rebuilt, mirrored or re-signed one would be a
 /// second producer under a second identity, which is what moving images out
 /// of this repository ended.
+///
+/// The guest runtime is not an image and is admitted by name: it is the
+/// guest programs and libraries built from this tree, and the CLI release is
+/// the one place it ships from.
 #[test]
 fn the_cli_release_carries_no_image() {
     let workflow = release_workflow();
-    assert!(
-        workflow.contains("uses: ./.github/workflows/guest-bins.yml")
-            && workflow.contains("artifacts/mvm-guest-bins-v*.tar.gz.sha256"),
-        "the complete versioned guest runtime is a CLI release asset, not a boot image"
-    );
     for image_asset in [
         "nix/images",
         "artifacts/runtime-overlay",
@@ -671,15 +705,136 @@ fn the_cli_release_carries_no_image() {
             "release.yml names {image_asset:?}; images ship from mvm-images, not from a CLI release"
         );
     }
+    assert!(
+        workflow.contains("artifacts/mvm-guest-bins-v*.tar.gz"),
+        "the guest runtime is the one guest artifact a CLI release carries, by name"
+    );
+}
+
+/// The guest runtime ships with every CLI release the way a tarball does:
+/// built by the guest-bins workflow before publication, required by the
+/// publish job, held to the tag's version, signed with the tarballs and with
+/// its digest sidecar, listed in the signed checksum manifest, covered by
+/// build provenance and attached with its bundles.
+#[test]
+fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
+    let workflow = release_workflow();
+
+    let job = job_block(&workflow, "guest-runtime");
+    assert!(
+        job.contains("uses: ./.github/workflows/guest-bins.yml"),
+        "the release must build its guest runtime with the guest-bins workflow:\n{job}"
+    );
+    let lane = fs::read_to_string(".github/workflows/guest-bins.yml").expect("guest-bins.yml");
+    assert!(
+        lane.contains("  workflow_call:\n")
+            && lane.contains("build guest-bins --out dist")
+            && lane.contains("name: mvm-guest-bins\n"),
+        "guest-bins.yml must be callable and upload the archive under the name the release reads"
+    );
+
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("guest-runtime, release-archive-smoke")
+            && release.contains("needs.guest-runtime.result == 'success'"),
+        "publication must wait for the guest runtime build and require it to succeed"
+    );
+    assert!(
+        release.contains(r#"artifacts/mvm-guest-bins-${TAG_NAME}.tar.gz"#),
+        "a tag must publish the guest runtime named for its own version"
+    );
+    assert!(
+        release.contains("guest-runtime job one for its archive")
+            && release.contains("cat ./*.sha256 > checksums-sha256.txt"),
+        "the runtime's sidecar must join the combined checksum manifest"
+    );
+
+    let sign_loop = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step")
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    for blob in [
+        "artifacts/*.tar.gz",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+    ] {
+        assert!(sign_loop.contains(blob), "{blob} must be cosign-signed");
+    }
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+    for asset in [
+        "artifacts/*.tar.gz",
+        "artifacts/*.tar.gz.bundle",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256.bundle",
+    ] {
+        assert!(
+            assets.contains(asset),
+            "{asset} must be attached to the release"
+        );
+    }
+
+    let attest = workflow
+        .find("actions/attest-build-provenance")
+        .expect("the release job must attest build provenance");
+    assert!(
+        workflow[attest..]
+            .lines()
+            .take(7)
+            .any(|line| line.trim() == "artifacts/*.tar.gz"),
+        "build provenance must cover the guest runtime with the tarballs"
+    );
+
+    let verify = fs::read_to_string("nix/packaging/release/verify-release-assets.sh")
+        .expect("verify-release-assets.sh");
+    assert!(
+        verify.contains("check_guest_runtime\n")
+            && verify.contains(r#"mvm-guest-bins-v${EXPECT_VERSION}.tar.gz"#),
+        "the post-publish verifier must require the guest runtime of the tag's version"
+    );
+}
+
+/// The archive smoke stages the guest runtime its release run built beside
+/// the unpublished mvmctl, so the CLI and the runtime it ships with are paired
+/// before anything is published.
+#[test]
+fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
+    let lane = fs::read_to_string(".github/workflows/release-archive-smoke.yml")
+        .expect("release-archive-smoke.yml");
+    let smoke = job_block(&lane, "release-archive-smoke");
+    assert_eq!(
+        smoke.matches("name: mvm-guest-bins\n").count(),
+        2,
+        "both download paths must fetch the guest runtime the release run built"
+    );
+    assert!(
+        smoke.contains(r#"sha256sum --check "${runtimes[0]}.sha256""#)
+            && smoke
+                .contains("MVM_SMOKE_GUEST_RUNTIME: ${{ steps.guest-runtime.outputs.archive }}"),
+        "the smoke must stage the checked runtime beside the unpacked mvmctl"
+    );
+    let script = fs::read_to_string("scripts/smoke-fresh-install.sh").expect("smoke script");
+    assert!(
+        script.contains("ready (installed beside mvmctl)"),
+        "the smoke must require bootstrap to adopt the staged runtime"
+    );
+    assert!(
+        script.contains("assembled from release guest runtime $runtime_name")
+            && script.contains("release archive $runtime_name"),
+        "the smoke must require the launch pieces to come from the staged runtime"
+    );
 }
 
 #[test]
 fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     let workflow = release_workflow();
-    assert!(
-        !workflow.contains("gh workflow run publish-crates.yml"),
-        "CLI releases must not automatically publish the private workspace dependency closure"
-    );
     let smoke = job_block(&workflow, "archive-install-smoke");
     for target in [
         "x86_64-unknown-linux-gnu",
@@ -721,6 +876,10 @@ fn macos_release_signing_precedes_archive_checksums() {
     assert!(signing.contains("scripts/release/sign_macos.py"));
     assert!(signing.contains("--payload staging/mvmctl-aarch64-apple-darwin"));
     assert!(signing.contains("macos-notarization.json"));
+    assert!(
+        signing.contains("--skip-unconfigured"),
+        "a tag build without Apple credentials must ship ad-hoc signed, not fail"
+    );
     assert!(
         build.contains("--features mvm-client/release-channel"),
         "the published host library must acquire the matching signed runtime"
@@ -1431,13 +1590,13 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
 
     let gate = job_block(&workflow, "release-archive-smoke");
     assert!(
-        gate.contains("    needs: [build, sign-guest-runtime]\n")
+        gate.contains("    needs: [build, guest-runtime]\n")
             && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
         "the archive smoke must run the shared lane on what `build` uploaded"
     );
     assert!(
-        gate.contains("tag: ${{ github.ref_name }}"),
-        "the signed archive smoke must assert the exact release tag's version"
+        gate.contains("tag: ${{ github.event_name == 'push' && github.ref_name || '' }}"),
+        "a tag's archive must report the tag's version; a dry run has none to check"
     );
     let release = job_block(&workflow, "release");
     assert!(
@@ -1477,13 +1636,6 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
     assert!(
         smoke.contains("sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256"),
         "the archive must be the one the build recorded a checksum for"
-    );
-    assert_eq!(smoke.matches("name: mvm-guest-bins\n").count(), 2);
-    assert!(
-        smoke.contains("MVM_SMOKE_GUEST_RUNTIME_DIR:")
-            && smoke.contains("--certificate-identity ")
-            && smoke.contains("release.yml@refs/tags/${TAG_NAME}"),
-        "the unpublished CLI must boot with its matching authenticated guest runtime"
     );
     assert!(
         smoke.contains(
@@ -1677,6 +1829,34 @@ fn remote_image_contract_checks_follow_the_locked_version() {
     assert!(downloader.contains("locked-image-tag.sh\" compatibility builder_cache_contract"));
     assert!(downloader.contains(".compatibility.builder_cache_contract == $contract"));
     assert!(pin_update.contains(".compatibility.builder_cache_contract == 5"));
+}
+
+/// The shell consumers of the signed root check the base-image contract with
+/// the same window `mvmctl` boots, reading an absent declaration as the legacy
+/// contract 0, and none of them consults the retired guest-agent range.
+#[test]
+fn remote_base_image_contract_checks_follow_the_cli_window() {
+    let supported = mvmctl::core::image_set::BaseImageContractRange::SUPPORTED;
+    assert_eq!(
+        supported.min(),
+        mvmctl::core::image_set::BaseImageContract::LEGACY
+    );
+    let check = format!(
+        "(.compatibility.base_image_contract // 0) <= {}",
+        supported.max()
+    );
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/update-image-pin.yml",
+        "scripts/download-qemu-wasm-smoke-pack.sh",
+    ] {
+        let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(text.contains(&check), "{path} must check `{check}`");
+        assert!(
+            !text.contains("guest_agent_protocol"),
+            "{path} must not consult the retired guest-agent range"
+        );
+    }
 }
 
 #[test]

@@ -224,11 +224,46 @@ pub fn call_streaming(
 /// a probe that answers without touching the stream cannot tell a booting guest
 /// from a serving one.
 pub fn probe_agent_ready(stream: &mut UnixStream) -> Result<()> {
+    match probe_agent_serving(stream)? {
+        AgentServing::Ready => Ok(()),
+        AgentServing::AwaitingActivation => bail!(
+            "guest agent answered readiness Ping with {:?}, expected Pong",
+            GuestResponse::NotActivated
+        ),
+    }
+}
+
+/// What an agent that answered the readiness `Ping` over an authenticated
+/// session can serve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentServing {
+    /// `Pong`: the agent serves the full control protocol.
+    Ready,
+    /// `NotActivated`: the universal-initramfs agent is up and has
+    /// authenticated the host, but accepts nothing except
+    /// `ActivateEnvironment` until the host activates it.
+    AwaitingActivation,
+}
+
+/// Prove that a guest agent is listening on `stream` and say which of the two
+/// serving states it is in.
+///
+/// [`probe_agent_ready`] is the check for a launch about to issue operational
+/// RPCs, and it reads a pre-activation agent as not ready. A caller that boots
+/// a guest and activates it itself, such as a factory parent, needs to know
+/// only that the agent is up — and a pre-activation agent answers every `Ping`
+/// with `NotActivated` for as long as it waits, so requiring `Pong` there
+/// waits for something that cannot happen. Any other answer, and every
+/// transport failure, is an error the caller polls past.
+pub fn probe_agent_serving(stream: &mut UnixStream) -> Result<AgentServing> {
     let mut session = connection::open_authenticated_session(stream)?;
     session.write(stream, &GuestRequest::Ping)?;
     match session.read(stream)? {
-        GuestResponse::Pong => Ok(()),
-        other => bail!("guest agent answered readiness Ping with {other:?}, expected Pong"),
+        GuestResponse::Pong => Ok(AgentServing::Ready),
+        GuestResponse::NotActivated => Ok(AgentServing::AwaitingActivation),
+        other => bail!(
+            "guest agent answered readiness Ping with {other:?}, expected Pong or NotActivated"
+        ),
     }
 }
 
@@ -2247,6 +2282,82 @@ mod tests {
             .expect_err("an authenticated non-Pong response is not readiness");
         assert!(error.to_string().contains("expected Pong"), "{error:#}");
         guest_thread.join().unwrap();
+    }
+
+    /// Run one authenticated guest that answers the readiness `Ping` with
+    /// `answer`, and return what `probe` made of it.
+    fn probe_against_guest_answering<T>(
+        answer: GuestResponse,
+        probe: impl FnOnce(&mut UnixStream) -> Result<T>,
+    ) -> Result<T> {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let anchor = seeded_host_signer(home.path()).verifying_key();
+
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let guest_thread = std::thread::spawn(move || {
+            let mut guest_key_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut guest_key_seed);
+            let mut session = AuthenticatedSession::guest(
+                &mut guest,
+                SigningKey::from_bytes(&guest_key_seed),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut guest).expect("read probe request");
+            assert!(matches!(req, GuestRequest::Ping), "got {req:?}");
+            session.write(&mut guest, &answer).expect("write answer");
+        });
+        let outcome = probe(&mut host);
+        guest_thread.join().unwrap();
+        outcome
+    }
+
+    /// The universal-initramfs agent answers `Ping` with `NotActivated` until
+    /// the host activates it. That is a live agent, and a caller that activates
+    /// the guest itself has to be able to see it as one.
+    #[test]
+    fn probe_agent_serving_reads_not_activated_as_awaiting_activation() {
+        let serving =
+            probe_against_guest_answering(GuestResponse::NotActivated, probe_agent_serving)
+                .expect("a pre-activation agent is serving");
+        assert_eq!(serving, AgentServing::AwaitingActivation);
+    }
+
+    #[test]
+    fn probe_agent_serving_reads_pong_as_ready() {
+        let serving = probe_against_guest_answering(GuestResponse::Pong, probe_agent_serving)
+            .expect("a ponging agent is serving");
+        assert_eq!(serving, AgentServing::Ready);
+    }
+
+    #[test]
+    fn probe_agent_serving_rejects_any_other_authenticated_answer() {
+        let error = probe_against_guest_answering(
+            GuestResponse::Error {
+                message: "not serving".to_string(),
+            },
+            probe_agent_serving,
+        )
+        .expect_err("an unrelated answer is neither serving state");
+        assert!(
+            error.to_string().contains("expected Pong or NotActivated"),
+            "{error:#}"
+        );
+    }
+
+    /// A launch about to issue operational RPCs still needs `Pong`: a
+    /// pre-activation agent would refuse every one of them.
+    #[test]
+    fn probe_agent_ready_still_refuses_a_pre_activation_agent() {
+        let error = probe_against_guest_answering(GuestResponse::NotActivated, probe_agent_ready)
+            .expect_err("a pre-activation agent is not ready for operational RPCs");
+        assert!(error.to_string().contains("NotActivated"), "{error:#}");
     }
 
     // ---- check_response: the pure contract enforcer ----

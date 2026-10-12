@@ -110,7 +110,8 @@ fn publish_directory_noclobber(source: &Path, output: &Path) -> std::io::Result<
         // SAFETY: both paths are valid, nul-terminated C strings and the
         // kernel only reads them for this rename operation.
         let result = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 source.as_ptr(),
                 libc::AT_FDCWD,

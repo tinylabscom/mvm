@@ -41,6 +41,10 @@ pub enum LocalAuditKind {
     VolumeLock,
     VolumeSnapshot,
     VolumeRestore,
+    /// `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` admitted volume plaintext onto
+    /// storage that is not verified encrypted. Detail: `purpose=… path=…
+    /// reason=…`.
+    VolumeStorageOverride,
     UpdateInstall,
     Uninstall,
     // --- DX features ---
@@ -151,6 +155,9 @@ pub enum LocalAuditKind {
     /// A verified revocation feed advanced the local rollback checkpoint.
     /// Detail carries the accepted sequence and document digest.
     RegistryPackRevocationUpdate,
+    /// A verified image-set revocation list advanced the local rollback
+    /// checkpoint. Detail carries the publication, issue time and digest.
+    ImageSetRevocationUpdate,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -582,6 +589,10 @@ pub enum LocalAuditKind {
     /// checkpointing each step. Detail:
     ///   `action=replay.begin|replay.end from=<id> source_vm=<v> entries=<n>     ///    steps=<n>`
     MachineReplay,
+    /// mvm minted the host snapshot key, the root that encrypts instance
+    /// snapshots and host-domain checkpoints, because no source held one.
+    /// Detail carries the key file's path, never the key.
+    SnapshotKeyCreated,
 }
 
 /// A single local audit log entry.
@@ -1227,6 +1238,7 @@ mod tests {
             LocalAuditKind::VolumeLock,
             LocalAuditKind::VolumeSnapshot,
             LocalAuditKind::VolumeRestore,
+            LocalAuditKind::VolumeStorageOverride,
             LocalAuditKind::UpdateInstall,
             LocalAuditKind::Uninstall,
             LocalAuditKind::NetworkCreate,
@@ -1264,6 +1276,7 @@ mod tests {
             LocalAuditKind::RegistryPackPin,
             LocalAuditKind::RegistryPackRemove,
             LocalAuditKind::RegistryPackRevocationUpdate,
+            LocalAuditKind::ImageSetRevocationUpdate,
             // Session lifecycle.
             LocalAuditKind::SessionStart,
             LocalAuditKind::SessionAttach,
@@ -1301,6 +1314,7 @@ mod tests {
             LocalAuditKind::WorkspaceRedo,
             // Replay.
             LocalAuditKind::MachineReplay,
+            LocalAuditKind::SnapshotKeyCreated,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
@@ -1366,6 +1380,7 @@ mod tests {
             (LocalAuditKind::WorkspaceUndo, "workspace_undo"),
             (LocalAuditKind::WorkspaceRedo, "workspace_redo"),
             (LocalAuditKind::MachineReplay, "machine_replay"),
+            (LocalAuditKind::SnapshotKeyCreated, "snapshot_key_created"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();

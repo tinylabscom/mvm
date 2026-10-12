@@ -34,8 +34,7 @@ use super::cache::{
     LocalImageCache, LocalImageCacheKey,
 };
 use crate::builder_vm_runtime::copy_dir_filtered;
-use crate::guest_libc::GuestLibc;
-use crate::host_payload_manifest::host_binary_names;
+use crate::host_payload_manifest::legacy_installed_host_binary_names;
 
 /// The image checkout's host-binary build script, relative to its root.
 pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
@@ -133,43 +132,6 @@ const BUILDER_VM: TargetContract = TargetContract {
     needs_host_binaries: true,
 };
 
-const RUNTIME_OVERLAY: TargetContract = TargetContract {
-    files: &[
-        file("overlay.ext4", "runtime_overlay", "ext4"),
-        file("overlay.verity", "runtime_overlay", "verity_hash_tree"),
-        file("overlay.roothash", "runtime_overlay", "verity_root_hash"),
-        file("VERSION", "runtime_overlay", "text"),
-    ],
-    capabilities: &[
-        ("runtime_overlay", "virtio_blk"),
-        ("runtime_overlay", "dm_verity"),
-    ],
-    set_roles: &[ImageSetRole::RuntimeOverlay],
-    needs_host_binaries: false,
-};
-
-const SDK_SIDECAR_GLIBC: TargetContract = TargetContract {
-    files: &[
-        file("sdk.ext4", "sdk_sidecar_glibc", "ext4"),
-        file("VERSION", "sdk_sidecar_glibc", "text"),
-        file("checksums-sha256.txt", "sdk_sidecar_glibc", "text"),
-    ],
-    capabilities: &[("sdk_sidecar_glibc", "virtio_blk")],
-    set_roles: &[ImageSetRole::SdkSidecar(GuestLibc::Glibc)],
-    needs_host_binaries: false,
-};
-
-const SDK_SIDECAR_MUSL: TargetContract = TargetContract {
-    files: &[
-        file("sdk.ext4", "sdk_sidecar_musl", "ext4"),
-        file("VERSION", "sdk_sidecar_musl", "text"),
-        file("checksums-sha256.txt", "sdk_sidecar_musl", "text"),
-    ],
-    capabilities: &[("sdk_sidecar_musl", "virtio_blk")],
-    set_roles: &[ImageSetRole::SdkSidecar(GuestLibc::Musl)],
-    needs_host_binaries: false,
-};
-
 const DEFAULT_TENANT: TargetContract = TargetContract {
     files: &[
         kernel("vmlinux", "default_tenant_workload_kernel"),
@@ -256,25 +218,16 @@ pub fn contract_for(
     };
     match (target.role, target.attr.as_str()) {
         (ImageBuildRole::BuilderVm, "default") => Ok(&BUILDER_VM),
-        (ImageBuildRole::RuntimeOverlay, "default") => Ok(&RUNTIME_OVERLAY),
-        (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image") => Ok(&SDK_SIDECAR_GLIBC),
-        (ImageBuildRole::RuntimeOverlay, "sdk-sidecar-image-musl") => Ok(&SDK_SIDECAR_MUSL),
         (ImageBuildRole::DefaultTenant, "default") => Ok(&DEFAULT_TENANT),
         (ImageBuildRole::DefaultTenant, "dev") => Ok(&DEFAULT_TENANT_DEV),
         (ImageBuildRole::RootlessTenant, "default") => Ok(&ROOTLESS_TENANT),
-        (ImageBuildRole::Initramfs, _) => Err(unsupported(
-            "the image-set schema has no initramfs role, so a built initramfs has no manifest \
-             to be published under",
-        )),
         (ImageBuildRole::Kernel, _) => Err(unsupported(
             "the kernel flake is not built from a local checkout yet; `default-tenant` carries \
              the workload kernel",
         )),
         _ => Err(unsupported(
             "no output contract for this attribute; known: builder-vm.default, \
-             runtime-overlay.default, runtime-overlay.sdk-sidecar-image, \
-             runtime-overlay.sdk-sidecar-image-musl, default-tenant.default, \
-             default-tenant.dev, rootless-tenant.default",
+             default-tenant.default, default-tenant.dev, rootless-tenant.default",
         )),
     }
 }
@@ -370,7 +323,7 @@ pub fn stage_work_tree(
             path: to.clone(),
             source,
         })?;
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             let from = bins.join(name);
             std::fs::copy(&from, to.join(name)).map_err(|source| LocalImageBuildError::Io {
                 op: "copying host binary",
@@ -454,7 +407,7 @@ pub fn build_host_binaries(
         what: "building the builder's host binaries".to_string(),
         detail: "the script printed no MVM_HOST_BIN_DIR= line".to_string(),
     })?;
-    for name in host_binary_names() {
+    for name in legacy_installed_host_binary_names() {
         if !dir.join(name).is_file() {
             return Err(LocalImageBuildError::Tool {
                 what: "building the builder's host binaries".to_string(),
@@ -992,24 +945,6 @@ mod tests {
                 true,
             ),
             (
-                ImageBuildRole::RuntimeOverlay,
-                "default",
-                &[ImageSetRole::RuntimeOverlay][..],
-                false,
-            ),
-            (
-                ImageBuildRole::RuntimeOverlay,
-                "sdk-sidecar-image",
-                &[ImageSetRole::SdkSidecar(GuestLibc::Glibc)][..],
-                false,
-            ),
-            (
-                ImageBuildRole::RuntimeOverlay,
-                "sdk-sidecar-image-musl",
-                &[ImageSetRole::SdkSidecar(GuestLibc::Musl)][..],
-                false,
-            ),
-            (
                 ImageBuildRole::DefaultTenant,
                 "default",
                 &[
@@ -1084,7 +1019,6 @@ mod tests {
     #[test]
     fn a_target_without_a_contract_is_refused_with_the_reason() {
         for (role, attr, needle) in [
-            (ImageBuildRole::Initramfs, "default", "no initramfs role"),
             (ImageBuildRole::Kernel, "workload-vmlinux", "default-tenant"),
             (ImageBuildRole::BuilderVm, "dev", "no output contract"),
             (ImageBuildRole::RootlessTenant, "dev", "no output contract"),
@@ -1106,13 +1040,13 @@ mod tests {
 
     #[test]
     fn the_script_builds_the_staged_images_against_the_staged_mvm() {
-        let t = target(ImageBuildRole::RuntimeOverlay, "default");
+        let t = target(ImageBuildRole::DefaultTenant, "default");
         let contract = contract_for(&t).unwrap();
         let script = render_build_script(&t, GuestArch::Aarch64, contract);
 
         assert!(
             script.contains(
-                "'path:/work/images#legacyPackages.aarch64-linux.runtime-overlay.default'"
+                "'path:/work/images#legacyPackages.aarch64-linux.default-tenant.default'"
             )
         );
         assert!(script.contains("--override-input mvm 'path:/work/mvm'"));
@@ -1153,7 +1087,7 @@ mod tests {
         write(&mvm.join("crates/a/src/lib.rs"), b"// src");
         write(&mvm.join("target/debug/junk"), b"x");
         let bins = tmp.path().join("bins");
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             write(&bins.join(name), name.as_bytes());
         }
         let dest = tmp.path().join("work");
@@ -1164,7 +1098,7 @@ mod tests {
         assert!(!dest.join("images/.git").exists());
         assert!(dest.join("mvm/crates/a/src/lib.rs").is_file());
         assert!(!dest.join("mvm/target").exists());
-        for name in host_binary_names() {
+        for name in legacy_installed_host_binary_names() {
             assert_eq!(
                 std::fs::read(dest.join("host-bins").join(name)).unwrap(),
                 name.as_bytes()

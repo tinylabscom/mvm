@@ -37,7 +37,7 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use mvm_sdk::compile::deps_audit::{
+use mvm_compiler::deps_audit::{
     FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeManifest, reseal_volume,
     verify_sealed_volume,
 };
@@ -676,7 +676,7 @@ mod tests {
         cve: &str,
         annotations: BTreeMap<String, String>,
     ) -> (PathBuf, String) {
-        use mvm_sdk::compile::deps_audit::{
+        use mvm_compiler::deps_audit::{
             FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, seal_volume,
         };
         let work = cache_root.join("scratch");

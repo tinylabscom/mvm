@@ -147,7 +147,7 @@ fn run_verify(args: VerifyArgs) -> Result<()> {
     }
     fs::create_dir_all(&out_dir).context("creating verify output directory")?;
 
-    mvm_sdk::compile::compile(&result.workload, &out_dir, &manifest_dir)
+    mvm_compiler::compile(&result.workload, &out_dir, &manifest_dir)
         .map_err(|e| anyhow::anyhow!("Nix render failed: {e}"))?;
 
     tracing::info!(dir = %out_dir.display(), "rendered Nix artifacts");

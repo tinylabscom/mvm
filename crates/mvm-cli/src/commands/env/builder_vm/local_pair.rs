@@ -112,11 +112,7 @@ pub(crate) fn ensure_pair_workload_kernel(
     checkout: &LocalImageCheckout,
     profile: WorkloadImageProfile,
 ) -> Result<std::path::PathBuf> {
-    let target = ImageBuildTarget {
-        role: mvm_build::image_source::ImageBuildRole::for_workload_profile(profile),
-        attr: mvm_build::image_source::FlakeAttr::new("default")
-            .expect("default is a valid flake attribute"),
-    };
+    let target = pair_workload_kernel_target(profile);
     let build = ensure_pair_built(checkout, target)?;
     let artifact = build
         .entry
@@ -128,6 +124,22 @@ pub(crate) fn ensure_pair_workload_kernel(
         })
         .with_context(|| format!("the pair's {profile} set has no workload kernel member"))?;
     Ok(artifact.path.clone())
+}
+
+fn pair_workload_kernel_target(profile: WorkloadImageProfile) -> ImageBuildTarget {
+    ImageBuildTarget {
+        role: mvm_build::image_source::ImageBuildRole::for_workload_profile(profile),
+        attr: mvm_build::image_source::FlakeAttr::new("default")
+            .expect("default is a valid flake attribute"),
+    }
+}
+
+pub(crate) fn pair_workload_kernel_fingerprint(
+    checkout: &LocalImageCheckout,
+    profile: WorkloadImageProfile,
+) -> Result<String> {
+    derive_pair_key(checkout, &pair_workload_kernel_target(profile))
+        .map(|key| pair_fingerprint(&key))
 }
 
 /// Copy a sealed (read-only) entry file into a writable cache: the entry's
@@ -147,23 +159,6 @@ pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
     }
 }
 
-/// A staging directory holding a pair entry's contract files under their
-/// canonical names, for installers that read a fixed layout (the overlay
-/// reader, the SDK sidecar installer). Removed on drop.
-pub(crate) fn staged_contract_files(
-    entry: &mvm_build::image_source::CachedImageSet,
-    files: &[(&str, &str)],
-) -> Result<tempfile::TempDir> {
-    let parent = Path::new(&mvm_core::config::mvm_cache_dir()).join("local-image-builds");
-    std::fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
-    let tmp = tempfile::Builder::new()
-        .prefix("contract-")
-        .tempdir_in(&parent)
-        .with_context(|| format!("creating a staging directory in {}", parent.display()))?;
-    mvm_build::image_source::stage_contract_files(entry, files, tmp.path())?;
-    Ok(tmp)
-}
-
 /// Under a selected checkout, put the pair's workload kernel where the
 /// template path's kernel fallback reads it. The template source prefers a
 /// built vmlinux, then the verified workload-kernel cache, and only then the
@@ -176,10 +171,9 @@ pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     let Some(checkout) = super::bootstrap::selected_local_checkout()? else {
         return Ok(());
     };
-    let kernel = ensure_pair_workload_kernel(
-        &checkout,
-        mvm_core::image_set::WorkloadImageProfile::DefaultTenant,
-    )?;
+    let profile = mvm_core::image_set::WorkloadImageProfile::DefaultTenant;
+    let fingerprint = pair_workload_kernel_fingerprint(&checkout, profile)?;
+    let kernel = ensure_pair_workload_kernel(&checkout, profile)?;
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let dest = mvm_build::kernel_fetch::cached_kernel_path(
         std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
@@ -193,6 +187,16 @@ pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     copy_contract_file(&kernel, &dest)?;
     mvm_build::kernel_fetch::record_kernel_digest(&dest)
         .with_context(|| format!("recording the digest of {}", dest.display()))?;
+    std::fs::write(
+        dest.with_file_name("local-pair-fingerprint"),
+        format!("{fingerprint}\n"),
+    )
+    .with_context(|| {
+        format!(
+            "recording the local pair fingerprint for {}",
+            dest.display()
+        )
+    })?;
     Ok(())
 }
 

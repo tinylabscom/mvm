@@ -77,6 +77,10 @@ pub mod addon;
 /// `rehash`, `discover_python_reachable`, `discover_node_reachable`,
 /// `detect_language`) plus `deps_audit` — the sealed-volume primitives
 /// behind the application-dependency audit pipeline.
+///
+/// Requires the `compiler` feature. New host tools can depend directly on
+/// `mvm-compiler` instead of enabling this compatibility facade.
+#[cfg(feature = "compiler")]
 pub mod compile;
 
 /// Static decorator parser — extracts `@mvm.app(...)` kwargs from a
@@ -88,6 +92,9 @@ pub mod decorator;
 /// Deploy-bundle assembly and local attestation for mvmd-owned control-plane
 /// flows. Builds the single `.tar.gz` (compile output plus embedded
 /// `mvmd-spec.json`) and exposes the authenticated shipping seam.
+///
+/// Requires `deploy`; remote transport additionally requires `deploy-remote`.
+#[cfg(feature = "deploy")]
 pub mod deploy;
 
 /// Runtime record-mode core — recording shape + lowering. The host

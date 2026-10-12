@@ -1,5 +1,6 @@
 [package]
 name = "mvm-hostd"
+publish = false
 description = "Host-side daemon roles for mvm: the trusted supervisor library + the broker / host-signer / audit-signer subprocess binaries + the jailer-lite confinement helper. One crate, separate [[bin]]s so each role stays its own process (ADR-022 §3 process moat). Consolidated from mvm-supervisor + mvm-broker + mvm-host-signer + mvm-audit-signer + mvm-jailer-lite (plan 121 D1)."
 version.workspace = true
 edition.workspace = true
@@ -93,8 +94,10 @@ mvm-http.workspace = true
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-contract.
 mvm-net.workspace = true
-# `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
+# `mvm_compiler::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
+mvm-compiler.workspace = true
+# SDK authoring types used by the keyholder and secret resolver.
 mvm-sdk.workspace = true
 # The Workload IR (`SecretRef`, `AuthType`, `HealthCheck`, `host_matches`,
 # …) the keyholder + supervisor + healthcheck modules resolve against,
@@ -156,7 +159,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-rustix = { version = "1.1", features = ["fs"] }
+rustix = { version = "1.1", features = ["fs", "event"] }
 
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]

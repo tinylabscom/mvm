@@ -1227,6 +1227,7 @@ mod tests {
         let mut observer = Observer::bind(
             &state,
             Some(RuntimeArtifacts {
+                kernel: None,
                 initramfs: Some(
                     RuntimeArtifact::loaded("/generation/initrd".into(), b"loaded").unwrap(),
                 ),

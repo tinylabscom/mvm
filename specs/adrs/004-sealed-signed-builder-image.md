@@ -27,10 +27,9 @@ model are unchanged.
   binaries stay embedded in `mvmctl`.
 - *The builder image's key folding mvm source* has one remaining term today:
   the ABI 1 image still bakes `mvm-setpriv`, which `mvm-images` compiles from
-  mvm's source and `mvm-host-vm-init` runs from `/sbin`. Builder boot ABI 2
-  ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) carries it in the
-  boot payload instead, after which the builder image contains no mvm binary
-  and its cache key folds no mvm source.
+  mvm's source. The host now includes it in every builder boot payload, and
+  `mvm-host-vm-init` prefers that copy. An ABI 2 image carries no mvm binary,
+  and its cache key folds no mvm binary source.
 
 ## Context
 
@@ -93,8 +92,8 @@ the output.
 **mvm's own builder binaries travel beside the builder image, not inside
 it.** At every builder boot, `mvmctl` assembles a deterministic initramfs —
 the *builder boot payload* — from its embedded builder binaries
-(`mvm-host-vm-init`, `mvm-builderd`), each re-verified against the SHA-256
-compiled into `mvmctl`. The VMM loads it the way it loads the kernel. Its
+(`mvm-host-vm-init`, `mvm-builderd`, `mvm-setpriv`), each re-verified
+against the SHA-256 compiled into `mvmctl`. The VMM loads it the way it loads the kernel. Its
 `/init` mounts the image read-only, copies the binaries to a tmpfs, pivots,
 and continues as the builder's PID 1. The payload digest travels on the
 kernel command line, and the guest refuses a payload that does not match
@@ -113,17 +112,27 @@ meaning is fixed once released:
   payload format, the command line every backend boots with, the ABIs a
   payload supports, and the stage-1 checks the guest runs.
 - *ABI 0* is the legacy image: no marker, and it bakes the builder binaries
-  at `/sbin`. It boots with the payload, whose binaries then win and whose
-  baked copies are never executed, or without one on a host that has none.
+  and `mvm-setpriv` at `/sbin`. It boots with the payload, whose binaries
+  then win and whose baked copies are never executed, or without one on a
+  host that has none.
   A published set published before the field existed omits it and means 0.
   An omitted field currently means ABI 0 for both published and locally built sets.
-- *ABI 1* is an image that carries no binary from `mvmctl`'s payload. It
-  boots only with the payload.
+- *ABI 1* bakes no builder daemon or init binary. It boots only with the
+  payload, but still bakes `mvm-setpriv` from mvm's source.
+- *ABI 2* carries no mvm binary. The payload supplies `mvm-setpriv` as well
+  as the two builder binaries, and the guest prefers its copy on older images.
 - *What every ABI promises the payload:* `/run` is a mount point; busybox,
   `nix`, `iptables` and `/usr/bin/firecracker` sit at their paths; the
   builder uid 902 exists; the persistent store lives on `/dev/vdb`; the root
   is ext4 on `/dev/vda`. Changing any of these is a new ABI number, never a
   reinterpretation of an old one.
+- *What no ABI promises:* the guest agent's uid. The payload's init reads
+  the image's own `/etc/passwd` and runs the agent under 901 (`mvm-worker`,
+  mkGuest's fixed identity) when the image names it, or under 990 on an
+  image built before that identity set was fixed, which names 990 and not
+  901. The published ABI 1 image is the second kind, and an ABI 2 image can
+  be either, so the image's account rows decide rather than its number. The egress client runs as 989 (`mvm-egress`) on every image, and
+  the FlowMux signing key is handed to that uid before the client starts.
 - *What the host guarantees:* every builder boot carries the payload of the
   running `mvmctl`, whatever the image's ABI; the payload is assembled per
   boot into the booting VM's own state directory, never a shared cache; the
@@ -165,6 +174,27 @@ the guest as files and an outcome; the host verifies them, and only then does
 `mvmctl bundle export` or `mvm_client::builder_bundle` sign a `.mvmpkg`
 under the host signer.
 
+**The host reads builder output only as regular files.** Every transport
+returns the output as a tar the guest wrote, and a tar can name a symbolic
+link. A link followed on the host would let a guest that cannot read the
+host signing key have the host read it into the template cache, or into a
+bundle signed by that same key. So the host never follows one: mirroring an
+output directory recreates a link as a link and refuses a FIFO, socket or
+device, and every member a build result names — rootfs, kernel, sidecar —
+must be a regular file, inspected without following, or the build fails as
+an output-contract failure. Owner: `mvm_build::builder_output`.
+
+Signing adds one more step. `verify_builder_output` holds every member a
+bundle carries to that rule in the output directory itself, requires the
+sidecar to pass the same runtime-overlay gate a boot applies, and requires a
+dm-verity pair to be complete with a well-formed root hash rather than
+silently exporting the rootfs unsealed. Its result, `VerifiedBuilderOutput`,
+has no other constructor, and `export_builder_result` takes nothing else, so
+builder output reaches the signer only through that check. None of it has to
+guard against the guest changing a file afterwards: the host reads only what
+the guest wrote before it powered off, extracted where the guest never had a
+handle.
+
 **Building an artifact is two phases, and only one of them has to happen
 inside a VM.** Evaluating and running Nix build logic — fetching sources,
 compiling, executing arbitrary derivation or package-install code —
@@ -187,7 +217,9 @@ signed image set, or from a paired `mvm-images` checkout. While that image
 still bakes the builder binaries (ABI 0), a pair build's cache key folds the
 source identity of the package that builds them, because its target contract
 says the image needs host binaries; that term leaves the key when the image
-moves to ABI 1.
+moves to ABI 1. Below ABI 2 the key also folds the source identity of
+`mvm-setpriv`, which the image compiles; at ABI 2 the payload carries that
+helper and the term leaves the key too.
 
 **Published release artifacts are cosign-signed, and the signed manifest —
 not the artifacts individually — is the trust anchor.** A release's

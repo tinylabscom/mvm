@@ -207,9 +207,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn private_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+    }
+
     #[test]
     fn writable_ancestor_is_rejected_before_creating_runtime_storage() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let attacker_parent = temp.path().join("shared");
         std::fs::create_dir(&attacker_parent).unwrap();
         std::fs::set_permissions(&attacker_parent, std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -222,7 +229,7 @@ mod tests {
 
     #[test]
     fn aliases_are_canonicalized_but_runtime_descendant_symlinks_are_refused() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let home = temp.path().join("home");
         private_directory(&home).unwrap();
         let alias = temp.path().join("alias");
@@ -237,9 +244,10 @@ mod tests {
 
     #[test]
     fn source_cache_paths_do_not_reuse_aliases() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let home = temp.path().join("home");
         private_directory(&home).unwrap();
+        private_directory(&home.join("cache")).unwrap();
         let objects = home.join("cache/guest-runtime/v1/objects");
         std::fs::create_dir_all(&objects).unwrap();
         let archive = objects.join("archive");
@@ -266,7 +274,7 @@ mod tests {
 
     #[test]
     fn lock_rejects_symlinks_and_serializes_owners() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = private_tempdir();
         let root = root_at(temp.path(), true).unwrap();
         let first = lock(&root).unwrap();
         let (attempted, attempt) = std::sync::mpsc::channel();

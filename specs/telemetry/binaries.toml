@@ -323,6 +323,16 @@ category = "code-generator"
 reason = "Development schema or SDK generator; not a VM runtime producer."
 
 [[binary]]
+package = "mvm-contract"
+name = "emit_pack_spec_schema"
+source = "crates/mvm-contract/src/bin/emit_pack_spec_schema.rs"
+required_features = ["schema"]
+[binary.capture]
+kind = "non-runtime"
+category = "code-generator"
+reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
 package = "mvm-core"
 name = "emit_broker_schema"
 source = "crates/mvm-core/src/bin/emit_broker_schema.rs"

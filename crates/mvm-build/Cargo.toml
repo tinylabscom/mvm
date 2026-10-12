@@ -1,5 +1,6 @@
 [package]
 name = "mvm-build"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Nix builder pipeline and artifact cache for mvm"
@@ -70,12 +71,11 @@ mvm-agentd.workspace = true
 mvm-net = { workspace = true, optional = true }
 mvm-vmm = { workspace = true }
 # `install_app_deps` reuses
-# `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
-# for cache-hit verification. The orchestrator owns the cache
-# probe + miss-path placeholder; the audit primitives stay in
-# `mvm-sdk` so the supervisor and the builder VM go through the
-# same types.
-mvm-sdk.workspace = true
+# `mvm_compiler::deps_audit::{verify_sealed_volume, VolumeError}`
+# for cache-hit verification. The orchestrator owns cache probes and
+# installation dispatch; compiler audit primitives keep the supervisor
+# and builder VM on the same types.
+mvm-compiler.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
@@ -97,7 +97,7 @@ sha2.workspace = true
 # format library is self-contained; the CLI passes the host
 # signer's key bytes in.
 ed25519-dalek.workspace = true
-# `download_runtime_overlay` stages files into a
+# Archive installs stage files into a
 # temp dir before atomic install into the cache. Promoted from a
 # dev-dep so lib code (not just tests) can reach it.
 tempfile.workspace = true
@@ -176,7 +176,7 @@ manifest-verify = ["mvm-core/manifest-verify"]
 contributor-bootstrap = []
 # Exposes `published_image_set::fixture`, a signed-root-shaped image set served
 # from a directory, to other crates' tests.
-test-support = []
+test-support = ["mvm-fs/test-support"]
 
 [lints]
 workspace = true

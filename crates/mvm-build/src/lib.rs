@@ -12,9 +12,15 @@ pub mod base_image_gate;
 /// against OSV over `mvm_http::blocking` and render the app-deps-shaped
 /// `cve.json` + CycloneDX SBOM sidecar pair.
 pub mod base_image_scan;
+/// Synthetic boot archives shared by offline admission tests.
+#[cfg(any(test, feature = "test-support"))]
+pub mod boot_asset_fixture;
 /// Disk-only job/artifact transport for the hvf-VMM builder (tar-over-raw-
 /// disk, so the host never formats or reads a guest filesystem).
 pub mod boot_image_select;
+/// The uid a builder guest runs its guest agent under, chosen from the
+/// identities the booted image names.
+pub mod builder_agent_uid;
 /// The builder boot contract: the payload of mvm's own builder binaries every
 /// builder boot carries beside its image, the image's boot ABI, and the one
 /// kernel command line every builder backend boots with.
@@ -34,6 +40,8 @@ pub mod builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 pub mod builder_orchestrator;
+/// What the host checks in a builder VM's output before it uses or signs it.
+pub mod builder_output;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
@@ -174,10 +182,6 @@ pub mod builder_backend_select;
 /// its VM here).
 pub mod builder_health;
 
-/// Which arm prepares an image that is otherwise pair-built from an image
-/// checkout: adopt the pinned set's verified members (when they were built
-/// from this tree, or unconditionally on request), or build locally.
-pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
 pub mod guest_agent_build;
@@ -195,6 +199,8 @@ pub mod nix;
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
 pub mod pipeline;
+/// Process-lifetime memo for answers every call site of one command shares.
+mod process_memo;
 /// Cosign-verify a downloaded release archive against the release workflow's
 /// keyless signing identity before anything reads it. Shared by every
 /// release-artifact downloader.
@@ -204,6 +210,9 @@ pub mod release_signature;
 /// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
 /// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// The overlay, initramfs and SDK sidecars assembled from one guest runtime,
+/// and the archive digest each records as its origin.
+pub mod runtime_pieces;
 /// Acquire the published SDK-sidecar disk for hosts that cannot build one.
 /// Fetches the per-arch, per-libc member of the signed image set, proves it
 /// against the verified root and its own manifest, and installs it under

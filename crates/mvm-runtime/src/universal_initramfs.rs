@@ -8,32 +8,9 @@ use anyhow::{Context, Result};
 
 const UNCACHED_SOURCE_RUNTIME_FINGERPRINT: &str = "source-runtime-cache-missing";
 
-#[cfg(any(test, feature = "test-support"))]
-static SEEDED_TEST_INITRAMFS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-#[cfg(any(test, feature = "test-support"))]
-fn seeded_test_initramfs(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: mvm_core::arch::GuestArch,
-) -> Option<mvm_fs::initramfs::InitramfsArtifact> {
-    if !SEEDED_TEST_INITRAMFS
-        .lock()
-        .expect("test initramfs registry mutex is not poisoned")
-        .contains(cache_root)
-    {
-        return None;
-    }
-    mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
-        .resolve(&arch.to_string())
-        .ok()
-}
-
 /// Discard a cached universal initramfs whose recorded source fingerprint no
 /// longer matches the checkout it would be attached from. Returns true when a
-/// stale artifact was evicted; rejects a corrupt source-runtime cache.
+/// stale artifact was evicted; rejects a source pointer that is not a digest.
 ///
 /// A source checkout rebuilds its guest binaries when they change, but the
 /// initramfs cache is keyed only on `(version, arch)` — so without this it
@@ -51,15 +28,17 @@ fn evict_stale_universal_initramfs(
     let Some(shared_cache_root) = cache_root.parent() else {
         return Ok(false);
     };
-    let fingerprint = match mvm_build::guest_runtime::cached_source_guest_runtime(
+    // Provenance only: the cached initramfs is kept when it was built from
+    // the runtime this tree records, and nothing is read from that runtime
+    // here, so its archive is not opened. Verifying it on every launch cost
+    // a contributor build more than a third of the warm-launch budget.
+    let fingerprint = mvm_build::guest_runtime::source_guest_runtime_digest(
         shared_cache_root,
         version,
         arch,
         &workspace_root,
-    )? {
-        Some(runtime) => runtime.digest,
-        None => UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string(),
-    };
+    )?
+    .unwrap_or_else(|| UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string());
     Ok(mvm_build::initramfs::evict_if_source_changed(
         cache_root,
         version,
@@ -115,7 +94,7 @@ pub const KERNEL_BOOTING_HYPERVISORS: [&str; 5] =
     ["firecracker", "hvf", "qemu", "libkrun", "apple-container"];
 
 /// Attach the universal initramfs to a launch on `hypervisor`, resolving it
-/// from the signed CLI release archive or a source-checkout build.
+/// from the cache, the locked image set, or a source-checkout build.
 ///
 /// A rootfs boot cannot come up without it: the initramfs supplies `/init`
 /// and mounts the runtime overlay at `/mvm/runtime`, and once it is attached
@@ -135,6 +114,29 @@ pub fn attach_universal_initramfs_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
 ) -> Result<()> {
+    if start_config.legacy_portable_runtime.is_some() {
+        crate::runtime_evidence::verify_runtime_for_launch(
+            start_config,
+            crate::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+        return Ok(());
+    }
+    if let Some(pin) = &start_config.bundle_boot_assets {
+        anyhow::ensure!(
+            pin.arch == mvm_core::arch::GuestArch::host(),
+            "bundle boot-assets architecture differs from host"
+        );
+        let path = start_config
+            .initrd_path
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("verified bundle initrd is missing"))?;
+        let digest = mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(path))?;
+        anyhow::ensure!(
+            digest == pin.initrd_sha256.as_str(),
+            "verified bundle initrd changed; refusing runtime fallback"
+        );
+        return Ok(());
+    }
     // `wasm` runs a WASI module directly and `mock` records calls without
     // starting a guest. Neither can mount an initramfs, so attaching one is
     // meaningless and resolving one is pure cost.
@@ -148,28 +150,18 @@ pub fn attach_universal_initramfs_if_cached(
             .as_deref()
             .context("signed runtime selection has no overlay version")?;
         let arch = mvm_core::arch::GuestArch::host();
-        mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?;
+        let verified =
+            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(proof, version, arch)?;
         let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-        // Use the selected archive, not a fresh cache/channel resolution that
-        // could silently pair another runtime's init with the overlay.
-        let runtime = mvm_build::guest_runtime::install_signed_guest_runtime_archive(
-            &cache,
-            &proof.archive,
-            &proof.checksum,
-            &proof.signature_bundle,
-            version,
-            arch,
-        )?;
+        // Require the prepared initramfs declared by the exact selected archive,
+        // never re-resolve a channel or assemble a missing piece during startup.
+        let artifact = resolve_cached_initramfs(&cache.join("initramfs"), version, arch)
+            .context("selected release initramfs is not prepared; run `mvmctl bootstrap` first")?;
         anyhow::ensure!(
-            runtime.digest == proof.archive_sha256,
-            "selected runtime archive changed during initramfs assembly"
+            mvm_core::crypto::image_verify::sha256_file(&artifact.image_path)?
+                == verified.declaration(arch)?.initramfs_sha256,
+            "prepared initramfs differs from the selected runtime archive"
         );
-        let artifact = mvm_build::initramfs::build_initramfs_from_guest_runtime(
-            &cache.join("initramfs"),
-            version,
-            arch,
-            &runtime,
-        )?;
         start_config.initrd_path = Some(artifact.image_path.display().to_string());
         return Ok(());
     }
@@ -177,60 +169,45 @@ pub fn attach_universal_initramfs_if_cached(
         start_config.runtime_overlay_path.is_none() || start_config.unsigned_runtime_development,
         "external runtime overlay has no signed release proof"
     );
+    if start_config.unsigned_runtime_development {
+        let version = start_config
+            .runtime_overlay_version
+            .as_deref()
+            .context("source runtime selection has no overlay version")?;
+        let arch = mvm_core::arch::GuestArch::host();
+        let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let checked =
+            mvm_build::guest_runtime::source::check_source_runtime(&cache, version, arch)?;
+        anyhow::ensure!(
+            start_config.source_runtime_archive_sha256.as_deref() == Some(checked.archive_sha256()),
+            "source runtime archive changed after overlay selection; refusing initramfs fallback"
+        );
+        let artifact = resolve_cached_initramfs(&cache.join("initramfs"), version, arch)
+            .context("source initramfs is not prepared; run `mvmctl bootstrap` first")?;
+        anyhow::ensure!(
+            mvm_core::crypto::image_verify::sha256_file(&artifact.image_path)?
+                == checked.declaration(arch)?.initramfs_sha256,
+            "prepared initramfs differs from the selected source runtime"
+        );
+        start_config.initrd_path = Some(artifact.image_path.display().to_string());
+        return Ok(());
+    }
     attach_universal_initramfs_with_resolver(start_config, |_env, cache_root, version, arch| {
-        if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout() {
-            #[cfg(any(test, feature = "test-support"))]
-            if let Some(fixture) = seeded_test_initramfs(cache_root, version, arch) {
-                return Ok(fixture);
-            }
-            let shared_cache_root = cache_root.parent().ok_or_else(|| {
-                mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
-                    reason: format!(
-                        "initramfs cache root {} has no parent for the shared guest runtime",
-                        cache_root.display()
-                    ),
-                }
-            })?;
-            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
-                shared_cache_root,
-                version,
-                arch,
-                &workspace_root,
-            )
-            .map_err(|error| {
-                mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
-                    reason: error.to_string(),
-                }
-            })?;
-            return mvm_build::initramfs::build_initramfs_from_guest_runtime(
-                cache_root, version, arch, &runtime,
-            );
-        }
-        resolve_released_initramfs(cache_root, version, arch)
+        resolve_cached_initramfs(cache_root, version, arch)
     })
 }
 
-fn resolve_released_initramfs(
+/// The initramfs a launch attaches, from the cache alone: the version-keyed
+/// one this CLI assembled from its own guest runtime. There is no other copy
+/// to fall back to; a miss names the command that assembles it.
+fn resolve_cached_initramfs(
     cache_root: &std::path::Path,
     version: &str,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<mvm_fs::initramfs::InitramfsArtifact, mvm_build::initramfs::InitramfsBuildError> {
-    let shared_cache_root = cache_root.parent().ok_or_else(|| {
-        mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
-            reason: "initramfs cache root has no shared guest-runtime parent".to_string(),
-        }
-    })?;
-    let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime(
-        shared_cache_root,
-        version,
-        arch,
-    )
-    .map_err(
-        |error| mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
-            reason: error.to_string(),
-        },
-    )?;
-    mvm_build::initramfs::build_initramfs_from_guest_runtime(cache_root, version, arch, &runtime)
+    mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
+        .resolve(&arch.to_string())
+        .map_err(mvm_build::initramfs::InitramfsBuildError::from)
 }
 
 fn attach_universal_initramfs_with_resolver(
@@ -289,7 +266,8 @@ fn attach_universal_initramfs_with_resolver(
                     "the universal initramfs {version} for {arch} could not be resolved, and \
                      this workload cannot boot without it: it is what mounts the guest runtime \
                      overlay at /mvm/runtime, which carries the guest agent and the egress \
-                     client. Run `mvmctl doctor` to see the artifact state"
+                     client. Run `mvmctl bootstrap` to assemble it from this CLI's guest \
+                     runtime, or `mvmctl doctor` to see the artifact state"
                 )));
             }
             tracing::debug!(error = %e, "universal initramfs not attached");
@@ -358,10 +336,6 @@ pub fn seed_warm_universal_initramfs(mvm_home: &std::path::Path) {
         mvm_build::initramfs::record_source_fingerprint(&cache_root, version, arch, &fingerprint)
             .unwrap();
     }
-    SEEDED_TEST_INITRAMFS
-        .lock()
-        .expect("test initramfs registry mutex is not poisoned")
-        .insert(cache_root);
 }
 
 #[cfg(test)]
@@ -370,6 +344,50 @@ mod tests {
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn source_initramfs_must_match_the_original_overlay_archive_selection() {
+        if !mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds() {
+            return;
+        }
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let cache = home.path().join("cache");
+        let workspace = mvm_build::image_source::guest_runtime_source_checkout().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let runtime = mvm_build::guest_runtime::test_support::write_source_cache_fixture(
+            &cache, &workspace, version, arch,
+        )
+        .unwrap();
+        let artifact = mvm_build::initramfs::build_initramfs_from_guest_runtime(
+            &cache.join("initramfs"),
+            version,
+            arch,
+            &runtime,
+        )
+        .unwrap();
+        let mut config = VmStartConfig {
+            kernel_path: Some("/mock/kernel".into()),
+            runtime_overlay_path: Some("/mock/overlay".into()),
+            runtime_overlay_version: Some(version.into()),
+            unsigned_runtime_development: true,
+            source_runtime_archive_sha256: Some("0".repeat(64)),
+            ..Default::default()
+        };
+        let error = attach_universal_initramfs_if_cached(&mut config, "firecracker").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("archive changed after overlay selection")
+        );
+        assert!(config.initrd_path.is_none());
+
+        config.source_runtime_archive_sha256 = Some(runtime.digest);
+        attach_universal_initramfs_if_cached(&mut config, "firecracker").unwrap();
+        assert_eq!(config.initrd_path.as_deref(), artifact.image_path.to_str());
+    }
 
     #[test]
     fn selected_external_runtime_without_proof_cannot_resolve_another_initramfs() {
@@ -460,9 +478,39 @@ mod tests {
                     .resolve(&GuestArch::host().to_string())
                     .is_ok()
             );
-            resolve_released_initramfs(&cache.join("initramfs"), version, GuestArch::host())
-                .expect_err("a warm initramfs must not bypass released archive verification");
+            mvm_build::guest_runtime::cached_runtime_release_proof(
+                &cache,
+                version,
+                GuestArch::host(),
+            )
+            .expect_err("a warm initramfs must not bypass released archive verification");
         }
+    }
+
+    #[test]
+    fn bundle_initrd_is_preserved_and_tampering_never_falls_back() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let image = tmp.path().join("bundle-initrd");
+        std::fs::write(&image, b"signed initrd").unwrap();
+        let mut config = VmStartConfig {
+            initrd_path: Some(image.display().to_string()),
+            bundle_boot_assets: Some(mvm_core::vm_backend::BundleBootAssetsPin {
+                manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"original set"),
+                arch: GuestArch::host(),
+                initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"signed initrd"),
+            }),
+            ..Default::default()
+        };
+        attach_universal_initramfs_if_cached(&mut config, "firecracker").unwrap();
+        assert_eq!(config.initrd_path.as_deref(), image.to_str());
+        std::fs::write(&image, b"replaced initrd").unwrap();
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
+        std::fs::remove_file(&image).unwrap();
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
+        config.initrd_path = None;
+        assert!(attach_universal_initramfs_if_cached(&mut config, "firecracker").is_err());
     }
 
     /// The resolver failure a cold cache produces, as the real ladder now
@@ -609,37 +657,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_disk_cache_entry_alone_is_not_a_test_fixture() {
-        let mut env = TestEnv::new();
-        let seeded = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(seeded.path());
-        seed_warm_universal_initramfs(seeded.path());
-
-        let other = tempfile::tempdir().unwrap();
-        let version = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let source = seeded
-            .path()
-            .join("cache/initramfs")
-            .join(version)
-            .join(arch.to_string());
-        let target = other
-            .path()
-            .join("cache/initramfs")
-            .join(version)
-            .join(arch.to_string());
-        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-        std::fs::create_dir(&target).unwrap();
-        for entry in std::fs::read_dir(source).unwrap() {
-            let entry = entry.unwrap();
-            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
-        }
-        assert!(
-            seeded_test_initramfs(&other.path().join("cache/initramfs"), version, arch).is_none()
-        );
-    }
-
     /// A backend that never boots a kernel must not reach the resolver at all.
     ///
     /// Asserting only that `initrd_path` stays `None` would pass for the
@@ -648,6 +665,70 @@ mod tests {
     /// untouched. `seed_warm_universal_initramfs` makes the difference
     /// observable: a resolver that ran would find the warm artifact and attach
     /// it.
+    /// The image set carries no guest runtime, so a launch never attaches an
+    /// initramfs an older CLI installed from it: with only that copy on disk,
+    /// the resolve misses, whether or not this version adopted a release
+    /// guest runtime.
+    #[test]
+    fn a_launch_never_attaches_the_image_sets_initramfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let initramfs_cache = cache.join("initramfs");
+        let arch = GuestArch::host();
+        let version = env!("CARGO_PKG_VERSION");
+        let set = mvm_build::published_image_set::SetMemberCache::locked();
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let payload = b"cpio-payload";
+        let image = {
+            use std::io::Write as _;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(payload).unwrap();
+            gz.finish().unwrap()
+        };
+        std::fs::write(staged.join(mvm_fs::initramfs::INITRAMFS_IMAGE_FILE), &image).unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_HASH_FILE),
+            format!(
+                "{}\n",
+                mvm_core::packs::Sha256Hex::from_bytes(payload).as_str()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_SIZE_FILE),
+            format!("{}\n", image.len()),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::VERSION_FILE),
+            format!("{version}\n"),
+        )
+        .unwrap();
+        mvm_build::initramfs::install_initramfs_into_cache(
+            &staged,
+            &set.cache_root(&initramfs_cache),
+            version,
+            arch,
+        )
+        .unwrap();
+        set.record(
+            &initramfs_cache,
+            mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE,
+            mvm_core::image_set::MemberTarget::Arch(arch),
+            &mvm_build::published_image_set::MemberVersion::parse(version).unwrap(),
+        )
+        .unwrap();
+
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("the image set's initramfs is not this CLI's");
+        let record = mvm_build::runtime_pieces::release_adoption_record(&cache, version, arch);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, format!("{}\n", "e".repeat(64))).unwrap();
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("an adopted release has nothing else to attach either");
+    }
+
     #[test]
     fn a_backend_that_boots_no_kernel_never_resolves_an_initramfs() {
         for hypervisor in ["mock", "wasm"] {

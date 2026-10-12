@@ -159,6 +159,8 @@ pub fn factory_parent_config(
         gpu_device,
         initrd_path,
         legacy_bundle_runtime,
+        legacy_portable_runtime,
+        bundle_boot_assets,
         verity_path,
         roothash,
         runtime_overlay_path,
@@ -167,6 +169,7 @@ pub fn factory_parent_config(
         runtime_overlay_version,
         runtime_release_proof,
         unsigned_runtime_development,
+        source_runtime_archive_sha256,
         mem_initial_mib,
     } = launch;
 
@@ -193,6 +196,8 @@ pub fn factory_parent_config(
         memory_mib: spec.mem_mib,
         initrd_path: initrd_path.clone(),
         legacy_bundle_runtime: legacy_bundle_runtime.clone(),
+        legacy_portable_runtime: legacy_portable_runtime.clone(),
+        bundle_boot_assets: bundle_boot_assets.clone(),
         verity_path: verity_path.clone(),
         roothash: roothash.clone(),
         runtime_overlay_path: runtime_overlay_path.clone(),
@@ -201,6 +206,7 @@ pub fn factory_parent_config(
         runtime_overlay_version: runtime_overlay_version.clone(),
         runtime_release_proof: runtime_release_proof.clone(),
         unsigned_runtime_development: *unsigned_runtime_development,
+        source_runtime_archive_sha256: source_runtime_archive_sha256.clone(),
         mem_initial_mib: *mem_initial_mib,
         gpu: *gpu,
         gpu_device: *gpu_device,
@@ -425,11 +431,17 @@ mod tests {
         })
     }
 
+    /// Drop the tokens that legitimately differ between a parent and the cold
+    /// boot it stands in for: the per-boot hostname and clock, and the
+    /// admitted plan's seccomp tier. A parent boots before any workload is
+    /// admitted, so it holds no plan and names no tier.
     fn without_per_boot_tokens(cmdline: &str) -> String {
         cmdline
             .split_whitespace()
             .filter(|token| {
-                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+                !token.starts_with("mvm.hostname=")
+                    && !token.starts_with("mvm.hostepoch=")
+                    && !token.starts_with("mvm.seccomp=")
             })
             .collect::<Vec<_>>()
             .join(" ")

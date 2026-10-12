@@ -26,6 +26,7 @@ struct Control {
 impl VmFullControl for Control {
     fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
         Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+            kernel: None,
             firecracker_drives: None,
             initramfs: None,
             disks: Vec::new(),

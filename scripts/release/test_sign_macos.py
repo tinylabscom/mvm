@@ -112,6 +112,32 @@ class SigningTests(unittest.TestCase):
         self.assertIn("missing Apple signing credentials", result.stderr)
         self.assertFalse(self.report.exists())
 
+    def test_cli_skips_cleanly_when_no_credential_is_configured(self):
+        self.report.write_text('{"status": "Accepted"}')
+        result = subprocess.run(
+            [os.sys.executable, str(Path(__file__).with_name("sign_macos.py")),
+             "--payload", str(self.payload), "--report", str(self.report),
+             "--skip-unconfigured"],
+            env={"GITHUB_ACTIONS": "true"}, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("::warning::no Apple signing credentials", result.stdout)
+        self.assertEqual(json.loads(self.report.read_text())["status"], "Unconfigured")
+
+    def test_skip_unconfigured_still_fails_closed_on_a_partial_set(self):
+        for credential in signing.CREDENTIALS:
+            with self.subTest(credential=credential):
+                env = {credential: "set"}
+                result = subprocess.run(
+                    [os.sys.executable, str(Path(__file__).with_name("sign_macos.py")),
+                     "--payload", str(self.payload), "--report", str(self.report),
+                     "--skip-unconfigured"],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("missing Apple signing credentials", result.stderr)
+                self.assertFalse(self.report.exists())
+
     def test_failed_rerun_removes_stale_accepted_evidence(self):
         self.report.write_text('{"status": "Accepted"}')
         with patch.dict(os.environ, {"APPLE_ID": ""}):
@@ -212,6 +238,7 @@ class SigningTests(unittest.TestCase):
             )
             for credential in signing.CREDENTIALS:
                 self.assertIn(f"secrets.{credential}", block)
+            self.assertIn("--skip-unconfigured", signing_step)
 
 class NativeRequirementTests(unittest.TestCase):
     @unittest.skipUnless(os.sys.platform == "darwin", "requires macOS codesign")

@@ -4,10 +4,12 @@ on:
   push:
     tags:
       - "v*"
-  # Branch dispatches build only: they cannot mint the exact tag identity
-  # required by an installed guest runtime. Dispatching an existing version
-  # tag rehearses signing, package installation, and boot without publication.
-  # Only a tag push publishes a release.
+  # Manual dry-run: validate the release build + packaging (binaries, host-bin
+  # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
+  # `dry_run=true` (the default) runs only the `build` job and skips the
+  # publishing `release` job and `verify-release`. A real
+  # release still happens via a `v*` tag push; an explicit `dry_run=false`
+  # dispatch publishes too (escape hatch).
   workflow_dispatch:
     inputs:
       dry_run:
@@ -32,48 +34,6 @@ env:
   MVMCTL_RELEASE_FEATURES: host,user,template-registry-s3,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
-  guest-runtime:
-    uses: ./.github/workflows/guest-bins.yml
-
-  sign-guest-runtime:
-    needs: guest-runtime
-    if: ${{ github.ref_type == 'tag' }}
-    environment: release-signing
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v8
-        with:
-          name: mvm-guest-bins-unsigned
-          path: guest-runtime
-      - uses: sigstore/cosign-installer@v3
-      - name: Bind the complete guest runtime to this release tag
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
-          [ "${TAG_NAME}" = "v${version}" ] || {
-            echo "::error::tag ${TAG_NAME} does not match workspace v${version}" >&2
-            exit 1
-          }
-          cd guest-runtime
-          archive="mvm-guest-bins-v${version}.tar.gz"
-          test -s "${archive}"
-          sha256sum --check "${archive}.sha256"
-          for asset in "${archive}" "${archive}.sha256"; do
-            cosign sign-blob --yes --new-bundle-format \
-              --bundle "${asset}.bundle" "${asset}"
-          done
-      - uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: guest-runtime/*.tar.gz
-      - uses: actions/upload-artifact@v7
-        with:
-          name: mvm-guest-bins
-          path: guest-runtime/
-          if-no-files-found: error
-
   bdd:
     uses: ./.github/workflows/bdd.yml
 
@@ -93,13 +53,19 @@ jobs:
       # evidence, so a macOS host that cannot boot a guest fails this workflow
       # here even though Extended CI tolerates it nightly.
       macos_blocks_on_unusable_host: true
-      # A release tests what its users get: this CLI against the image set
-      # images.lock pins, not a pair build of the tree's guest sources. The
-      # SDK sidecar and the dev default image are therefore adopted from that
-      # signed set whatever sources it was built from, and the lane fails if
-      # the set's signed compatibility excludes this CLI. Guest-source changes
-      # are pair-built and booted in the merge queue's guest-image-boot lane.
-      boot_pinned_images: true
+      # A release tests what its users get, and nothing is pair-built through
+      # mvm-images: the Linux layer (kernels, base and dev root filesystems,
+      # the builder image) comes from the image set images.lock pins, and the
+      # guest runtime — the SDK sidecars, the runtime overlay, the initramfs —
+      # from the tagged tree, which is the runtime this release ships.
+
+  # The guest runtime this release ships: the `mvm-guest-bins` archive for
+  # both guest architectures, built from the tagged tree with the pinned
+  # toolchain. The release job signs it, lists it in the signed checksum
+  # manifest, attests it and publishes it beside the CLI tarballs, so a
+  # downloaded mvmctl fetches the runtime of its own version and nothing else.
+  guest-runtime:
+    uses: ./.github/workflows/guest-bins.yml
 
   build:
     strategy:
@@ -132,10 +98,11 @@ jobs:
             os: ubuntu-latest
 
     runs-on: ${{ matrix.os }}
-    # Backstop: a cold release build is ~15-25 min. Without a cap a hung
-    # build (e.g. the nested-cargo target-lock deadlock fixed in build.rs)
-    # runs to the 6h default, burning runner minutes silently.
-    timeout-minutes: 45
+    # Backstop: a cold macOS release plus host binaries took 43 min before the
+    # size check began on 2026-10-08. That check and man-page generation each
+    # compile xtask separately. Keep a bounded cap with room to package, so a
+    # healthy cold build is not canceled at the old 45-minute limit.
+    timeout-minutes: 75
 
     steps:
       - uses: actions/checkout@v6
@@ -155,7 +122,7 @@ jobs:
         run: rustup target add "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
 
       # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
-      # binaries (mvm-host-vm-init, mvm-builderd) as static
+      # binaries (mvm-host-vm-init, mvm-builderd, mvm-setpriv) as static
       # aarch64-unknown-linux-musl via cargo-zigbuild — so zig +
       # cargo-zigbuild must be present at `cargo build`-of-mvmctl time, the
       # same as the ci.yml Lint job. Without this the release binary build
@@ -347,10 +314,6 @@ jobs:
           cp "${HOSTLIB_SRC}" "staging/${ARCHIVE_NAME}/"
           echo "bundled libmvm_hostlib.${HOSTLIB_EXT}"
 
-          # Self-update runs only this authenticated copy, reusing the
-          # installer's atomic CLI/runtime transaction rather than copying
-          # individual files into an already-running installation.
-          cp install.sh "staging/${ARCHIVE_NAME}/install.sh"
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           # Include generated man pages
@@ -370,6 +333,7 @@ jobs:
         run: |
           python3 scripts/release/sign_macos.py \
             --payload staging/mvmctl-aarch64-apple-darwin \
+            --skip-unconfigured \
             --report "${RUNNER_TEMP}/macos-notarization.json"
 
       - name: Retain macOS notarization evidence
@@ -475,22 +439,24 @@ jobs:
   # endpoint from them. v0.22.0 published an endpoint that could not survive a
   # guest's egress handshake for exactly that reason.
   release-archive-smoke:
-    needs: [build, sign-guest-runtime]
+    needs: [build, guest-runtime]
     uses: ./.github/workflows/release-archive-smoke.yml
     with:
-      tag: ${{ github.ref_name }}
+      # A tag must ship the version it names; a dry run builds from a branch,
+      # whose name is not a version.
+      tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
 
   # The .deb and .rpm, built from the Linux tarballs above rather than
   # rebuilt, and installed on Debian, Ubuntu, Fedora and Rocky on both
   # architectures before the release job will publish them.
   distro-packages:
-    needs: [build, sign-guest-runtime]
+    needs: [build, guest-runtime]
     uses: ./.github/workflows/distro-packages.yml
     with:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, archive-install-smoke, sign-guest-runtime, release-archive-smoke, distro-packages]
+    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, release-archive-smoke, distro-packages]
     # `e2e-docs` was added to `needs` above when the documented-surface gate
     # landed, and its result was never added here. `!cancelled()` overrides the
     # implicit all-needs-succeeded rule, so for as long as that was true the
@@ -500,9 +466,10 @@ jobs:
     # this condition; a job listed and not checked is worse than one that was
     # never added, because it reads as covered.
     #
-    # Tag dispatches exercise this path using a disposable draft; a branch
-    # cannot pass the signed-runtime gate and never reaches publication.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.sign-guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
+    # (the `build` job) but never reaches this publish job — only a tag push or
+    # an explicit dry_run=false dispatch publishes.
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -530,23 +497,46 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           path: artifacts
-          pattern: "!mvm-guest-bins-unsigned"
           merge-multiple: true
+
+      # Exactly one guest runtime, and on a tag the one whose name carries the
+      # tag's version: the archive's own manifest records the version it was
+      # built at, and mvmctl refuses a runtime that is not its own.
+      - name: Check the guest runtime matches this release
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          IS_TAG: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          runtimes=(artifacts/mvm-guest-bins-v*.tar.gz)
+          if [ "${#runtimes[@]}" -ne 1 ]; then
+            echo "::error::expected one guest runtime archive, found ${#runtimes[@]}: ${runtimes[*]}" >&2
+            exit 1
+          fi
+          runtime="${runtimes[0]}"
+          if [ "${IS_TAG}" = "true" ] && [ "${runtime}" != "artifacts/mvm-guest-bins-${TAG_NAME}.tar.gz" ]; then
+            echo "::error::${runtime} is not the guest runtime of ${TAG_NAME}" >&2
+            exit 1
+          fi
+          (cd artifacts && sha256sum --check "$(basename "${runtime}").sha256")
 
       - name: Generate combined checksum file
         shell: bash
         run: |
           cd artifacts
           # Combine the per-tarball and per-package checksums into one file;
-          # distro-packages writes a `.sha256` per .deb and .rpm in the same
-          # format as the build job's.
+          # distro-packages writes a `.sha256` per .deb and .rpm, and the
+          # guest-runtime job one for its archive, in the same format as the
+          # build job's.
           # ./ prefix: a file named like an option must stay a filename.
           cat ./*.sha256 > checksums-sha256.txt
           echo "Combined checksums:"
           cat checksums-sha256.txt
 
       - name: Sign release tarballs, checksum manifests, and SBOM
-        if: ${{ github.ref_type == 'tag' }}
+        if: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -573,6 +563,11 @@ jobs:
           # The .deb and .rpm are signed directly like the tarballs, and are
           # in the manifest too, so either anchor authenticates them.
           #
+          # The guest runtime archive matches `*.tar.gz` and is signed with
+          # the tarballs. Its `.sha256` sidecar is published too, since
+          # mvmctl reads that digest before it fetches the archive, and is
+          # signed so that no unsigned file ships in the release.
+          #
           # Boot images are not in this release: they are members of the
           # signed image set `images.lock` pins, verified against that root's
           # own signature, so nothing here re-signs them.
@@ -580,6 +575,7 @@ jobs:
             artifacts/*.tar.gz \
             artifacts/*.deb \
             artifacts/*.rpm \
+            artifacts/mvm-guest-bins-v*.tar.gz.sha256 \
             artifacts/checksums-sha256.txt \
             sbom.cdx.json; do
             cosign sign-blob \
@@ -622,10 +618,10 @@ jobs:
       # an independent rebuild landing on the same bytes needs no trust in this
       # builder at all.
       #
-      # Subjects are the tarballs and the distro packages, matching the
-      # direct-signature set.
+      # Subjects are the tarballs (the guest runtime archive among them) and
+      # the distro packages, matching the direct-signature set.
       - name: Attest build provenance for the release tarballs (release-provenance)
-        if: ${{ github.ref_type == 'tag' }}
+        if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
@@ -732,6 +728,21 @@ jobs:
           else
             echo "no dry-run draft ${tag} to delete"
           fi
+
+      # The "release: published" event fired by `gh release create` runs under
+      # GITHUB_TOKEN, which by design does not trigger downstream workflows.
+      # workflow_dispatch is exempt from that rule, so chain publish-crates
+      # explicitly here. This keeps crates.io in sync with GitHub releases.
+      - name: Trigger crates.io publish workflow
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh workflow run publish-crates.yml \
+            --ref "${TAG_NAME}" \
+            -f tag="${TAG_NAME}" \
+            -f dry_run=false
 
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle

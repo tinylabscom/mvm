@@ -1,57 +1,15 @@
-//! Compile pipeline — Workload IR to staged build artifacts.
+//! Compatibility facade for the shared workload compiler.
 //!
-//! Ported from `mvmforge/src/{archive,source,reachability,deps,
-//! func_describe,flake,launch,compile,explain}.rs` per the SDK port plan.
-//!
-//! Phase 2a (this commit) lands the source-bundling primitives:
-//!
-//! - `archive` — deterministic gzipped-tar of a staging directory.
-//!   Sorted entries, mtime = 0, normalized modes, gzip with no
-//!   filename header. Output is byte-reproducible across runs.
-//! - `source` — walks `app.source.path`, applies include/exclude
-//!   globs, copies files into `<staging>/src/`, and computes a stable
-//!   `tree_hash` over the resulting tree. Symlinks preserved in-tree,
-//!   rejected out-of-tree.
-//! - `reachability` — bundler reachability scoping for
-//!   function-entrypoint workloads. Tree-sitter-backed AST walks for
-//!   Python and Node/TypeScript prune unreachable files from the
-//!   staged source before archiving.
-//! - `data` — tiny helper for parsing curated word lists (used by
-//!   `reachability` to load the language-extension lists).
-//!
-//! Phase 2b adds the orchestration layer:
-//!
-//! - `deps` — host-level dependency-lockfile validation (hash-pin
-//!   heuristics for `uv.lock`, `requirements.txt`, `pnpm-lock.yaml`,
-//!   `package-lock.json`, `yarn.lock`).
-//! - `func_describe` — tree-sitter function-presence check for
-//!   function-entrypoint workloads.
-//! - `flake` — renderer for the generated `flake.nix`.
-//! - `launch` — builder for `launch.json` (a sidecar the generated
-//!   flake reads at evaluation time; an inlining rewrite is planned
-//!   but deferred).
-//! - `mvm_pin` — pinned mvm flake input baked into every generated
-//!   `flake.nix`. Override via `MVM_FLAKE_URL`.
-//! - [`compile`] — top-level orchestrator that ties everything
-//!   together.
-//! - `explain` — diagnostic surface for `mvmctl compile --explain`.
-//!
-//! Phase 2c wires `mvmctl compile <entry>` as the CLI verb.
+//! All stages and their error types are owned by `mvm-compiler`. Existing
+//! `mvm_sdk::compile` paths remain available with the `compiler` feature,
+//! without a separate implementation.
+//! Workload authoring and language bridges stay in the SDK; build execution
+//! and artifact signing are not compiler responsibilities.
 
-pub mod archive;
-pub(crate) mod data;
-pub mod deps;
-pub mod deps_audit;
-pub mod explain;
-pub mod flake;
-pub mod func_describe;
-pub mod hooks;
-pub mod launch;
-pub mod mvm_pin;
-pub mod orchestrator;
-pub mod reachability;
-pub mod source;
-pub mod strip_framework;
+pub use mvm_compiler::{
+    archive, deps, deps_audit, explain, flake, func_describe, hooks, launch, mvm_pin, orchestrator,
+    reachability, source, strip_framework,
+};
 
 pub use archive::{ArchiveError, archive_dir};
 pub use deps::{DepsError, validate_lockfiles};

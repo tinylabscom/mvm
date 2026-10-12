@@ -5,11 +5,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cucumber::{given, then, when};
-use mvm_build::guest_agent_build::{
-    GuestBinarySource, GuestRuntimeBinaryPaths, RuntimeOverlayGuestLayout, guest_binary_source,
-    install_into_cache, runtime_overlay_source_checkout_fingerprint,
-};
-use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
@@ -42,81 +37,24 @@ fn managed_volume_path(world: &CliWorld, volume_name: &str) -> PathBuf {
 
 #[given("a cached live workload kernel")]
 fn cached_live_workload_kernel(world: &mut CliWorld) {
-    // The `@workload_kernel` gate guarantees this resolves before the scenario
-    // is selected, so reaching here without one is a harness bug, not an
+    // The `@workload_kernel` gate guarantees a kernel resolves before the
+    // scenario is selected, so a missing one here is a harness bug, not an
     // operator mistake.
-    let source = crate::workload_kernel_path()
-        .expect("`@workload_kernel` scenarios only run when a kernel resolves");
-    let destination = mvm_build::kernel_fetch::cached_kernel_path(
-        &isolated_home(world).join("cache"),
-        std::env::consts::ARCH,
-        "workload",
-    );
-    fs::create_dir_all(
-        destination
-            .parent()
-            .expect("workload kernel cache path has a parent"),
-    )
-    .expect("create isolated workload kernel cache");
-    fs::copy(&source, &destination).unwrap_or_else(|error| {
-        panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
-    });
-    cache_live_guest_binaries(world);
-}
-
-fn cache_live_guest_binaries(world: &CliWorld) {
-    let source_dir = PathBuf::from(
-        std::env::var_os("MVM_BDD_GUEST_BIN_DIR")
-            .expect("MVM_BDD_GUEST_BIN_DIR must name the prebuilt guest-runtime directory"),
-    );
+    let home = isolated_home(world).to_path_buf();
+    super::live_home::prepare_live_home(&home);
+    let mut command = mvmctl_command();
+    super::live_home::use_seeded_runtime(&mut command);
+    let output = command
+        .args(["image", "pull", "alpine"])
+        .isolated_home(&home)
+        .output()
+        .expect("prepare Alpine in the isolated live home");
     assert!(
-        source_dir.is_dir(),
-        "MVM_BDD_GUEST_BIN_DIR does not name a directory: {source_dir:?}"
+        output.status.success(),
+        "prepare Alpine in the isolated live home\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    let source = guest_binary_source().expect("resolve guest-runtime cache generation");
-    install_into_cache(
-        GuestRuntimeBinaryPaths {
-            agent: &source_dir.join("mvm-guest-agent"),
-            netinit: &source_dir.join("mvm-guest-netinit"),
-            egress_client: &source_dir.join("mvm-egress-client"),
-            entrypoint_runner: &source_dir.join("mvm-oci-entrypoint"),
-        },
-        &isolated_home(world).join("cache").join("oci"),
-        source.cache_key(),
-        GuestArch::host(),
-    )
-    .expect("seed isolated guest-runtime cache from prebuilt binaries");
-    if let GuestBinarySource::SourceCheckout { workspace_root, .. } = source {
-        let fingerprint = runtime_overlay_source_checkout_fingerprint(&workspace_root)
-            .expect("fingerprint local runtime-overlay sources");
-        cache_live_runtime_overlay(world, &source_dir, &fingerprint);
-    }
-}
-
-fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: &str) {
-    let layout = RuntimeOverlayGuestLayout::under(
-        &isolated_home(world).join("cache"),
-        env!("CARGO_PKG_VERSION"),
-        GuestArch::host(),
-        fingerprint,
-    );
-    fs::create_dir_all(&layout.dir).expect("create isolated runtime-overlay cache");
-    for (source_name, destination) in [
-        ("mvm-guest-agent", &layout.agent),
-        ("mvm-guest-netinit", &layout.netinit),
-        ("mvm-seccomp-apply", &layout.seccomp_apply),
-        ("mvm-display-bridge", &layout.display_bridge),
-        ("mvm-runner", &layout.runner),
-        ("mvm-egress-client", &layout.egress_client),
-        ("mvm-addon-dns", &layout.addon_dns),
-        ("mvm-exit-report", &layout.exit_report),
-        ("mvm-ping", &layout.ping),
-    ] {
-        let source = source_dir.join(source_name);
-        fs::copy(&source, destination).unwrap_or_else(|error| {
-            panic!("copy runtime-overlay binary {source:?} to {destination:?}: {error}")
-        });
-    }
 }
 
 #[when(expr = "I write byte {int} to the end of managed volume {string}")]

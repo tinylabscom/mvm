@@ -1325,7 +1325,7 @@ mod caller_commitment_tests {
 ///
 /// 1. **`volume_hash`** — the canonical
 ///    `sha256(content_sha256 || canonical(meta.json))` produced by
-///    `mvm_sdk::compile::deps_audit::seal_volume`. This is the value
+///    `mvm_compiler::deps_audit::seal_volume`. This is the value
 ///    used as the volume directory name on disk
 ///    (`~/.mvm/volumes/deps/<volume_hash>/`).
 /// 2. **`manifest_sha256`** — the SHA-256 of the canonical

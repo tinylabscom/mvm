@@ -1,5 +1,6 @@
 pub mod aead;
 pub mod attestation;
+pub mod checkpoint_object;
 pub mod command_gate;
 pub mod constant_time;
 pub mod ed25519_keypair;

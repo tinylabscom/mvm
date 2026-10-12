@@ -9,6 +9,25 @@ use super::CheckpointStore;
 
 pub(super) const EVIDENCE_BLOB: &str = "runtime-artifacts.json";
 
+/// Plaintext digest of a small metadata blob, authenticated by the checkpoint
+/// manifest directly or by its sealed index. This never opens content chunks.
+pub(crate) fn metadata_blob_sha256(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    name: &str,
+) -> Result<String> {
+    let blob = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == name)
+        .with_context(|| format!("checkpoint has no {name} blob"))?;
+    if meta.protection.is_sealed() {
+        super::materialized_blob_sha256(store, meta, name)
+    } else {
+        Ok(blob.sha256.clone())
+    }
+}
+
 /// The caller must collect `actual` while the VM is paused. Runtime metadata
 /// supplies only a candidate: it cannot establish what the VMM loaded.
 /// Absence of external runtime inputs does not authenticate a baked agent:
@@ -39,6 +58,40 @@ pub(crate) fn verify_capture(
 }
 
 fn verify_bound_artifacts(binding: &RuntimeLaunchBinding, actual: &RuntimeArtifacts) -> Result<()> {
+    if let RuntimeLaunchBinding::LegacyPortable {
+        overlay_path,
+        overlay_verity_path,
+        initramfs_path,
+        kernel_path,
+        ..
+    } = binding
+    {
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        binding.apply_to_config(&mut config);
+        let verified = crate::runtime_evidence::verify_retained_portable_runtime(&config)?;
+        ensure!(
+            actual
+                .kernel
+                .as_ref()
+                .is_some_and(|kernel| kernel.path == *kernel_path
+                    && kernel.sha256 == verified.kernel_sha256()),
+            "paused portable kernel differs from signed bundle or lacks loaded-kernel evidence"
+        );
+        let root = actual
+            .disks
+            .first()
+            .context("portable rootfs absent from paused VM")?;
+        ensure!(
+            root.sha256 == verified.rootfs_sha256(),
+            "paused portable rootfs differs from signed bundle"
+        );
+        verify_artifact(root, &root.path)?;
+        ensure!(
+            mvm_core::crypto::image_verify::sha256_file(kernel_path)? == verified.kernel_sha256(),
+            "retained portable kernel differs from signed bundle"
+        );
+        return verify_overlay_artifacts(actual, overlay_path, overlay_verity_path, initramfs_path);
+    }
     let RuntimeLaunchBinding::CliAssembly(binding) = binding else {
         let RuntimeLaunchBinding::LegacyBundle { initramfs_path, .. } = binding else {
             unreachable!()
@@ -70,16 +123,30 @@ fn verify_bound_artifacts(binding: &RuntimeLaunchBinding, actual: &RuntimeArtifa
         verify_artifact(root, &root.path)?;
         return Ok(());
     };
+    verify_overlay_artifacts(
+        actual,
+        &binding.overlay_path,
+        &binding.overlay_verity_path,
+        &binding.initramfs_path,
+    )
+}
+
+fn verify_overlay_artifacts(
+    actual: &RuntimeArtifacts,
+    overlay_path: &std::path::Path,
+    overlay_verity_path: &std::path::Path,
+    initramfs_path: &std::path::Path,
+) -> Result<()> {
     let initramfs = actual
         .initramfs
         .as_ref()
         .context("bound runtime is absent from the paused VM's initramfs configuration")?;
-    verify_artifact(initramfs, &binding.initramfs_path)?;
-    for path in [&binding.overlay_path, &binding.overlay_verity_path] {
+    verify_artifact(initramfs, initramfs_path)?;
+    for path in [overlay_path, overlay_verity_path] {
         let matches = actual
             .disks
             .iter()
-            .filter(|artifact| artifact.path == *path)
+            .filter(|artifact| artifact.path == path)
             .collect::<Vec<_>>();
         ensure!(
             matches.len() == 1,
@@ -89,9 +156,10 @@ fn verify_bound_artifacts(binding: &RuntimeLaunchBinding, actual: &RuntimeArtifa
         verify_artifact(matches[0], path)?;
     }
     ensure!(
-        actual.disks.windows(2).any(|pair| {
-            pair[0].path == binding.overlay_path && pair[1].path == binding.overlay_verity_path
-        }),
+        actual
+            .disks
+            .windows(2)
+            .any(|pair| { pair[0].path == overlay_path && pair[1].path == overlay_verity_path }),
         "runtime data and verity devices are not in their authenticated role order"
     );
     Ok(())
@@ -119,6 +187,7 @@ pub(super) fn capture_supervisor_config(
 ) -> Result<()> {
     #[derive(serde::Deserialize)]
     struct Config {
+        kernel: Option<std::path::PathBuf>,
         initramfs: Option<std::path::PathBuf>,
         disks: Vec<Disk>,
         cmdline: Option<String>,
@@ -130,6 +199,12 @@ pub(super) fn capture_supervisor_config(
     }
     let bytes = std::fs::read(source)?;
     let config: Config = serde_json::from_slice(&bytes)?;
+    if let Some(kernel) = &actual.kernel {
+        ensure!(
+            config.kernel.as_ref() == Some(&kernel.path),
+            "saved supervisor kernel differs from the paused runtime"
+        );
+    }
     ensure!(
         config.initramfs.as_ref() == actual.initramfs.as_ref().map(|artifact| &artifact.path),
         "saved supervisor initramfs differs from the paused runtime"
@@ -175,17 +250,42 @@ pub(super) fn capture_supervisor_config(
 /// The evidence is independently checked against that authenticated manifest,
 /// including when the large memory image is verified lazily on load.
 pub fn verify_checkpoint_runtime(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<()> {
+    if meta.protection.is_sealed() && meta.class == CheckpointClass::VmFull {
+        let scratch = crate::private_staging::create(
+            store.root(),
+            super::staging::RESTORE_MATERIALIZATION_PREFIX,
+        )?;
+        let _remove_on_interrupt = {
+            let path = scratch.path().to_path_buf();
+            crate::interrupt_cleanup::on_interrupt("runtime evidence staging", move || {
+                let _ = std::fs::remove_dir_all(&path);
+            })
+        };
+        super::materialized_source(store, meta, EVIDENCE_BLOB, scratch.path())?;
+        return verify_checkpoint_runtime_at(store, meta, scratch.path());
+    }
+    verify_checkpoint_runtime_at(store, meta, &store.content_dir(&meta.id))
+}
+
+/// Verify private materialized evidence against the chain-authenticated parent.
+/// Prepared children reuse this copy without reopening sealed content chunks.
+pub(crate) fn verify_checkpoint_runtime_at(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    content_dir: &std::path::Path,
+) -> Result<()> {
     if meta.class != CheckpointClass::VmFull {
         return Ok(());
     }
-    let blob = meta
+    meta
         .content
         .iter()
         .find(|blob| blob.name == EVIDENCE_BLOB)
         .context("checkpoint has no authenticated paused-runtime evidence; recapture the VM with a runtime-aware backend before restoring or forking it")?;
-    let path = store.content_dir(&meta.id).join(EVIDENCE_BLOB);
+    let digest = metadata_blob_sha256(store, meta, EVIDENCE_BLOB)?;
+    let path = content_dir.join(EVIDENCE_BLOB);
     let bytes = std::fs::read(path).context("reading paused-runtime evidence")?;
-    let actual = decode_authenticated_observation(&bytes, &blob.sha256)?;
+    let actual = decode_authenticated_observation(&bytes, &digest)?;
     match mvm_core::checkpoint::vm_full_origin(meta) {
         Some(mvm_core::checkpoint::VmFullOrigin::Firecracker) => {
             mvm_backends::fc::runtime_artifacts::validate_artifacts(
@@ -224,6 +324,7 @@ mod tests {
 
     fn baked() -> RuntimeArtifacts {
         RuntimeArtifacts {
+            kernel: None,
             firecracker_drives: None,
             initramfs: None,
             disks: Vec::new(),
@@ -261,6 +362,7 @@ mod tests {
                 provenance: RuntimeBindingProvenance::Source {
                     version: "1.2.3".into(),
                     arch: mvm_core::arch::GuestArch::host(),
+                    archive_sha256: "ab".repeat(32),
                 },
                 initramfs_path: paths[0].clone(),
                 overlay_path: paths[1].clone(),
@@ -269,6 +371,7 @@ mod tests {
             },
         );
         let actual = RuntimeArtifacts {
+            kernel: None,
             firecracker_drives: None,
             initramfs: Some(artifacts[0].clone()),
             disks: artifacts[1..].to_vec(),

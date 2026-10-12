@@ -30,8 +30,7 @@ pub use mvm_contract::protocol::vm_backend::{
     VmNetworkInfo, VmPortMapping, VmStatus, VmVolume, VmVolumeKind, WarmArtifactIdentity,
     WarmClaimOutcome, WarmClaimRefusal, WarmClaimTiming, WarmLaunchMode, WarmPrewarmSource,
     WarmServiceRequest, WarmServiceResponse, WarmStartError, WarmStartOutcome, clamp_vcpus,
-    decode_host_epoch_cmdline, encode_secret_env_cmdline, encode_user_volumes_cmdline,
-    is_secret_env_name,
+    decode_host_epoch_cmdline, encode_user_volumes_cmdline, is_secret_env_name,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +46,16 @@ pub use mvm_contract::protocol::vm_backend::{
 pub struct LegacyBundleRuntimeProof {
     pub archive: std::path::PathBuf,
     pub pin: crate::plan::PlanArtifact,
+}
+
+/// Untrusted original schema-4 archive and schema-2 runtime selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPortableRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+    pub manifest_sha256: String,
+    pub arch: crate::arch::GuestArch,
 }
 
 /// Backend-agnostic configuration describing *what* to run.
@@ -68,6 +77,15 @@ pub struct LegacyBundleRuntimeProof {
 /// };
 /// backend.start(&config)?;
 /// ```
+/// Runtime identity admitted from a verified bundle, independent of the CLI lock.
+#[derive(Debug, Clone)]
+pub struct BundleBootAssetsPin {
+    pub manifest_sha256: crate::packs::Sha256Hex,
+    pub arch: crate::arch::GuestArch,
+    /// Digest of the signed, extracted initrd, not a mutable cache marker.
+    pub initrd_sha256: crate::packs::Sha256Hex,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct VmStartConfig {
     /// VM name (user-provided or auto-generated).
@@ -88,6 +106,10 @@ pub struct VmStartConfig {
     /// Untrusted pinned bundle inputs for a baked runtime and per-image initrd.
     /// External CLI runtime selections still require their own release/source proof.
     pub legacy_bundle_runtime: Option<LegacyBundleRuntimeProof>,
+    /// Portable overlay evidence must be independently verified before launch.
+    pub legacy_portable_runtime: Option<LegacyPortableRuntimeProof>,
+    /// Verified bundle runtime selection. Never inferred from a cache version.
+    pub bundle_boot_assets: Option<BundleBootAssetsPin>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
     /// Present when the flake was built with `verifiedBoot = true`
     /// (the production default). Must be paired with `roothash`.
@@ -124,6 +146,9 @@ pub struct VmStartConfig {
     /// Explicit unsigned contributor runtime. Never sufficient for production
     /// assurance, regardless of cache fingerprints or declared protocol.
     pub unsigned_runtime_development: bool,
+    /// Digest selected by the checked source resolver. This pins continuity,
+    /// not authority: source admission must independently recheck its bytes.
+    pub source_runtime_archive_sha256: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).

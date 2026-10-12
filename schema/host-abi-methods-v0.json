@@ -1,7 +1,25 @@
 {
   "abi_major": 1,
-  "abi_minor": 6,
+  "abi_minor": 7,
   "methods": [
+    {
+      "classification": "prod_safe",
+      "key": "manifest_info",
+      "name": "manifest.info",
+      "summary": "Inspect a built manifest slot and its optional snapshot."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_list",
+      "name": "manifest.list",
+      "summary": "List built manifest slots with orphan and tag-intersection filters."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "manifest_verify",
+      "name": "manifest.verify",
+      "summary": "Verify built manifest artifact checksums; signature verification is refused."
+    },
     {
       "classification": "prod_safe",
       "key": "backend_capabilities",

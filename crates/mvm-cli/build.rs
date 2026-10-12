@@ -50,6 +50,7 @@ fn main() {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     emit_pinned_toolchain_env(&workspace_root);
+    emit_source_identity(&workspace_root);
     println!("cargo:rerun-if-env-changed=MVM_EMBED");
 
     // A release build embeds unless told not to; a debug one — which is what
@@ -63,6 +64,80 @@ fn main() {
             write_unembedded_table(&workspace_root, &out_dir, warning.as_deref())
         }
     }
+}
+
+fn emit_source_identity(workspace_root: &Path) {
+    let commit = std::env::var("MVM_BUILD_SOURCE_COMMIT")
+        .ok()
+        .or_else(|| git_stdout(workspace_root, &["rev-parse", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty = std::env::var("MVM_BUILD_SOURCE_DIRTY")
+        .ok()
+        .unwrap_or_else(|| {
+            git_stdout(
+                workspace_root,
+                &[
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=normal",
+                    "--",
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "rust-toolchain.toml",
+                    ".cargo",
+                    "crates",
+                    "src",
+                    "build.rs",
+                ],
+            )
+            .map_or_else(
+                || "unknown".to_string(),
+                |status| (!status.is_empty()).to_string(),
+            )
+        });
+    println!("cargo:rustc-env=MVM_SOURCE_COMMIT={commit}");
+    println!("cargo:rustc-env=MVM_SOURCE_DIRTY={dirty}");
+    println!("cargo:rerun-if-env-changed=MVM_BUILD_SOURCE_COMMIT");
+    println!("cargo:rerun-if-env-changed=MVM_BUILD_SOURCE_DIRTY");
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        ".cargo",
+        "crates",
+        "src",
+        "build.rs",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            workspace_root.join(path).display()
+        );
+    }
+    if let Some(git_dir) = git_stdout(workspace_root, &["rev-parse", "--git-dir"]) {
+        let git_dir = PathBuf::from(git_dir);
+        let git_dir = if git_dir.is_absolute() {
+            git_dir
+        } else {
+            workspace_root.join(git_dir)
+        };
+        println!("cargo:rerun-if-changed={}/HEAD", git_dir.display());
+        println!("cargo:rerun-if-changed={}/index", git_dir.display());
+    }
+}
+
+fn git_stdout(workspace_root: &Path, args: &[&str]) -> Option<String> {
+    let output = helper_command("git")
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(workspace_root)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// This build's embed request, from the environment cargo hands the script.

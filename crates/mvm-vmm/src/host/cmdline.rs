@@ -1,11 +1,11 @@
 //! Workload kernel-cmdline assembly.
 //!
-//! Every guest kernel-cmdline security token — dm-verity roothash, plan-bound
-//! verb grant + enforcement assertion + host-signer trust anchor, the in-guest
-//! vsock egress client, and the runtime-source
-//! policy / overlay knobs — is strung together here, once, so the raw HVF
-//! backend and `WorkloadRunner::start` boot with the identical cmdline. Pure
-//! string assembly (cfg-free) so it stays unit-testable with no hypervisor.
+//! Guest kernel-cmdline tokens — the plan-bound verb grant, its enforcement
+//! assertion and host-signer trust anchor, the in-guest vsock egress client,
+//! and the non-verity runtime-overlay device — are strung together here, once,
+//! so the raw HVF backend and `WorkloadRunner::start` boot with the identical
+//! cmdline. Pure string assembly (cfg-free) so it stays unit-testable with no
+//! hypervisor.
 //!
 //! One token is deliberately NOT in that shared list: `mvm.uvols=`, the
 //! user-volume mount manifest. The raw HVF backend calls `workload_cmdline`
@@ -17,15 +17,14 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use mvm_core::vm_backend::VmStartConfig;
 
 #[cfg(test)]
 use crate::host::boot_config::booted_with_universal_initramfs;
 use crate::host::boot_config::non_verity_overlay_ext4;
 use crate::host::egress_bridge::{
-    host_signer_pub_cmdline_token, require_grant_cmdline_token, telemetry_cmdline_token,
-    verb_grant_cmdline_token,
+    host_signer_pub_cmdline_token, require_grant_cmdline_token, seccomp_cmdline_token,
+    telemetry_cmdline_token, verb_grant_cmdline_token,
 };
 
 /// Bytes the guest kernel reserves for its command line (`COMMAND_LINE_SIZE`,
@@ -50,29 +49,6 @@ pub fn cmdline_overflow(cmdline: &str) -> Option<String> {
             cmdline.len()
         )
     })
-}
-
-/// Read the opaque placeholders minted by this VM's substitution endpoint and
-/// encode the environment-shaped entries for PID 1. Missing state means the
-/// admitted plan declared no environment secrets. Malformed state refuses the
-/// boot: silently dropping a declared binding would make admission and guest
-/// state disagree.
-pub fn secret_env_cmdline_token(vm_name: &str) -> Result<Option<String>> {
-    let path = mvm_core::config::vm_substitution_env_path(vm_name);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", path.display()));
-        }
-    };
-    let pairs: Vec<(String, String)> = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing substitution env at {}", path.display()))?;
-    let env_pairs = pairs
-        .into_iter()
-        .filter(|(name, _)| mvm_core::vm_backend::is_secret_env_name(name))
-        .collect::<Vec<_>>();
-    Ok(mvm_core::vm_backend::encode_secret_env_cmdline(&env_pairs))
 }
 
 /// Kernel cmdline token that turns on the authenticated in-guest vsock client.
@@ -184,6 +160,7 @@ fn workload_cmdline_for_hostname(
         require_grant_cmdline_token(&config.name),
         host_signer_pub_cmdline_token(&config.name),
         telemetry_cmdline_token(&config.name),
+        seccomp_cmdline_token(config),
     ]
     .into_iter()
     .flatten()
@@ -487,46 +464,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_env_token_carries_only_environment_placeholders() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", home.path());
-        let path = mvm_core::config::vm_substitution_env_path("secret-env-test");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&vec![
-                ("API_KEY".to_string(), "mvm-secret://opaque".to_string()),
-                (
-                    "/run/secrets/key".to_string(),
-                    "mvm-secret://file".to_string(),
-                ),
-            ])
-            .unwrap(),
-        )
-        .unwrap();
-
-        let token = secret_env_cmdline_token("secret-env-test")
-            .unwrap()
-            .expect("env placeholder token");
-        assert!(token.starts_with("mvm.secret_env="));
-        assert!(token.contains("4150495f4b45593d"));
-        assert!(!token.contains("2f72756e2f736563726574732f6b6579"));
-    }
-
-    #[test]
-    fn malformed_secret_env_sidecar_refuses_boot_token() {
-        let home = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", home.path());
-        let path = mvm_core::config::vm_substitution_env_path("bad-secret-env");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"not-json").unwrap();
-
-        assert!(secret_env_cmdline_token("bad-secret-env").is_err());
-    }
-
-    #[test]
     pub fn vsock_egress_cmdline_token_for_ingress_under_deny_all() {
         let dir = tempfile::tempdir().unwrap();
         let deny_all = VmStartConfig::default();
@@ -581,6 +518,64 @@ mod tests {
             cmdline.contains("mvm.hostname=build-worker-7"),
             "all workload backends consume this shared cmdline: {cmdline}"
         );
+    }
+
+    fn config_admitted_under(tier: mvm_core::plan::PlanSeccompTier) -> VmStartConfig {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.admission_profile.seccomp_tier = tier;
+        VmStartConfig {
+            name: "vm-test".to_string(),
+            plan_json: Some(serde_json::to_string(&plan).expect("plan serializes")),
+            ..Default::default()
+        }
+    }
+
+    /// The guest applies the admitted tier to every workload process, and the
+    /// cmdline is how the tier reaches it. Every tier is checked, because a
+    /// token hardcoded to the default would pass a test that only tried the
+    /// default.
+    #[test]
+    fn workload_cmdline_carries_the_admitted_seccomp_tier() {
+        use mvm_core::plan::PlanSeccompTier;
+        let dir = tempfile::tempdir().unwrap();
+        for tier in [
+            PlanSeccompTier::Essential,
+            PlanSeccompTier::Minimal,
+            PlanSeccompTier::Standard,
+            PlanSeccompTier::Network,
+            PlanSeccompTier::Unrestricted,
+        ] {
+            let cmdline = workload_cmdline(
+                &config_admitted_under(tier),
+                dir.path(),
+                hvf_like_workload_bootargs,
+            )
+            .expect("cmdline");
+            let expected = format!("mvm.seccomp={tier}");
+            assert_eq!(
+                cmdline
+                    .split_whitespace()
+                    .filter(|token| token.starts_with("mvm.seccomp="))
+                    .collect::<Vec<_>>(),
+                vec![expected.as_str()],
+                "{cmdline}"
+            );
+        }
+    }
+
+    /// No admitted plan, no tier: a standby parent boots before any workload
+    /// is admitted, and must not be handed a tier nobody chose.
+    #[test]
+    fn workload_cmdline_names_no_seccomp_tier_without_an_admitted_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "vm-test".to_string(),
+            ..Default::default()
+        };
+        let cmdline =
+            workload_cmdline(&config, dir.path(), hvf_like_workload_bootargs).unwrap_or_default();
+        assert!(!cmdline.contains("mvm.seccomp="), "{cmdline}");
+        assert_eq!(seccomp_cmdline_token(&config), None);
     }
 
     #[test]

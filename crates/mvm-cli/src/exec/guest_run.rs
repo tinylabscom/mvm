@@ -33,7 +33,7 @@ pub(super) fn run_in_guest(
     vm_name: &str,
     req: &ExecRequest,
     capture: bool,
-    timing: bool,
+    startup: &super::StartupClock,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
 ) -> Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> {
     use crate::commands::vm::phase_timing::SubPhase;
@@ -58,7 +58,7 @@ pub(super) fn run_in_guest(
     )?;
     phase.finish();
     // Agent reachable over vsock: the command is about to be dispatched.
-    let vsock_ready = timing.then(std::time::Instant::now);
+    let vsock_ready = std::time::Instant::now();
     let req = &with_provisioned_egress_env(req, vm_name);
     let wrapper = build_guest_wrapper(req);
 
@@ -71,9 +71,10 @@ pub(super) fn run_in_guest(
     if req.pty {
         refuse_mediated_pty(dispatch)?;
         let pty = pty_console_request(req, wrapper);
+        startup.gate_dispatch(vsock_ready, sub)?;
         let exit_code =
             crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
-        return Ok((Either::Left(exit_code), vsock_ready));
+        return Ok((Either::Left(exit_code), Some(vsock_ready)));
     }
 
     // Establishing the channel the command goes out on — the dispatch cost,
@@ -82,6 +83,10 @@ pub(super) fn run_in_guest(
     let transport = vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     sub.finish(SubPhase::FirstDispatch);
+    // The last host-side point before the command is written to the guest:
+    // a launch already over its startup ceiling is refused here, with the
+    // channel open but nothing sent, so the workload never starts.
+    startup.gate_dispatch(vsock_ready, sub)?;
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
     // reach the private `commands::shared` re-export, so inline the audit
     // emit here. The detail format matches
@@ -166,7 +171,7 @@ pub(super) fn run_in_guest(
     } else {
         Either::Left(exit_code)
     };
-    Ok((either, vsock_ready))
+    Ok((either, Some(vsock_ready)))
 }
 
 /// Tool name the run's own command is reported under when the guest mediates

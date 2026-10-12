@@ -243,7 +243,7 @@ pub struct ExecutionPlan {
     pub bundle: Option<PlanArtifact>,
 
     /// Optional pin to an application-dependencies volume sealed
-    /// by `mvm_sdk::compile::deps_audit::seal_volume`. When present,
+    /// by `mvm_compiler::deps_audit::seal_volume`. When present,
     /// the supervisor's admit path re-runs `verify_sealed_volume`
     /// against `~/.mvm/volumes/deps/<volume_hash>/`, then compares
     /// the derived volume hash + manifest sha against the pinned

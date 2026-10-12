@@ -132,9 +132,15 @@ Homebrew and `cargo install` installs are removed with their own tools.
 The default install model is binary-first: install `mvmctl`, then run workloads
 from your normal terminal. You do **not** need Nix on the host for normal use.
 
-After installation, the shortest current image-backed path is:
+After installation, the shortest current image-backed path is below. An
+unnamed run claims a prepared warm standby of the same image and sizing and
+refuses rather than cold-booting without one, so the image is pulled and a
+standby warmed first:
 
 ```bash
+mvmctl image pull alpine
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
 mvmctl run --image alpine -- uname -a
 ```
 
@@ -163,10 +169,13 @@ cargo build --release
 cp target/release/mvmctl ~/.local/bin/
 ```
 
-## Cargo Install
+## Cargo Install From Git
+
+`mvmctl` is not published to crates.io (only the public `mvm-contract` library
+is), so `cargo install` builds it from the repository:
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 ## Optional Nix Packages
@@ -231,7 +240,10 @@ hash pin, while `nix/#mvmctl` builds the checkout's source.
 `mvmctl env update` is the self-update command: it fetches the latest release
 tarball and swaps the install in place. `--check` reports whether a newer
 release exists without installing it, `--force` reinstalls even when already
-current, and `--skip-verify` bypasses checksum verification (don't).
+current. Before installing, it verifies the signature on the release's
+`checksums-sha256.txt` under that release's tag, checks the tarball against the
+digest it lists, and verifies the tarball's own signature. `--skip-verify` skips
+only that last check; the signed manifest still binds the tarball.
 
 An `install.sh` install is upgraded by re-running `install.sh`, which moves
 `mvmctl`, its host binaries and `assets/` together and can roll back. `env update`
@@ -282,12 +294,14 @@ rebuilds or downloads what is missing.
 
 Running `mvmctl bootstrap` -- or simply your first `mvmctl machine build` / `mvmctl machine run --flake ...` -- also handles setup automatically: mvm detects your platform, selects the backend, and stages the builder microVM image on first use.
 
-You can force a specific backend with `--hypervisor`:
+You can force a specific backend with `--hypervisor`. A flake or manifest run is named here because an unnamed run must claim a
+prepared warm standby, and `pool warm` prepares only OCI and default images;
+a named run boots cold.
 
 ```bash
-mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
-mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
-mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
+mvmctl machine run --name app --flake . --hypervisor firecracker  # Linux KVM
+mvmctl machine run --name app --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
+mvmctl machine run --name app --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
 
 Use `mvmctl doctor` to check which backends are available on your system.

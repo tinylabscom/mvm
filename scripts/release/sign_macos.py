@@ -97,6 +97,28 @@ def targets(payload):
     return found
 
 
+def unconfigured(report):
+    """Record that this run shipped without Developer ID signing.
+
+    Only a run with no Apple credential at all is skipped. A partial set is a
+    misconfiguration and still fails in `sign`, so a typo in one secret name
+    cannot quietly downgrade a release that was meant to be notarized.
+    """
+    if any(os.environ.get(name) for name in CREDENTIALS):
+        return False
+    report.unlink(missing_ok=True)
+    report.parent.mkdir(parents=True, exist_ok=True)
+    message = ("no Apple signing credentials are configured; the macOS payload "
+               "keeps its ad-hoc signature and is not notarized")
+    report.write_text(json.dumps({"status": "Unconfigured", "reason": message},
+                                 indent=2) + "\n")
+    if os.environ.get("GITHUB_ACTIONS"):
+        print(f"::warning::{message}")
+    else:
+        print(f"warning: {message}")
+    return True
+
+
 def sign(payload, report):
     payload = payload.resolve(strict=True)
     if not payload.is_dir():
@@ -182,8 +204,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--payload", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument(
+        "--skip-unconfigured", action="store_true",
+        help="exit 0 with an Unconfigured report when no Apple credential is set")
     args = parser.parse_args()
     try:
+        if args.skip_unconfigured and unconfigured(args.report):
+            return
         sign(args.payload, args.report)
     except (RuntimeError, ValueError, OSError, struct.error) as error:
         parser.exit(1, f"macOS release signing failed: {error}\n")

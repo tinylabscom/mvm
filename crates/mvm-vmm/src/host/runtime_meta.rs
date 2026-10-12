@@ -370,6 +370,10 @@ pub fn record_from_start_config(
                     .clone()
                     .context("source runtime binding has no version")?,
                 arch: mvm_core::arch::GuestArch::host(),
+                archive_sha256: start_config
+                    .source_runtime_archive_sha256
+                    .clone()
+                    .context("source runtime binding has no archive digest")?,
             })
         }
         None => None,
@@ -414,6 +418,46 @@ pub fn record_from_start_config(
                 proof: proof.clone(),
                 rootfs_path: start_config.rootfs_path.clone().into(),
                 initramfs_path: start_config.initrd_path.as_ref().map(PathBuf::from),
+            },
+        );
+    }
+    if let Some(proof) = &start_config.legacy_portable_runtime {
+        anyhow::ensure!(
+            meta.runtime_launch_binding.is_none(),
+            "mixed runtime provenance"
+        );
+        meta.runtime_launch_binding = Some(
+            mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyPortable {
+                proof: proof.clone(),
+                rootfs_path: start_config.rootfs_path.clone().into(),
+                kernel_path: start_config
+                    .kernel_path
+                    .as_ref()
+                    .context("portable kernel missing")?
+                    .into(),
+                overlay_path: start_config
+                    .runtime_overlay_path
+                    .as_ref()
+                    .context("portable overlay missing")?
+                    .into(),
+                overlay_verity_path: start_config
+                    .runtime_overlay_verity_path
+                    .as_ref()
+                    .context("portable verity missing")?
+                    .into(),
+                initramfs_path: start_config
+                    .initrd_path
+                    .as_ref()
+                    .context("portable initramfs missing")?
+                    .into(),
+                overlay_roothash: start_config
+                    .runtime_overlay_roothash
+                    .clone()
+                    .context("portable verity root missing")?,
+                version: start_config
+                    .runtime_overlay_version
+                    .clone()
+                    .context("portable version missing")?,
             },
         );
     }

@@ -5,7 +5,8 @@ description: mvmforge has been merged into mvm. Workloads previously authored ag
 
 mvmforge — the sibling repo that previously held the workload SDKs —
 has been merged into this repo and deprecated. Every author-side
-capability now lives under `crates/mvm-sdk/`, `crates/mvm-sdk/sdks/python/mvm/`, and
+capability now lives under `crates/mvm-compiler/`, `crates/mvm-sdk/`,
+`crates/mvm-sdk/sdks/python/mvm/`, and
 `crates/mvm-sdk/sdks/typescript/`. There is no longer a cross-repo boundary; one
 mvm release ships the substrate and the SDK in lockstep.
 
@@ -16,7 +17,7 @@ mvm release ships the substrate and the SDK in lockstep.
 | `mvmforge-ir` crate                | `crates/mvm-contract/src/ir/`                               |
 | `mvmforge-sdk` crate (Rust builder)| `crates/mvm-sdk` (`builder` module)                         |
 | `mvmforge-addon` crate             | `crates/mvm-sdk/src/addon/`                                 |
-| `mvmforge` host CLI compile path   | `crates/mvm-sdk/src/compile/` + `mvmctl build compile`            |
+| `mvmforge` host CLI compile path   | `crates/mvm-compiler/` (re-exported by `mvm-sdk::compile`) + `mvmctl build compile` |
 | `mvmforge-runtime` (in-guest)      | `crates/mvm-agentd` + `nix/lib/factories/mkFunctionService` |
 | Python SDK (`@mv.func`)            | `crates/mvm-sdk/sdks/python/mvm/` (`@mvm.app`)                             |
 | TypeScript SDK                     | `crates/mvm-sdk/sdks/typescript/`                                          |
@@ -42,9 +43,18 @@ surface.
   `before_start`, `after_start`, `before_stop`.
 - Packaging moved behind control-plane flows. `mvmctl` keeps the local
   compile/build/run surface.
-- The Rust-side compile pipeline is now a library (`mvm-sdk::compile`),
-  so automation can call into the same rendering primitives without going
-  through `mvmctl`.
+- The Rust-side compile pipeline lives in `mvm-compiler`, so automation can
+  call the same analysis and rendering primitives without going through
+  `mvmctl` or depending on the SDK. Existing `mvm_sdk::compile` imports
+  remain supported as re-exports of that single implementation when the
+  SDK's `compiler` feature is enabled (off by default).
+  `mvm-contract` owns the workload IR; `mvm-sdk` retains authoring builders,
+  language bridges, and guest-facing APIs. Compilation stages source and
+  build artifacts but does not execute Nix builds or sign packages.
+
+Rust callers that use `mvm_sdk::deploy` must enable `deploy` for local
+assembly/records or `deploy-remote` for HTTP shipping. Deployment remains
+outside `mvm-compiler`.
 
 ## Migration steps
 

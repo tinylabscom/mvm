@@ -37,7 +37,7 @@ const STALE_OBJECT_TEMP_AGE: Duration = Duration::from_secs(60 * 60);
 /// What [`prune_unreferenced_content`] removed, or would remove on a dry run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ContentPruneReport {
-    /// Staging directories left by captures whose process is gone.
+    /// Staging left by captures and restores whose process is gone.
     pub abandoned_staging: usize,
     /// Pool objects no checkpoint links, plus objects a dead capture never
     /// finished writing.
@@ -79,9 +79,9 @@ pub fn prune_unreferenced_content(
     let referenced = referenced_materializations(store)?;
     let staging_root = store.root().join(STAGING_DIR);
     let abandoned_staging = if dry_run {
-        staging::abandoned_entries(&staging_root).len()
+        staging::abandoned_entries(&staging_root).len() + staging::abandoned_restores(store.root())
     } else {
-        staging::sweep_abandoned(&staging_root)
+        staging::sweep_abandoned(&staging_root) + staging::reclaim_abandoned_restores(store.root())
     };
     let objects = sweep_pool(store.root(), dry_run, SystemTime::now())?;
     let materializations = sweep_materializations(store.root(), &referenced, dry_run)?;
@@ -438,6 +438,34 @@ mod tests {
         assert_eq!(report.objects, 1, "chunk 1 is still kept's");
         assert!(!staged_content.exists());
         verify_content(&store, &kept).unwrap();
+    }
+
+    #[test]
+    fn an_abandoned_restore_materialization_is_reclaimed_and_a_live_one_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        capture(&store, tmp.path(), "kept", &[chunk(1)]);
+        // A restore killed before it returned leaves the blobs it opened.
+        let dead = store.root().join(format!(
+            "{}{DEAD_PID}-x",
+            staging::RESTORE_MATERIALIZATION_PREFIX
+        ));
+        std::fs::create_dir_all(&dead).unwrap();
+        std::fs::write(dead.join("memory.bin"), b"plaintext guest memory").unwrap();
+        let live =
+            crate::private_staging::create(store.root(), staging::RESTORE_MATERIALIZATION_PREFIX)
+                .unwrap();
+
+        let dry = prune_unreferenced_content(&store, true).unwrap();
+        assert_eq!(dry.abandoned_staging, 1);
+        assert!(dead.exists(), "a dry run removes nothing");
+        let report = prune_unreferenced_content(&store, false).unwrap();
+        assert_eq!(report.abandoned_staging, 1);
+        assert!(!dead.exists());
+        assert!(
+            live.path().exists(),
+            "a restore in progress keeps its staging"
+        );
     }
 
     #[test]

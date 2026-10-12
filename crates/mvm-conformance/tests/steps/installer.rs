@@ -11,6 +11,26 @@ fn installer() -> String {
     std::fs::read_to_string(workspace_root().join("install.sh")).expect("read install.sh")
 }
 
+/// The body of the installer's one signature check, shared by the mvmctl
+/// archive and the guest runtime.
+fn signature_check(script: &str) -> &str {
+    let start = script
+        .find("\nverify_release_signature() {\n")
+        .expect("installer must define verify_release_signature");
+    let body = &script[start..];
+    let end = body
+        .find("\n}\n")
+        .expect("verify_release_signature must close");
+    &body[..end]
+}
+
+/// The mvmctl archive goes through that check, and the check refuses an asset
+/// with no bundle.
+fn archive_bundle_is_required(script: &str) -> bool {
+    script.contains("\nverify_release_signature \"$ARCHIVE\"\n")
+        && signature_check(script).contains("|| die \"no signature bundle published for $asset\"")
+}
+
 #[given("a fresh host with neither mvmctl nor cosign")]
 fn fresh_host(_world: &mut CliWorld) {}
 
@@ -40,8 +60,8 @@ fn fresh_install_trust_precedes_verifier_execution(_world: &mut CliWorld) {
 fn fresh_install_requires_tag_pinned_bundle(_world: &mut CliWorld) {
     let script = installer();
     assert!(
-        script.contains("no signature bundle published for $ARCHIVE")
-            && script.contains("--tag \"$VERSION\""),
+        archive_bundle_is_required(&script)
+            && signature_check(&script).contains("--tag \"$VERSION\""),
         "the bootstrap verifier must require the release bundle under the selected tag"
     );
 }
@@ -52,7 +72,7 @@ fn fresh_install_has_no_unsigned_fallback(_world: &mut CliWorld) {
     assert!(
         !script.contains("skipping signature verification")
             && script.contains("trusted cosign SHA-256 mismatch")
-            && script.contains("no signature bundle published for $ARCHIVE"),
+            && archive_bundle_is_required(&script),
         "a host without a verifier must authenticate one or refuse the install"
     );
 }

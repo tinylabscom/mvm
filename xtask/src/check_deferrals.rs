@@ -56,10 +56,6 @@ const EXEMPTIONS: &[(&str, &str)] = &[
         "crates/mvm-hostd/src/broker/mod.rs",
         "references the same broker config TODO in config.rs; resolves together",
     ),
-    (
-        "crates/mvm-sdk/src/compile/mvm_pin.rs",
-        "tracked release-time pin-bump automation; resolves when the xtask exists",
-    ),
 ];
 
 /// Trees walked for Rust sources and their manifests and docs.

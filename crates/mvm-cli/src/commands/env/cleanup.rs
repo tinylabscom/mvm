@@ -2,9 +2,11 @@
 //! wipe host-side cache / state directories (`--cache` / `--state` /
 //! `--nuclear`).
 //!
-//! Without any tier flag the command is the same lightweight in-VM
-//! cleanup it has always been (clears the dev VM's `/tmp`, prunes
-//! `~/.mvm/dev/builds/`, runs `nix-collect-garbage -d`). The tier
+//! Without any tier flag the command prunes `~/.mvm/dev/builds/` and, when
+//! the Linux environment is a dev VM, clears that VM's `/tmp` and runs
+//! `nix-collect-garbage -d` inside it. Where the Linux environment is this
+//! host (native Linux, macOS 13-25) those two steps are skipped: they would
+//! be run against the host itself. The tier
 //! flags add host-side directory sweeps that run after the in-VM
 //! step and are gated by a confirmation prompt.
 //!
@@ -36,7 +38,7 @@ use std::path::{Path, PathBuf};
 use crate::ui;
 
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::shell;
+use mvm_runtime::{linux_env, shell};
 use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 
 use super::Cli;
@@ -188,13 +190,18 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
         );
     }
 
-    // ---- in-VM cleanup (preserved behavior; runs every invocation) ----
-    let disk_before = vm_disk_usage_pct();
-    if let Some(pct) = disk_before {
-        ui::info(&format!("Dev VM disk usage: {}%", pct));
-    }
-    ui::info("Clearing temporary files...");
-    let _ = shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+    // ---- dev-VM maintenance + host build prune (runs every invocation) ----
+    let vm_maintenance = VmMaintenance::for_env(linux_env::default_env_runs_on_host());
+    let disk_before = match vm_maintenance {
+        VmMaintenance::Run => clear_dev_vm_scratch(),
+        VmMaintenance::Skip => {
+            ui::info(
+                "No dev VM to clean: guest commands run on this host, so the \
+                 host's /tmp and Nix store are left alone.",
+            );
+            None
+        }
+    };
 
     let report = mvm_build::dev_build::cleanup_old_dev_builds(keep_count)?;
     if cli.verbose > 0 {
@@ -218,40 +225,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
             report.removed_count, keep_count
         ));
     }
-    if disk_before.is_none() {
-        ui::info("Skipping nix-collect-garbage: dev VM is not running.");
-    } else {
-        ui::info("Running nix-collect-garbage...");
-        match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
-            Ok(output) => {
-                let trimmed = output.trim();
-                if !trimmed.is_empty() {
-                    println!("{trimmed}");
-                }
-            }
-            Err(e) => {
-                ui::warn(&format!("nix-collect-garbage failed: {e}"));
-                ui::info("Retrying after clearing Nix profile generations...");
-                let _ = shell::run_in_vm("rm -rf ~/.local/state/nix/profiles/* 2>/dev/null");
-                match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
-                    Ok(output) => {
-                        let trimmed = output.trim();
-                        if !trimmed.is_empty() {
-                            println!("{trimmed}");
-                        }
-                    }
-                    Err(e2) => ui::warn(&format!("nix-collect-garbage retry failed: {e2}")),
-                }
-            }
-        }
-    }
-    let disk_after = vm_disk_usage_pct();
-    if let Some(pct) = disk_after {
-        let freed_msg = match disk_before {
-            Some(before) if before > pct => format!(" (freed {}%)", before - pct),
-            _ => String::new(),
-        };
-        ui::success(&format!("Dev VM disk usage: {}%{}", pct, freed_msg));
+    if vm_maintenance == VmMaintenance::Run {
+        collect_dev_vm_garbage(disk_before);
     }
     let removed = report.removed_count;
     mvm_core::audit_emit!(SlotPrune, "source=cleanup removed={removed}");
@@ -508,6 +483,76 @@ fn dir_size(path: &Path) -> u64 {
 }
 
 /// Read the dev VM root filesystem usage percentage.
+/// Whether `cleanup` may run its dev-VM maintenance scripts.
+///
+/// Those scripts (`rm -rf /tmp/*`, `nix-collect-garbage -d`, clearing Nix
+/// profiles) are only safe inside a disposable dev VM. Where the Linux
+/// environment is this host, `run_in_vm` is a plain host shell, and sending
+/// them there wipes every other process's files under `/tmp` and collects the
+/// host's own Nix store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmMaintenance {
+    Run,
+    Skip,
+}
+
+impl VmMaintenance {
+    fn for_env(env_runs_on_host: bool) -> Self {
+        if env_runs_on_host {
+            VmMaintenance::Skip
+        } else {
+            VmMaintenance::Run
+        }
+    }
+}
+
+/// Clear the dev VM's scratch directories, returning its disk usage before
+/// the sweep (`None` when the VM is unreachable).
+fn clear_dev_vm_scratch() -> Option<u8> {
+    let disk_before = vm_disk_usage_pct();
+    if let Some(pct) = disk_before {
+        ui::info(&format!("Dev VM disk usage: {}%", pct));
+    }
+    ui::info("Clearing temporary files...");
+    let _ = shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+    disk_before
+}
+
+/// Run `nix-collect-garbage` in the dev VM and report the space it freed.
+fn collect_dev_vm_garbage(disk_before: Option<u8>) {
+    if disk_before.is_none() {
+        ui::info("Skipping nix-collect-garbage: dev VM is not running.");
+        return;
+    }
+    ui::info("Running nix-collect-garbage...");
+    match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+        Ok(output) => print_trimmed(&output),
+        Err(e) => {
+            ui::warn(&format!("nix-collect-garbage failed: {e}"));
+            ui::info("Retrying after clearing Nix profile generations...");
+            let _ = shell::run_in_vm("rm -rf ~/.local/state/nix/profiles/* 2>/dev/null");
+            match shell::run_in_vm_stdout("nix-collect-garbage -d 2>&1 | tail -3") {
+                Ok(output) => print_trimmed(&output),
+                Err(e2) => ui::warn(&format!("nix-collect-garbage retry failed: {e2}")),
+            }
+        }
+    }
+    if let Some(pct) = vm_disk_usage_pct() {
+        let freed_msg = match disk_before {
+            Some(before) if before > pct => format!(" (freed {}%)", before - pct),
+            _ => String::new(),
+        };
+        ui::success(&format!("Dev VM disk usage: {}%{}", pct, freed_msg));
+    }
+}
+
+fn print_trimmed(output: &str) {
+    let trimmed = output.trim();
+    if !trimmed.is_empty() {
+        println!("{trimmed}");
+    }
+}
+
 fn vm_disk_usage_pct() -> Option<u8> {
     let output = shell::run_in_vm_stdout("df --output=pcent / 2>/dev/null | tail -1").ok()?;
     output.trim().trim_end_matches('%').trim().parse().ok()
@@ -517,6 +562,12 @@ fn vm_disk_usage_pct() -> Option<u8> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn dev_vm_maintenance_never_runs_against_the_host() {
+        assert_eq!(VmMaintenance::for_env(true), VmMaintenance::Skip);
+        assert_eq!(VmMaintenance::for_env(false), VmMaintenance::Run);
+    }
 
     fn touch(p: &Path, bytes: usize) {
         if let Some(parent) = p.parent() {

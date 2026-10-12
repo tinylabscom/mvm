@@ -102,7 +102,16 @@ impl Smoke {
     }
 
     fn run_archive(&self, archive: &Path, version: Option<&str>) -> Output {
-        let mut command = self.command(version, &[]);
+        self.run_archive_with(archive, version, &[])
+    }
+
+    fn run_archive_with(
+        &self,
+        archive: &Path,
+        version: Option<&str>,
+        envs: &[(&str, &str)],
+    ) -> Output {
+        let mut command = self.command(version, envs);
         command
             .env("MVM_SMOKE_ARCHIVE", archive)
             .env_remove("MVM_SMOKE_INSTALLER");
@@ -115,6 +124,7 @@ impl Smoke {
             .arg(script())
             .env("MVM_SMOKE_OUT", self.out())
             .env_remove("MVM_SMOKE_ARCHIVE")
+            .env_remove("MVM_SMOKE_GUEST_RUNTIME")
             .env_remove("GITHUB_ACTIONS")
             .env_remove("GITHUB_STEP_SUMMARY");
         if let Some(version) = version {
@@ -297,6 +307,186 @@ fn release_archive(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
         .unwrap();
     assert!(status.success());
     archive
+}
+
+/// A fake `mvmctl` whose bootstrap reports the guest runtime it finds in
+/// `guest-runtime/` beside its real path, and the pieces it assembles from it,
+/// the way a release binary does; its doctor names that archive.
+fn runtime_adopting_mvmctl() -> String {
+    runtime_adopting_mvmctl_with(
+        "[mvm] Runtime overlay, initramfs and SDK sidecars assembled from release guest runtime $name (0123456789ab).",
+        "  guest runtime: OK (release archive $name 0123456789ab — assembled from the release guest runtime — \
+         runtime overlay: archive 0123456789ab (this release); initramfs: archive 0123456789ab (this release))",
+    )
+}
+
+/// [`runtime_adopting_mvmctl`] printing `assembled` after adopting each
+/// staged runtime, and `doctor_line` from `mvmctl doctor`. Both see the
+/// runtime's file name as `$name`.
+fn runtime_adopting_mvmctl_with(assembled: &str, doctor_line: &str) -> String {
+    format!(
+        "#!/bin/sh\nruntimes=\"$(dirname \"$(readlink -f \"$0\")\")/guest-runtime\"\n\
+         case \"$1\" in\n  --version) echo 'mvmctl 1.2.3' ;;\n  \
+         bootstrap) for f in \"$runtimes\"/*; do [ -f \"$f\" ] || continue; name=\"$(basename \"$f\")\"; \
+         echo \"[mvm] Guest runtime $name ready (installed beside mvmctl).\" >&2; \
+         echo \"{assembled}\" >&2; done ;;\n  \
+         doctor) for f in \"$runtimes\"/*; do [ -f \"$f\" ] || continue; name=\"$(basename \"$f\")\"; \
+         echo \"{doctor_line}\"; done ;;\n  \
+         machine) shift 2\n{CACHE_OVERLAY_ONCE}\n{ECHO_TOKEN}\n    ;;\nesac"
+    )
+}
+
+/// Run the archive smoke with `mvmctl` and an unpublished guest runtime staged
+/// beside it.
+fn run_with_guest_runtime(smoke: &Smoke, mvmctl: &str) -> Output {
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", mvmctl)]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    std::fs::write(&runtime, b"runtime").unwrap();
+    smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    )
+}
+
+/// The release workflow stages the guest runtime it is about to publish beside
+/// the unpublished mvmctl, and the smoke passes only when bootstrap adopts it
+/// from there.
+#[test]
+fn an_unpublished_guest_runtime_is_adopted_from_beside_mvmctl() {
+    let smoke = Smoke::new();
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", &runtime_adopting_mvmctl())]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    std::fs::write(&runtime, b"runtime").unwrap();
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    for expected in [
+        "guest runtime: mvm-guest-bins-v1.2.3.tar.gz adopted from beside mvmctl",
+        "guest runtime: launch pieces assembled from mvm-guest-bins-v1.2.3.tar.gz",
+        "release archive mvm-guest-bins-v1.2.3.tar.gz 0123456789ab",
+    ] {
+        assert!(transcript.contains(expected), "{expected}\n{transcript}");
+    }
+}
+
+/// Adopting the runtime is not enough: bootstrap must assemble the launch
+/// pieces from it, or the boots that follow ran on something else.
+#[test]
+fn a_guest_runtime_bootstrap_did_not_assemble_from_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let output = run_with_guest_runtime(
+        &smoke,
+        &runtime_adopting_mvmctl_with(
+            "[mvm] Runtime overlay installed from image set image-set/v0.2.4.",
+            "  guest runtime: OK (release archive $name 0123456789ab)",
+        ),
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke.transcript().contains(
+            "bootstrap did not assemble the runtime overlay, initramfs and SDK sidecars from the guest runtime mvm-guest-bins-v1.2.3.tar.gz"
+        ),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// After the boots, doctor must name the staged archive as the pieces' origin.
+#[test]
+fn a_doctor_that_does_not_name_the_release_archive_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let output = run_with_guest_runtime(
+        &smoke,
+        &runtime_adopting_mvmctl_with(
+            "[mvm] Runtime overlay, initramfs and SDK sidecars assembled from release guest runtime $name (0123456789ab).",
+            "  guest runtime: OK (no source or release archive — installed from image set image-set/v0.2.4)",
+        ),
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("mvmctl doctor does not name the release guest runtime"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// A doctor line that names the archive and still reports a piece from the
+/// image set means a boot could have attached it.
+#[test]
+fn a_doctor_that_reports_an_image_set_piece_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let output = run_with_guest_runtime(
+        &smoke,
+        &runtime_adopting_mvmctl_with(
+            "[mvm] Runtime overlay, initramfs and SDK sidecars assembled from release guest runtime $name (0123456789ab).",
+            "  guest runtime: OK (release archive $name 0123456789ab — assembled from the release guest runtime — \
+             runtime overlay: image set image-set/v0.2.4 (member 0.2.4))",
+        ),
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("reports a launch piece from the image set"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// A bootstrap that never reports the staged runtime fails the smoke: the
+/// pairing it exists to witness did not happen.
+#[test]
+fn a_guest_runtime_bootstrap_did_not_adopt_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[("mvmctl", &fake_mvmctl("1.2.3", ECHO_TOKEN))],
+    );
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    std::fs::write(&runtime, b"runtime").unwrap();
+
+    let output = smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("bootstrap did not adopt the unpublished guest runtime"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// The guest runtime is staged beside an unpacked archive; on its own it names
+/// nothing to install.
+#[test]
+fn a_guest_runtime_without_an_archive_is_exit_two() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", "/nonexistent.tar.gz")],
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{}", combined(&output));
 }
 
 /// The release workflow runs the smoke on the archive it is about to publish.

@@ -51,8 +51,8 @@ pub struct LocalRunRequest {
     /// Absolute path to the already-materialized ext4 rootfs. Hashed for the
     /// plan's `image_sha256`, so it must exist and be readable.
     pub rootfs_path: PathBuf,
-    /// Kernel image path. `None` for backends that carry their own kernel
-    /// (libkrun's bundled kernel, the mock backend); `Some` for Firecracker.
+    /// Kernel image path. `None` only for the mock backend, which boots no
+    /// kernel; every VMM backend needs one.
     pub kernel_path: Option<PathBuf>,
     /// dm-verity Merkle-tree sidecar, paired with `roothash`. Both `Some` for a
     /// verified-boot rootfs; both `None` otherwise.
@@ -150,7 +150,10 @@ pub(crate) fn attach_runtime_overlay_from_cache(
     backend_name: &str,
 ) -> Result<()> {
     use mvm_build::runtime_overlay::{RuntimeOverlayResolver, resolve_cached_runtime_overlay};
-    if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
+    // Every backend that boots a kernel boots the universal initramfs, and
+    // that initramfs mounts the overlay. `apple-container` is the HVF runner
+    // with another kernel image, so it needs the overlay exactly as HVF does.
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
         return Ok(());
     }
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
@@ -178,7 +181,7 @@ pub(crate) fn attach_runtime_overlay_from_cache(
 /// userspace and the host sees only an agent that never answers. The
 /// initramfs comes from the same resolution every other launch path uses.
 pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
-    if !matches!(backend_name, "firecracker" | "hvf" | "qemu" | "libkrun") {
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
         return Ok(());
     }
     let mut selected = config.clone();
@@ -191,9 +194,19 @@ pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &st
         None => mvm_build::guest_runtime::cached_runtime_release_proof(&cache, version, arch)?,
     };
     selected.unsigned_runtime_development = selected.runtime_release_proof.is_none();
-    if selected.unsigned_runtime_development {
-        mvm_build::guest_runtime::source::check_source_runtime(&cache, version, arch)?;
-    }
+    selected.source_runtime_archive_sha256 = if selected.unsigned_runtime_development {
+        let checked =
+            mvm_build::guest_runtime::source::check_source_runtime(&cache, version, arch)?;
+        if let Some(expected) = config.source_runtime_archive_sha256.as_deref() {
+            anyhow::ensure!(
+                expected == checked.archive_sha256(),
+                "source runtime archive differs from the originally selected archive"
+            );
+        }
+        Some(checked.archive_sha256().to_owned())
+    } else {
+        None
+    };
     let initramfs = mvm_fs::initramfs::InitramfsResolver::new(cache.join("initramfs"), version)
         .resolve(&arch.to_string())
         .context("cached initramfs required for local boot; prepare the guest runtime first")?;
@@ -247,6 +260,16 @@ pub fn admit_and_boot_local(
         })
         .transpose()?;
 
+    // With no egress grant the deny-all default stands; a granted allow-list
+    // is projected onto it, so the policy the gate enforces, and the seccomp
+    // tier the guest installs, derive from the grants the plan is signed for.
+    let network_policy = match req.grants.as_ref() {
+        Some(grants) if grants.egress.is_some() => {
+            mvm_contract::grants::projection::network_policy_from_grants(grants)
+        }
+        _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
+    };
+
     let synthesis = SynthesisInput {
         outputs: Vec::new(),
         grants: req.grants.clone(),
@@ -261,7 +284,12 @@ pub fn admit_and_boot_local(
         image_sha256: &sha,
         image_cosign_bundle: None,
         intent: None,
-        seccomp_tier: PlanSeccompTier::Standard,
+        seccomp_tier: mvm_core::plan::workload_seccomp_tier(
+            PlanSeccompTier::Standard,
+            &network_policy,
+            &[],
+            &[],
+        ),
         network_policy_ref: None,
         fs_policy_ref: None,
         egress_policy_ref: None,
@@ -303,15 +331,7 @@ pub fn admit_and_boot_local(
         memory_mib: req.mem_mib,
         volumes: req.volumes.clone(),
         tenant_id: Some(LOCAL_TENANT.to_string()),
-        // With no egress grant the deny-all default from `VmStartConfig` stands;
-        // a granted allow-list is projected onto it, so the policy the gate
-        // enforces is derived from the same grants the plan was signed for.
-        network_policy: match req.grants.as_ref() {
-            Some(grants) if grants.egress.is_some() => {
-                mvm_contract::grants::projection::network_policy_from_grants(grants)
-            }
-            _ => mvm_core::network_policy::NetworkPolicy::deny_all(),
-        },
+        network_policy,
         ..Default::default()
     };
     attach_guest_runtime(&mut config, &req.backend_name)?;
@@ -767,7 +787,10 @@ mod tests {
     /// did while this path attached the overlay alone.
     #[test]
     fn cached_runtime_propagates_checked_source_and_refuses_tampering_without_fallback() {
-        for target in ["overlay", "initramfs", "release-triplet", "explicit-proof"] {
+        for (backend, target) in ["hvf", "apple-container"].into_iter().flat_map(|backend| {
+            ["overlay", "initramfs", "release-triplet", "explicit-proof"]
+                .map(|target| (backend, target))
+        }) {
             let data = tempfile::tempdir().unwrap();
             let mut env = TestEnv::new();
             env.isolate_mvm_home(data.path());
@@ -776,7 +799,7 @@ mod tests {
                 kernel_path: Some("/kernel".into()),
                 ..Default::default()
             };
-            attach_guest_runtime(&mut config, "hvf").unwrap();
+            attach_guest_runtime(&mut config, backend).unwrap();
             assert!(config.unsigned_runtime_development);
             assert!(config.runtime_release_proof.is_none());
             mvm_runtime::runtime_evidence::verify_runtime_for_launch(
@@ -817,8 +840,8 @@ mod tests {
                 _ => unreachable!(),
             }
             assert!(
-                attach_guest_runtime(&mut request, "hvf").is_err(),
-                "{target}"
+                attach_guest_runtime(&mut request, backend).is_err(),
+                "{backend}: {target}"
             );
             assert!(
                 request.runtime_overlay_path.is_none(),
@@ -838,7 +861,9 @@ mod tests {
         env.isolate_mvm_home(data.path());
         crate::test_fixtures::install_runtime_overlay(data.path());
 
-        for backend in ["firecracker", "hvf"] {
+        // Every kernel-booting backend, so one that boots the initramfs
+        // without the overlay it mounts cannot slip in again.
+        for backend in mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS {
             let mut config = VmStartConfig {
                 rootfs_path: "/rootfs.ext4".into(),
                 kernel_path: Some("/vmlinux".into()),

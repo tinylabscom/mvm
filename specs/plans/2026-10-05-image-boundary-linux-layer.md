@@ -134,9 +134,9 @@ signed checksum manifest, and build provenance. The pins that move with it:
 
 ### #4104: mvmctl assembles the guest runtime
 
-- **Runtime overlay.** The host build
-  (`build_runtime_overlay_from_guest_binaries`: cargo-zigbuild binaries, the
-  pure-Rust ext4 writer, in-process verity) gains the GPU shims under
+- **Runtime overlay.** The host build (then from loose cargo-zigbuild
+  binaries; now `build_runtime_overlay_from_guest_runtime`: the pure-Rust ext4
+  writer, in-process verity) gains the GPU shims under
   `gpu/{glibc,musl}` and the Python SDK tree, so its contents match what the
   image set publishes today.
 - **Initramfs.** Built from the archive's initramfs agent with the existing
@@ -174,9 +174,9 @@ What only the shell `/init` still does is this workstream's real scope:
   powering off. On the universal path the host drives this through
   `RunEntrypoint`; the open question is whether anything besides dev boots
   and `mvm-images`' own e2e boots still needs the autostart;
-- `mvm.secret_env`, which the runner still emits but no agent code reads,
+- `mvm.secret_env`, which the runner emitted but no agent code read,
   because the universal path delivers the environment per `RunEntrypoint`.
-  The emitter can be deleted.
+  The emitter and the shell consumer are deleted.
 
 The identity files need a choice: either the agent provisions `/etc/passwd`
 and `/etc/group` read-only at boot, which claim 2 relies on, or the base root
@@ -241,7 +241,10 @@ fixed:
 - `images.lock`'s `[compatibility] guest_agent_protocol` is replaced by a
   base-image contract version that the base root filesystem declares and
   `mvmctl` checks before boot. The guest-agent protocol becomes a property of
-  the CLI and its own guest runtime, which ship together.
+  the CLI and its own guest runtime, which ship together. *Landed:* the lock
+  no longer copies the range and nothing checks it;
+  `compatibility.base_image_contract` is checked at acquisition, an absent
+  declaration as the legacy contract 0. ADR-054 records the values.
 - The re-measure in `specs/plans/2026-09-27-release-e2e-under-image-target.md`
   is retargeted to this arrangement.
 

@@ -7,11 +7,8 @@
 
 use cucumber::{given, then, when};
 use mvm_build::guest_libc::GuestLibc;
-use mvm_build::published_image_set::PublishedImageSet;
-use mvm_build::published_image_set::fixture::ImageSetFixture;
 use mvm_contract::protocol::broker::ServiceId;
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmStartConfig, VmVolume, VmVolumeKind};
 use mvm_fs::sdk_sidecar::{
@@ -115,124 +112,81 @@ fn byte_flip_sidecar(world: &mut CliWorld) {
     std::fs::write(&layout.image, &image).expect("write the tampered sidecar image");
 }
 
-/// Build the tarball the `sdk-sidecar-image` release job publishes: the ext4,
-/// the VERSION marker, and the derivation's own manifest over both.
-fn sidecar_release_archive() -> Vec<u8> {
-    let image = sidecar_ext4_bytes();
-    let version_text = format!("{FIXTURE_VERSION}\n").into_bytes();
-    let manifest = format!(
-        "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
-        sha256_hex(&image),
-        sha256_hex(&version_text),
-    )
-    .into_bytes();
-    let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let mut tar = tar::Builder::new(encoder);
-    for (name, bytes) in [
-        (SDK_SIDECAR_IMAGE_FILE, image),
-        (SDK_SIDECAR_VERSION_FILE, version_text),
-        (mvm_fs::overlay::CHECKSUM_MANIFEST_FILE, manifest),
-    ] {
-        let mut header = tar::Header::new_gnu();
-        header.set_mode(0o644);
-        header.set_size(u64::try_from(bytes.len()).expect("fixture member size"));
-        header.set_cksum();
-        tar.append_data(&mut header, name, bytes.as_slice())
-            .expect("append the release archive member");
-    }
-    tar.into_inner()
-        .expect("finish the tar stream")
-        .finish()
-        .expect("finish the gzip stream")
-}
-
-/// Serve an image set whose sidecar member for this arch declares
-/// `declared`, while the release archive is what is actually served — so a
-/// scenario can make the signed root disagree with the shipped archive.
-fn stage_release(world: &mut CliWorld, declared: &[u8]) {
+/// Stage the guest runtime a CLI release ships beside an installed `mvmctl`,
+/// optionally with this host's `libc` host-services library changed after its
+/// manifest recorded the digest. The image set carries no sidecar: a
+/// downloaded `mvmctl` packs it from this archive.
+fn stage_release(world: &mut CliWorld, tamper: bool) {
     let dir = world
         .sdk_sidecar_release
         .get_or_insert_with(|| tempfile::tempdir().expect("create the release dir"))
         .path()
         .to_path_buf();
-    let names = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
-        &GuestArch::host().to_string(),
-        SCENARIO_LIBC,
+    let tampered = format!(
+        "{}/lib/{SCENARIO_LIBC}/libmvm_host_services.so",
+        GuestArch::host()
     );
-    let source = ImageSetFixture::complete()
-        .publish(
-            ImageSetRole::SdkSidecar(SCENARIO_LIBC),
-            MemberTarget::Arch(GuestArch::host()),
-            &names.archive,
-            declared.to_vec(),
-        )
-        .serve_instead(&names.archive, sidecar_release_archive())
-        .serve_from(&dir);
-    world.sdk_sidecar_image_set = Some(source);
+    mvm_build::guest_runtime::release_fixture::write_release_archive_tampering(
+        &dir,
+        FIXTURE_VERSION,
+        tamper.then_some(tampered.as_str()),
+    );
 }
 
-#[given(expr = "a published SDK sidecar release artifact")]
-fn published_release_artifact(world: &mut CliWorld) {
-    stage_release(world, &sidecar_release_archive());
+#[given(expr = "a release guest runtime installed beside mvmctl")]
+fn release_guest_runtime_installed(world: &mut CliWorld) {
+    stage_release(world, false);
 }
 
-#[given(expr = "a published SDK sidecar release artifact whose archive checksum does not match")]
-fn published_release_artifact_with_drifted_checksum(world: &mut CliWorld) {
-    stage_release(world, b"bytes the release never shipped");
+#[given(expr = "a release guest runtime whose host-services library does not match its manifest")]
+fn release_guest_runtime_tampered(world: &mut CliWorld) {
+    stage_release(world, true);
 }
 
-/// Drive the acquire ladder an installed `mvmctl` runs on a cold cache: acquire
-/// the signed image set, fetch the sidecar member held to its root, then
-/// resolve the attachment from the entry it installed. The set is the staged
-/// fixture, so no scenario reaches the network.
-#[when(expr = "the launch path acquires the SDK sidecar from the published release")]
-fn acquire_sidecar_from_release(world: &mut CliWorld) {
+/// Drive what an installed `mvmctl` runs on a cold cache: acquire its release
+/// guest runtime from beside the binary (never the network), assemble every
+/// launch piece from it, then resolve the attachment from the sidecar it
+/// packed.
+#[when(expr = "bootstrap assembles the SDK sidecar from the release guest runtime")]
+fn assemble_sidecar_from_release(world: &mut CliWorld) {
     let cache = cache_root(world);
-    let source = world
-        .sdk_sidecar_image_set
-        .take()
-        .expect("a prior step must stage the release");
+    let installed = world
+        .sdk_sidecar_release
+        .as_ref()
+        .expect("a prior step must stage the release")
+        .path()
+        .to_path_buf();
     let services = world.sdk_sidecar_services.clone();
-
-    // `TestEnv` serializes process-wide env mutation and restores it on drop.
-    // Nothing awaits inside this step, so the guard is held only for the
-    // download and cannot stall a concurrently-running scenario.
-    let mut env = mvm_core::util::test_env::TestEnv::new();
-    // The scenario is the acquire-and-boot workflow; a valid Sigstore
-    // signature cannot be minted offline, so the signature rung is exercised
-    // by `mvm_build::published_image_set`'s own witnesses instead.
-    env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+    let arch = GuestArch::host();
 
     world.sdk_sidecar_result = Some(
-        PublishedImageSet::acquire_from(source)
+        mvm_build::guest_bins::release::acquire_release_guest_runtime(
+            &mvm_build::guest_bins::release::ReleaseGuestRuntimeRequest {
+                release_url: "file:///no-release-is-reachable",
+                version: FIXTURE_VERSION,
+                cache_root: &cache,
+                installed_dirs: &[installed],
+            },
+        )
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|release| {
+            mvm_build::runtime_pieces::assemble_release_runtime_pieces(
+                &cache,
+                FIXTURE_VERSION,
+                arch,
+                &release.archive,
+            )
             .map_err(|e| format!("{e:#}"))
-            .and_then(|image_set| {
-                mvm_build::sdk_sidecar::download_sdk_sidecar_from(
-                    &image_set,
-                    GuestArch::host(),
-                    SCENARIO_LIBC,
-                    &cache,
-                )
-                .map_err(|e| format!("{e:#}"))?;
-                // The installed member is filed under the set's root and
-                // resolved expecting its own recorded VERSION.
-                mvm_build::sdk_sidecar::image_set_sidecar_resolver(
-                    &cache,
-                    &image_set.member_cache(),
-                    GuestArch::host(),
-                    SCENARIO_LIBC,
-                )
-                .map_err(|e| format!("{e:#}"))
-            })
-            .and_then(|resolver| {
-                mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
-                    &services,
-                    &resolver,
-                    GuestArch::host(),
-                    SCENARIO_LIBC,
-                )
-                .map_err(|e| format!("{e:#}"))
-            }),
+        })
+        .and_then(|_| {
+            mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                &services,
+                &SdkSidecarResolver::new(cache.clone(), FIXTURE_VERSION.to_string()),
+                arch,
+                SCENARIO_LIBC,
+            )
+            .map_err(|e| format!("{e:#}"))
+        }),
     );
 }
 

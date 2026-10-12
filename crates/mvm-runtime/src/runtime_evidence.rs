@@ -34,6 +34,7 @@ pub enum VerifiedLaunchRuntime {
     Release(VerifiedRuntimeManifest),
     Source(CheckedSourceRuntime),
     LegacyBundle(crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime),
+    LegacyPortable(crate::legacy_portable_runtime::VerifiedLegacyPortableRuntime),
 }
 
 impl VerifiedLaunchRuntime {
@@ -45,7 +46,9 @@ impl VerifiedLaunchRuntime {
         match self {
             Self::Release(runtime) => Ok(runtime.declaration(arch)?),
             Self::Source(runtime) => Ok(runtime.declaration(arch)?),
-            Self::LegacyBundle(_) => bail!("a baked runtime has no external runtime assembly"),
+            Self::LegacyBundle(_) | Self::LegacyPortable(_) => {
+                bail!("a legacy runtime has no CLI runtime assembly")
+            }
         }
     }
 
@@ -57,7 +60,9 @@ impl VerifiedLaunchRuntime {
         match self {
             Self::Release(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
             Self::Source(runtime) => Ok(runtime.snapshot_artifacts_in(selection, parent)?),
-            Self::LegacyBundle(_) => bail!("a baked runtime has no external runtime assembly"),
+            Self::LegacyBundle(_) | Self::LegacyPortable(_) => {
+                bail!("a legacy runtime has no CLI runtime assembly")
+            }
         }
     }
 }
@@ -66,6 +71,7 @@ fn checked_source(
     version: &str,
     arch: GuestArch,
     bound_home: Option<&Path>,
+    expected_archive_sha256: Option<&str>,
 ) -> Result<CheckedSourceRuntime> {
     if !mvm_build::artifact_acquisition::compiled_channel().permits_automatic_builds() {
         bail!("selected runtime requires a signed release proof for this compiled channel");
@@ -74,7 +80,13 @@ fn checked_source(
         Some(home) => namespace::source_cache_at(home)?,
         None => namespace::source_cache_root()?,
     };
-    Ok(check_source_runtime(&cache, version, arch)?)
+    let checked = check_source_runtime(&cache, version, arch)?;
+    if let Some(expected) = expected_archive_sha256
+        && expected != checked.archive_sha256()
+    {
+        bail!("source runtime archive differs from the originally selected archive");
+    }
+    Ok(checked)
 }
 
 /// Bind a warm child's requested runtime to its authenticated parent record.
@@ -106,6 +118,14 @@ pub fn verify_runtime_for_claim(
     if checked.is_release() != parent_assembly.release_proof().is_some() {
         bail!("warm child cannot change its parent's runtime provenance tier");
     }
+    if let (
+        VerifiedLaunchRuntime::Source(checked),
+        RuntimeBindingProvenance::Source { archive_sha256, .. },
+    ) = (&checked, &parent_assembly.provenance)
+        && checked.archive_sha256() != archive_sha256
+    {
+        bail!("warm child requested a different source archive");
+    }
     if let (Some(requested), Some(actual)) = (
         config.runtime_release_proof.as_ref(),
         parent_assembly.release_proof(),
@@ -125,6 +145,17 @@ pub fn verify_runtime_for_claim(
 /// authenticity nor permission to delete. The host account is trusted not to
 /// chmod or replace its private generations; mvm never modifies them in place.
 pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
+    if matches!(binding, RuntimeLaunchBinding::LegacyPortable { .. }) {
+        let mut config = VmStartConfig::default();
+        binding.apply_to_config(&mut config);
+        let verified = verify_retained_portable_runtime(&config)?;
+        anyhow::ensure!(
+            mvm_core::crypto::image_verify::sha256_file(Path::new(&config.rootfs_path))?
+                == verified.rootfs_sha256(),
+            "retained portable rootfs differs from signed bundle"
+        );
+        return Ok(());
+    }
     let RuntimeLaunchBinding::CliAssembly(binding) = binding else {
         let mut config = VmStartConfig::default();
         binding.apply_to_config(&mut config);
@@ -139,13 +170,16 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
         RuntimeBindingProvenance::Release { proof } => VerifiedLaunchRuntime::Release(
             verify_runtime_release_proof(proof, binding.version(), GuestArch::host())?,
         ),
-        RuntimeBindingProvenance::Source { version, arch } => {
-            VerifiedLaunchRuntime::Source(checked_source(
-                version,
-                *arch,
-                Some(root.parent().context("runtime root has no home")?),
-            )?)
-        }
+        RuntimeBindingProvenance::Source {
+            version,
+            arch,
+            archive_sha256,
+        } => VerifiedLaunchRuntime::Source(checked_source(
+            version,
+            *arch,
+            Some(root.parent().context("runtime root has no home")?),
+            Some(archive_sha256),
+        )?),
     };
     let declaration = verified.declaration(GuestArch::host())?;
     if declaration.protocol_version < MIN_GUEST_RPC_PROTOCOL_VERSION
@@ -192,6 +226,87 @@ pub(crate) fn verify_retained_legacy_runtime(
         validate_legacy_generation(Path::new(path))?;
     }
     crate::legacy_bundle_runtime::verify_retained(config, MIN_GUEST_RPC_PROTOCOL_VERSION)
+}
+
+pub(crate) fn verify_retained_portable_runtime(
+    config: &VmStartConfig,
+) -> Result<crate::legacy_portable_runtime::VerifiedLegacyPortableRuntime> {
+    let proof = config
+        .legacy_portable_runtime
+        .as_ref()
+        .context("portable proof missing")?;
+    let generation = proof
+        .archive
+        .parent()
+        .context("portable generation missing")?;
+    let root = namespace::root(false)?;
+    let relative = generation
+        .strip_prefix(&root)
+        .context("portable generation outside retained storage")?;
+    let parts: Vec<_> = relative.components().collect();
+    let [
+        std::path::Component::Normal(vm),
+        std::path::Component::Normal(name),
+    ] = parts.as_slice()
+    else {
+        bail!("portable generation is not one VM's direct generation");
+    };
+    mvm_core::naming::validate_vm_name(vm.to_str().context("non-UTF-8 VM name")?)?;
+    anyhow::ensure!(
+        name.to_str()
+            .is_some_and(|name| name.starts_with("portable-runtime-")),
+        "invalid portable generation name"
+    );
+    for directory in [root.clone(), root.join(vm), generation.to_path_buf()] {
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        anyhow::ensure!(
+            metadata.file_type().is_dir()
+                && mvm_core::private_fs::mode_bits(&directory, &metadata)? == 0o700,
+            "portable generation ancestry is not private"
+        );
+        check_owner(&metadata)?;
+    }
+    for (selected, name) in [
+        (Some(proof.archive.as_path()), "bundle.mvmpkg"),
+        (
+            config.runtime_overlay_path.as_deref().map(Path::new),
+            "overlay.ext4",
+        ),
+        (
+            config.runtime_overlay_verity_path.as_deref().map(Path::new),
+            "overlay.verity",
+        ),
+        (
+            config.initrd_path.as_deref().map(Path::new),
+            "initramfs.cpio.gz",
+        ),
+        (config.kernel_path.as_deref().map(Path::new), "kernel"),
+    ] {
+        let path = selected.context("portable retained selection missing")?;
+        anyhow::ensure!(
+            path == generation.join(name),
+            "portable artifacts mix generations"
+        );
+        let metadata = std::fs::symlink_metadata(path)?;
+        anyhow::ensure!(
+            metadata.file_type().is_file()
+                && mvm_core::private_fs::mode_bits(path, &metadata)? == 0o400,
+            "portable retained artifact is not private read-only"
+        );
+        check_owner(&metadata)?;
+    }
+    let verified =
+        crate::legacy_portable_runtime::verify_retained(config, MIN_GUEST_RPC_PROTOCOL_VERSION)?;
+    anyhow::ensure!(
+        mvm_core::crypto::image_verify::sha256_file(Path::new(
+            config
+                .kernel_path
+                .as_deref()
+                .context("portable kernel missing")?
+        ))? == verified.kernel_sha256(),
+        "retained portable kernel differs from signed bundle"
+    );
+    Ok(verified)
 }
 
 fn validate_legacy_generation(path: &Path) -> Result<()> {
@@ -288,6 +403,19 @@ fn verify_runtime_for_launch_at(
     minimum_protocol: u32,
     bound_home: Option<&Path>,
 ) -> Result<Option<VerifiedLaunchRuntime>> {
+    if config.legacy_portable_runtime.is_some() {
+        return Ok(Some(VerifiedLaunchRuntime::LegacyPortable(
+            crate::legacy_portable_runtime::verify(config, minimum_protocol)?,
+        )));
+    }
+    anyhow::ensure!(
+        config.bundle_boot_assets.is_none(),
+        "bundle boot-assets pin has no portable runtime proof"
+    );
+    anyhow::ensure!(
+        !(config.legacy_bundle_runtime.is_some() && has_external_runtime(config)),
+        "conflicting baked and external runtime evidence"
+    );
     if !has_external_runtime(config) && config.legacy_bundle_runtime.is_some() {
         return Ok(Some(VerifiedLaunchRuntime::LegacyBundle(
             crate::legacy_bundle_runtime::verify(config, minimum_protocol)?,
@@ -307,9 +435,12 @@ fn verify_runtime_for_launch_at(
             version,
             GuestArch::host(),
         )?),
-        None => {
-            VerifiedLaunchRuntime::Source(checked_source(version, GuestArch::host(), bound_home)?)
-        }
+        None => VerifiedLaunchRuntime::Source(checked_source(
+            version,
+            GuestArch::host(),
+            bound_home,
+            config.source_runtime_archive_sha256.as_deref(),
+        )?),
     };
     let declaration = verified.declaration(GuestArch::host())?;
     if declaration.protocol_version < minimum_protocol
@@ -325,6 +456,7 @@ fn verify_runtime_for_launch_at(
 
 fn has_external_runtime(config: &VmStartConfig) -> bool {
     config.runtime_release_proof.is_some()
+        || config.source_runtime_archive_sha256.is_some()
         || config.runtime_overlay_path.is_some()
         || config.runtime_overlay_verity_path.is_some()
         || config.runtime_overlay_roothash.is_some()
@@ -336,6 +468,7 @@ fn requires_runtime_proof(config: &VmStartConfig) -> Result<bool> {
     if has_external_runtime(config)
         || config.initrd_path.is_some()
         || config.legacy_bundle_runtime.is_some()
+        || config.legacy_portable_runtime.is_some()
     {
         return Ok(true);
     }
@@ -415,7 +548,13 @@ impl RuntimeLifecycleLease {
             return Ok(config.clone());
         };
         if let VerifiedLaunchRuntime::LegacyBundle(legacy) = &verified {
-            let bound = legacy.snapshot_in(config, &self.directory)?;
+            let mut bound = legacy.snapshot_in(config, &self.directory)?;
+            bound.source_runtime_archive_sha256 = None;
+            self.report_retained_best_effort();
+            return Ok(bound);
+        }
+        if let VerifiedLaunchRuntime::LegacyPortable(portable) = &verified {
+            let bound = portable.snapshot_in(config, &self.directory)?;
             self.report_retained_best_effort();
             return Ok(bound);
         }
@@ -423,6 +562,12 @@ impl RuntimeLifecycleLease {
         let artifacts = verified.snapshot_artifacts_in(&selection, &self.directory)?;
         let mut bound = config.clone();
         bound.unsigned_runtime_development = !verified.is_release();
+        bound.source_runtime_archive_sha256 = match &verified {
+            VerifiedLaunchRuntime::Source(source) => Some(source.archive_sha256().to_owned()),
+            VerifiedLaunchRuntime::Release(_)
+            | VerifiedLaunchRuntime::LegacyBundle(_)
+            | VerifiedLaunchRuntime::LegacyPortable(_) => None,
+        };
         bound.runtime_overlay_path = Some(artifacts.overlay_path().display().to_string());
         bound.runtime_overlay_verity_path =
             Some(artifacts.overlay_verity_path().display().to_string());
@@ -491,6 +636,90 @@ impl RuntimeLifecycleLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_binding_pins_checked_archive_and_refuses_changed_selection() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let cache = home.path().join("cache");
+        let workspace = mvm_build::image_source::guest_runtime_source_checkout().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let runtime = mvm_build::guest_runtime::test_support::write_source_cache_fixture(
+            &cache, &workspace, version, arch,
+        )
+        .unwrap();
+        let overlay = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+            &cache, version, arch, &runtime,
+        )
+        .unwrap();
+        let initramfs = mvm_build::initramfs::build_initramfs_from_guest_runtime(
+            &cache, version, arch, &runtime,
+        )
+        .unwrap();
+        let mut config = VmStartConfig {
+            name: "source-pin".into(),
+            runtime_overlay_version: Some(version.into()),
+            runtime_overlay_path: Some(overlay.overlay_ext4.display().to_string()),
+            runtime_overlay_verity_path: Some(overlay.sidecar.display().to_string()),
+            runtime_overlay_roothash: Some(overlay.roothash),
+            initrd_path: Some(initramfs.image_path.display().to_string()),
+            source_runtime_archive_sha256: Some("0".repeat(64)),
+            ..Default::default()
+        };
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        assert!(
+            lease
+                .bind(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("originally selected archive")
+        );
+        assert!(
+            std::fs::read_dir(&lease.directory)
+                .unwrap()
+                .all(|entry| !entry.unwrap().file_type().unwrap().is_dir()),
+            "a mismatched original selection must fail before snapshotting"
+        );
+        // Direct callers without an earlier selection gain only the digest of
+        // the independently checked archive, after all artifact hashes pass.
+        config.source_runtime_archive_sha256 = None;
+        let bound = lease.bind(&config).unwrap();
+        assert_eq!(
+            bound.source_runtime_archive_sha256.as_deref(),
+            Some(runtime.digest.as_str())
+        );
+        let binding = CliRuntimeLaunchBinding {
+            provenance: RuntimeBindingProvenance::Source {
+                version: version.into(),
+                arch,
+                archive_sha256: runtime.digest.clone(),
+            },
+            overlay_path: bound.runtime_overlay_path.as_ref().unwrap().into(),
+            overlay_verity_path: bound.runtime_overlay_verity_path.as_ref().unwrap().into(),
+            initramfs_path: bound.initrd_path.as_ref().unwrap().into(),
+            overlay_roothash: bound.runtime_overlay_roothash.clone().unwrap(),
+        };
+        verify_runtime_binding(&RuntimeLaunchBinding::CliAssembly(binding.clone())).unwrap();
+        verify_runtime_for_claim(
+            Some(&RuntimeLaunchBinding::CliAssembly(binding.clone())),
+            Some(&config),
+        )
+        .unwrap();
+        let mut changed = binding;
+        let RuntimeBindingProvenance::Source { archive_sha256, .. } = &mut changed.provenance
+        else {
+            unreachable!()
+        };
+        *archive_sha256 = "0".repeat(64);
+        let changed = RuntimeLaunchBinding::CliAssembly(changed);
+        assert!(verify_runtime_binding(&changed).is_err());
+        assert!(verify_runtime_for_claim(Some(&changed), Some(&config)).is_err());
+    }
 
     #[cfg(unix)]
     #[test]

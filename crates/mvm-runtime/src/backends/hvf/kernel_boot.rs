@@ -515,12 +515,16 @@ impl KernelImageSource<'_> {
         }
     }
 
-    fn load_into(self, ram: &mut GuestRam, offset: usize) -> Result<(), HvfError> {
+    fn load_into(self, ram: &mut GuestRam, offset: usize) -> Result<usize, HvfError> {
         match self {
-            Self::Bytes(image) => ram.copy_at(offset, image),
+            Self::Bytes(image) => {
+                ram.copy_at(offset, image)?;
+                Ok(image.len())
+            }
             Self::File(path) => {
                 let meta = self.metadata()?;
-                ram.map_private_file_at(offset, path, meta.file_len)
+                ram.map_private_file_at(offset, path, meta.file_len)?;
+                Ok(meta.file_len)
             }
         }
     }
@@ -685,7 +689,19 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     }
 
     if restore_frame.is_none() {
-        kernel.load_into(&mut guest_ram, load_off)?;
+        let loaded_len = kernel.load_into(&mut guest_ram, load_off)?;
+        if let (KernelImageSource::File(path), Some(observer)) =
+            (kernel, &mut channels.runtime_observer)
+        {
+            // SAFETY: load_into validated and populated this range; no vCPU
+            // exists yet, and guest_ram outlives this immediate measurement.
+            let loaded =
+                unsafe { std::slice::from_raw_parts(guest_ram.as_ptr().add(load_off), loaded_len) };
+            observer.set_loaded_kernel(
+                mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(path.to_path_buf(), loaded)
+                    .map_err(|_| HvfError::SnapshotState("kernel evidence measurement failed"))?,
+            );
+        }
         guest_ram.copy_at(dtb_off, &dtb)?;
         if let Some(rd) = initramfs {
             guest_ram.copy_at(initrd_off, rd)?;
@@ -724,6 +740,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
                 runtime_observer: channels.runtime_observer,
+                console_sink: channels.console_sink,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
@@ -734,6 +751,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 handoff_root: channels.handoff_root,
                 handoff_verify_key: channels.handoff_verify_key,
                 handoff_accepted: channels.handoff_accepted,
+                capture_control: channels.capture_control,
                 cpu_millicores,
                 quota_record,
             },
@@ -794,6 +812,7 @@ struct RunInputs {
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
     runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
+    console_sink: Option<Box<dyn std::io::Write + Send>>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
@@ -806,6 +825,7 @@ struct RunInputs {
     handoff_root: Option<PathBuf>,
     handoff_verify_key: Option<String>,
     handoff_accepted: Option<mvm_vmm::hvf_handoff::HandoffAcceptedSender>,
+    capture_control: Option<mvm_vmm::hvf_handoff::CaptureControlSender>,
     /// CPU share to enforce via the in-process vCPU quota scheduler.
     cpu_millicores: Option<u32>,
     /// Where to write the measured quota record on exit.
@@ -898,6 +918,7 @@ struct MachineShared<'a> {
     stop: &'static AtomicBool,
     /// The supervisor's pause request.
     paused: &'static AtomicBool,
+    handoff_fence: Option<&'a mvm_vmm::hvf_handoff::HandoffFence>,
     /// Set by whichever vCPU leaves its run loop first. Every other CPU reads
     /// it as a stop, which is what turns one CPU taking `PSCI SYSTEM_OFF` into
     /// the whole machine ending rather than the rest spinning on in a guest
@@ -1097,7 +1118,8 @@ fn run_primary<B: run::DeviceBus>(
             // Park the vCPU in the run loop's pause hold while `paused` is set,
             // freezing guest RAM + device state in place until resume clears it.
             should_pause: move || {
-                let requested = shared.paused.load(Ordering::Relaxed);
+                let requested = shared.paused.load(Ordering::Relaxed)
+                    || shared.handoff_fence.is_some_and(|fence| fence.held());
                 if !requested && let Some(observer) = runtime_observer {
                     observer.service(|| None::<()>);
                 }
@@ -1127,6 +1149,9 @@ fn run_primary<B: run::DeviceBus>(
                             && parked.iter().skip(1).all(Option::is_some))
                         .then_some(parked)
                     });
+                }
+                if let Some(fence) = shared.handoff_fence {
+                    fence.acknowledge(0);
                 }
                 let (Some(request_path), Some(ram_path), Some(frame_path)) = (
                     snapshot_request.as_deref(),
@@ -1326,6 +1351,9 @@ fn run_secondary<B: run::DeviceBus>(
     created: &std::sync::mpsc::Sender<Result<Option<Arc<ThreadCpuHandle>>, HvfError>>,
     ready: &std::sync::mpsc::Sender<Result<(), HvfError>>,
 ) -> Result<CpuDiagnostics, HvfError> {
+    if let Some(fence) = shared.handoff_fence {
+        fence.enter_offline(cpu as usize);
+    }
     // Ordered internally: HVF allocates GIC redistributor frames in
     // `hv_vcpu_create` order and the device tree tells the guest CPU n owns the
     // nth, so the nth vCPU created has to be CPU n whatever order the scheduler
@@ -1399,6 +1427,14 @@ fn run_secondary<B: run::DeviceBus>(
             apply_vcpu_start(&vcpu, start)?;
         }
 
+        if let Some(fence) = shared.handoff_fence {
+            while !fence.leave_offline(cpu as usize) {
+                if shared.stopping() {
+                    return Ok((RunOutcome::Stopped, CpuDiagnostics::default()));
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
         let mut diagnostics = CpuDiagnostics::default();
         let outcome = run::run_on_bus(
             &vcpu,
@@ -1415,7 +1451,8 @@ fn run_secondary<B: run::DeviceBus>(
                 // state on the way out of the hold, so a capture can never read
                 // registers from a CPU that has already resumed.
                 should_pause: || {
-                    let requested = shared.paused.load(Ordering::Relaxed);
+                    let requested = shared.paused.load(Ordering::Relaxed)
+                        || shared.handoff_fence.is_some_and(|fence| fence.held());
                     if !requested {
                         shared.clear_parked(cpu);
                     }
@@ -1427,6 +1464,9 @@ fn run_secondary<B: run::DeviceBus>(
                 // what each CPU leaves here.
                 on_pause: |vc: &HvfVcpu, _: &[&dyn SnapshotDeviceState]| {
                     shared.publish_parked(cpu, vc.capture_state()?);
+                    if let Some(fence) = shared.handoff_fence {
+                        fence.acknowledge(cpu as usize);
+                    }
                     Ok(())
                 },
                 should_throttle: || shared.throttle.load(Ordering::Relaxed),
@@ -1477,6 +1517,7 @@ unsafe fn run(
         builder_control_sockets,
         console_log,
         runtime_observer,
+        console_sink,
         pause_state,
         snapshot_request,
         snapshot_ram,
@@ -1487,9 +1528,15 @@ unsafe fn run(
         handoff_root,
         handoff_verify_key,
         handoff_accepted,
+        capture_control,
         cpu_millicores,
         quota_record,
     } = inputs;
+    if console_sink.is_some() && handoff_socket.is_some() && capture_control.is_none() {
+        return Err(HvfError::SnapshotState(
+            "protected handoff controller missing",
+        ));
+    }
     unsafe {
         // In-kernel GICv3 — created after the VM, before any vCPU. Base
         // addresses must match the DTB's intc node, or the kernel's IRQ/timer
@@ -1649,12 +1696,15 @@ unsafe fn run(
 
         let mut uart = Pl011::new(UART_BASE);
         // Mirror guest output to the host log as it arrives. Write-only, and
-        // best-effort: a console log that cannot be opened costs a diagnostic,
-        // never the boot. The full transcript still comes back in the result.
-        if let Some(path) = console_log.as_deref()
-            && let Ok(file) = mvm_vmm::host::console_capture::open_console_capture(path)
-        {
-            uart.stream_to(Box::new(file));
+        // best-effort for legacy file capture. An owner-provided protected sink
+        // disables both the legacy file and the result's plaintext replay.
+        super::host_channels::install_console_sink(&mut uart, console_log.as_deref(), console_sink);
+        let handoff_fence = capture_control
+            .as_ref()
+            .map(|_| Arc::new(mvm_vmm::hvf_handoff::HandoffFence::new(vcpus as usize)));
+        let (uart_control, uart_requests) = std::sync::mpsc::sync_channel(1);
+        if capture_control.is_some() {
+            uart.handoffs_from(uart_requests);
         }
         // One virtio-blk per disk image (`/dev/vda`, `/dev/vdb`, …) at its window.
         let mut virtio_disks: Vec<VirtioBlk> = disks
@@ -1794,6 +1844,9 @@ unsafe fn run(
             if let Some(sender) = handoff_accepted {
                 v.publish_handoffs_to(sender);
             }
+            if let (Some(owner), Some(fence)) = (capture_control, handoff_fence.as_ref()) {
+                v.protect_handoffs(Arc::clone(fence), owner, uart_control);
+            }
             // Start the dedicated host-I/O thread now that the agent/egress/console
             // sockets are wired: it services host→guest delivery on wall-clock time
             // and raises the guest IRQ itself, so reachability no longer depends on
@@ -1932,6 +1985,7 @@ unsafe fn run(
                 roster: &roster,
                 stop,
                 paused,
+                handoff_fence: handoff_fence.as_deref(),
                 machine_over: &machine_over,
                 guest_shutdown: &guest_shutdown,
                 throttle: &throttle,
@@ -2540,6 +2594,34 @@ mod tests {
         assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"Zbcdefgh");
+    }
+
+    #[test]
+    fn raw_image_kernel_observation_hashes_exact_loaded_artifact_not_padding_or_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        let image = arm64_image(128, (HVF_PAGE_SIZE * 2) as u64);
+        std::fs::write(&kernel, &image).unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 3).unwrap();
+        let loaded_len = KernelImageSource::File(&kernel)
+            .load_into(&mut ram, HVF_PAGE_SIZE)
+            .unwrap();
+        assert_eq!(loaded_len, image.len());
+        std::fs::rename(&kernel, dir.path().join("original")).unwrap();
+        std::fs::write(&kernel, b"replacement").unwrap();
+        // SAFETY: load_into populated this bounded range, and no vCPU exists.
+        let loaded =
+            unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), loaded_len) };
+        let observation =
+            mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(kernel.clone(), loaded).unwrap();
+        assert_eq!(
+            observation.sha256,
+            mvm_core::plan::bundle::sha256_hex(&image)
+        );
+        assert_ne!(
+            observation.sha256,
+            mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap()
+        );
     }
 
     /// The point of the split: the four things an operator can actually do

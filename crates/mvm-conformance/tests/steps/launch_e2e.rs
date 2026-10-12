@@ -57,6 +57,16 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The residency the README's quick start exports before it launches.
+///
+/// An unnamed launch must claim a prepared warm standby, and only a warm
+/// residency lets it: Linux otherwise resolves to `parked`, whose warm target
+/// is zero, and refuses every unnamed launch even after `pool warm`. These
+/// scenarios run the documented shell, so they set what it sets. A launch that
+/// means to boot cold is named.
+const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
+const DOCUMENTED_RESIDENCY: &str = "warm";
+
 pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)
         .map(PathBuf::from)
@@ -69,11 +79,16 @@ pub(crate) fn e2e_home() -> PathBuf {
 /// process, so the number asserted is the number the launch budget is defined
 /// in: guest-dispatchable, excluding process startup and teardown.
 fn parse_dispatch_window_ms(output: &str) -> Option<f64> {
+    parse_phase_timing_ms(output, "dispatch_window=")
+}
+
+/// Parse one `<key><n>ms` token out of the `phase-timing` line.
+fn parse_phase_timing_ms(output: &str, key: &str) -> Option<f64> {
     output
         .lines()
         .find(|line| line.contains("phase-timing:"))?
         .split_whitespace()
-        .find_map(|token| token.strip_prefix("dispatch_window="))?
+        .find_map(|token| token.strip_prefix(key))?
         .strip_suffix("ms")?
         .parse()
         .ok()
@@ -138,6 +153,7 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
         .args(argv)
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1")
+        .env(RESIDENCY_ENV, DOCUMENTED_RESIDENCY)
         // Same setting as `mvmctl_command`, restated because an `extra_env`
         // entry below may override it.
         .env("MVM_COLD_BUILD", "auto");
@@ -192,6 +208,23 @@ fn artifact_warm_home(world: &mut CliWorld) {
     world.e2e_home = Some(home);
 }
 
+#[given(expr = "the documented launch images are prepared")]
+fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
+    for image in ["alpine", "rust", "python:3.12", "curlimages/curl:8.21.0"] {
+        let pull = run_in_e2e_home(&format!("image pull {image}"), &[]);
+        assert_eq!(
+            pull.exit_code, 0,
+            "failed to prepare the {image} image\nstdout:\n{}\nstderr:\n{}",
+            pull.stdout, pull.stderr
+        );
+    }
+}
+
+#[when(expr = "I prepare launch artifacts with {string}")]
+fn prepare_launch_artifacts(world: &mut CliWorld, args: String) {
+    world.last_launch = Some(run_in_e2e_home(&args, &[]));
+}
+
 /// Prepare the exact standby shape the warm-budget launch will claim.
 ///
 /// Standbys expire and a successful claim consumes one, so this belongs in the
@@ -199,10 +232,37 @@ fn artifact_warm_home(world: &mut CliWorld) {
 /// while earlier features run or be consumed by an earlier invocation.
 #[given(expr = "an Alpine warm parent is ready")]
 fn alpine_warm_parent_is_ready(_world: &mut CliWorld) {
-    let result = run_in_e2e_home("pool warm 1 --image alpine", &[]);
+    warm_parent_is_ready("alpine");
+}
+
+#[given(expr = "a Rust warm parent is ready")]
+fn rust_warm_parent_is_ready(_world: &mut CliWorld) {
+    warm_parent_is_ready("rust");
+}
+
+#[given(expr = "a Python warm parent is ready")]
+fn python_warm_parent_is_ready(_world: &mut CliWorld) {
+    warm_parent_is_ready("python:3.12");
+}
+
+#[given(expr = "an Alpine warm parent with {int} CPUs and {word} memory is ready")]
+fn sized_alpine_warm_parent_is_ready(_world: &mut CliWorld, cpus: u32, memory: String) {
+    let result = run_in_e2e_home(
+        &format!("pool warm 1 --image alpine --cpus {cpus} --memory {memory}"),
+        &[],
+    );
     assert_eq!(
         result.exit_code, 0,
-        "failed to prepare the Alpine warm parent\nstdout:\n{}\nstderr:\n{}",
+        "failed to prepare the Alpine {cpus}-CPU/{memory} warm parent\nstdout:\n{}\nstderr:\n{}",
+        result.stdout, result.stderr
+    );
+}
+
+fn warm_parent_is_ready(image: &str) {
+    let result = run_in_e2e_home(&format!("pool warm 1 --image {image}"), &[]);
+    assert_eq!(
+        result.exit_code, 0,
+        "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
     );
 }
@@ -267,6 +327,7 @@ fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
         .args(shell_split(args))
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1")
+        .env(RESIDENCY_ENV, DOCUMENTED_RESIDENCY)
         // A terminal the guest shell can actually address. Without it the
         // shell falls back to `dumb` and some images print nothing at all,
         // which would read as a console failure.
@@ -492,6 +553,21 @@ fn warm_launch_meets_hard_dispatch_ceiling(world: &mut CliWorld) {
     assert!(
         mvm_cli::launch_contract::within_warm_start_slo_ms(observed),
         "dispatch window was {observed:.1}ms; the warm-claim contract is strictly under {:.0}ms",
+        mvm_cli::launch_contract::WARM_START_MAX_MS,
+    );
+    // The dispatch window starts at admission. The ceiling is held from the
+    // caller's command, which also covers resolution and admission.
+    let startup = parse_phase_timing_ms(&record.combined(), "startup=").unwrap_or_else(|| {
+        panic!(
+            "no `startup=` token in the phase-timing line, so the launch could not be \
+             measured from invocation.\n--- combined ---\n{}",
+            record.combined()
+        )
+    });
+    assert!(
+        mvm_cli::launch_contract::within_warm_start_slo_ms(startup),
+        "startup from invocation was {startup:.1}ms; the warm-claim contract is strictly \
+         under {:.0}ms",
         mvm_cli::launch_contract::WARM_START_MAX_MS,
     );
 }

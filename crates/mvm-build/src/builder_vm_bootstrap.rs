@@ -15,6 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
@@ -66,16 +67,70 @@ fn current_exe_as_bootstrap_helper() -> Option<PathBuf> {
         .flatten()
 }
 
+/// Puts the builder image into the cache, in this process, the way
+/// `mvmctl bootstrap` would: the pinned image fetched and verified against
+/// the signed image set, or built from a selected image checkout when the
+/// operator opted into local builder builds. An `Err` is a refusal.
+pub type BuilderImageAcquirer = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
+
+static BUILDER_IMAGE_ACQUIRER: OnceLock<BuilderImageAcquirer> = OnceLock::new();
+
+/// Set while an acquirer runs. Acquisition can itself boot a builder — a
+/// local image-set build runs inside one — and a cold cache seen from there
+/// must be reported, not acquired a second time underneath the first.
+static ACQUIRING: AtomicBool = AtomicBool::new(false);
+
+/// Register how this process acquires a missing builder image. Called once by
+/// `mvmctl` at startup; the first registration wins.
+///
+/// `mvm-build` cannot acquire one itself: the signed image-set fetch and the
+/// local image-set build both live a layer up. A process that registers none
+/// keeps the bootstrap-helper path below, and a library embedder gets its
+/// refusal.
+pub fn register_builder_image_acquirer(acquirer: BuilderImageAcquirer) {
+    let _ = BUILDER_IMAGE_ACQUIRER.set(acquirer);
+}
+
 /// Refresh a cold builder-image cache by running a bootstrap, reporting whether
 /// one ran. `Ok(false)` is a decline, not a failure: the caller falls back to
 /// its own missing-image error, which says what the cache needs.
 pub(crate) fn auto_bootstrap_builder_vm_image(arch_dir: &Path) -> Result<bool, BuilderVmError> {
-    auto_bootstrap_builder_vm_image_for(arch_dir, &HostProcess::current())
+    auto_bootstrap_builder_vm_image_for(
+        arch_dir,
+        &HostProcess::current(),
+        BUILDER_IMAGE_ACQUIRER
+            .get()
+            .map(|acquirer| acquirer.as_ref()),
+    )
+}
+
+/// Run `acquire` unless an acquisition is already in progress in this process.
+fn acquire_in_process(
+    arch_dir: &Path,
+    acquire: &(dyn Fn() -> Result<(), String> + Send + Sync),
+) -> Result<bool, BuilderVmError> {
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            ACQUIRING.store(false, Ordering::SeqCst);
+        }
+    }
+    if ACQUIRING.swap(true, Ordering::SeqCst) {
+        return Ok(false);
+    }
+    let _running = Running;
+    acquire().map(|()| true).map_err(|error| {
+        BuilderVmError::ExtractionFailed(format!(
+            "acquiring the builder VM image into {}: {error}",
+            arch_dir.display()
+        ))
+    })
 }
 
 fn auto_bootstrap_builder_vm_image_for(
     arch_dir: &Path,
     host: &HostProcess,
+    acquirer: Option<&(dyn Fn() -> Result<(), String> + Send + Sync)>,
 ) -> Result<bool, BuilderVmError> {
     if std::env::var_os(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV).is_some() {
         return Ok(false);
@@ -90,6 +145,13 @@ fn auto_bootstrap_builder_vm_image_for(
     // Refused before the checkout test, so a cold cache reads the same to an
     // embedder whether or not it was built from a source checkout.
     host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)?;
+
+    // The registering binary acquires the image itself, release build or
+    // source build alike; only a process that registered nothing needs a
+    // source checkout to find a helper in.
+    if let Some(acquire) = acquirer {
+        return acquire_in_process(arch_dir, acquire);
+    }
 
     #[cfg(test)]
     if std::env::var_os(BUILDER_VM_BOOTSTRAP_BIN_ENV).is_none() {
@@ -555,7 +617,7 @@ mod tests {
         );
         env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
 
-        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder())
+        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder(), None)
             .expect_err("an embedder is refused, not declined");
 
         assert_refused(err, CliSpawn::BuilderBootstrapHelper);
@@ -575,10 +637,144 @@ mod tests {
         env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
         env.remove(BUILDER_VM_BOOTSTRAP_BIN_ENV);
 
-        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder())
+        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder(), None)
             .expect_err("an embedder is refused, not declined");
 
         assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+    }
+
+    /// An acquirer that counts its calls and answers with `outcome`.
+    fn counting_acquirer(
+        calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        outcome: Result<(), String>,
+    ) -> impl Fn() -> Result<(), String> + Send + Sync + use<> {
+        let calls = std::sync::Arc::clone(calls);
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            outcome.clone()
+        }
+    }
+
+    /// A cold cache in a process that registered an acquirer is filled by
+    /// that acquirer, once, with no source checkout and no helper involved.
+    #[test]
+    fn a_registered_acquirer_fills_a_cold_cache_once_in_process() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.remove(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_BIN_ENV);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let acquire = counting_acquirer(&calls, Ok(()));
+
+        let ran = auto_bootstrap_builder_vm_image_for(
+            scratch.path(),
+            &HostProcess::undeclared(),
+            Some(&acquire),
+        )
+        .expect("the acquirer succeeded");
+
+        assert!(ran, "a successful acquisition reports that it ran");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A refused acquisition — a signature or digest that does not verify —
+    /// is the caller's error, not a decline it could paper over.
+    #[test]
+    fn a_failed_acquisition_refuses_with_its_reason() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.remove(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let acquire = counting_acquirer(&calls, Err("digest mismatch for rootfs.ext4".into()));
+
+        let err = auto_bootstrap_builder_vm_image_for(
+            scratch.path(),
+            &HostProcess::undeclared(),
+            Some(&acquire),
+        )
+        .expect_err("a refused acquisition must fail the build");
+
+        assert!(
+            err.to_string().contains("digest mismatch for rootfs.ext4"),
+            "the refusal names its reason: {err}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !ACQUIRING.load(Ordering::SeqCst),
+            "a failed acquisition must not leave the next one locked out"
+        );
+    }
+
+    /// A command that must not acquire a builder — a launch — sets the skip
+    /// variable, and a registered acquirer honours it like the helper does.
+    #[test]
+    fn the_skip_variable_declines_before_the_acquirer() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.set(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV, "1");
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let acquire = counting_acquirer(&calls, Ok(()));
+
+        let ran = auto_bootstrap_builder_vm_image_for(
+            scratch.path(),
+            &HostProcess::undeclared(),
+            Some(&acquire),
+        )
+        .unwrap();
+
+        assert!(!ran);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// An acquisition that boots a builder and finds the cache cold again is
+    /// reported the missing image instead of acquiring underneath itself.
+    #[test]
+    fn a_nested_acquisition_declines() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let scratch = TempDir::new().unwrap();
+        let inner = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let nested = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (inner_calls, nested_seen) = (inner.clone(), nested.clone());
+        let arch_dir = scratch.path().to_path_buf();
+        let outer = move || {
+            let inner_acquire = counting_acquirer(&inner_calls, Ok(()));
+            *nested_seen.lock().unwrap() = Some(
+                acquire_in_process(&arch_dir, &inner_acquire).map_err(|error| error.to_string()),
+            );
+            Ok(())
+        };
+
+        assert!(acquire_in_process(scratch.path(), &outer).unwrap());
+
+        assert_eq!(*nested.lock().unwrap(), Some(Ok(false)));
+        assert_eq!(inner.load(Ordering::SeqCst), 0);
+    }
+
+    /// An embedder that somehow registered an acquirer is still refused first.
+    #[test]
+    fn a_library_embedder_is_refused_before_a_registered_acquirer() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.isolate_mvm_home(scratch.path());
+        env.remove(BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV);
+        env.remove(BUILDER_VM_BOOTSTRAP_ACTIVE_ENV);
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let acquire = counting_acquirer(&calls, Ok(()));
+
+        let err = auto_bootstrap_builder_vm_image_for(scratch.path(), &embedder(), Some(&acquire))
+            .expect_err("an embedder is refused, not served");
+
+        assert_refused(err, CliSpawn::BuilderBootstrapHelper);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     /// With nothing declared the named helper is still the one resolved.

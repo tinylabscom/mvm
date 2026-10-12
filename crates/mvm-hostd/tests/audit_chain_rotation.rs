@@ -138,6 +138,22 @@ async fn a_rotated_chain_verifies_per_segment_and_across_the_set() {
     assert!(reports[0].seq == 1 && !reports[0].active);
     assert!(reports.last().unwrap().active);
 
+    // The set walk lives in mvm-core; the single-file walk callers reach
+    // through `verify_audit_chain` is this crate's own. Each continuing
+    // segment must verify through it too, seeded by its signed handoff,
+    // with the entry count the set walk reported.
+    for report in &reports {
+        assert_eq!(
+            verify_audit_chain(&report.path, &vk).unwrap_or_else(|e| panic!(
+                "segment {} must verify on its own, got {e:?}",
+                report.seq
+            )),
+            report.entries.unwrap(),
+            "segment {}",
+            report.seq
+        );
+    }
+
     // Every emitted entry is still present exactly once across the set, plus
     // one sealing and one continuation record per boundary.
     let boundaries = reports.len() - 1;

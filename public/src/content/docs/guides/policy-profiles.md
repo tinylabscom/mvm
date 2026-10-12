@@ -57,8 +57,16 @@ The default is `standard`. Use `restrictive` when the workload does not need
 host files or host-provided environment values:
 
 ```sh
+export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
+mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
+mvmctl pool warm                              # the default image, for ./debug-script.sh below
 mvmctl run --profile restrictive -- python task.py
 ```
+
+An unnamed run claims a prepared warm standby of the image it boots — here the
+`python:3.12-alpine` image a `python` command infers — and refuses rather than
+cold-booting without one, so the standby is warmed first; `--name` boots cold. The examples
+below run in the same shell.
 
 Use `standard` when the workload needs explicit environment values or
 read-only input files:
@@ -151,16 +159,26 @@ caught before a workload starts.
 
 ## Seccomp tier
 
-There is **no per-launch seccomp selector**. Every plan `mvmctl` synthesises
-hardcodes the `standard` tier, and `--profile` carries no seccomp field — a
-profile governs `--env`, host shares, writable-disk eligibility, the dev
-guest profile, and whether an acknowledgement is required, and nothing else.
+There is **no per-launch seccomp selector**, and `--profile` carries no
+seccomp field — a profile governs `--env`, host shares, writable-disk
+eligibility, the dev guest profile, and whether an acknowledgement is
+required, and nothing else.
 
-The tier is still recorded in the signed admission profile, so an audit can
-show which tier was admitted; it just cannot vary per run today. The
-`PlanSeccompTier` type has five values (`essential`, `minimal`, `standard`,
-`network`, `unrestricted`) and the plumbing to carry them, but no CLI flag
-and no manifest key feeds it.
+Admission picks the tier from what the launch admits. A run with no network
+surface gets `standard`, which allows ordinary file, process and signal calls
+and refuses `socket`. A run that admits egress (`--allow-host`, a peer route),
+an ingress mapping, or a host service gets `network`, which adds sockets: the
+workload reaches admitted egress through a loopback proxy and resolver, and
+answers ingress on a socket of its own.
+
+The tier is signed into the plan's admission profile and recorded in its
+audit labels, and the guest agent installs it, with `no_new_privs`, in every
+process it starts for the workload: the entrypoint, `machine exec` and
+process-control commands, detached runs, the console shell, lifecycle hooks
+and health probes. A call outside the tier fails with `EPERM`. A run booted
+from a warm-pool standby uses the tier its standby was booted with, and a
+guest whose agent predates the tier — including the one in the image set a
+release binary pins, until that set is re-pinned — runs unfiltered.
 
 The one place you can name a tier is the hidden developer command
 `mvmctl seccomp-audit --tier <tier>`, which is Linux-only, boots no microVM,

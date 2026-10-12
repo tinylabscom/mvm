@@ -177,6 +177,7 @@ mod tests {
         [
             ("mvm-host-vm-init", b"INIT".as_slice()),
             ("mvm-builderd", b"BUILDERD".as_slice()),
+            ("mvm-setpriv", b"SETPRIV".as_slice()),
             ("stage0-init", b"SEED".as_slice()),
         ]
         .into_iter()
@@ -189,7 +190,7 @@ mod tests {
         let cache = tempfile::tempdir().unwrap();
         let payload = boot_payload_from(&fake_payload(), cache.path()).unwrap();
         let names: Vec<&str> = payload.manifest().members().map(|(n, _)| n).collect();
-        assert_eq!(names, ["mvm-builderd", "mvm-host-vm-init"]);
+        assert_eq!(names, ["mvm-builderd", "mvm-host-vm-init", "mvm-setpriv"]);
     }
 
     /// A payload entry whose bytes do not hash to the digest compiled beside

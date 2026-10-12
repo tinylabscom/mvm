@@ -198,6 +198,7 @@ impl AssuranceRuntimeBinding {
                 "runtime_version": config.runtime_overlay_version,
                 "release_proof": config.runtime_release_proof,
                 "legacy_bundle_runtime": config.legacy_bundle_runtime,
+                "legacy_portable_runtime": config.legacy_portable_runtime,
             }),
         })
     }
@@ -1533,8 +1534,8 @@ pub fn enforce_sdk_sidecar_attachment(
             "refusing to launch: the signed ExecutionPlan binds SDK host service(s) [{}], which \
              need the SDK sidecar mounted read-only at {SDK_SIDECAR_GUEST_PATH}, and no such \
              attachment is present. The launch path resolves the sidecar from the version-keyed \
-             cache under the mvm cache dir; build it with \
-             `mvmctl build sdk-sidecar build` and retry.",
+             cache under the mvm cache dir; prepare it with \
+             `mvmctl bootstrap` and retry.",
             bound.join(", "),
         );
     };
@@ -1619,8 +1620,8 @@ fn enforce_sidecar_libc(
         }
         (_, GuestLibc::Unknown) => {
             "the attached sidecar is not filed under a libc this host recognises, so which \
-             variant it holds cannot be established. Rebuild the cache with \
-             `mvmctl build sdk-sidecar build`, which files each variant under its own libc"
+             variant it holds cannot be established. Prepare the cache with \
+             `mvmctl bootstrap`, which files each variant under its own libc"
         }
         _ => {
             "a process under one libc cannot dlopen an object built for the other — the guest \
@@ -3063,7 +3064,7 @@ mod tests {
             .expect_err("a sidecar of unknown variant must not be attached");
 
         assert!(
-            err.to_string().contains("sdk-sidecar build"),
+            err.to_string().contains("`mvmctl bootstrap`"),
             "the refusal must say how to repopulate the cache: {err}"
         );
     }
@@ -5205,6 +5206,47 @@ mod tests {
         assert!(admitted.verify_assurance_launch(&config).is_err());
         std::fs::write(&config.rootfs_path, b"replacement rootfs").unwrap();
         assert!(AssuranceRuntimeBinding::verify(&config, admitted.plan()).is_err());
+    }
+
+    #[test]
+    fn portable_assurance_capability_binds_original_proof_and_manifest_after_admission() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let config = mvm_runtime::signed_legacy_portable_runtime_fixture(directory.path());
+        let mut plan = plan_binding(&[]);
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let admitted = AdmittedPlan::for_test(plan, signer_id, signed)
+            .with_assurance_runtime_for_test(&config);
+        admitted.verify_assurance_launch(&config).unwrap();
+        for mutation in 0..3 {
+            let mut changed = config.clone();
+            let proof = changed.legacy_portable_runtime.as_mut().unwrap();
+            match mutation {
+                0 => proof.pin.bundle_sha256 = "0".repeat(64),
+                1 => proof.manifest_sha256 = "0".repeat(64),
+                2 => {
+                    let copy = directory.path().join("same-signed-archive.mvmpkg");
+                    std::fs::copy(&proof.archive, &copy).unwrap();
+                    proof.archive = copy;
+                    // An independently valid proof at another location still
+                    // changes the selection this capability admitted.
+                    AssuranceRuntimeBinding::verify(&changed, admitted.plan()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                admitted.verify_assurance_launch(&changed).is_err(),
+                "mutation {mutation}"
+            );
+        }
     }
 
     #[test]

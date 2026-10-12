@@ -36,9 +36,9 @@ pub use mvm_fs::overlay::{
     RuntimeOverlayResolver, read_overlay_artifact_from_dir,
 };
 
-use crate::guest_agent_build::RuntimeOverlayGuestBinaries;
-use crate::published_image_set::{MemberVersion, PublishedImageSet, SetMemberCache};
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
+use crate::published_image_set::{MemberVersion, SetMemberCache};
+use mvm_core::image_set::MemberTarget;
+use mvm_core::plan::bundle::BOOT_ASSET_OVERLAY_ROLE;
 
 /// Failure building, downloading, installing, or resolving the runtime
 /// overlay artifact.
@@ -179,7 +179,11 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // stale staged content.
 const LOCAL_BUILD_EPOCH: &str = "6";
 
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
+/// Guest runtime executables staged at the overlay root, as (archive member
+/// name, name under `/mvm/runtime`). Every one but `mvm-setpriv` is an
+/// `mvm-agentd` binary; the privilege helper is its own package, built beside
+/// them into the same archive, and rides here so a root needs no copy of it.
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 10] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -189,8 +193,14 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
+    ("mvm-setpriv", "setpriv"),
 ];
-const GPU_SHIM_SONAMES: [&str; 3] = ["libcuda.so.1", "libcudart.so", "libnvidia-ml.so.1"];
+/// The GPU shim sonames the overlay carries under `gpu/<libc>/`, read from the
+/// archive's own cdylib table so the two cannot name different libraries.
+const GPU_SHIM_SONAMES: [&str; 3] = {
+    let [cuda, cudart, nvml] = crate::guest_bins::GPU_SHIM_CDYLIBS;
+    [cuda.soname, cudart.soname, nvml.soname]
+};
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
 /// non-default cache root (e.g. a worktree-isolated `MVM_HOME`), seed
@@ -233,8 +243,8 @@ fn seed_from_default_cache(
     )
 }
 
-/// Resolve `arch`'s overlay installed from the image set `set`, a pure cache
-/// read.
+/// Resolve `arch`'s overlay installed from the image set `set` by a bundle's
+/// boot assets, a pure cache read.
 ///
 /// The entry's resolver expects the `VERSION` recorded when the member was
 /// installed from its digest-verified bytes, not the running CLI's version:
@@ -248,7 +258,7 @@ pub fn resolve_image_set_runtime_overlay(
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let version = set.installed_version(
         cache_root,
-        ImageSetRole::RuntimeOverlay,
+        BOOT_ASSET_OVERLAY_ROLE,
         MemberTarget::Arch(arch),
     )?;
     Ok(
@@ -258,46 +268,14 @@ pub fn resolve_image_set_runtime_overlay(
 }
 
 /// Resolve the overlay a boot of this host would attach, from cache alone:
-/// the entry matching `resolver`'s version (seeded from the default cache on a
-/// miss), and otherwise the one installed from the image set this build pins.
-/// A miss in both surfaces the version-matched resolve error.
+/// the entry matching `resolver`'s version, seeded from the default cache on a
+/// miss. The overlay is assembled from this CLI's own guest runtime, so there
+/// is no other copy to fall back to; a miss surfaces the resolve error.
 pub fn resolve_cached_runtime_overlay(
     resolver: &RuntimeOverlayResolver,
     arch: GuestArch,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    resolve_or_seed_from_default_cache(resolver, arch).or_else(|version_matched| {
-        resolve_image_set_runtime_overlay(resolver.cache_root(), &SetMemberCache::locked(), arch)
-            .map_err(|_| version_matched)
-    })
-}
-
-pub fn build_runtime_overlay_from_guest_binaries(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    bins: &RuntimeOverlayGuestBinaries,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let staging = tempfile::tempdir()?;
-    let root = staging.path().join("overlay-root");
-    std::fs::create_dir_all(&root)?;
-
-    let binaries = [
-        (&bins.agent, root.join("agent")),
-        (&bins.netinit, root.join("netinit")),
-        (&bins.ping, root.join("ping")),
-        (&bins.seccomp_apply, root.join("seccomp-apply")),
-        (&bins.display_bridge, root.join("display-bridge")),
-        (&bins.runner, root.join("runner")),
-        (&bins.egress_client, root.join("egress-client")),
-        (&bins.addon_dns, root.join("addon-dns")),
-        (&bins.exit_report, root.join("exit-report")),
-    ];
-    par_map(binaries.to_vec(), |(src, dst)| {
-        stage_runtime_overlay_binary(src, &dst)
-    })
-    .into_iter()
-    .collect::<Result<(), _>>()?;
-    assemble_runtime_overlay(cache_root, version, arch, &root, &staging)
+    resolve_or_seed_from_default_cache(resolver, arch)
 }
 
 /// Assemble the runtime overlay from one verified guest-runtime tree. The
@@ -318,21 +296,78 @@ pub fn build_runtime_overlay_from_guest_runtime(
         });
     }
     let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
-    if local_source_cache_is_fresh(&resolver.layout(&arch.to_string()), &runtime.digest)?
+    let layout = resolver.layout(&arch.to_string());
+    if local_source_cache_is_fresh(&layout, &runtime.digest)?
         && let Ok(cached) = resolver.resolve(&arch.to_string())
         && verify_guest_runtime_overlay_verity(&cached).is_ok()
     {
+        // The slot was assembled from this digest; a slot written before
+        // pieces recorded their origin gains the record here.
+        crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
         return Ok(cached);
     }
     let staging = tempfile::tempdir()?;
     let root = staging.path().join("overlay-root");
     std::fs::create_dir_all(&root)?;
-    stage_guest_runtime_overlay_tree(runtime, arch, &root)?;
+    stage_runtime_overlay_root(runtime, arch, &root)?;
     let artifact = assemble_runtime_overlay(cache_root, version, arch, &root, &staging)?;
     verify_guest_runtime_overlay_verity(&artifact)?;
     write_local_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
     write_local_build_epoch(cache_root, version, arch)?;
+    crate::runtime_pieces::record_archive_origin(&layout.artifact_dir, &runtime.digest)?;
     Ok(artifact)
+}
+
+/// Every file the overlay carries, staged under `root` exactly as the guest
+/// sees it at `/mvm/runtime`: the archive's members plus `VERSION`. The ext4
+/// image and the directory tree a preopening tier uses are both built from
+/// this one staging, so they cannot carry different files.
+fn stage_runtime_overlay_root(
+    runtime: &crate::guest_runtime::GuestRuntime,
+    arch: GuestArch,
+    root: &Path,
+) -> Result<(), RuntimeOverlayError> {
+    stage_guest_runtime_overlay_tree(runtime, arch, root)?;
+    std::fs::write(
+        root.join("VERSION"),
+        format!("{}\n", runtime.manifest.version),
+    )?;
+    Ok(())
+}
+
+/// Top-level cache directory holding [`resolve_runtime_overlay_tree`]'s trees.
+pub const RUNTIME_OVERLAY_TREE_CACHE_DIR: &str = "runtime-overlay-tree";
+
+/// The overlay's file tree as a host directory, for a tier that preopens a
+/// directory at `/mvm/runtime` instead of attaching the ext4 image (Wasm has
+/// no block devices). Staged once per guest-runtime digest from the same
+/// staging the ext4 is built from, and published by a single rename, so a
+/// tree that exists is complete.
+pub fn resolve_runtime_overlay_tree(
+    cache_root: &Path,
+    arch: GuestArch,
+    runtime: &crate::guest_runtime::GuestRuntime,
+) -> Result<PathBuf, RuntimeOverlayError> {
+    let trees = cache_root
+        .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+        .join(arch.to_string());
+    let tree = trees.join(&runtime.digest);
+    if tree.is_dir() {
+        return Ok(tree);
+    }
+    std::fs::create_dir_all(&trees)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(&trees)?;
+    stage_runtime_overlay_root(runtime, arch, staging.path())?;
+    if let Err(error) = std::fs::rename(staging.path(), &tree) {
+        // Another process published the same digest first; its tree is the
+        // same staging of the same verified members.
+        if !tree.is_dir() {
+            return Err(error.into());
+        }
+    }
+    Ok(tree)
 }
 
 fn stage_guest_runtime_overlay_tree(
@@ -432,8 +467,6 @@ fn assemble_runtime_overlay(
     root: &Path,
     staging: &tempfile::TempDir,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
-
     let image = mvm_fs::ext4::build_image(collect_overlay_nodes(root)?, &Default::default())
         .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
             reason: format!("build ext4 image: {e}"),
@@ -470,7 +503,7 @@ fn assemble_runtime_overlay(
     )
 }
 
-fn verify_guest_runtime_overlay_verity(
+pub(crate) fn verify_guest_runtime_overlay_verity(
     artifact: &RuntimeOverlayArtifact,
 ) -> Result<(), RuntimeOverlayError> {
     let image = std::fs::read(&artifact.overlay_ext4)?;
@@ -487,24 +520,6 @@ fn verify_guest_runtime_overlay_verity(
         return Err(RuntimeOverlayError::DirectBuildFailed {
             reason: "runtime overlay ext4, verity tree, and roothash disagree".into(),
         });
-    }
-    Ok(())
-}
-
-fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
-    if !src.is_file() {
-        return Err(RuntimeOverlayError::DirectBuildFailed {
-            reason: format!(
-                "required runtime-overlay binary missing at {}",
-                src.display()
-            ),
-        });
-    }
-    std::fs::copy(src, dst)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o555))?;
     }
     Ok(())
 }
@@ -869,61 +884,13 @@ pub(crate) fn set_cache_perms(_p: &Path) -> Result<(), RuntimeOverlayError> {
 /// CLI's download path, so the operator runbook covers both.
 pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 
-/// Download the runtime overlay tarball for `arch` as a member of the image
-/// set this build pins, safely extract it, re-verify each inner artifact
-/// against the archive's embedded `checksums-sha256.txt`, and install it as a
-/// member of that set (see [`install_image_set_runtime_overlay_archive`]).
-///
-/// The archive is trusted only through the set: the root manifest is held to
-/// its locked digest and its publisher's signature, and the archive to the
-/// size and digest that root declares, all before extraction.
-///
-/// `guest_runtime_key` is the key the OCI guest runtime binaries the archive
-/// also carries are cached under — the running CLI's guest-binary source key.
-///
-/// Returns the installed `RuntimeOverlayArtifact` so the caller
-/// can hand it straight to the backend.
-pub fn download_runtime_overlay(
-    guest_runtime_key: &str,
-    arch: GuestArch,
-    cache_root: &Path,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let image_set = PublishedImageSet::acquire().map_err(RuntimeOverlayError::ImageSet)?;
-    download_runtime_overlay_from(&image_set, guest_runtime_key, arch, cache_root)
-}
-
-/// [`download_runtime_overlay`] from a set that has already been acquired.
-pub fn download_runtime_overlay_from(
-    image_set: &PublishedImageSet,
-    guest_runtime_key: &str,
-    arch: GuestArch,
-    cache_root: &Path,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let names = RuntimeOverlayArtifactNames::for_arch(&arch.to_string());
-    let tmp = tempfile::tempdir()?;
-    let archive_local = tmp.path().join(&names.archive);
-    image_set.fetch_member_artifact(
-        ImageSetRole::RuntimeOverlay,
-        arch,
-        &names.archive,
-        &archive_local,
-    )?;
-    install_image_set_runtime_overlay_archive(
-        &archive_local,
-        &image_set.member_cache(),
-        guest_runtime_key,
-        arch,
-        cache_root,
-    )
-}
-
 /// Fetch `asset` from the per-version directory `release_url` of a CLI
-/// release, the way clients that predate the image set acquire it: its
-/// `.sha256` sidecar first, then the archive held to that digest, then the
-/// archive held to the CLI release workflow's signing identity.
+/// release: its `.sha256` sidecar first, then the archive held to that
+/// digest, then the archive held to the CLI release workflow's signing
+/// identity at exactly `version`. Nothing reads the archive before both pass.
 ///
-/// The CLI release still publishes these archives for those clients, and its
-/// workflow proves each one survives this path before publishing.
+/// The guest runtime each CLI release publishes is acquired through here
+/// ([`crate::guest_bins::release`]).
 pub fn fetch_cli_release_archive(
     release_url: &str,
     version: &str,
@@ -942,6 +909,7 @@ pub fn fetch_cli_release_archive(
             train: crate::release_signature::ReleaseTrain::Cli,
         },
     )
+    .map(|_| ())
 }
 
 /// Install an authenticated runtime overlay archive published per CLI
@@ -972,7 +940,8 @@ pub fn install_runtime_overlay_archive(
 
 /// Install an authenticated runtime overlay archive delivered as a member of
 /// the image set `set`, filed under that set's root rather than any CLI
-/// version.
+/// version. Only a bundle's boot assets deliver one: they authenticate it
+/// through the image-set manifest the bundle embeds.
 ///
 /// The entry is labelled with the member's own `VERSION`, read from the
 /// verified bytes, and that version is recorded as what the entry's resolver
@@ -999,7 +968,7 @@ pub fn install_image_set_runtime_overlay_archive(
     )?;
     set.record(
         cache_root,
-        ImageSetRole::RuntimeOverlay,
+        BOOT_ASSET_OVERLAY_ROLE,
         MemberTarget::Arch(arch),
         &version,
     )?;
@@ -1098,10 +1067,84 @@ pub(crate) fn extract_release_archive(
     stage: &Path,
     expected: &[&'static str],
 ) -> Result<(), RuntimeOverlayError> {
+    // Release bundles contain several executables, unlike the single initramfs
+    // image. Bound expansion while leaving room for larger runtime binaries.
+    extract_release_archive_with_limits(
+        archive_path,
+        stage,
+        expected,
+        ExpandedArchiveLimits {
+            file_bytes: 128 * 1024 * 1024,
+            total_bytes: 512 * 1024 * 1024,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExpandedArchiveLimits {
+    pub(crate) file_bytes: u64,
+    pub(crate) total_bytes: u64,
+}
+
+impl ExpandedArchiveLimits {
+    // Canonical bundles have only a handful of flat files. 64 KiB covers
+    // their headers, block padding and optional GNU/PAX metadata generously.
+    const TAR_FRAMING_BYTES: u64 = 64 * 1024;
+
+    pub(crate) fn archive_reader<R: std::io::Read>(&self, reader: R) -> std::io::Take<R> {
+        reader.take(self.total_bytes.saturating_add(Self::TAR_FRAMING_BYTES))
+    }
+
+    /// Account for bytes after tar's end marker too. `Take` bounds metadata
+    /// consumed internally by tar; probing its underlying reader distinguishes
+    /// a real EOF from a stream truncated at the expansion ceiling.
+    pub(crate) fn finish_archive<R: std::io::Read>(
+        mut reader: std::io::Take<R>,
+    ) -> std::io::Result<()> {
+        std::io::copy(&mut reader, &mut std::io::sink())?;
+        if reader.limit() == 0 && reader.get_mut().read(&mut [0u8; 1])? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expanded tar stream budget exceeded",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Copy at most the per-file and remaining aggregate budgets. The probe
+    /// reads one extra byte but never writes it, including at an exact fit.
+    pub(crate) fn copy_entry(
+        &self,
+        entry: &mut impl std::io::Read,
+        out: &mut impl std::io::Write,
+        remaining: &mut u64,
+    ) -> std::io::Result<()> {
+        let copied = std::io::copy(
+            &mut std::io::Read::take(&mut *entry, self.file_bytes.min(*remaining)),
+            out,
+        )?;
+        *remaining -= copied;
+        if entry.read(&mut [0u8; 1])? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expanded archive budget exceeded",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn extract_release_archive_with_limits(
+    archive_path: &Path,
+    stage: &Path,
+    expected: &[&'static str],
+    limits: ExpandedArchiveLimits,
+) -> Result<(), RuntimeOverlayError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(limits.archive_reader(decoder));
     let mut seen = std::collections::BTreeSet::new();
+    let mut remaining = limits.total_bytes;
 
     for entry in archive
         .entries()
@@ -1129,16 +1172,25 @@ pub(crate) fn extract_release_archive(
         };
         match entry.header().entry_type() {
             tar::EntryType::Regular => {
+                if !seen.insert(name.to_string()) {
+                    return Err(RuntimeOverlayError::InvalidArchive {
+                        archive_path: archive_path.to_path_buf(),
+                        reason: format!("duplicate archive member {name}"),
+                    });
+                }
                 let dest = stage.join(name);
                 let mut out = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&dest)?;
-                std::io::copy(&mut entry, &mut out)?;
+                limits
+                    .copy_entry(&mut entry, &mut out, &mut remaining)
+                    .map_err(|e| RuntimeOverlayError::InvalidArchive {
+                        archive_path: archive_path.to_path_buf(),
+                        reason: format!("extract {name}: {e}"),
+                    })?;
                 set_cache_perms(&dest)?;
-                seen.insert(name.to_string());
             }
-            tar::EntryType::Directory => {}
             other => {
                 return Err(RuntimeOverlayError::InvalidArchive {
                     archive_path: archive_path.to_path_buf(),
@@ -1151,6 +1203,12 @@ pub(crate) fn extract_release_archive(
         }
     }
 
+    ExpandedArchiveLimits::finish_archive(archive.into_inner()).map_err(|e| {
+        RuntimeOverlayError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("finish tar stream: {e}"),
+        }
+    })?;
     for required in expected {
         if !seen.contains(*required) {
             return Err(RuntimeOverlayError::InvalidArchive {
@@ -1289,11 +1347,157 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tar_stream_budget_bounds_hidden_metadata_and_trailing_bytes() {
+        let limits = super::ExpandedArchiveLimits {
+            file_bytes: 16,
+            total_bytes: 32,
+        };
+        let cap = limits.total_bytes + super::ExpandedArchiveLimits::TAR_FRAMING_BYTES;
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let mut builder = tar::Builder::new(Vec::new());
+            let bytes = vec![b'a'; 1024 * 1024];
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "metadata", bytes.as_slice())
+                .unwrap();
+            let mut cursor = std::io::Cursor::new(builder.into_inner().unwrap());
+            {
+                let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
+                assert!(archive.entries().unwrap().next().unwrap().is_err());
+            }
+            assert_eq!(
+                cursor.position(),
+                cap,
+                "metadata cannot read beyond the raw cap"
+            );
+        }
+
+        let mut cursor = std::io::Cursor::new(vec![0; 1024 * 1024]);
+        let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
+        assert!(
+            archive.entries().unwrap().next().is_none(),
+            "tar stops at its end marker"
+        );
+        let error = super::ExpandedArchiveLimits::finish_archive(archive.into_inner()).unwrap_err();
+        assert!(error.to_string().contains("stream budget"), "{error}");
+        assert_eq!(cursor.position(), cap + 1, "only one excess byte is probed");
+
+        let cursor = std::io::Cursor::new(vec![0; cap as usize]);
+        super::ExpandedArchiveLimits::finish_archive(limits.archive_reader(cursor)).unwrap();
+    }
+
+    #[test]
+    fn release_archive_rejects_redundant_directory_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("directories.tar.gz");
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut tar = tar::Builder::new(gzip);
+        for _ in 0..1024 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, "VERSION", std::io::empty())
+                .unwrap();
+        }
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let error = super::extract_release_archive_with_limits(
+            &archive,
+            &stage,
+            &["VERSION"],
+            super::ExpandedArchiveLimits {
+                file_bytes: 16,
+                total_bytes: 32,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported tar entry type Directory"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(stage).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn expanded_archive_copy_accepts_exact_limits_and_bounds_actual_writes() {
+        let limits = super::ExpandedArchiveLimits {
+            file_bytes: 4,
+            total_bytes: 6,
+        };
+        let mut remaining = limits.total_bytes;
+        let mut out = Vec::new();
+        limits
+            .copy_entry(&mut b"1234".as_slice(), &mut out, &mut remaining)
+            .unwrap();
+        assert_eq!(remaining, 2);
+        limits
+            .copy_entry(&mut b"56".as_slice(), &mut out, &mut remaining)
+            .unwrap();
+        assert_eq!(remaining, 0);
+        assert!(
+            limits
+                .copy_entry(&mut b"7".as_slice(), &mut out, &mut remaining)
+                .is_err()
+        );
+        assert_eq!(out, b"123456");
+        let mut remaining = limits.total_bytes;
+        let mut out = Vec::new();
+        assert!(
+            limits
+                .copy_entry(&mut b"12345".as_slice(), &mut out, &mut remaining)
+                .is_err()
+        );
+        assert_eq!(out, b"1234");
+    }
+
+    #[test]
+    fn release_archive_rejects_duplicate_members_and_expansion_over_budget() {
+        for (entries, expected_error) in [
+            (vec![b"first".as_slice(), b"second".as_slice()], "duplicate"),
+            (vec![&[0; 4096][..]], "budget"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let archive = tmp.path().join("release.tar.gz");
+            let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            let mut tar = tar::Builder::new(gzip);
+            for bytes in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append_data(&mut header, "VERSION", bytes).unwrap();
+            }
+            std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+            let stage = tmp.path().join("stage");
+            std::fs::create_dir(&stage).unwrap();
+            let error = super::extract_release_archive_with_limits(
+                &archive,
+                &stage,
+                &["VERSION"],
+                super::ExpandedArchiveLimits {
+                    file_bytes: 16,
+                    total_bytes: 32,
+                },
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(expected_error), "{error}");
+            assert!(std::fs::metadata(stage.join("VERSION")).unwrap().len() <= 16);
+        }
+    }
+
     use super::*;
-    use crate::published_image_set::ImageSetMemberError;
-    use crate::published_image_set::fixture::ImageSetFixture;
+    use crate::published_image_set::SetMemberCache;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_fs::ext4::{Node, Owner};
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1366,6 +1570,11 @@ mod tests {
             &runtime,
         )
         .unwrap();
+        assert_eq!(
+            crate::runtime_pieces::archive_origin(a.overlay_ext4.parent().unwrap()).unwrap(),
+            Some(runtime.digest.clone()),
+            "the assembled overlay names the archive it came from"
+        );
         let fs = ext4_view::Ext4::load_from_path(&a.overlay_ext4).unwrap();
         let names_in = |path: &str| {
             let mut names: Vec<Vec<u8>> = fs
@@ -1384,6 +1593,9 @@ mod tests {
             .collect();
         expected_root.sort();
         assert_eq!(names_in("/"), expected_root);
+        // Every path the resolver demands of a cached overlay is staged.
+        mvm_fs::overlay::validate_overlay_payload(&a.overlay_ext4)
+            .expect("the archive-staged overlay carries every required guest path");
         assert_eq!(names_in("/gpu"), vec![b"glibc".to_vec(), b"musl".to_vec()]);
         assert_eq!(names_in("/sdk-py"), vec![b"mvm".to_vec()]);
         assert_eq!(
@@ -1456,6 +1668,102 @@ mod tests {
             .unwrap()
             .trim(),
             runtime.digest,
+        );
+    }
+
+    /// Every file under `root`, as relative path → (bytes, permission bits).
+    fn tree_files(root: &Path) -> std::collections::BTreeMap<String, (Vec<u8>, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut out = std::collections::BTreeMap::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let rel = path.strip_prefix(root).unwrap().display().to_string();
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                out.insert(rel, (std::fs::read(&path).unwrap(), mode));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn overlay_tree_holds_exactly_what_the_overlay_image_holds() {
+        let (_source, runtime) = guest_runtime_fixture();
+        let cache = TempDir::new().unwrap();
+        let tree = resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        assert_eq!(
+            tree,
+            cache
+                .path()
+                .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+                .join("x86_64")
+                .join(&runtime.digest)
+        );
+
+        let artifact = build_runtime_overlay_from_guest_runtime(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        let fs = ext4_view::Ext4::load_from_path(&artifact.overlay_ext4).unwrap();
+        let files = tree_files(&tree);
+        assert!(files.contains_key("agent") && files.contains_key("VERSION"));
+        for (rel, (bytes, mode)) in &files {
+            let guest_path = format!("/{rel}");
+            assert_eq!(&fs.read(guest_path.as_str()).unwrap(), bytes, "{rel}");
+            assert_eq!(
+                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
+                *mode as u16,
+                "{rel}"
+            );
+        }
+        let staged = TempDir::new().unwrap();
+        stage_runtime_overlay_root(&runtime, GuestArch::X86_64, staged.path()).unwrap();
+        assert_eq!(
+            files,
+            tree_files(staged.path()),
+            "the tree is the image's staging"
+        );
+    }
+
+    #[test]
+    fn overlay_tree_is_staged_once_per_runtime_digest() {
+        let (_source, mut runtime) = guest_runtime_fixture();
+        let cache = TempDir::new().unwrap();
+        let first =
+            resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        // A published tree is reused, not restaged: a member removed from the
+        // source after publication is still present in the reused tree.
+        std::fs::remove_file(runtime.root.join("x86_64/bin/mvm-guest-agent")).unwrap();
+        let again =
+            resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime).unwrap();
+        assert_eq!(first, again);
+        assert!(again.join("agent").is_file());
+
+        // A different digest is a different tree, staged from its own members,
+        // so the missing member now fails the stage and publishes nothing.
+        runtime.digest = "e".repeat(64);
+        resolve_runtime_overlay_tree(cache.path(), GuestArch::X86_64, &runtime)
+            .expect_err("a missing member refuses the tree");
+        let trees = cache
+            .path()
+            .join(RUNTIME_OVERLAY_TREE_CACHE_DIR)
+            .join("x86_64");
+        let published: Vec<String> = std::fs::read_dir(&trees)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            published,
+            vec!["d".repeat(64)],
+            "no partial tree and no staging left"
         );
     }
 
@@ -1712,36 +2020,7 @@ mod tests {
     }
 
     fn valid_overlay_ext4_bytes() -> Vec<u8> {
-        let paths: &[&str] = &[
-            "/agent",
-            "/netinit",
-            "/ping",
-            "/seccomp-apply",
-            "/display-bridge",
-            "/runner",
-            "/egress-client",
-            "/addon-dns",
-            "/exit-report",
-        ];
-        let mut nodes: Vec<Node> = paths
-            .iter()
-            .map(|path| Node::File {
-                path: (*path).to_string(),
-                mode: 0o555,
-                data: path.as_bytes().to_vec(),
-                xattrs: Vec::new(),
-                owner: Owner::ROOT,
-            })
-            .collect();
-        nodes.push(Node::File {
-            path: "/VERSION".into(),
-            mode: 0o444,
-            data: b"0.14.0\n".to_vec(),
-            xattrs: Vec::new(),
-            owner: Owner::ROOT,
-        });
-        mvm_fs::ext4::build_image(nodes, &Default::default())
-            .expect("build valid overlay ext4 fixture")
+        crate::boot_asset_fixture::valid_overlay_ext4_bytes()
     }
 
     #[test]
@@ -2151,102 +2430,45 @@ mod tests {
         )
     }
 
-    fn with_overlay(archive: Vec<u8>) -> ImageSetFixture {
-        ImageSetFixture::complete().publish(
-            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
-            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
-            OVERLAY_ARCHIVE,
-            archive,
-        )
+    /// Write `bytes` as an authenticated archive a bundle's boot assets would
+    /// hand over, and return its path.
+    fn bundle_archive(dir: &Path, bytes: Vec<u8>) -> PathBuf {
+        let path = dir.join(OVERLAY_ARCHIVE);
+        std::fs::write(&path, bytes).unwrap();
+        path
     }
 
-    /// Acquire `fixture` as the verified set. A fixture carries no publisher
-    /// signature; that rung has its own witnesses in
-    /// `crate::published_image_set`.
-    fn acquire(fixture: &ImageSetFixture, served: &Path, env: &mut TestEnv) -> PublishedImageSet {
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        PublishedImageSet::acquire_from(fixture.serve_from(served))
-            .expect("the fixture root must be accepted")
+    fn bundle_set() -> SetMemberCache {
+        SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"bundle-set"))
     }
 
-    /// The member the signed root names is fetched, extracted, re-verified
-    /// against its own manifest and installed under the canonical layout.
-    /// `file://` URLs go through the same `curl -fSL` a release URL does, so
-    /// only the network hop is missing.
+    /// A member a bundle delivers is extracted, re-verified against its own
+    /// manifest and installed under the canonical layout of the set's root.
     #[test]
-    fn download_runtime_overlay_installs_the_member_the_signed_root_names() {
-        let mut env = TestEnv::new();
-        let served = TempDir::new().unwrap();
-        let set = acquire(
-            &with_overlay(fixture_overlay_archive()),
-            served.path(),
-            &mut env,
-        );
+    fn a_bundle_member_installs_under_its_sets_root() {
+        let archives = TempDir::new().unwrap();
+        let archive = bundle_archive(archives.path(), fixture_overlay_archive());
+        let set = bundle_set();
 
         let cache = TempDir::new().unwrap();
-        let installed =
-            download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
-                .expect("download + install must succeed against the fixture set");
+        let installed = install_image_set_runtime_overlay_archive(
+            &archive,
+            &set,
+            "9.9.9",
+            GuestArch::Aarch64,
+            cache.path(),
+        )
+        .expect("install must succeed against the fixture archive");
 
         assert_eq!(installed.arch, "aarch64");
         assert_eq!(installed.version, "9.9.9");
         assert_eq!(installed.roothash, FAKE_ROOTHASH);
-        let cache_dir = set
-            .member_cache()
-            .cache_root(cache.path())
-            .join("runtime-overlay/9.9.9/aarch64");
-        for file in [
-            "overlay.ext4",
-            "overlay.verity",
-            "overlay.roothash",
-            "VERSION",
-        ] {
-            assert!(cache_dir.join(file).is_file(), "{file} must be installed");
-        }
         assert!(
-            crate::guest_agent_build::cached_guest_binaries(
-                &cache.path().join("oci"),
-                "9.9.9",
-                GuestArch::Aarch64,
+            installed.overlay_ext4.starts_with(
+                set.cache_root(cache.path())
+                    .join("runtime-overlay/9.9.9/aarch64")
             )
-            .is_some(),
-            "the published overlay must seed OCI materialization shims"
         );
-        assert_eq!(
-            std::fs::read(cache_dir.join("overlay.ext4")).unwrap(),
-            b"fake-ext4-bytes"
-        );
-    }
-
-    /// Bytes other than the ones the signed root declares are refused at the
-    /// digest, before extraction, and nothing reaches the cache. The served
-    /// archive differs in its gzip trailer only, so had it been extracted the
-    /// failure would have been a gzip error rather than a digest mismatch.
-    #[test]
-    fn download_runtime_overlay_rejects_checksum_mismatch() {
-        let mut env = TestEnv::new();
-        let archive = fixture_overlay_archive();
-        let mut tampered = archive.clone();
-        let last = tampered.len() - 1;
-        tampered[last] ^= 0xff;
-        let served = TempDir::new().unwrap();
-        let fixture = with_overlay(archive).serve_instead(OVERLAY_ARCHIVE, tampered);
-        let set = acquire(&fixture, served.path(), &mut env);
-
-        let cache = TempDir::new().unwrap();
-        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
-            .expect_err("tampered archive must be refused");
-        match err {
-            RuntimeOverlayError::ImageSetMember(member) => match *member {
-                ImageSetMemberError::DigestMismatch { name, .. } => {
-                    assert_eq!(name, OVERLAY_ARCHIVE)
-                }
-                other => panic!("expected a digest mismatch, got {other:?}"),
-            },
-            other => panic!("expected a digest mismatch, got {other:?}"),
-        }
-        assert!(!cache.path().join("runtime-overlay").exists());
-        assert!(!set.member_cache().cache_root(cache.path()).exists());
     }
 
     /// A member cut from a workspace at another version than this CLI's.
@@ -2262,21 +2484,17 @@ mod tests {
     }
 
     /// The set's identity is its signed root, so a member whose `VERSION` is
-    /// not this CLI's installs, and a later boot resolves it from the cache
-    /// without the set being acquired again.
+    /// not this CLI's installs, and resolves from the cache afterwards.
     #[test]
     fn a_set_member_at_another_version_installs_and_resolves_from_cache() {
         assert_ne!(MEMBER_VERSION, env!("CARGO_PKG_VERSION"));
-        let mut env = TestEnv::new();
-        let served = TempDir::new().unwrap();
-        let set = acquire(
-            &with_overlay(member_overlay_archive(MEMBER_VERSION)),
-            served.path(),
-            &mut env,
-        );
+        let archives = TempDir::new().unwrap();
+        let archive = bundle_archive(archives.path(), member_overlay_archive(MEMBER_VERSION));
+        let set = bundle_set();
         let cache = TempDir::new().unwrap();
 
-        let installed = download_runtime_overlay_from(
+        let installed = install_image_set_runtime_overlay_archive(
+            &archive,
             &set,
             env!("CARGO_PKG_VERSION"),
             GuestArch::Aarch64,
@@ -2285,31 +2503,27 @@ mod tests {
         .expect("a member at another version must install");
         assert_eq!(installed.version, MEMBER_VERSION);
 
-        // Nothing is served any more: a resolve that reached for the set would
-        // fail, so success proves a pure cache hit.
-        std::fs::remove_dir_all(served.path()).unwrap();
-        let resolved = resolve_image_set_runtime_overlay(
-            cache.path(),
-            &set.member_cache(),
-            GuestArch::Aarch64,
-        )
-        .expect("the installed member must resolve from the cache");
+        std::fs::remove_file(&archive).unwrap();
+        let resolved = resolve_image_set_runtime_overlay(cache.path(), &set, GuestArch::Aarch64)
+            .expect("the installed member must resolve from the cache");
         assert_eq!(resolved, installed);
     }
 
-    /// An entry installed from another root is not this root's member, even
-    /// when its bytes are intact: the lock moved, so it is acquired again.
+    /// An entry installed under another root is not this root's member, even
+    /// when its bytes are intact.
     #[test]
     fn a_set_member_installed_from_another_root_is_not_reused() {
-        let mut env = TestEnv::new();
-        let served = TempDir::new().unwrap();
-        let set = acquire(
-            &with_overlay(member_overlay_archive(MEMBER_VERSION)),
-            served.path(),
-            &mut env,
-        );
+        let archives = TempDir::new().unwrap();
+        let archive = bundle_archive(archives.path(), member_overlay_archive(MEMBER_VERSION));
         let cache = TempDir::new().unwrap();
-        download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path()).unwrap();
+        install_image_set_runtime_overlay_archive(
+            &archive,
+            &bundle_set(),
+            "9.9.9",
+            GuestArch::Aarch64,
+            cache.path(),
+        )
+        .unwrap();
 
         let moved = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"next"));
         let err = resolve_image_set_runtime_overlay(cache.path(), &moved, GuestArch::Aarch64)
@@ -2329,38 +2543,42 @@ mod tests {
     /// anything is installed.
     #[test]
     fn a_set_member_with_an_unusable_version_is_refused() {
-        let mut env = TestEnv::new();
-        let served = TempDir::new().unwrap();
-        let set = acquire(
-            &with_overlay(member_overlay_archive("../escape")),
-            served.path(),
-            &mut env,
-        );
+        let archives = TempDir::new().unwrap();
+        let archive = bundle_archive(archives.path(), member_overlay_archive("../escape"));
+        let set = bundle_set();
         let cache = TempDir::new().unwrap();
 
-        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
-            .expect_err("a traversal VERSION must be refused");
+        let err = install_image_set_runtime_overlay_archive(
+            &archive,
+            &set,
+            "9.9.9",
+            GuestArch::Aarch64,
+            cache.path(),
+        )
+        .expect_err("a traversal VERSION must be refused");
         assert!(
             matches!(err, RuntimeOverlayError::ImageSetCache(_)),
             "{err:?}"
         );
-        assert!(!set.member_cache().cache_root(cache.path()).exists());
+        assert!(!set.cache_root(cache.path()).exists());
     }
 
-    /// Every cache-only consumer — the builder VM, the in-process boot, the
-    /// bootstrap readiness probe — finds the pinned set's member when the
-    /// version-matched entry is absent.
+    /// An overlay an older CLI installed from the pinned image set is still on
+    /// disk after an upgrade. Every cache-only consumer — the builder VM, the
+    /// in-process boot, the bootstrap readiness probe — misses rather than
+    /// attaching it: it was built from another tree, and the overlay comes
+    /// from this CLI's own guest runtime.
     #[test]
-    fn a_cache_only_resolve_falls_back_to_the_pinned_sets_member() {
-        // The version-matched arm seeds from the default cache; point that at
-        // an empty home so only the pinned set's member can answer.
+    fn a_cache_only_resolve_never_takes_the_pinned_sets_overlay() {
         let mut env = TestEnv::new();
         let home = TempDir::new().unwrap();
         env.isolate_mvm_home(home.path());
         let cache = TempDir::new().unwrap();
-        let archive_dir = TempDir::new().unwrap();
-        let archive = archive_dir.path().join(OVERLAY_ARCHIVE);
-        std::fs::write(&archive, member_overlay_archive(MEMBER_VERSION)).unwrap();
+        let archives = TempDir::new().unwrap();
+        let archive = bundle_archive(
+            archives.path(),
+            member_overlay_archive(env!("CARGO_PKG_VERSION")),
+        );
         install_image_set_runtime_overlay_archive(
             &archive,
             &SetMemberCache::locked(),
@@ -2374,9 +2592,8 @@ mod tests {
             cache.path().to_path_buf(),
             env!("CARGO_PKG_VERSION").to_string(),
         );
-        let artifact = resolve_cached_runtime_overlay(&resolver, GuestArch::Aarch64)
-            .expect("the pinned set's member must satisfy a cache-only resolve");
-        assert_eq!(artifact.version, MEMBER_VERSION);
+        resolve_cached_runtime_overlay(&resolver, GuestArch::Aarch64)
+            .expect_err("the pinned set's overlay must not satisfy a cache-only resolve");
     }
 
     /// The version-matched cache keeps exact equality with the running CLI: a
@@ -2399,56 +2616,6 @@ mod tests {
             matches!(err, OverlayError::VersionMismatch { .. }),
             "{err:?}"
         );
-    }
-
-    /// The current train requires an overlay for every arch, so a root without
-    /// one is refused at acquisition — naming the role and arch — before any
-    /// member is requested.
-    #[test]
-    fn download_runtime_overlay_refuses_a_set_without_an_overlay_for_the_arch() {
-        let mut env = TestEnv::new();
-        env.set(crate::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
-        let served = TempDir::new().unwrap();
-        let fixture = ImageSetFixture::complete().without_member(
-            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
-            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
-        );
-
-        let err = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
-            .err()
-            .expect("a set without the overlay member must be refused");
-        assert!(
-            format!("{err:#}").contains("runtime_overlay/aarch64"),
-            "{err:#}"
-        );
-    }
-
-    /// A member that exists but does not carry this arch's archive name is
-    /// refused by name before any download.
-    #[test]
-    fn download_runtime_overlay_refuses_a_member_without_the_archive() {
-        let mut env = TestEnv::new();
-        let served = TempDir::new().unwrap();
-        let fixture = ImageSetFixture::complete().publish(
-            mvm_core::image_set::ImageSetRole::RuntimeOverlay,
-            mvm_core::image_set::MemberTarget::Arch(GuestArch::Aarch64),
-            "runtime-overlay-renamed.tar.gz",
-            fixture_overlay_archive(),
-        );
-        let set = acquire(&fixture, served.path(), &mut env);
-
-        let cache = TempDir::new().unwrap();
-        let err = download_runtime_overlay_from(&set, "9.9.9", GuestArch::Aarch64, cache.path())
-            .expect_err("an undeclared archive must be refused");
-        assert!(
-            matches!(
-                &err,
-                RuntimeOverlayError::ImageSetMember(member)
-                    if matches!(**member, ImageSetMemberError::NoArtifact { .. })
-            ),
-            "{err:?}"
-        );
-        assert!(err.to_string().contains("runtime_overlay/aarch64"), "{err}");
     }
 
     /// Stage a CLI release directory the way `release.yml` publishes one: the
@@ -2655,45 +2822,13 @@ mod tests {
         roothash_bytes: &[u8],
         version_bytes: &[u8],
     ) -> Vec<u8> {
-        let guest_files: Vec<(&str, Vec<u8>)> = RELEASE_GUEST_RUNTIME_FILES
-            .iter()
-            .map(|name| {
-                (
-                    *name,
-                    crate::guest_agent_build::fake_static_elf(GuestArch::Aarch64, name.as_bytes()),
-                )
-            })
-            .collect();
-        let mut checksums = format!(
-            "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
-            sha256_hex(ext4_bytes),
-            sha256_hex(verity_bytes),
-            sha256_hex(roothash_bytes),
-            sha256_hex(version_bytes),
-        );
-        for (name, bytes) in &guest_files {
-            checksums.push_str(&format!("{}  {name}\n", sha256_hex(bytes)));
-        }
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-        append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
-        append_archive_file(&mut tar, "overlay.verity", verity_bytes);
-        append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
-        append_archive_file(&mut tar, "VERSION", version_bytes);
-        for (name, bytes) in &guest_files {
-            append_archive_file(&mut tar, name, bytes);
-        }
-        append_archive_file(&mut tar, CHECKSUM_MANIFEST_FILE, checksums.as_bytes());
-        let encoder = tar.into_inner().unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
-        let mut header = tar::Header::new_gnu();
-        header.set_mode(0o644);
-        header.set_size(u64::try_from(bytes.len()).unwrap());
-        header.set_cksum();
-        tar.append_data(&mut header, path, bytes).unwrap();
+        crate::boot_asset_fixture::runtime_overlay_archive_bytes(
+            GuestArch::Aarch64,
+            ext4_bytes,
+            verity_bytes,
+            roothash_bytes,
+            version_bytes,
+        )
     }
 
     fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) {
@@ -2705,49 +2840,6 @@ mod tests {
         let mut h = Sha256::new();
         h.update(bytes);
         hex::encode(h.finalize())
-    }
-
-    #[test]
-    fn direct_overlay_build_writes_cache_layout() {
-        let cache = TempDir::new().unwrap();
-        let src = TempDir::new().unwrap();
-        let make_bin = |name: &str| {
-            let path = src.path().join(name);
-            std::fs::write(&path, format!("fake-{name}")).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-            path
-        };
-        let bins = RuntimeOverlayGuestBinaries {
-            agent: make_bin("agent"),
-            netinit: make_bin("netinit"),
-            ping: make_bin("ping"),
-            seccomp_apply: make_bin("seccomp-apply"),
-            display_bridge: make_bin("display-bridge"),
-            runner: make_bin("runner"),
-            egress_client: make_bin("egress-client"),
-            addon_dns: make_bin("addon-dns"),
-            exit_report: make_bin("exit-report"),
-        };
-
-        let artifact = build_runtime_overlay_from_guest_binaries(
-            cache.path(),
-            "1.2.3",
-            GuestArch::X86_64,
-            &bins,
-        )
-        .expect("build direct overlay");
-
-        assert!(artifact.overlay_ext4.is_file());
-        assert!(artifact.sidecar.is_file());
-        assert_eq!(artifact.version, "1.2.3");
-        assert_eq!(artifact.roothash.len(), 64);
-
-        mvm_fs::overlay::validate_overlay_payload(&artifact.overlay_ext4)
-            .expect("direct overlay carries all required guest paths");
     }
 
     /// The overlay's per-file mode is copied from the staged file, masked

@@ -355,7 +355,14 @@ fn restore_forked_child_and_read_random(
     // reseeds.
     let genid = fresh_generation_token(format!("{checkpoint}:{}", child_id));
     let identity = FcDriver::new()
-        .deliver_child_identity(child_id, genid.token, None)
+        .deliver_child_identity(
+            child_id,
+            mvm_vmm::post_restore::ChildIdentity {
+                token: genid.token,
+                grant_envelope: None,
+                seccomp_tier: None,
+            },
+        )
         .expect("the restored child must complete the authenticated identity handshake");
     assert!(
         identity.acknowledged,
@@ -481,8 +488,16 @@ fn fc_live_fork_n_children_from_running_parent() {
     )
     .expect("write live-test host signer public key");
     // SAFETY: this harness is `#[ignore]` and runs single-threaded by hand, so
-    // no other thread is reading the environment concurrently.
-    unsafe { std::env::set_var("MVM_HOME", &home) };
+    // no other thread is reading the environment concurrently. The store
+    // `CheckpointStore::open` returns encrypts every capture under the host
+    // snapshot key, so the harness selects one explicitly.
+    unsafe {
+        std::env::set_var("MVM_HOME", &home);
+        std::env::set_var(
+            "MVM_TENANT_KEY_LOCAL",
+            "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        );
+    }
     let images = resolve_live_images(inputs, &home.join("cache"));
 
     let pid = std::process::id();

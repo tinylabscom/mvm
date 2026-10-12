@@ -281,6 +281,11 @@ pub enum GuestResponse {
         /// guest reseeded or no rotation was requested.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reseed_shortfall: Option<ReseedShortfall>,
+        /// The workload seccomp tier the guest holds admitted after this
+        /// restore. Reported only when the request named one, so a host that
+        /// never asks never sees the field; `None` when admission failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -1088,6 +1093,7 @@ mod tests {
             reseeded: true,
             clock_resynced: true,
             reseed_shortfall: None,
+            seccomp_tier: None,
         };
         let json = serde_json::to_string(&ack).unwrap();
         match serde_json::from_str::<GuestResponse>(&json).unwrap() {
@@ -1126,6 +1132,7 @@ mod tests {
                 reseeded: false,
                 clock_resynced: true,
                 reseed_shortfall: Some(shortfall),
+                seccomp_tier: None,
             };
             let json = serde_json::to_string(&ack).unwrap();
             assert!(json.contains(wire), "{json}");
@@ -1248,6 +1255,7 @@ mod tests {
                 reseeded: false,
                 clock_resynced: false,
                 reseed_shortfall: Some(ReseedShortfall::HelperMissing),
+                seccomp_tier: None,
             },
             GuestResponse::FsDiffResult {
                 changes: vec![

@@ -48,8 +48,8 @@ _prep VERSION:
     # version this PR prepares: that tag does not exist yet, has no hashes, and
     # has not passed the first-run smoke that promotes it. Left as it is, with
     # a warning, when that release cannot be authenticated.
-    if ./scripts/pin-installer-default.sh --newest install.sh; then
-        git add install.sh
+    if ./scripts/pin-installer-default.sh --newest install.sh nix/prebuilt-release.nix; then
+        git add install.sh nix/prebuilt-release.nix
     else
         echo "WARN: install.sh's offline fallback is unchanged — see the reason above." >&2
     fi
@@ -104,9 +104,9 @@ tag VERSION:
 build-target TARGET:
     cargo build --release --target {{ TARGET }} --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 
-# Dry-run crates.io publish (all crates in dependency order)
+# Dry-run crates.io publish (the public crates only)
 publish-dry-run:
-    ./scripts/release-dry-run.sh
+    cargo package $(cargo run --quiet --package xtask -- publish-plan | sed 's/^/--package /')
 
 # Pre-publish verification (version, tag, clippy)
 deploy-guard:

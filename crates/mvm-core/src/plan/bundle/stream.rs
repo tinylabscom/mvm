@@ -248,7 +248,8 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
         .members
         .iter()
         .filter_map(|member| match member {
-            BundleMember::EmbeddedImageSet { manifest_artifact } => {
+            BundleMember::EmbeddedImageSet { manifest_artifact }
+            | BundleMember::EmbeddedBootAssets { manifest_artifact } => {
                 manifest.find_by_name(manifest_artifact)
             }
             _ => None,
@@ -266,6 +267,20 @@ pub struct VerifiedBundleFile {
     /// SHA-256 of the whole archive file.
     pub bundle_sha256: String,
     pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
+    pub boot_assets: Option<super::VerifiedBootAssets>,
+    manifest_signature: [u8; 64],
+}
+
+impl VerifiedBundleFile {
+    /// The original archive, signature and publisher identity for independent
+    /// plan admission. This is a pin, not permission to skip re-verification.
+    pub fn plan_artifact(&self) -> super::PlanArtifact {
+        super::PlanArtifact::new(
+            self.bundle_sha256.clone(),
+            &self.manifest_signature,
+            self.key_id.clone(),
+        )
+    }
 }
 
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
@@ -298,7 +313,10 @@ pub fn verify_bundle_file(
     path: &Path,
     trust_store: &dyn TrustStore,
 ) -> Result<VerifiedBundleFile, BundleVerifyError> {
-    let (manifest, key_id, _, _) = verify_head(path, trust_store)?;
+    let (manifest, key_id, _, signature) = verify_head(path, trust_store)?;
+    let manifest_signature = signature.try_into().map_err(|_| {
+        BundleVerifyError::ManifestParse("verified manifest signature has invalid length".into())
+    })?;
     let capture = image_set_manifest_paths(&manifest);
     let captured = stream_artifacts(open_archive(path)?, &manifest, |artifact| {
         if capture.contains(&artifact.path) {
@@ -308,11 +326,14 @@ pub fn verify_bundle_file(
         }
     })?;
     let embedded_image_sets = verify_embedded_image_sets(&manifest, &InMemoryArtifacts(&captured))?;
+    let boot_assets = super::verify_boot_assets(&manifest, &InMemoryArtifacts(&captured))?;
     Ok(VerifiedBundleFile {
         bundle_sha256: archive_sha256(path)?,
         manifest,
         key_id,
         embedded_image_sets,
+        boot_assets,
+        manifest_signature,
     })
 }
 
@@ -532,6 +553,7 @@ fn stage(
     .map_err(StageError::Verify)?;
     let embedded = verify_embedded_image_sets(manifest, &StagedArtifacts(staging))
         .map_err(StageError::Verify)?;
+    super::verify_boot_assets(manifest, &StagedArtifacts(staging)).map_err(StageError::Verify)?;
     for (name, bytes) in head {
         std::fs::write(staging.join(name), bytes).map_err(|e| {
             StageError::Io(format!("writing {name} into {}: {e}", staging.display()))

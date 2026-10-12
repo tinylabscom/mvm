@@ -132,6 +132,13 @@ impl Observer {
         }
     }
 
+    /// Called with the kernel bytes already placed in guest RAM before execution.
+    pub fn set_loaded_kernel(&mut self, artifact: super::RuntimeArtifact) {
+        if let Some(artifacts) = &mut self.artifacts {
+            artifacts.kernel = Some(artifact);
+        }
+    }
+
     /// Retained within the authenticated snapshot frame, never in mutable
     /// supervisor metadata.
     pub fn snapshot_payload(&self) -> Result<Vec<u8>> {
@@ -176,6 +183,7 @@ impl Observer {
         // consumer verifies selected runtime read-only attachments.
         // Cmdline belongs to saved RAM, not this new loader's config.
         current.initramfs = inherited.artifacts.initramfs;
+        current.kernel = inherited.artifacts.kernel;
         current.kernel_cmdline = inherited.artifacts.kernel_cmdline;
         self.origin = Origin::InheritedSnapshot;
         Ok(())
@@ -305,6 +313,7 @@ mod tests {
 
     fn evidence() -> RuntimeArtifacts {
         RuntimeArtifacts {
+            kernel: None,
             initramfs: Some(RuntimeArtifact::loaded("/loaded/initrd".into(), b"abc").unwrap()),
             disks: vec![],
             kernel_cmdline: "actual bootargs".into(),
@@ -445,7 +454,12 @@ mod tests {
     fn recursive_snapshot_preserves_original_boot_and_refreshes_disks() {
         let dir = tempfile::tempdir().unwrap();
         let mut observer = Observer::bind(dir.path(), Some(evidence())).unwrap();
+        let loaded_kernel = RuntimeArtifact::loaded("/loaded/kernel".into(), b"original").unwrap();
+        observer.set_loaded_kernel(loaded_kernel.clone());
         let payload = observer.snapshot_payload().unwrap();
+        observer.set_loaded_kernel(
+            RuntimeArtifact::loaded("/new/kernel".into(), b"not loaded").unwrap(),
+        );
         observer.set_kernel_cmdline("not loaded on restore".into());
         let fresh_disk = RuntimeArtifact::loaded("/new/disk".into(), b"fresh").unwrap();
         observer.artifacts.as_mut().unwrap().disks = vec![fresh_disk.clone()];
@@ -453,10 +467,26 @@ mod tests {
         let first = exchange(&observer, true).result.unwrap();
         assert_eq!(first.origin, Origin::InheritedSnapshot);
         assert_eq!(first.artifacts.kernel_cmdline, "actual bootargs");
+        assert_eq!(first.artifacts.kernel, Some(loaded_kernel));
         assert_eq!(first.artifacts.disks, vec![fresh_disk]);
         let next = observer.snapshot_payload().unwrap();
         observer.inherit_verified_snapshot(&next).unwrap();
         assert_eq!(exchange(&observer, true).result.unwrap(), first);
+        let historical = serde_json::to_vec(&Evidence {
+            origin: Origin::LoadedBoot,
+            artifacts: evidence(),
+        })
+        .unwrap();
+        observer.inherit_verified_snapshot(&historical).unwrap();
+        assert!(
+            exchange(&observer, true)
+                .result
+                .unwrap()
+                .artifacts
+                .kernel
+                .is_none(),
+            "historical frame must not gain a fresh kernel measurement on restore"
+        );
     }
 
     #[test]

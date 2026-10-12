@@ -84,6 +84,7 @@ fn from_config(json: &str) -> Result<RuntimeArtifacts> {
         .map(|drive| observe_file(drive.path_on_host))
         .collect::<Result<Vec<_>>>()?;
     Ok(RuntimeArtifacts {
+        kernel: Some(observe_file(config.boot_source.kernel_image_path)?),
         initramfs: config.boot_source.initrd_path.map(observe_file).transpose()?,
         disks,
         firecracker_drives: Some(firecracker_drives),
@@ -171,9 +172,10 @@ pub fn validate_artifacts(
         readonly == measured,
         "Firecracker readonly evidence differs from its configured slots"
     );
-    if let Some(mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyBundle {
-        ..
-    }) = binding
+    if let Some(
+        mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyBundle { .. }
+        | mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyPortable { .. },
+    ) = binding
     {
         ensure!(
             drives
@@ -182,13 +184,25 @@ pub fn validate_artifacts(
             "legacy runtime requires a measured read-only Firecracker rootfs"
         );
     }
-    if let Some(mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(binding)) =
-        binding
-    {
+    let runtime_paths = match binding {
+        Some(mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(binding)) => {
+            Some((&binding.overlay_path, &binding.overlay_verity_path))
+        }
+        Some(mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyPortable {
+            overlay_path,
+            overlay_verity_path,
+            ..
+        }) => Some((overlay_path, overlay_verity_path)),
+        Some(mvm_core::protocol::runtime_release::RuntimeLaunchBinding::LegacyBundle {
+            ..
+        })
+        | None => None,
+    };
+    if let Some((overlay_path, overlay_verity_path)) = runtime_paths {
         ensure!(
             drives.windows(2).any(|pair| {
-                pair[0].path == binding.overlay_path
-                    && pair[1].path == binding.overlay_verity_path
+                &pair[0].path == overlay_path
+                    && &pair[1].path == overlay_verity_path
                     && pair
                         .iter()
                         .all(|drive| drive.is_read_only && !drive.is_root_device)
@@ -260,6 +274,12 @@ pub(crate) fn verify_restored_layout(socket: &Path, expected: &RuntimeArtifacts)
 fn compare_restored_layout(actual: &RuntimeArtifacts, expected: &RuntimeArtifacts) -> Result<()> {
     validate_artifacts(actual, None)?;
     validate_artifacts(expected, None)?;
+    if let Some(kernel) = &expected.kernel {
+        ensure!(
+            actual.kernel.as_ref() == Some(kernel),
+            "restored Firecracker kernel differs from authenticated capture"
+        );
+    }
     ensure!(
         actual.firecracker_drives == expected.firecracker_drives,
         "restored Firecracker drive roles differ from authenticated capture"
@@ -288,10 +308,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let initrd = dir.path().join("initrd");
         let overlay = dir.path().join("overlay");
+        let kernel = dir.path().join("kernel");
+        std::fs::write(&kernel, b"loaded kernel").unwrap();
         std::fs::write(&initrd, b"loaded initrd").unwrap();
         std::fs::write(&overlay, b"runtime").unwrap();
         let config = serde_json::json!({
-            "boot-source": {"kernel_image_path": "/kernel", "initrd_path": initrd, "boot_args": "console=hvc0"},
+            "boot-source": {"kernel_image_path": kernel, "initrd_path": initrd, "boot_args": "console=hvc0"},
             "drives": [
                 {"drive_id":"blk0", "is_root_device":true, "path_on_host": "/unreadable/writable/root", "is_read_only": false},
                 {"drive_id":"blk1", "is_root_device":false, "path_on_host": overlay, "is_read_only": true}
@@ -320,7 +342,12 @@ mod tests {
         for config in ["{}", r#"{"boot-source":{},"drives":[]}"#] {
             assert!(from_config(config).is_err());
         }
-        let baked = from_config(r#"{"boot-source":{"kernel_image_path":"/kernel","initrd_path":null,"boot_args":null},"drives":[]}"#).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("kernel");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let baked = from_config(&serde_json::json!({
+            "boot-source":{"kernel_image_path":kernel,"initrd_path":null,"boot_args":null},"drives":[]
+        }).to_string()).unwrap();
         assert!(baked.initramfs.is_none());
         assert!(
             baked
@@ -345,6 +372,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         RuntimeArtifacts {
+            kernel: None,
             initramfs: None,
             disks: drives
                 .iter()
@@ -388,6 +416,7 @@ mod tests {
                 provenance: RuntimeBindingProvenance::Source {
                     version: "1".into(),
                     arch: mvm_core::arch::GuestArch::host(),
+                    archive_sha256: "ab".repeat(32),
                 },
                 overlay_path: "/overlay".into(),
                 overlay_verity_path: "/verity".into(),
@@ -434,8 +463,11 @@ mod tests {
         // Firecracker v1.14.1 device_manager/persist.rs saves block devices by
         // traversing MMIODeviceManager.virtio_devices, a HashMap, and restores
         // VmResources in that order. Device info and IDs remain in native state.
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("kernel");
+        std::fs::write(&kernel, b"kernel").unwrap();
         let mut config = serde_json::json!({
-            "boot-source":{"kernel_image_path":"/kernel","boot_args":"console=hvc0"},
+            "boot-source":{"kernel_image_path":kernel,"boot_args":"console=hvc0"},
             "drives":[
                 {"drive_id":"blk0","path_on_host":"/root","is_root_device":true,"is_read_only":false},
                 {"drive_id":"blk1","path_on_host":"/volume","is_root_device":false,"is_read_only":false}
@@ -445,6 +477,11 @@ mod tests {
         config["drives"].as_array_mut().unwrap().reverse();
         let shuffled = from_config(&config.to_string()).unwrap();
         compare_restored_layout(&shuffled, &expected).unwrap();
+        let mut wrong_kernel = shuffled.clone();
+        wrong_kernel.kernel.as_mut().unwrap().sha256 = "0".repeat(64);
+        assert!(compare_restored_layout(&wrong_kernel, &expected).is_err());
+        wrong_kernel.kernel = None;
+        assert!(compare_restored_layout(&wrong_kernel, &expected).is_err());
         config["drives"][0]["drive_id"] = "blk01".into();
         assert!(from_config(&config.to_string()).is_err());
         config["drives"][0]["drive_id"] = "unmanaged".into();

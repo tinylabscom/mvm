@@ -383,9 +383,10 @@ fn a_real_signed_image_pack_pulls_with_its_image_and_reopens_under_the_pin() {
         &summary.reference,
     )
     .expect("reopen signed pack");
-    assert_eq!(
-        verified.manifest().image.as_ref().expect("image").manifest,
-        "pack/image/mvm.toml"
-    );
+    assert!(matches!(
+        verified.manifest().image.as_ref(),
+        Some(mvm_core::registry_pack::RegistryPackImage::Source(source))
+            if source.manifest == "pack/image/mvm.toml"
+    ));
     assert_eq!(verified.manifest_sha256().as_str(), summary.manifest_sha256);
 }

@@ -181,12 +181,12 @@ pub(in crate::commands) enum Commands {
     /// Manage versioned packs (list/rollback/prune/download/update)
     #[command(display_order = 9)]
     Pack(pack::Args),
-    /// Run one command in a fresh transient microVM, then tear it down
+    /// Run an image or a signed `.mvmpkg` (alias of `machine run`)
     ///
-    /// The argument surface still differs from `machine run` in both
-    /// directions; consolidating the two into one struct is the next step.
+    /// `mvmctl run <IMAGE|ARTIFACT> -- <cmd>` is `mvmctl machine run`, plus
+    /// the SDK transport flags (`--mode`, `--dev`) that only `run` carries.
     #[command(display_order = 2)]
-    Run(vm::exec::TransientRunArgs),
+    Run(vm::exec::RunVerbArgs),
     /// Internal SDK host-dispatch transport for `MVM_NO_VM=1`.
     #[command(name = "__sdk-no-vm", hide = true)]
     SdkNoVm(vm::sdk_no_vm::Args),
@@ -357,6 +357,10 @@ fn run_command() -> Result<()> {
         Err(error) => {
             let exit_code = error.exit_code();
             eprint!("{}", constrain_help_output(&error.to_string()));
+            let args: Vec<String> = std::env::args().skip(1).collect();
+            if let Some(tip) = separator_tip(error.kind(), &args) {
+                eprintln!("{tip}");
+            }
             mvm_observability::exit(exit_code);
         }
     };
@@ -367,10 +371,14 @@ fn run_command() -> Result<()> {
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
     crate::host_binaries::source::allow_payload_from_source();
-    allow_helper_builds_from_source(mvm_build::artifact_acquisition::compiled_channel());
+    allow_helper_builds_from_source(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        &cli.command,
+    );
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
+    register_builder_image_acquirer();
     register_stream_plane();
     // Bound for the rest of the command so queued trace spans are flushed as
     // it returns. A verb that ends early goes through `mvm_observability::exit`,
@@ -449,6 +457,34 @@ fn wrap_usage(usage: &str) -> String {
         line_width += word_width;
     }
     wrapped
+}
+
+/// The hint a `run` or `machine run` parse error gets when the likeliest cause
+/// is a guest command written without `--`. clap's own message for that names
+/// only the stray word, or reports a conflict between the first word and the
+/// source flag.
+///
+/// It fires only when the subcommand is plainly `run` or `machine run`, so it
+/// cannot attach itself to an unrelated error.
+fn separator_tip(kind: ErrorKind, args: &[String]) -> Option<&'static str> {
+    if !matches!(
+        kind,
+        ErrorKind::UnknownArgument | ErrorKind::ArgumentConflict
+    ) {
+        return None;
+    }
+    let mut words = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'));
+    let is_run = match words.next()? {
+        "run" => true,
+        "machine" => words.next() == Some("run"),
+        _ => false,
+    };
+    is_run.then_some(
+        "tip: the guest command goes after `--`: `mvmctl run [IMAGE | ./app.mvmpkg] -- <cmd>`",
+    )
 }
 
 fn constrain_help_output(help: &str) -> String {
@@ -596,21 +632,38 @@ fn refuse_local_image_source_in_release_build(
     Ok(())
 }
 
-/// Let a contributor build compile the per-VM helpers it spawns — the
-/// supervisors and the network endpoint — from its checkout when they are
-/// missing or out of date. A root `cargo build` produces only `mvmctl`, and
-/// this is what keeps that build plus one `mvmctl` command sufficient. An
-/// official release ships its helpers beside it and never runs `cargo`.
-fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::DistributionChannel) {
-    if channel.permits_automatic_builds() {
+/// Let explicit preparation/build commands compile per-VM helpers from source.
+/// Launch commands never receive this process capability, even when an
+/// acquisition selector is present, so a missing helper fails instead of
+/// turning startup into an implicit Cargo build.
+fn allow_helper_builds_from_source(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    command: &Commands,
+) {
+    if channel.permits_automatic_builds() && command_allows_helper_source_builds(command) {
         mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
     }
+}
+
+fn command_allows_helper_source_builds(command: &Commands) -> bool {
+    command_allows_builder_auto_bootstrap(command)
 }
 
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
         Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
         Commands::PersistentBuilder(_) => true,
+        // `machine build` is `build` under its documented name.
+        Commands::Machine(machine_args) => matches!(
+            machine_args.action,
+            crate::commands::machine::MachineAction::Build(_)
+        ),
+        // An explicit pull materializes its rootfs in a builder VM when the
+        // tree is too large for the in-process writer.
+        Commands::Image(image_args) => matches!(
+            image_args.action,
+            crate::commands::image::ImageAction::Pull { .. }
+        ),
         Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
         _ => false,
     }
@@ -667,6 +720,19 @@ fn apply_startup_env(cli: &Cli) {
 fn register_builder_session_starter() {
     mvm_build::persistent_builder::register_session_starter(Box::new(|| {
         crate::commands::build::persistent_builder::start_session_for_contended_build()
+    }));
+}
+
+/// Let every builder entry point acquire a missing builder image itself.
+///
+/// `mvm-build` resolves the image for every build, but the signed image-set
+/// fetch and the local image-set build live up here. Whichever build finds
+/// the cache cold acquires through the one function `mvmctl bootstrap` and the
+/// flake build use, so a build on a fresh home never asks for bootstrap first.
+fn register_builder_image_acquirer() {
+    mvm_build::builder_vm_bootstrap::register_builder_image_acquirer(Box::new(|| {
+        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
+            .map_err(|error| format!("{error:#}"))
     }));
 }
 
@@ -872,7 +938,7 @@ mod image_source_gate_tests {
 
 #[cfg(test)]
 mod builder_bootstrap_policy_tests {
-    use super::{Cli, command_allows_builder_auto_bootstrap};
+    use super::{Cli, command_allows_builder_auto_bootstrap, command_allows_helper_source_builds};
     use clap::Parser;
 
     fn command(args: &[&str]) -> super::Commands {
@@ -892,6 +958,47 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_builder_auto_bootstrap(&command(&[
             "cache", "info",
+        ])));
+    }
+
+    /// `machine build` is the documented build verb, and its manifest form
+    /// reaches the builder only through image resolution: were it left out,
+    /// a fresh home would be refused with "run `mvmctl bootstrap`".
+    #[test]
+    fn machine_build_may_acquire_its_builder_image() {
+        for argv in [
+            &[
+                "machine",
+                "build",
+                "--mvm-config",
+                "examples/exit_code/mvm.toml",
+            ][..],
+            &["machine", "build", "--flake", "."][..],
+        ] {
+            assert!(
+                command_allows_builder_auto_bootstrap(&command(argv)),
+                "{argv:?}"
+            );
+        }
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "image", "pull", "alpine",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "machine", "run", "--image", "alpine", "--", "true",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "image", "ls",
+        ])));
+    }
+
+    #[test]
+    fn launches_never_receive_the_helper_build_capability() {
+        assert!(command_allows_helper_source_builds(&command(&[
+            "env",
+            "bootstrap",
+        ])));
+        assert!(!command_allows_helper_source_builds(&command(&[
+            "machine", "run", "--image", "alpine", "--", "true",
         ])));
     }
 }

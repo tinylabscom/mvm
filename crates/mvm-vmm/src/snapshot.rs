@@ -265,6 +265,7 @@ impl CannedIO {
 impl SnapshotIO for CannedIO {
     fn runtime_artifacts(&self) -> Result<crate::runtime_artifacts::RuntimeArtifacts> {
         Ok(crate::runtime_artifacts::RuntimeArtifacts {
+            kernel: None,
             initramfs: None,
             disks: Vec::new(),
             kernel_cmdline: String::new(),

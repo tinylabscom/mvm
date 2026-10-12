@@ -98,7 +98,11 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
     let Some(initrd) = &config.initrd_path else {
         return false;
     };
-    if config.runtime_release_proof.is_some() || config.unsigned_runtime_development {
+    if config.bundle_boot_assets.is_some()
+        || config.legacy_portable_runtime.is_some()
+        || config.runtime_release_proof.is_some()
+        || config.unsigned_runtime_development
+    {
         return true;
     }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
@@ -114,12 +118,12 @@ pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartCon
 /// present — including on the virtiofs-root shape, which reaches its guest
 /// binaries the same way every other shape does now that the overlay is the
 /// single runtime source. Returned to the backends that assign the overlay the
-/// next free `/dev/vdN` after the rootfs — always `/dev/vdb` on the non-verity
-/// branch, matching [`build_runtime_overlay_cmdline_args`]`(None, true)`.
+/// next free `/dev/vdN` after the rootfs; the live cmdline token names the
+/// attached device on this path.
 pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> Option<&str> {
     // The three overlay fields are populated together; require the full triple
     // so a half-populated config can't attach a device the guest can't
-    // corroborate against the cmdline token.
+    // corroborate against the boot metadata.
     if config.runtime_overlay_verity_path.is_none() || config.runtime_overlay_roothash.is_none() {
         return None;
     }
@@ -248,6 +252,25 @@ mod tests {
             ..config
         };
         assert!(!booted_with_universal_initramfs(&without_initramfs));
+    }
+
+    #[test]
+    fn a_pinned_bundle_initrd_uses_universal_activation_outside_the_cli_cache() {
+        let mut config = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: Some("/bundle-runtime/initramfs.cpio.gz".into()),
+            bundle_boot_assets: Some(mvm_core::vm_backend::BundleBootAssetsPin {
+                manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"set"),
+                arch: mvm_core::arch::GuestArch::host(),
+                initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"initrd"),
+            }),
+            ..Default::default()
+        };
+        assert!(booted_with_universal_initramfs(&config));
+        config.initrd_path = None;
+        assert!(!booted_with_universal_initramfs(&config));
+        config.initrd_path = Some("/bundle-runtime/initramfs.cpio.gz".into());
+        config.bundle_boot_assets = None;
+        assert!(!booted_with_universal_initramfs(&config));
     }
 
     // ------------------------------------------------------------------
@@ -409,76 +432,8 @@ mod tests {
     // verity cmdline + runtime-overlay attachment
     // ------------------------------------------------------------------
 
-    /// 64-char lowercase hex used wherever a roothash is needed.
-    /// Two distinct values so cmdline tests can prove the rootfs
-    /// hash and the overlay hash flow through the right knobs.
+    /// A valid 64-character rootfs hash for sidecar discovery tests.
     const ROOTFS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-    const OVERLAY_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000002";
-
-    #[test]
-    fn build_verity_cmdline_args_none_without_roothash() {
-        assert_eq!(build_verity_cmdline_args(None, None), None);
-        // Overlay hash alone without rootfs verity does not synthesize verity
-        // knobs; non-verity OCI boots use the separate runtime-data token path.
-        assert_eq!(
-            build_verity_cmdline_args(None, Some(OVERLAY_HASH)),
-            None,
-            "overlay-only input should not produce verity cmdline knobs"
-        );
-    }
-
-    #[test]
-    fn build_verity_cmdline_args_rootfs_only_matches_legacy_shape() {
-        let got =
-            build_verity_cmdline_args(Some(ROOTFS_HASH), None).expect("rootfs verity → cmdline");
-        assert_eq!(
-            got,
-            format!("mvm.roothash={ROOTFS_HASH} mvm.data=/dev/vda mvm.hash=/dev/vdb"),
-        );
-        assert!(!got.contains("runtime_"));
-    }
-
-    #[test]
-    fn build_verity_cmdline_args_with_overlay_appends_runtime_knobs() {
-        let got = build_verity_cmdline_args(Some(ROOTFS_HASH), Some(OVERLAY_HASH))
-            .expect("rootfs + overlay verity → cmdline");
-        // Rootfs knobs come first, overlay knobs append at the end —
-        // mvm-verity-init parses tokens left-to-right and only the
-        // last assignment wins for a duplicate key, so order is
-        // load-bearing if rootfs/overlay were ever to share a key.
-        // The runtime keys are distinct names today, but pinning
-        // the order keeps the contract obvious.
-        assert!(got.starts_with(&format!("mvm.roothash={ROOTFS_HASH} ")));
-        assert!(got.contains(&format!("mvm.runtime_roothash={OVERLAY_HASH}")));
-        assert!(got.contains("mvm.runtime_data=/dev/vdc"));
-        assert!(got.contains("mvm.runtime_hash=/dev/vdd"));
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_none_without_overlay() {
-        assert_eq!(build_runtime_overlay_cmdline_args(None, false), None);
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), false),
-            None
-        );
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_uses_verity_shape_when_rootfs_is_verified() {
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), true).as_deref(),
-            Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd")
-        );
-    }
-
-    #[test]
-    fn build_runtime_overlay_cmdline_args_uses_non_verity_oci_shape() {
-        assert_eq!(
-            build_runtime_overlay_cmdline_args(None, true).as_deref(),
-            Some("mvm.runtime_data=/dev/vdb")
-        );
-    }
-
     #[test]
     fn non_verity_overlay_ext4_requires_the_full_triple() {
         use mvm_core::vm_backend::VmStartConfig;

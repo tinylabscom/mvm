@@ -86,6 +86,10 @@ pub(crate) fn verify_retained(
     let trust = FsTrustStore::default_path()?;
     let verified = verify_plan_bundle(&proof.pin, &ArchiveResolver(&proof.archive), &trust)
         .context("verifying legacy runtime bundle")?;
+    ensure!(
+        verified.boot_assets.is_none(),
+        "portable bundle cannot be admitted as a baked runtime"
+    );
     mvm_core::arch::GuestArch::require_host(&verified.manifest.arch)?;
     let rootfs_sha256 = verified
         .manifest
@@ -303,6 +307,7 @@ mod tests {
             sha256: mvm_core::crypto::image_verify::sha256_file(Path::new(path)).unwrap(),
         };
         let actual = RuntimeArtifacts {
+            kernel: None,
             initramfs: Some(observe(bound.initrd_path.as_deref().unwrap())),
             disks: vec![observe(&bound.rootfs_path)],
             kernel_cmdline: "console=hvc0".into(),

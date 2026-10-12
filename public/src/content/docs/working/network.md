@@ -10,9 +10,13 @@ Networking is part of the sandbox contract. Name what the guest can reach, name 
 Egress is off unless you ask for it. `--net` opts into the built-in dev preset:
 
 ```sh
-mvmctl machine run --flake .          # deny-all (the default)
-mvmctl machine run --flake . --net    # dev preset
+mvmctl machine run --name app --flake .          # deny-all (the default)
+mvmctl machine run --flake . --net               # dev preset
 ```
+
+The deny-all run is named because an unnamed run without egress must claim a
+prepared warm standby, which `pool warm` cannot prepare for a flake image. A
+run that allows egress always boots cold.
 
 Use explicit allow rules for narrow agent workloads. `--allow-host` replaces the
 preset with a concrete allow-list:

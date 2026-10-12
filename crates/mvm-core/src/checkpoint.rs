@@ -201,6 +201,38 @@ pub enum CheckpointKeyDomainParseError {
     Unknown(String),
 }
 
+/// How a checkpoint's content is stored at rest.
+///
+/// Part of the load-bearing digest, so a sealed record cannot be relabelled
+/// unprotected (or the reverse) without failing lineage verification. A record
+/// that predates the field carries none on the wire and reads back as
+/// [`CheckpointProtection::Unprotected`]: legacy content is never reclassified
+/// as protected, and is never opened through the sealed path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointProtection {
+    /// Plaintext chunk objects and whole files: the legacy layout, written
+    /// only when a store was explicitly opened without key custody.
+    #[default]
+    Unprotected,
+    /// Every content blob is a sealed index naming sealed chunk objects, in
+    /// the authenticated checkpoint-object envelope, under the record's key
+    /// domain.
+    SealedV1,
+}
+
+impl CheckpointProtection {
+    #[must_use]
+    pub fn is_unprotected(&self) -> bool {
+        matches!(self, Self::Unprotected)
+    }
+
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        !self.is_unprotected()
+    }
+}
+
 /// Saved guest memory image inside a vm_full checkpoint's content dir.
 pub const MEMORY_BLOB: &str = "memory.bin";
 /// Cloned rootfs image inside any checkpoint's content dir.
@@ -414,6 +446,11 @@ pub struct CheckpointMeta {
     /// pre-chunk whole-file records retain their original digest shape.
     #[serde(default, skip_serializing_if = "CheckpointKeyDomain::is_host")]
     pub key_domain: CheckpointKeyDomain,
+    /// How the content is stored at rest. Omitted on the wire when
+    /// unprotected, so a record sealed before the field existed keeps its
+    /// digest and still reads as unprotected.
+    #[serde(default, skip_serializing_if = "CheckpointProtection::is_unprotected")]
+    pub protection: CheckpointProtection,
     pub supervisor_config_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_overlay_version: Option<String>,
@@ -467,6 +504,7 @@ impl CheckpointMeta {
             created_unix: 0,
             content: Vec::new(),
             key_domain: CheckpointKeyDomain::host(),
+            protection: CheckpointProtection::Unprotected,
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
             runtime_launch_binding: None,
@@ -493,6 +531,7 @@ impl CheckpointMeta {
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
             key_domain: &self.key_domain,
+            protection: self.protection,
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_overlay_version: &self.runtime_overlay_version,
             runtime_launch_binding: &self.runtime_launch_binding,
@@ -515,42 +554,34 @@ impl CheckpointMeta {
     /// Rebuilding through the normal builder recomputes the load-bearing digest
     /// so the binding is covered by lineage verification.
     pub fn with_snapshot_id(&self, snapshot_id: impl Into<String>) -> Self {
-        CheckpointMeta::builder(self.id.clone(), self.class, self.vm_name.clone())
-            .tag(self.tag.clone())
-            .parent(self.parent.clone())
-            .created_unix(self.created_unix)
-            .content(self.content.clone())
-            .key_domain(self.key_domain.clone())
-            .supervisor_config_digest(self.supervisor_config_digest.clone())
-            .runtime_overlay_version(self.runtime_overlay_version.clone())
-            .runtime_launch_binding(self.runtime_launch_binding.clone())
-            .snapshot_id(Some(snapshot_id.into()))
-            .grants(self.grants.clone())
-            .session(self.session.clone())
-            .machine_input_cursor(self.machine_input_cursor)
-            .audit_ref(self.audit_ref.clone())
-            .build()
+        self.rebuild().snapshot_id(Some(snapshot_id.into())).build()
     }
 
     /// Return the same sealed record bound to an exact machine-input cursor.
     /// Rebuilding recomputes the load-bearing digest before the record is
     /// written or chain-bound.
     pub fn with_machine_input_cursor(&self, cursor: u64) -> Self {
+        self.rebuild().machine_input_cursor(Some(cursor)).build()
+    }
+
+    /// A builder holding every field of this record, so a `with_*` variant
+    /// cannot forget one when the record grows a field.
+    fn rebuild(&self) -> CheckpointMetaBuilder {
         CheckpointMeta::builder(self.id.clone(), self.class, self.vm_name.clone())
             .tag(self.tag.clone())
             .parent(self.parent.clone())
             .created_unix(self.created_unix)
             .content(self.content.clone())
             .key_domain(self.key_domain.clone())
+            .protection(self.protection)
             .supervisor_config_digest(self.supervisor_config_digest.clone())
             .runtime_overlay_version(self.runtime_overlay_version.clone())
             .runtime_launch_binding(self.runtime_launch_binding.clone())
             .snapshot_id(self.snapshot_id.clone())
             .grants(self.grants.clone())
             .session(self.session.clone())
-            .machine_input_cursor(Some(cursor))
+            .machine_input_cursor(self.machine_input_cursor)
             .audit_ref(self.audit_ref.clone())
-            .build()
     }
 }
 
@@ -585,6 +616,8 @@ struct CheckpointDigestInput<'a> {
     content: Vec<&'a ContentBlob>,
     #[serde(skip_serializing_if = "CheckpointKeyDomain::is_host")]
     key_domain: &'a CheckpointKeyDomain,
+    #[serde(skip_serializing_if = "CheckpointProtection::is_unprotected")]
+    protection: CheckpointProtection,
     supervisor_config_digest: &'a str,
     runtime_overlay_version: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -651,6 +684,7 @@ pub struct CheckpointMetaBuilder {
     created_unix: u64,
     content: Vec<ContentBlob>,
     key_domain: CheckpointKeyDomain,
+    protection: CheckpointProtection,
     supervisor_config_digest: String,
     runtime_overlay_version: Option<String>,
     runtime_launch_binding: Option<crate::protocol::runtime_release::RuntimeLaunchBinding>,
@@ -682,6 +716,10 @@ impl CheckpointMetaBuilder {
     }
     pub fn key_domain(mut self, domain: CheckpointKeyDomain) -> Self {
         self.key_domain = domain;
+        self
+    }
+    pub fn protection(mut self, protection: CheckpointProtection) -> Self {
+        self.protection = protection;
         self
     }
     pub fn supervisor_config_digest(mut self, d: impl Into<String>) -> Self {
@@ -735,6 +773,7 @@ impl CheckpointMetaBuilder {
             created_unix: self.created_unix,
             content: sorted_content(&self.content),
             key_domain: &self.key_domain,
+            protection: self.protection,
             supervisor_config_digest: &self.supervisor_config_digest,
             runtime_overlay_version: &self.runtime_overlay_version,
             runtime_launch_binding: &self.runtime_launch_binding,
@@ -753,6 +792,7 @@ impl CheckpointMetaBuilder {
             created_unix: self.created_unix,
             content: self.content,
             key_domain: self.key_domain,
+            protection: self.protection,
             supervisor_config_digest: self.supervisor_config_digest,
             runtime_overlay_version: self.runtime_overlay_version,
             runtime_launch_binding: self.runtime_launch_binding,
@@ -873,6 +913,54 @@ mod tests {
         assert!(host_json.get("key_domain").is_none());
         assert_eq!(host.compute_meta_digest(), host.meta_digest);
         assert_eq!(tenant.compute_meta_digest(), tenant.meta_digest);
+    }
+
+    #[test]
+    fn protection_is_load_bearing_and_a_legacy_record_stays_unprotected() {
+        let legacy = digest_fixture_meta(Vec::new());
+        let legacy_json = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            legacy_json.get("protection").is_none(),
+            "an unprotected record keeps the shape it had before the field existed"
+        );
+        let reread: CheckpointMeta = serde_json::from_value(legacy_json).unwrap();
+        assert_eq!(reread.protection, CheckpointProtection::Unprotected);
+        assert_eq!(reread.compute_meta_digest(), legacy.meta_digest);
+
+        let sealed =
+            CheckpointMeta::builder(CheckpointId::new("c1"), CheckpointClass::FsQuick, "vm")
+                .content(Vec::new())
+                .supervisor_config_digest("cfg")
+                .created_unix(7)
+                .protection(CheckpointProtection::SealedV1)
+                .build();
+        assert_ne!(sealed.meta_digest, legacy.meta_digest);
+        assert_eq!(
+            serde_json::to_value(&sealed).unwrap()["protection"],
+            "sealed_v1"
+        );
+
+        // Relabelling either way, without re-sealing, is digest drift.
+        let mut stripped = sealed.clone();
+        stripped.protection = CheckpointProtection::Unprotected;
+        assert_ne!(stripped.compute_meta_digest(), stripped.meta_digest);
+        let mut promoted = legacy.clone();
+        promoted.protection = CheckpointProtection::SealedV1;
+        assert_ne!(promoted.compute_meta_digest(), promoted.meta_digest);
+    }
+
+    #[test]
+    fn with_variants_keep_protection() {
+        let sealed =
+            CheckpointMeta::builder(CheckpointId::new("c1"), CheckpointClass::VmFull, "vm")
+                .protection(CheckpointProtection::SealedV1)
+                .build();
+        let staged = sealed.with_snapshot_id("snap");
+        assert_eq!(staged.protection, CheckpointProtection::SealedV1);
+        assert_eq!(staged.compute_meta_digest(), staged.meta_digest);
+        let cursor = staged.with_machine_input_cursor(4);
+        assert_eq!(cursor.protection, CheckpointProtection::SealedV1);
+        assert_eq!(cursor.snapshot_id.as_deref(), Some("snap"));
     }
 
     #[test]
@@ -1154,6 +1242,7 @@ mod tests {
             created_unix: sessionless.created_unix,
             content: sorted_content(&sessionless.content),
             key_domain: &sessionless.key_domain,
+            protection: sessionless.protection,
             supervisor_config_digest: &sessionless.supervisor_config_digest,
             runtime_overlay_version: &sessionless.runtime_overlay_version,
             runtime_launch_binding: &sessionless.runtime_launch_binding,

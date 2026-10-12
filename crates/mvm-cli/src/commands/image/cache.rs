@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use mvm_fs::oci::verify_sha256_digest;
 
@@ -226,13 +227,23 @@ fn upsert_cached_image_with_wait_observer(
         .as_deref()
         .context("cannot register an OCI image without a materialized rootfs")?;
     let rootfs = safe_cache_path(cache_root, rootfs_rel)?;
-    let hex = sha256_hex(&image.resolved_digest)?;
-    let unpacked = cache_root.join("unpacked").join(hex);
+    let unpacked = if image.resolved_digest.is_empty() {
+        cache_root.join("unpacked").join(format!(
+            "local-{}",
+            hex::encode(Sha256::digest(image.reference.as_bytes()))
+        ))
+    } else {
+        cache_root
+            .join("unpacked")
+            .join(sha256_hex(&image.resolved_digest)?)
+    };
     let _resources =
         mvm_build::run_image::HeldTreeLocks::acquire_observed(&unpacked, &rootfs, || {
             on_wait(CacheLockWait::Resource)
         })?;
-    if read_cached_unpack(cache_root, &image.resolved_digest)?.is_none() {
+    if !image.resolved_digest.is_empty()
+        && read_cached_unpack(cache_root, &image.resolved_digest)?.is_none()
+    {
         bail!(
             "refusing to register OCI image {} without its complete unpacked tree",
             image.reference
@@ -529,10 +540,14 @@ pub(super) fn all_image_paths(image: &CachedOciImage) -> Vec<String> {
 }
 
 pub(super) fn metadata_paths(image: &CachedOciImage) -> Vec<String> {
-    let mut paths = vec![image.manifest_path.clone()];
+    let mut paths = (!image.manifest_path.is_empty())
+        .then(|| image.manifest_path.clone())
+        .into_iter()
+        .collect::<Vec<_>>();
     paths.extend(image.config_path.clone());
     paths.extend(image.rootfs_path.clone());
     paths.extend(image.claims_path.clone());
+    paths.extend(image.verification_receipt_path.clone());
     paths
 }
 
@@ -880,6 +895,7 @@ mod tests {
             rootfs_path: None,
             runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
+            verification_receipt_path: None,
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
                 size_bytes: 4,

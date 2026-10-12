@@ -192,9 +192,11 @@ per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
 One-time per clone: `just maint::hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
-scoped stable clippy `-D warnings`, `nix fmt` for staged `.nix` files, and
-`actionlint` for workflow changes — never the full test suite; heavy gates run
-in CI (`MVM_SKIP_CLIPPY=1` bypasses the clippy pass).
+scoped stable clippy `-D warnings`, and `actionlint` for workflow changes —
+never Nix on the host or the full test suite. Nix flake checks run in CI;
+local Nix evaluation and builds run only in the builder VM. CI does not
+currently enforce Nix formatting because the flake declares no formatter.
+`MVM_SKIP_CLIPPY=1` bypasses the clippy pass.
 
 ## The DX rule: binary development is single-repo
 

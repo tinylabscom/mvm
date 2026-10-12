@@ -24,9 +24,9 @@
 //! It is a static check. The image flakes that call `mkfs`, `veritysetup` and
 //! `cpio` live in mvm-images; what stays under `nix/` is `mkGuest`, the
 //! library those flakes build their rootfs through, so its `make-ext4-fs` call
-//! is what this gate holds here. The merge-queue image job rebuilds the
-//! default image and runtime overlay from mvm-images with `nix build
-//! --rebuild`, which is the byte-level witness.
+//! is what this gate holds here. mvm-images rebuilds its images and compares
+//! the bytes; the runtime overlay is assembled by `mvmctl` with the pure-Rust
+//! ext4 writer, and the guest-image-boot lane reassembles it and compares.
 
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};

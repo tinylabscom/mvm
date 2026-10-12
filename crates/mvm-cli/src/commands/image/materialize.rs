@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 
 use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
+use mvm_fs::oci::config::OciImageConfig;
 
 use super::cache::safe_cache_path;
-use super::oci_types::OciImageConfig;
 
 /// How much of a runtime identity goes into the cache tag. Long enough that
 /// two distinct guest runtimes cannot collide in practice, short enough to keep
@@ -94,13 +94,11 @@ pub(super) fn prepared_virtiofs_root(
 /// command is what left `rust:latest` without `/usr/local/cargo/bin` on
 /// `PATH`.
 pub(super) fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<ImageRuntimeConfig>> {
-    let config: OciImageConfig = serde_json::from_slice(bytes).context("parse OCI image config")?;
-    let mut argv = config.config.entrypoint.unwrap_or_default();
-    argv.extend(config.config.cmd.unwrap_or_default());
+    let config = OciImageConfig::parse(bytes).context("parse OCI image config")?;
     let resolved = ImageRuntimeConfig {
-        argv,
-        env: config.config.env,
-        working_dir: config.config.working_dir,
+        argv: config.argv,
+        env: config.env,
+        working_dir: config.working_dir,
     };
     Ok((!resolved.is_empty()).then_some(resolved))
 }
@@ -229,6 +227,32 @@ pub(super) struct MaterializeCall<'a> {
 /// A type alias rather than a bare fn pointer everywhere it's threaded, and
 /// swappable in tests for a fake that skips the real Nix/ext4 machinery.
 pub(super) type RuntimeMaterializer = for<'a> fn(MaterializeCall<'a>) -> Result<()>;
+
+/// Point a cached image's index entry at the rootfs an earlier pull already
+/// prepared for `runtime_tag`, without building anything.
+///
+/// The index records one prepared rootfs per image, but each runtime's rootfs
+/// lives at its own path, so a pull under a second guest runtime leaves the
+/// first one's rootfs on disk and moves the entry away from it. A launch under
+/// the first runtime then finds that complete rootfs here instead of refusing
+/// an image it prepared. `None` when no complete rootfs exists for this
+/// runtime: the launch still refuses, and only an explicit pull builds one.
+pub(super) fn adopt_prepared_rootfs(
+    cache_root: &Path,
+    mut image: super::oci_types::CachedOciImage,
+    runtime_tag: &str,
+    prod: bool,
+) -> Result<Option<super::oci_types::CachedOciImage>> {
+    let rootfs_path = oci_rootfs_rel(&image.resolved_digest, runtime_tag, prod)?;
+    let rootfs_abs = safe_cache_path(cache_root, &rootfs_path)?;
+    if !rootfs_abs.is_file() || !reusable_rootfs(&rootfs_abs, prod)? {
+        return Ok(None);
+    }
+    image.rootfs_path = Some(rootfs_path);
+    image.runtime_tag = Some(runtime_tag.to_string());
+    super::cache::upsert_cached_image(cache_root, image.clone())?;
+    Ok(Some(image))
+}
 
 pub(super) fn rematerialize_cached_image(
     cache_root: &Path,
@@ -584,6 +608,7 @@ mod tests {
             rootfs_path: None,
             runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
+            verification_receipt_path: None,
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
                 size_bytes: 4,

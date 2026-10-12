@@ -517,6 +517,50 @@ class MachineStopRequest:
 
 
 @dataclass
+class ManifestInfoReply:
+    persisted: Dict[str, Any]
+    slot_hash: str
+    snapshot: Optional[Dict[str, Any]]
+
+
+@dataclass
+class ManifestInfoRequest:
+    path: Optional[str] = None
+
+
+@dataclass
+class ManifestListReplyItem:
+    manifest_path: str
+    orphan: bool
+    slot_hash: str
+    updated_at: str
+    name: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+
+ManifestListReply = List[ManifestListReplyItem]
+
+
+@dataclass
+class ManifestListRequest:
+    orphans: Optional[bool] = False
+    tags: Optional[List[str]] = field(default_factory=lambda: [])
+
+
+@dataclass
+class ManifestVerifyReply:
+    manifest_path: str
+    slot_hash: str
+
+
+@dataclass
+class ManifestVerifyRequest:
+    check_signature: Optional[bool] = False
+    path: Optional[str] = None
+    revision: Optional[str] = None
+
+
+@dataclass
 class PortMapping:
     guest: int
     host: int
@@ -872,6 +916,24 @@ class MachineSetTtl:
 class MachineStop:
     reply: MachineStopReply
     request: MachineStopRequest
+
+
+@dataclass
+class ManifestInfo:
+    reply: ManifestInfoReply
+    request: ManifestInfoRequest
+
+
+@dataclass
+class ManifestList:
+    reply: ManifestListReply
+    request: ManifestListRequest
+
+
+@dataclass
+class ManifestVerify:
+    reply: ManifestVerifyReply
+    request: ManifestVerifyRequest
 
 
 @dataclass
@@ -1294,6 +1356,9 @@ class HostAbi:
     machine_set_ttl: MachineSetTtl
     machine_start: MachineStart
     machine_stop: MachineStop
+    manifest_info: ManifestInfo
+    manifest_list: ManifestList
+    manifest_verify: ManifestVerify
     session_call: SessionCall
     session_info: SessionInfo
     session_start: SessionStart

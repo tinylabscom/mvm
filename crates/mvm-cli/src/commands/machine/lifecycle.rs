@@ -240,9 +240,9 @@ impl CliStartHost {
 }
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
-    /// The CLI boots an explicit kernel on every backend: the pinned one, or
-    /// the workload kernel, built through the builder VM when the cache has
-    /// none.
+    /// The CLI boots an explicit kernel on every backend: the pinned one, or a
+    /// workload kernel prepared by `mvmctl bootstrap`. Launch never acquires
+    /// one on a cache miss.
     fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
             Some(kernel_path) => Ok(Some(kernel_path)),

@@ -1,6 +1,7 @@
 //! An in-memory `MvmClient` for tests and for callers to develop against before
 //! a real backend exists. Not a production path.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -11,6 +12,9 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
+use crate::client::{
+    ReceivedRecord, TelemetryCursor, TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
+};
 use mvm_contract::protocol::capability_negotiation::{
     BackendCapabilityReport, ClientOperationCapabilities,
 };
@@ -24,6 +28,91 @@ pub struct MockBackend {
     /// silently claims to do everything.
     capabilities: Mutex<VmCapabilities>,
     operations: Mutex<ClientOperationCapabilities>,
+    /// What each machine's collector would have left, by machine id. A
+    /// machine with no entry reads as one booted without a collector.
+    telemetry: Mutex<BTreeMap<String, MockTelemetry>>,
+}
+
+/// One machine's mock collector outputs: the status it answers and, once
+/// seeded, its record stream.
+#[derive(Debug, Default)]
+struct MockTelemetry {
+    status: Option<TelemetryStatus>,
+    /// `None` until records are pushed or the stream is reset, mirroring a
+    /// machine with no collector files: such a stream echoes any cursor.
+    stream: Option<MockStream>,
+}
+
+/// A record stream positioned the way the collector persists it: each
+/// record's cursor end is the byte offset past its persisted line.
+#[derive(Debug, Default)]
+struct MockStream {
+    records: Vec<ReceivedRecord>,
+    /// `ends[i]` is the offset just past record `i`'s line.
+    ends: Vec<u64>,
+}
+
+impl MockStream {
+    fn len(&self) -> u64 {
+        self.ends.last().copied().unwrap_or(0)
+    }
+
+    fn push(&mut self, record: ReceivedRecord) {
+        let end = self.len() + persisted_line_len(&record);
+        self.records.push(record);
+        self.ends.push(end);
+    }
+
+    /// The index of the first record at `cursor`, or `None` when the cursor
+    /// is not a line boundary of this stream.
+    fn index_at(&self, cursor: TelemetryCursor) -> Option<usize> {
+        if cursor.offset == 0 {
+            return Some(0);
+        }
+        self.ends
+            .binary_search(&cursor.offset)
+            .ok()
+            .map(|index| index + 1)
+    }
+
+    fn page(&self, request: &TelemetryReadRequest) -> Result<TelemetryReadResponse> {
+        let cursor = request.cursor();
+        let start = self.index_at(cursor).ok_or_else(|| MvmError::InvalidSpec {
+            reason: format!(
+                "telemetry cursor offset {} is not a line boundary of a {}-byte stream",
+                cursor.offset,
+                self.len()
+            ),
+        })?;
+        let end = start
+            .saturating_add(request.effective_limit())
+            .min(self.records.len());
+        let next_cursor = match end {
+            0 => TelemetryCursor::START,
+            end => TelemetryCursor {
+                offset: self.ends[end - 1],
+            },
+        };
+        Ok(TelemetryReadResponse {
+            records: self.records[start..end].to_vec(),
+            next_cursor,
+            undecodable: 0,
+            exhausted: end == self.records.len(),
+        })
+    }
+}
+
+/// The length of the line the collector persists for `record`: the
+/// envelope when it carries a receive time, the bare record otherwise.
+fn persisted_line_len(record: &ReceivedRecord) -> u64 {
+    let line = match record.received_at_ms {
+        Some(received_at_ms) => ReceivedRecord::encode_line(received_at_ms, &record.record),
+        None => serde_json::to_vec(&record.record).map(|mut line| {
+            line.push(b'\n');
+            line
+        }),
+    };
+    line.expect("a built telemetry record serializes").len() as u64
 }
 
 impl Default for MockBackend {
@@ -33,6 +122,7 @@ impl Default for MockBackend {
             next: Mutex::new(0),
             capabilities: Mutex::new(VmCapabilities::default()),
             operations: Mutex::new(all_mock_operations()),
+            telemetry: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -73,6 +163,52 @@ impl MockBackend {
             .expect("mock operation capability lock poisoned") = operations;
         self
     }
+
+    /// Set what `telemetry_status` answers for machine `id`.
+    pub fn set_telemetry_status(&self, id: &MachineId, status: TelemetryStatus) {
+        self.with_telemetry(id, |telemetry| telemetry.status = Some(status));
+    }
+
+    /// Append records to what `telemetry_records` pages for machine `id`, as
+    /// if the collector had just persisted them. Cursors advance by each
+    /// record's persisted line length, exactly as the real reader's do.
+    pub fn push_telemetry_records(
+        &self,
+        id: &MachineId,
+        records: impl IntoIterator<Item = ReceivedRecord>,
+    ) {
+        self.with_telemetry(id, |telemetry| {
+            let stream = telemetry.stream.get_or_insert_with(MockStream::default);
+            records.into_iter().for_each(|record| stream.push(record));
+        });
+    }
+
+    /// Empty machine `id`'s record stream, as removing and recreating the
+    /// machine does to the real one: a cursor into the old stream is then
+    /// refused rather than rebased.
+    pub fn reset_telemetry_records(&self, id: &MachineId) {
+        self.with_telemetry(id, |telemetry| {
+            telemetry.stream = Some(MockStream::default());
+        });
+    }
+
+    fn with_telemetry(&self, id: &MachineId, update: impl FnOnce(&mut MockTelemetry)) {
+        update(
+            self.telemetry
+                .lock()
+                .expect("mock telemetry lock poisoned")
+                .entry(id.0.clone())
+                .or_default(),
+        );
+    }
+
+    fn require_machine(&self, id: &MachineId) -> Result<()> {
+        if self.machines.lock().unwrap().iter().any(|m| m.id == *id) {
+            Ok(())
+        } else {
+            Err(MvmError::NotFound { id: id.0.clone() })
+        }
+    }
 }
 
 impl MockBackend {
@@ -112,32 +248,36 @@ impl MvmClient for MockBackend {
         ))
     }
 
-    async fn telemetry_status(&self, id: &MachineId) -> Result<crate::client::TelemetryStatus> {
-        // The mock boots nothing, so no collector is ever provisioned; a
-        // known machine answers honestly and an unknown one is not found.
-        let all = self.machines.lock().unwrap();
-        if all.iter().any(|m| m.id == *id) {
-            Ok(crate::client::TelemetryStatus::NotProvisioned)
-        } else {
-            Err(MvmError::NotFound { id: id.0.clone() })
-        }
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus> {
+        // A machine nobody seeded was booted without a collector; an unknown
+        // one is not found.
+        self.require_machine(id)?;
+        Ok(self
+            .telemetry
+            .lock()
+            .expect("mock telemetry lock poisoned")
+            .get(&id.0)
+            .and_then(|telemetry| telemetry.status.clone())
+            .unwrap_or(TelemetryStatus::NotProvisioned))
     }
 
     async fn telemetry_records(
         &self,
         id: &MachineId,
-        request: crate::client::TelemetryReadRequest,
-    ) -> Result<crate::client::TelemetryReadResponse> {
-        let all = self.machines.lock().unwrap();
-        if all.iter().any(|m| m.id == *id) {
-            Ok(crate::client::TelemetryReadResponse {
+        request: TelemetryReadRequest,
+    ) -> Result<TelemetryReadResponse> {
+        self.require_machine(id)?;
+        let telemetry = self.telemetry.lock().expect("mock telemetry lock poisoned");
+        match telemetry.get(&id.0).and_then(|t| t.stream.as_ref()) {
+            Some(stream) => stream.page(&request),
+            // No collector files: an empty page echoing the cursor, as the
+            // local seam answers for a machine with no state directory.
+            None => Ok(TelemetryReadResponse {
                 records: Vec::new(),
                 next_cursor: request.cursor(),
                 undecodable: 0,
                 exhausted: true,
-            })
-        } else {
-            Err(MvmError::NotFound { id: id.0.clone() })
+            }),
         }
     }
 
@@ -271,6 +411,7 @@ impl MvmClient for MockBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::CollectorState;
     use crate::client::dto::*;
 
     #[tokio::test]
@@ -293,6 +434,180 @@ mod tests {
         assert!(operations.exec);
         assert!(operations.reconfigure);
         assert!(operations.set_ttl);
+        assert!(operations.telemetry);
+    }
+
+    fn telemetry_record(sequence: u64) -> ReceivedRecord {
+        use crate::protocol::telemetry::{
+            Attributes, Level, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+        };
+        let record = TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([9; 16]).unwrap())
+            .producer(1)
+            .sequence(sequence)
+            .monotonic_ns(sequence * 1_000)
+            .source(SourceKind::GuestAgent)
+            .body(RecordBody::Event {
+                context: None,
+                level: Level::Info,
+                name: "tick".try_into().unwrap(),
+                attributes: Attributes::new(Vec::new()).unwrap(),
+            })
+            .build()
+            .unwrap();
+        ReceivedRecord {
+            received_at_ms: Some(1_700_000_000_000 + sequence),
+            record,
+        }
+    }
+
+    fn page(cursor: u64, limit: usize) -> TelemetryReadRequest {
+        TelemetryReadRequest::builder()
+            .cursor(TelemetryCursor { offset: cursor })
+            .limit(limit)
+            .build()
+    }
+
+    async fn running(mock: &MockBackend, name: &str) -> MachineId {
+        mock.run_machine(
+            MachineSpec::builder(name, "oci:alpine:3.20")
+                .unwrap()
+                .build(),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn telemetry_status_answers_what_was_set_and_unknown_is_not_found() {
+        let mock = MockBackend::default();
+        let id = running(&mock, "quiet").await;
+        assert_eq!(
+            mock.telemetry_status(&id).await.unwrap(),
+            TelemetryStatus::NotProvisioned,
+            "nothing set reads as no collector provisioned"
+        );
+
+        let collecting = TelemetryStatus::Provisioned {
+            vm_name: "quiet".into(),
+            state: CollectorState::Collecting { generation: 2 },
+            shed: 1,
+            snapshot_age_ms: Some(400),
+            records_bytes: 0,
+        };
+        mock.set_telemetry_status(&id, collecting.clone());
+        assert_eq!(mock.telemetry_status(&id).await.unwrap(), collecting);
+
+        let ghost = MachineId("ghost".into());
+        assert!(matches!(
+            mock.telemetry_status(&ghost).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(matches!(
+            mock.telemetry_records(&ghost, TelemetryReadRequest::default())
+                .await,
+            Err(MvmError::NotFound { .. })
+        ));
+    }
+
+    /// Cursors are the byte offsets the real reader hands out: each record
+    /// advances the cursor by the length of the line the collector persists
+    /// for it, so a consumer developed against the mock sees real values.
+    #[tokio::test]
+    async fn telemetry_records_page_by_the_persisted_byte_offset() {
+        let mock = MockBackend::default();
+        let id = running(&mock, "chatty").await;
+        let records: Vec<ReceivedRecord> = (1..=3).map(telemetry_record).collect();
+        let line_len = |r: &ReceivedRecord| {
+            ReceivedRecord::encode_line(r.received_at_ms.unwrap(), &r.record)
+                .unwrap()
+                .len() as u64
+        };
+        let ends: Vec<u64> = records
+            .iter()
+            .scan(0, |end, r| {
+                *end += line_len(r);
+                Some(*end)
+            })
+            .collect();
+        mock.push_telemetry_records(&id, records.clone());
+
+        let first = mock.telemetry_records(&id, page(0, 2)).await.unwrap();
+        assert_eq!(first.records, records[..2]);
+        assert_eq!(first.next_cursor.offset, ends[1]);
+        assert!(!first.exhausted);
+        assert_eq!(first.undecodable, 0);
+
+        let second = mock
+            .telemetry_records(&id, page(first.next_cursor.offset, 10))
+            .await
+            .unwrap();
+        assert_eq!(second.records, records[2..]);
+        assert_eq!(second.next_cursor.offset, ends[2]);
+        assert!(second.exhausted);
+
+        let idle = mock
+            .telemetry_records(&id, page(second.next_cursor.offset, 10))
+            .await
+            .unwrap();
+        assert!(idle.records.is_empty());
+        assert_eq!(idle.next_cursor, second.next_cursor, "an idle poll echoes");
+        assert!(idle.exhausted);
+
+        // More arrive; the held cursor picks them up.
+        mock.push_telemetry_records(&id, [telemetry_record(4)]);
+        let more = mock
+            .telemetry_records(&id, page(idle.next_cursor.offset, 10))
+            .await
+            .unwrap();
+        assert_eq!(more.records, [telemetry_record(4)]);
+    }
+
+    /// The real seam refuses a cursor that is not a line boundary of the
+    /// current stream as `InvalidSpec`; the mock refuses it the same way, for
+    /// a cursor inside a line, past the end, or into a stream since reset.
+    #[tokio::test]
+    async fn telemetry_records_refuse_a_cursor_off_a_line_boundary_or_past_a_reset() {
+        let mock = MockBackend::default();
+        let id = running(&mock, "rebooted").await;
+        mock.push_telemetry_records(&id, (1..=2).map(telemetry_record));
+        let all = mock.telemetry_records(&id, page(0, 10)).await.unwrap();
+        let end = all.next_cursor.offset;
+
+        for offset in [1, end + 1] {
+            let err = mock
+                .telemetry_records(&id, page(offset, 10))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, MvmError::InvalidSpec { .. }),
+                "{offset}: {err}"
+            );
+        }
+
+        mock.reset_telemetry_records(&id);
+        let err = mock
+            .telemetry_records(&id, page(end, 10))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MvmError::InvalidSpec { .. }), "{err}");
+        let fresh = mock.telemetry_records(&id, page(0, 10)).await.unwrap();
+        assert!(fresh.records.is_empty());
+        assert_eq!(fresh.next_cursor, TelemetryCursor::START);
+        assert!(fresh.exhausted);
+    }
+
+    /// A machine nobody seeded behaves as one with no collector files at
+    /// all: an empty page that echoes whatever cursor it was given.
+    #[tokio::test]
+    async fn telemetry_records_for_an_unseeded_machine_echo_the_cursor() {
+        let mock = MockBackend::default();
+        let id = running(&mock, "unseeded").await;
+        let empty = mock.telemetry_records(&id, page(96, 10)).await.unwrap();
+        assert!(empty.records.is_empty());
+        assert_eq!(empty.next_cursor.offset, 96);
+        assert!(empty.exhausted);
     }
 
     #[tokio::test]

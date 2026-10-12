@@ -65,9 +65,17 @@ or a tampered artifact before anything is installed.
 ### 4. Install and run
 
 ```bash
+mvmctl run ./my-app.mvmpkg -- <cmd>
+```
+
+`run` re-runs the same verification as `fetch` every time, extracts the archive
+into `~/.mvm/bundles/<bundle_sha256>/` the first time, and boots it. To install
+ahead of time and boot by digest instead:
+
+```bash
 mvmctl bundle install ./my-app.mvmpkg
 mvmctl manifest ls                        # find the installed slot (keyed by bundle sha256)
-mvmctl machine run --manifest <bundle-sha256>
+mvmctl machine run --manifest <bundle-sha256> -- <cmd>
 ```
 
 `bundle install` re-runs the same verification as `fetch`, then

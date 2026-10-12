@@ -577,6 +577,31 @@ fn fresh_boot_without_image_is_rejected_at_dispatch() {
 }
 
 #[test]
+fn the_run_alias_boots_the_default_image_when_no_source_is_named() {
+    // `mvmctl run -- <cmd>` dispatches through `machine run` but has always
+    // booted the default image when given no source; the documented-surface
+    // e2e and the CLI reference both rely on it.
+    let mut args = parse_run(&["run", "--no-detect", "--", "/bin/true"]).expect("parse");
+    args.default_image_when_sourceless = true;
+    assert_eq!(
+        args.resolve_mode(false)
+            .expect("the run alias boots the default image"),
+        MachineRunMode::Transient
+    );
+
+    // It waives only the source: a command is still required.
+    let mut args = parse_run(&["run", "--no-detect"]).expect("parse");
+    args.default_image_when_sourceless = true;
+    let err = args
+        .resolve_mode(false)
+        .expect_err("a sourceless run still needs a command");
+    assert!(
+        err.to_string().contains("command"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn transient_run_without_argv_is_rejected_at_dispatch() {
     // Argv is no longer clap-required (persistent/interactive modes boot
     // without a command), so a bare transient run parses and is refused at
@@ -4188,7 +4213,10 @@ fn start_resolver_recreates_with_force() {
 /// is applied until the machine starts.
 fn register_writable_state_volume(machine: &str) {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
@@ -4250,7 +4278,10 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
 
     let _state = IsolatedMachineState::new();
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
@@ -4358,4 +4389,30 @@ fn a_projects_allow_list_takes_effect_through_every_verb() {
     );
     assert_eq!(through_run, through_machine_run);
     assert_eq!(through_run, through_create);
+}
+
+/// `--attach` dispatches into a machine that is already running, so it boots
+/// nothing and has no source to infer. Inferring one anyway turned an attach
+/// started from a Rust checkout into an OCI `rust:1-alpine` boot, which
+/// `--entrypoint` then refused.
+#[test]
+fn an_attached_entrypoint_infers_no_boot_source() {
+    use crate::commands::vm::exec::Inference;
+    let attach = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "web",
+        "--stdin",
+        "/tmp/script.sh",
+    ])
+    .expect("attach parses");
+    assert_eq!(attach.source_inference(), Inference::ExplicitOnly);
+
+    let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("detach parses");
+    assert_eq!(detached.source_inference(), Inference::ExplicitOnly);
+
+    let transient = parse_run(&["run", "--", "true"]).expect("transient run parses");
+    assert_eq!(transient.source_inference(), Inference::Enabled);
 }

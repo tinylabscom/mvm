@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 6
+ABI_MINOR: Final = 7
 
 
 class Classification(str, Enum):
@@ -28,6 +28,20 @@ class Method:
     key: str
     classification: Classification
     summary: str
+
+
+#: Inspect a built manifest slot and its optional snapshot.
+MANIFEST_INFO: Final = "manifest.info"
+
+
+#: List built manifest slots with orphan and tag-intersection
+#: filters.
+MANIFEST_LIST: Final = "manifest.list"
+
+
+#: Verify built manifest artifact checksums; signature verification
+#: is refused.
+MANIFEST_VERIFY: Final = "manifest.verify"
 
 
 #: Reports what the backend can do.
@@ -209,6 +223,9 @@ TELEMETRY_STATUS: Final = "telemetry.status"
 
 
 METHODS: dict[str, Method] = {
+    "manifest.info": Method(key="manifest_info", classification=Classification.PROD_SAFE, summary="Inspect a built manifest slot and its optional snapshot."),
+    "manifest.list": Method(key="manifest_list", classification=Classification.PROD_SAFE, summary="List built manifest slots with orphan and tag-intersection filters."),
+    "manifest.verify": Method(key="manifest_verify", classification=Classification.PROD_SAFE, summary="Verify built manifest artifact checksums; signature verification is refused."),
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
     "entrypoint.call": Method(key="entrypoint_call", classification=Classification.PROD_SAFE, summary="Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."),
     "machine.create": Method(key="machine_create", classification=Classification.PROD_SAFE, summary="Persists a machine definition without booting it."),
@@ -255,6 +272,9 @@ METHODS: dict[str, Method] = {
 }
 
 __all__ = [
+    "MANIFEST_INFO",
+    "MANIFEST_LIST",
+    "MANIFEST_VERIFY",
     "BACKEND_CAPABILITIES",
     "ENTRYPOINT_CALL",
     "MACHINE_CREATE",

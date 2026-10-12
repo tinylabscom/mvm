@@ -39,8 +39,12 @@ To run from the checkout, one build is enough:
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build --release
-./target/release/mvmctl machine run --image alpine -- echo ok
+./target/release/mvmctl image pull alpine
+./target/release/mvmctl machine run --name smoke --image alpine -- echo ok
 ```
+
+The smoke run is named so it boots cold; an unnamed run would instead claim a
+standby prepared by `mvmctl pool warm` and refuse without one.
 
 A root `cargo build` produces only `mvmctl`. The per-VM helpers it spawns —
 `mvm-hvf-supervisor`, `mvm-network-endpoint` — are separate executables, and a
@@ -64,14 +68,15 @@ install -m 0755 \
   ~/.local/bin/
 ```
 
-### From crates.io
+### From source
 
-The GitHub release tarball is preferred for runtime use because it includes the
-adjacent host helper binaries. `cargo install` installs only the `mvmctl` CLI and
-is useful for CLI-only inspection or development.
+`mvmctl` is not published to crates.io; only the public `mvm-contract` library
+is. The GitHub release tarball is preferred for runtime use because it includes
+the adjacent host helper binaries. Installing from a checkout gives only the
+`mvmctl` CLI and is useful for CLI-only inspection or development.
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 `mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries. A contributor `mvmctl` run from its checkout signs the supervisor it builds; sign copies you install elsewhere yourself.
@@ -108,10 +113,12 @@ mvmctl doctor
 mkdir my-app && cd my-app
 mvmctl init .
 mvmctl machine build
-mvmctl machine run --manifest .
+mvmctl machine run --name my-app --manifest .
 ```
 
-`mvmctl init` scaffolds the project. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. The builder VM image is built in [mvm-images](https://github.com/tinylabscom/mvm-images): when developing from this source checkout with an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it is built from that checkout, and otherwise fetched from the signed image set `images.lock` pins. The cache is reused only when its recorded fingerprint matches the selected source, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set; on a miss or any drift the image is rebuilt or refetched, validated in staging, and only then promoted into the live cache. Run with `--verbose` to see the safe cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`.
+`mvmctl init` scaffolds the project. The run is named because an unnamed run
+must claim a prepared warm standby, and `pool warm` prepares only OCI and
+default images. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. The builder VM image is built in [mvm-images](https://github.com/tinylabscom/mvm-images): when developing from this source checkout with an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it is built from that checkout, and otherwise fetched from the signed image set `images.lock` pins. The cache is reused only when its recorded fingerprint matches the selected source, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set; on a miss or any drift the image is rebuilt or refetched, validated in staging, and only then promoted into the live cache. Run with `--verbose` to see the safe cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`.
 
 ## Troubleshooting
 

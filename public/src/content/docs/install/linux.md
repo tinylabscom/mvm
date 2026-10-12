@@ -55,14 +55,15 @@ install -m 0755 \
   ~/.local/bin/
 ```
 
-### From crates.io
+### From source
 
-The GitHub release tarball is preferred for runtime use because it includes the
-adjacent host helper binaries. `cargo install` installs only the `mvmctl` CLI and
-is useful for CLI-only inspection or development.
+`mvmctl` is not published to crates.io; only the public `mvm-contract` library
+is. The GitHub release tarball is preferred for runtime use because it includes
+the adjacent host helper binaries. Installing from a checkout gives only the
+`mvmctl` CLI and is useful for CLI-only inspection or development.
 
 ```bash
-cargo install mvmctl
+cargo install --locked --git https://github.com/tinylabscom/mvm mvmctl
 ```
 
 ## Verify
@@ -79,10 +80,13 @@ mvmctl doctor
 mkdir my-app && cd my-app
 mvmctl init .
 mvmctl machine build
-mvmctl machine run --manifest .
+mvmctl machine run --name my-app --manifest .
 ```
 
-`mvmctl init` scaffolds an `mvm.toml` + `flake.nix` in your project. `mvmctl machine build` reads `mvm.toml` and builds the rootfs via Nix (using your flake's `mvm.lib.x86_64-linux.mkGuest` call); `mvmctl machine run --manifest .` boots it on Firecracker. Expected cold boot: ≤ 200ms.
+The run is named because an unnamed run must claim a prepared warm standby,
+and `pool warm` prepares only OCI and default images; a named run boots cold.
+
+`mvmctl init` scaffolds an `mvm.toml` + `flake.nix` in your project. `mvmctl machine build` reads `mvm.toml` and builds the rootfs via Nix (using your flake's `mvm.lib.x86_64-linux.mkGuest` call); `mvmctl machine run --name my-app --manifest .` boots it on Firecracker. Expected cold boot: ≤ 200ms.
 
 (Bare `mvmctl run` is the *transient* verb and needs a command — `mvmctl run --image alpine -- uname -a`. Without one it exits with an error rather than booting your project.)
 

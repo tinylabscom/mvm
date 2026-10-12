@@ -29,15 +29,20 @@ You have an OCI image reference and want to run one command in a fresh
 microVM without writing a flake or installing host Nix.
 
 ```bash
-mvmctl doctor --workflow cli-run                # preflight
-mvmctl run --image alpine -- uname -a           # pull/cache, boot, run, tear down
-mvmctl image inspect alpine                     # inspect cached provenance
+mvmctl doctor --workflow cli-run                 # preflight
+mvmctl bootstrap                                # prepare shared artifacts
+mvmctl image pull alpine                        # prepare this OCI image
+export MVM_RESIDENCY=warm                        # enable prepared claims
+mvmctl pool warm 1 --image alpine               # prepare its launch shape
+mvmctl run --image alpine -- uname -a            # claim, run, tear down
+mvmctl image inspect alpine                      # inspect cached provenance
 ```
 
-The first run may pull and materialize the image. Subsequent runs reuse the
-cache when the resolved image and policy inputs still match. Production image
-runs should use digest-pinned refs and the existing OCI policy verification
-path.
+`machine run` does not pull or materialize. Preparation is explicit so a
+successful warm-eligible launch remains strictly below 300ms; a cache or
+standby miss fails quickly with the command needed to prepare it. Production
+image runs should use digest-pinned refs and the existing OCI policy
+verification path.
 
 For the higher-level `mvmctl machine` workflow map, see
 [Machine use cases](/guides/machine-use-cases/). For explicit network, volume,
@@ -59,9 +64,12 @@ macOS, GPU, and architecture limits, see
 You have a `flake.nix` (or want to scaffold one) and want a microVM
 booted from it.
 
+The run is named: an unnamed run must claim a prepared warm standby, and
+`pool warm` prepares only OCI and default images, so a named flake run boots cold.
+
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
-mvmctl machine run --flake . --cpus 2 --memory 1024      # build + boot
+mvmctl machine run --name my-app --flake . --cpus 2 --memory 1024   # build + boot
 mvmctl machine stop --all                                     # tear down
 ```
 
@@ -137,8 +145,13 @@ to launch.
 ```bash
 mvmctl doctor --workflow bundle-run          # preflight (no host rust needed)
 mvmctl bundle fetch ./my-app.mvmpkg          # verify the signed bundle
-mvmctl bundle install ./my-app.mvmpkg        # install it into ~/.mvm/bundles/
+mvmctl run ./my-app.mvmpkg -- <cmd>          # verify, install on first use, boot
 ```
+
+`mvmctl run` checks the bundle's signature against your trust store every time
+and installs it into `~/.mvm/bundles/` the first time. `mvmctl bundle install`
+does the install on its own, for a host that should hold the bundle before
+anything runs it.
 
 `mvmctl machine check-artifact` verifies the same bundle without installing
 or booting it, and shows the posture it declares — the ceilings any launch of
@@ -171,8 +184,14 @@ builder VM is headless (it only exists to run `nix build` on your
 behalf), so an interactive shell means booting a dev-tier *workload*
 and attaching your terminal to it.
 
+An unnamed `-it` run claims a prepared warm standby like any other unnamed
+transient run, and refuses without one:
+
 ```bash
 mvmctl doctor --workflow dev-shell              # preflight (no host rust needed)
+mvmctl image pull alpine
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -it -- /bin/sh  # boot + drop into shell
 # inside the shell: do work; exit / Ctrl+D tears the VM down
 ```

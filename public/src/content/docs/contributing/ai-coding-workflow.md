@@ -103,13 +103,21 @@ scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just bdd::live-ci
 
 The controller creates an Intel C3 Spot VM with nested KVM and no Google
 service account or OAuth scopes, refuses project-wide SSH keys, waits for SSH
-readiness, transfers only git-tracked files from the current worktree, prepares the repository's
-pinned Rust/Zig/Firecracker test toolchain, runs the request, downloads results, and deletes
+readiness, transfers only git-tracked files from the current worktree, restores
+the exact public commit identity without transferring local Git history,
+prepares the pinned Rust/Zig/Firecracker test toolchain, runs the request,
+downloads results, and deletes
 the instance even when the test fails. This is only a test/dev-tier KVM
 provider: do not use it for Nix builds/evals, ordinary compilation, or work the
 builder VM can perform. Before each real run, obtain explicit operator
 authorization for both the billable VM and tracked-file checkout transfer unless
 that exact invocation was already authorized.
+
+The `bdd::live-ci` recipe downloads the published, digest-verified workload
+kernel into the isolated worktree cache before running its KVM scenarios; it
+does not compile a kernel on the disposable host. The remote source identity
+must be reachable from the public `mvm` repository, so push or merge the
+worktree commit before requesting a live run.
 
 ## CVE-2026-80521 preset
 
@@ -269,29 +277,22 @@ Two notes from experience:
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —
   it does not run on pull requests.
-- `release.yml` branch dispatches build host archives and the complete guest
-  runtime, but cannot prove a signed installation: the installed runtime accepts
-  only its exact version-tag signing identity. A dispatch against an existing
-  version tag rehearses signed-runtime installation and boot, then uploads a
-  disposable draft and deletes it; only a tag push publishes. Do not move a tag
-  to reuse a failed release version. Stable promotion requires verification of
-  the published signatures and provenance, fresh-install guest boots, native
-  deb/rpm installation, and installation of the generated AUR/Nix recipes.
-  CLI releases do not dispatch crates.io publication: internal workspace crates
-  are not an approved registry distribution. A build artifact or deleted
-  rehearsal draft is never publication evidence.
-- Distro-package pull requests retain eight native install/remove lanes using
-  authenticated existing host archives and a confined synthetic guest-runtime
-  fixture. Their `fixture-*` artifacts test packaging mechanics only; they
-  cannot boot the new runtime or satisfy release acceptance. Tag builds use the
-  actual signed runtime, and post-publication lanes download the published
-  packages rather than rebuilding them.
+- A stable `release.yml` tag is promoted only after verification of the
+  published signatures and provenance, fresh-install guest boots, native
+  install of the published deb/rpm packages, and installation of the generated
+  AUR/Nix recipes. A build artifact or a deleted dry-run draft is never
+  publication evidence.
 - Website/docs changes under `public/` are built and validated on PRs by
   `website.yml` and deploy to Cloudflare Workers Static Assets only after merge.
 - The merge queue runs the required `Test` check on the synthetic merge commit.
   Once a PR is queued, further pushes restart its checks. Wait for green checks
   plus queue merge before considering the work landed, and sync the main checkout
   (`git fetch origin && git pull --ff-only origin main`) immediately after.
+- The release and nightly documented-surface Linux gate runs two required
+  Firecracker jobs with `MVM_BDD_SHARD=0/2` and `1/2`. Each executes a disjoint,
+  deterministic partition of the complete scenario inventory; a green shard
+  alone is not full coverage. The macOS/HVF lane retains its unsharded inventory
+  and existing host-capability and recorded-run gates.
 
 Treat CI as the outer loop of the ladder above: everything through rung 7 should
 already be green locally before a PR is opened, so CI failures mean a

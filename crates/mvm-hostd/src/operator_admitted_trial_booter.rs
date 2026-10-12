@@ -471,51 +471,13 @@ impl OperatorConfiguredTrialBooter {
             stream_retention: StreamRetention::Ephemeral,
             attestation_mode: self.config.attestation.mode.clone(),
         };
-        let config = VmStartConfig {
-            name: vm_name.clone(),
-            rootfs_path: self.config.workload.rootfs_path.display().to_string(),
-            kernel_path: self
-                .config
-                .workload
-                .kernel_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            verity_path: self
-                .config
-                .workload
-                .verity_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            roothash: self.config.workload.roothash.clone(),
-            runtime_overlay_path: self
-                .config
-                .workload
-                .runtime_overlay_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            runtime_overlay_verity_path: self
-                .config
-                .workload
-                .runtime_overlay_verity_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            runtime_overlay_roothash: self.config.workload.runtime_overlay_roothash.clone(),
-            runtime_overlay_version: self.config.workload.runtime_overlay_version.clone(),
-            initrd_path: self
-                .config
-                .workload
-                .initrd_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            runtime_release_proof: self.config.workload.runtime_release_proof.clone(),
-            legacy_bundle_runtime: self.config.workload.legacy_bundle_runtime.clone(),
-            cpus: self.config.workload.cpus,
-            memory_mib: self.config.workload.memory_mib,
-            tenant_id: Some(self.config.tenant.as_str().to_string()),
-            network_policy: network_policy.clone(),
-            ..Default::default()
-        };
-        verify_assurance_guest_protocol(&config)?;
+        let config = workload_start_config(
+            &self.config.workload,
+            &self.config.tenant,
+            &network_policy,
+            &vm_name,
+            backend_name,
+        )?;
         let campaign_now_unix_ms = now_unix_ms()?;
         let extension_context = ExtensionAdmissionContext::at(&cache_root, &verify);
         let keys_root = self.state_root.join("host-signing-keys");
@@ -696,9 +658,69 @@ pub(crate) fn verify_assurance_guest_protocol(
         Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Source(_)) => {
             anyhow::bail!("assurance requires a released runtime, not a source runtime");
         }
-        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyBundle(_)) => Ok(None),
+        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyBundle(_))
+        | Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_)) => Ok(None),
         None => anyhow::bail!("assurance requires authenticated guest runtime provenance"),
     }
+}
+
+fn workload_start_config(
+    workload: &ProviderWorkloadConfig,
+    tenant: &AssuranceId,
+    network_policy: &NetworkPolicy,
+    vm_name: &str,
+    backend_name: &str,
+) -> Result<VmStartConfig> {
+    let mut config = VmStartConfig {
+        name: vm_name.to_string(),
+        rootfs_path: workload.rootfs_path.display().to_string(),
+        kernel_path: workload
+            .kernel_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        verity_path: workload
+            .verity_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        roothash: workload.roothash.clone(),
+        runtime_overlay_path: workload
+            .runtime_overlay_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_overlay_verity_path: workload
+            .runtime_overlay_verity_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_overlay_roothash: workload.runtime_overlay_roothash.clone(),
+        runtime_overlay_version: workload.runtime_overlay_version.clone(),
+        initrd_path: workload
+            .initrd_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_release_proof: workload.runtime_release_proof.clone(),
+        legacy_bundle_runtime: workload.legacy_bundle_runtime.clone(),
+        cpus: workload.cpus,
+        memory_mib: workload.memory_mib,
+        tenant_id: Some(tenant.as_str().to_string()),
+        network_policy: network_policy.clone(),
+        ..Default::default()
+    };
+    // Resolve the ordinary cached runtime only when the operator has not
+    // selected one. Partial or invalid explicit selections must fail closed,
+    // not be replaced with a different runtime.
+    if config.runtime_overlay_path.is_none()
+        && config.runtime_overlay_verity_path.is_none()
+        && config.runtime_overlay_roothash.is_none()
+        && config.runtime_overlay_version.is_none()
+        && config.initrd_path.is_none()
+        && config.runtime_release_proof.is_none()
+        && config.legacy_bundle_runtime.is_none()
+    {
+        crate::run::attach_guest_runtime(&mut config, backend_name)
+            .context("resolving guest runtime for admitted assurance boot")?;
+    }
+    verify_assurance_guest_protocol(&config)?;
+    Ok(config)
 }
 
 impl AdmittedTrialBooter for OperatorConfiguredTrialBooter {
@@ -1036,6 +1058,58 @@ mod tests {
             })
             .expect_err("a stub or runtime-lean base is not a baked guest agent");
         }
+    }
+
+    #[test]
+    fn assurance_start_config_refuses_cached_source_runtime() {
+        let (_environment, home) = crate::test_fixtures::isolated_mvm_home();
+        crate::test_fixtures::install_runtime_overlay(home.path());
+        let rootfs = home.path().join("workload.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("rootfs");
+        let mut workload = ProviderWorkloadConfig {
+            image_name: AssuranceId::parse("assurance-workload").expect("image name"),
+            rootfs_path: rootfs,
+            artifact_digest: Sha256Digest::parse(format!("sha256:{}", "11".repeat(32)))
+                .expect("artifact digest"),
+            kernel_path: Some(home.path().join("vmlinux")),
+            kernel_digest: Some(
+                Sha256Digest::parse(format!("sha256:{}", "22".repeat(32))).expect("kernel digest"),
+            ),
+            runtime_overlay_path: None,
+            runtime_overlay_verity_path: None,
+            runtime_overlay_roothash: None,
+            runtime_overlay_version: None,
+            initrd_path: None,
+            runtime_release_proof: None,
+            legacy_bundle_runtime: None,
+            verity_path: None,
+            roothash: None,
+            backend: ProviderBackend::Firecracker,
+            cpus: 1,
+            memory_mib: 256,
+            boot_timeout_seconds: 60,
+        };
+        let error = workload_start_config(
+            &workload,
+            &AssuranceId::parse("assurance-tenant").expect("tenant"),
+            &NetworkPolicy::deny_all(),
+            "assurance-runtime-test",
+            "firecracker",
+        )
+        .expect_err("a cached source runtime must not satisfy assurance");
+        assert!(format!("{error:#}").contains("unsigned development runtimes"));
+
+        // An incomplete operator selection must not be replaced by that cache.
+        workload.runtime_overlay_path = Some(home.path().join("selected.ext4"));
+        let error = workload_start_config(
+            &workload,
+            &AssuranceId::parse("assurance-tenant").expect("tenant"),
+            &NetworkPolicy::deny_all(),
+            "assurance-runtime-test",
+            "firecracker",
+        )
+        .expect_err("partial explicit runtime must fail without cache fallback");
+        assert!(format!("{error:#}").contains("selected guest runtime has no version"));
     }
 
     fn signed_extension_pack(

@@ -12,8 +12,12 @@ export MVM_HOME="$PWD/.mvm-ci"
 
 mvmctl doctor --json
 mvmctl machine build ./ci-worker --json
-mvmctl run --timeout 600 --receipt /tmp/mvm-run-receipt.json -- ./scripts/test.sh
+mvmctl run --name ci-test --timeout 600 --receipt /tmp/mvm-run-receipt.json -- ./scripts/test.sh
 ```
+
+The run is named so it boots cold on a fresh CI host. An unnamed run would have
+to claim a warm standby of the image it boots, prepared earlier in the job with
+`mvmctl pool warm` under `MVM_RESIDENCY=warm`, and refuses without one.
 
 Keep generated receipts as build artifacts when they are useful for audit or
 debugging. Do not persist the full runtime state unless the job explicitly

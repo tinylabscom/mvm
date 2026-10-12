@@ -130,6 +130,7 @@ jobs:
         run: |
           python3 scripts/release/sign_macos.py \
             --payload crates/mvm-sdk/sdks/python/mvm/_native \
+            --skip-unconfigured \
             --report "${RUNNER_TEMP}/pypi-notarization.json"
 
       - name: Retain macOS notarization evidence

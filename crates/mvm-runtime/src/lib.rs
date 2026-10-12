@@ -26,8 +26,11 @@
 pub mod build_env;
 mod host_shell;
 mod legacy_bundle_runtime;
+mod legacy_portable_runtime;
 #[cfg(feature = "test-support")]
 pub use legacy_bundle_runtime::fixtures::signed_legacy_runtime_fixture;
+#[cfg(any(test, feature = "test-support"))]
+pub use legacy_portable_runtime::fixtures::signed_legacy_portable_runtime_fixture;
 pub mod machine;
 pub mod runtime_evidence;
 pub mod sdk_sidecar;
@@ -97,6 +100,9 @@ pub mod mock;
 #[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
 pub mod netinit_audit;
+/// Private, pid-owned staging directories for transient plaintext, and the
+/// sweep that reclaims those whose owner died.
+pub mod private_staging;
 /// QEMU workload runtime backend (dev/test).
 /// Process-local reservation and rollback for resident warm parents.
 pub mod resident_pool;

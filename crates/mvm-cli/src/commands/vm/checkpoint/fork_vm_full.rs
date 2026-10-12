@@ -934,6 +934,7 @@ mod tests {
         }
         fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
             Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+                kernel: None,
                 initramfs: None,
                 disks: vec![mvm_vmm::runtime_artifacts::RuntimeArtifact {
                     path: self.0.clone(),

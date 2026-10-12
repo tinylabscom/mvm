@@ -28,6 +28,16 @@ pub enum RuntimeLaunchBinding {
         rootfs_path: PathBuf,
         initramfs_path: Option<PathBuf>,
     },
+    LegacyPortable {
+        proof: super::vm_backend::LegacyPortableRuntimeProof,
+        rootfs_path: PathBuf,
+        kernel_path: PathBuf,
+        overlay_path: PathBuf,
+        overlay_verity_path: PathBuf,
+        initramfs_path: PathBuf,
+        overlay_roothash: String,
+        version: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,8 +55,14 @@ pub struct CliRuntimeLaunchBinding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RuntimeBindingProvenance {
-    Release { proof: RuntimeReleaseProof },
-    Source { version: String, arch: GuestArch },
+    Release {
+        proof: RuntimeReleaseProof,
+    },
+    Source {
+        version: String,
+        arch: GuestArch,
+        archive_sha256: String,
+    },
 }
 
 impl RuntimeLaunchBinding {
@@ -55,6 +71,31 @@ impl RuntimeLaunchBinding {
             Self::CliAssembly(binding) => {
                 config.legacy_bundle_runtime = None;
                 binding.apply_to_config(config);
+            }
+            Self::LegacyPortable {
+                proof,
+                rootfs_path,
+                kernel_path,
+                overlay_path,
+                overlay_verity_path,
+                initramfs_path,
+                overlay_roothash,
+                version,
+            } => {
+                config.rootfs_path = rootfs_path.display().to_string();
+                config.kernel_path = Some(kernel_path.display().to_string());
+                config.initrd_path = Some(initramfs_path.display().to_string());
+                config.runtime_overlay_path = Some(overlay_path.display().to_string());
+                config.runtime_overlay_verity_path =
+                    Some(overlay_verity_path.display().to_string());
+                config.runtime_overlay_roothash = Some(overlay_roothash.clone());
+                config.runtime_overlay_version = Some(version.clone());
+                config.legacy_portable_runtime = Some(proof.clone());
+                config.legacy_bundle_runtime = None;
+                config.runtime_release_proof = None;
+                config.source_runtime_archive_sha256 = None;
+                config.unsigned_runtime_development = false;
+                config.bundle_boot_assets = None;
             }
             Self::LegacyBundle {
                 proof,
@@ -66,12 +107,15 @@ impl RuntimeLaunchBinding {
                     .as_ref()
                     .map(|path| path.display().to_string());
                 config.legacy_bundle_runtime = Some(proof.clone());
+                config.legacy_portable_runtime = None;
+                config.bundle_boot_assets = None;
                 config.runtime_overlay_version = None;
                 config.runtime_overlay_path = None;
                 config.runtime_overlay_verity_path = None;
                 config.runtime_overlay_roothash = None;
                 config.runtime_release_proof = None;
                 config.unsigned_runtime_development = false;
+                config.source_runtime_archive_sha256 = None;
             }
         }
     }
@@ -81,6 +125,9 @@ impl CliRuntimeLaunchBinding {
     /// Copy untrusted selection data, not authority. Callers must authenticate
     /// the enclosing record and verify these artifacts before executing them.
     pub fn apply_to_config(&self, config: &mut super::vm_backend::VmStartConfig) {
+        config.legacy_bundle_runtime = None;
+        config.legacy_portable_runtime = None;
+        config.bundle_boot_assets = None;
         config.runtime_overlay_version = Some(self.version().to_owned());
         config.runtime_overlay_path = Some(self.overlay_path.display().to_string());
         config.runtime_overlay_verity_path = Some(self.overlay_verity_path.display().to_string());
@@ -88,6 +135,10 @@ impl CliRuntimeLaunchBinding {
         config.runtime_overlay_roothash = Some(self.overlay_roothash.clone());
         config.runtime_release_proof = self.release_proof().cloned();
         config.unsigned_runtime_development = self.release_proof().is_none();
+        config.source_runtime_archive_sha256 = match &self.provenance {
+            RuntimeBindingProvenance::Release { .. } => None,
+            RuntimeBindingProvenance::Source { archive_sha256, .. } => Some(archive_sha256.clone()),
+        };
     }
 
     pub fn release_proof(&self) -> Option<&RuntimeReleaseProof> {
@@ -154,6 +205,7 @@ mod tests {
             provenance: RuntimeBindingProvenance::Source {
                 version: "1.2.3".into(),
                 arch: GuestArch::X86_64,
+                archive_sha256: "c".repeat(64),
             },
             ..binding
         };
@@ -163,8 +215,19 @@ mod tests {
         let source = RuntimeLaunchBinding::CliAssembly(source);
         let value = serde_json::to_value(&source).unwrap();
         assert_eq!(
-            serde_json::from_value::<RuntimeLaunchBinding>(value).unwrap(),
+            serde_json::from_value::<RuntimeLaunchBinding>(value.clone()).unwrap(),
             source
         );
+        let mut missing_digest = value;
+        missing_digest["provenance"]
+            .as_object_mut()
+            .unwrap()
+            .remove("archive_sha256");
+        assert!(serde_json::from_value::<RuntimeLaunchBinding>(missing_digest).is_err());
+        let mut config = super::super::vm_backend::VmStartConfig::default();
+        source.apply_to_config(&mut config);
+        assert_eq!(config.source_runtime_archive_sha256, Some("c".repeat(64)));
+        wrapped.apply_to_config(&mut config);
+        assert_eq!(config.source_runtime_archive_sha256, None);
     }
 }

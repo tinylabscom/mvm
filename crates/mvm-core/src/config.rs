@@ -241,6 +241,15 @@ pub fn mvm_cache_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::Pat
     mvm_home.as_ref().join("cache")
 }
 
+/// OCI image cache, and the guest runtime injected into images from it:
+/// `<mvm_home>/cache/oci`.
+///
+/// One answer for every caller that prepares or boots an OCI image, so the CLI
+/// and the host library resolve an image's guest runtime from the same place.
+pub fn oci_cache_dir() -> std::path::PathBuf {
+    mvm_cache_dir_at(mvm_home()).join("oci")
+}
+
 /// The cache directory of the *default* root (`$HOME/.mvm/cache`),
 /// deliberately ignoring the `MVM_HOME` override. Isolated sessions
 /// (worktrees pointing `MVM_HOME` at a tempdir) use this to
@@ -425,7 +434,7 @@ pub fn mvm_share_dir() -> String {
 }
 
 /// Root directory for application-dependency volumes sealed by
-/// `mvm_sdk::compile::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
+/// `mvm_compiler::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
 /// Each immediate child is a `<volume_hash>/` directory containing
 /// `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, `meta.json`.
 ///
@@ -477,7 +486,7 @@ pub fn mvm_volumes_env() -> Vec<String> {
 /// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
 /// volume. The caller is responsible for verifying the directory
 /// exists and matches its sealed manifest — see
-/// `mvm_sdk::compile::deps_audit::verify_sealed_volume`.
+/// `mvm_compiler::deps_audit::verify_sealed_volume`.
 pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }
@@ -529,6 +538,13 @@ pub fn registry_pack_revocation_store_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home())
         .join("registry")
         .join("revocations")
+}
+
+/// Owner-only cache for the signed image-set revocation list and its
+/// independently persisted rollback checkpoint. Kept apart from the
+/// registry-pack feed: the two are signed by different authorities.
+pub fn image_set_revocation_store_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("image-set-revocations")
 }
 
 /// Operator-selected release identity for the cached registry-pack revocation
@@ -936,6 +952,20 @@ pub fn vm_stream_transcript_dir_at(state_dir: &std::path::Path) -> std::path::Pa
 /// [`vm_stream_transcript_dir_at`].
 pub fn vm_stream_transcript_dir(name: &str) -> std::path::PathBuf {
     vm_stream_transcript_dir_at(&vm_state_dir(name))
+}
+
+/// Protected workload-output families are durable diagnostic state, not VM
+/// runtime or instance state. Stop, remove and orphan reaping do not own this
+/// tree; only authenticated retention owns payload retirement. Legacy stream
+/// captures remain at [`vm_stream_transcript_dir`], without migration.
+///
+/// Encode the concrete name into one component so even a rejected caller name
+/// cannot escape the diagnostics root. Original tenant/VM identity remains
+/// authenticated in every generation, not inferred from this directory name.
+pub fn vm_protected_stream_dir(name: &str) -> std::path::PathBuf {
+    mvm_audit_dir()
+        .join("workload-output")
+        .join(hex::encode(name.as_bytes()))
 }
 
 /// Per-VM JSON file of `(guest var, placeholder)` pairs the

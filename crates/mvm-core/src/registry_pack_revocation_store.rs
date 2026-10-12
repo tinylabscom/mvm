@@ -1,17 +1,14 @@
 //! Durable, fail-closed local cache for signed registry-pack revocations.
 //!
-//! The checkpoint is persisted before the signed bytes. A crash between those
-//! writes can make the cache unusable until a verified refresh, but cannot make
-//! an older feed appear current. The owner-only directory protects this local
-//! checkpoint from other accounts; it is not a hardware rollback counter.
+//! The file mechanics and crash ordering live in
+//! [`crate::signed_feed_store`]; this module binds them to the registry-pack
+//! checkpoint, verifier and directory. The checkpoint is persisted before the
+//! signed bytes, so a crash between those writes can make the cache unusable
+//! until a verified refresh, but cannot make an older feed appear current.
 
-use std::fs;
-use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::packs::{KeylessTrust, Sha256Hex};
@@ -19,12 +16,7 @@ use crate::registry_pack_revocation::{
     RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
     verify_registry_pack_revocations,
 };
-use crate::util::atomic_io::{FileLock, write_private};
-
-const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
-const MAX_BUNDLE_BYTES: usize = 1024 * 1024;
-const MAX_STATE_BYTES: usize = 3 * 1024 * 1024;
-const MAX_CHECKPOINT_BYTES: usize = 1024;
+use crate::signed_feed_store::{FeedCheckpoint, FeedStoreFault, SignedFeedStore};
 
 #[derive(Debug, Error)]
 pub enum RegistryPackRevocationStoreError {
@@ -42,25 +34,36 @@ pub enum RegistryPackRevocationStoreError {
     Storage(String),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoredFeed {
-    document_base64: String,
-    bundle_base64: String,
-    bundle_sha256: Sha256Hex,
-    checkpoint: RegistryPackRevocationCheckpoint,
+impl From<FeedStoreFault> for RegistryPackRevocationStoreError {
+    fn from(fault: FeedStoreFault) -> Self {
+        match fault {
+            FeedStoreFault::Missing => Self::Missing,
+            FeedStoreFault::Incomplete => Self::Incomplete,
+            FeedStoreFault::Corrupt => Self::Corrupt,
+            FeedStoreFault::TooLarge => Self::TooLarge,
+            FeedStoreFault::Storage(reason) => Self::Storage(reason),
+        }
+    }
 }
 
-struct FeedBytes {
-    document: Vec<u8>,
-    bundle: Vec<u8>,
-    checkpoint: RegistryPackRevocationCheckpoint,
+impl FeedCheckpoint for RegistryPackRevocationCheckpoint {
+    fn document_sha256(&self) -> &Sha256Hex {
+        &self.sha256
+    }
+
+    fn is_well_formed(&self) -> bool {
+        self.sequence != 0
+    }
+
+    fn supersedes(&self, earlier: &Self) -> bool {
+        self.sequence > earlier.sequence
+    }
 }
 
 /// A caller supplies fetched bytes; this type performs no network access.
 #[derive(Debug, Clone)]
 pub struct RegistryPackRevocationStore {
-    root: PathBuf,
+    feed: SignedFeedStore,
 }
 
 impl RegistryPackRevocationStore {
@@ -71,7 +74,9 @@ impl RegistryPackRevocationStore {
 
     /// Use an explicit directory, primarily for isolated test homes.
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            feed: SignedFeedStore::new(root),
+        }
     }
 
     /// Authenticate and durably cache a fetched feed before it can be used.
@@ -123,32 +128,11 @@ impl RegistryPackRevocationStore {
             Option<&RegistryPackRevocationCheckpoint>,
         ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationError>,
     {
-        check_sizes(document, bundle)?;
-        self.ensure_root()?;
-        let _lock = self.lock()?;
-        let previous = self.read_checkpoint_for_update()?;
-        let checkpoint = verify(document, bundle, now, previous.as_ref())?;
-        if checkpoint.sha256 != Sha256Hex::from_bytes(document) {
-            return Err(RegistryPackRevocationStoreError::Corrupt);
-        }
-        let stored = StoredFeed {
-            document_base64: base64::engine::general_purpose::STANDARD.encode(document),
-            bundle_base64: base64::engine::general_purpose::STANDARD.encode(bundle),
-            bundle_sha256: Sha256Hex::from_bytes(bundle),
-            checkpoint: checkpoint.clone(),
-        };
-        let checkpoint_bytes = serde_json::to_vec(&checkpoint)
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-        let state_bytes = serde_json::to_vec(&stored)
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-        if state_bytes.len() > MAX_STATE_BYTES {
-            return Err(RegistryPackRevocationStoreError::TooLarge);
-        }
-        write_private(&self.checkpoint_path(), &checkpoint_bytes)
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-        write_private(&self.state_path(), &state_bytes)
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-        Ok(checkpoint)
+        self.feed
+            .update_with(document, bundle, |bytes, signature, previous| {
+                verify(bytes, signature, now, previous)
+                    .map_err(RegistryPackRevocationStoreError::Verification)
+            })
     }
 
     fn load_with<T, F>(
@@ -164,173 +148,32 @@ impl RegistryPackRevocationStore {
             &RegistryPackRevocationCheckpoint,
         ) -> Result<T, RegistryPackRevocationStoreError>,
     {
-        self.ensure_root()?;
-        let _lock = self.lock()?;
-        let feed = self
-            .read_state()?
-            .ok_or(RegistryPackRevocationStoreError::Missing)?;
-        verify(&feed.document, &feed.bundle, now, &feed.checkpoint)
+        self.feed
+            .load_with(|bytes, signature, checkpoint| verify(bytes, signature, now, checkpoint))
     }
 
-    fn ensure_root(&self) -> Result<(), RegistryPackRevocationStoreError> {
-        match fs::symlink_metadata(&self.root) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(RegistryPackRevocationStoreError::Corrupt);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(RegistryPackRevocationStoreError::Storage(error.to_string()));
-            }
-        }
-        crate::config::create_private_dir(&self.root)
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))
-    }
-
-    fn lock(&self) -> Result<FileLock, RegistryPackRevocationStoreError> {
-        FileLock::acquire(&self.state_path())
-            .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))
-    }
-
+    #[cfg(test)]
     fn state_path(&self) -> PathBuf {
-        self.root.join("feed.json")
+        self.feed.state_path()
     }
 
+    #[cfg(test)]
     fn checkpoint_path(&self) -> PathBuf {
-        self.root.join("checkpoint.json")
+        self.feed.checkpoint_path()
     }
-
-    fn read_state(&self) -> Result<Option<FeedBytes>, RegistryPackRevocationStoreError> {
-        let checkpoint = read_limited(&self.checkpoint_path(), MAX_CHECKPOINT_BYTES)?;
-        let state = read_limited(&self.state_path(), MAX_STATE_BYTES)?;
-        let (Some(checkpoint), Some(state)) = (checkpoint, state) else {
-            return if !self.checkpoint_path().exists() && !self.state_path().exists() {
-                Ok(None)
-            } else {
-                Err(RegistryPackRevocationStoreError::Incomplete)
-            };
-        };
-        let checkpoint = parse_checkpoint(&checkpoint)?;
-        let feed = decode_state(&state)?;
-        if feed.checkpoint != checkpoint {
-            return Err(RegistryPackRevocationStoreError::Incomplete);
-        }
-        Ok(Some(feed))
-    }
-
-    fn read_checkpoint_for_update(
-        &self,
-    ) -> Result<Option<RegistryPackRevocationCheckpoint>, RegistryPackRevocationStoreError> {
-        let checkpoint = read_limited(&self.checkpoint_path(), MAX_CHECKPOINT_BYTES)?;
-        let state = read_limited(&self.state_path(), MAX_STATE_BYTES)?;
-        match (checkpoint, state) {
-            (None, None) => Ok(None),
-            (None, Some(_)) => Err(RegistryPackRevocationStoreError::Incomplete),
-            (Some(checkpoint), state) => {
-                let checkpoint = parse_checkpoint(&checkpoint)?;
-                if let Some(state) = state {
-                    let feed = decode_state(&state)?;
-                    if feed.checkpoint.sequence > checkpoint.sequence
-                        || (feed.checkpoint.sequence == checkpoint.sequence
-                            && feed.checkpoint != checkpoint)
-                    {
-                        return Err(RegistryPackRevocationStoreError::Incomplete);
-                    }
-                }
-                Ok(Some(checkpoint))
-            }
-        }
-    }
-}
-
-fn parse_checkpoint(
-    bytes: &[u8],
-) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationStoreError> {
-    let checkpoint: RegistryPackRevocationCheckpoint =
-        serde_json::from_slice(bytes).map_err(|_| RegistryPackRevocationStoreError::Corrupt)?;
-    if checkpoint.sequence == 0 {
-        return Err(RegistryPackRevocationStoreError::Corrupt);
-    }
-    Ok(checkpoint)
-}
-
-fn decode_state(bytes: &[u8]) -> Result<FeedBytes, RegistryPackRevocationStoreError> {
-    let stored: StoredFeed =
-        serde_json::from_slice(bytes).map_err(|_| RegistryPackRevocationStoreError::Corrupt)?;
-    if stored.checkpoint.sequence == 0 {
-        return Err(RegistryPackRevocationStoreError::Corrupt);
-    }
-    let document = decode_limited(&stored.document_base64, MAX_DOCUMENT_BYTES)?;
-    let bundle = decode_limited(&stored.bundle_base64, MAX_BUNDLE_BYTES)?;
-    if Sha256Hex::from_bytes(&document) != stored.checkpoint.sha256
-        || Sha256Hex::from_bytes(&bundle) != stored.bundle_sha256
-    {
-        return Err(RegistryPackRevocationStoreError::Corrupt);
-    }
-    Ok(FeedBytes {
-        document,
-        bundle,
-        checkpoint: stored.checkpoint,
-    })
-}
-
-fn check_sizes(document: &[u8], bundle: &[u8]) -> Result<(), RegistryPackRevocationStoreError> {
-    if document.len() > MAX_DOCUMENT_BYTES || bundle.len() > MAX_BUNDLE_BYTES {
-        return Err(RegistryPackRevocationStoreError::TooLarge);
-    }
-    Ok(())
-}
-
-fn decode_limited(
-    encoded: &str,
-    limit: usize,
-) -> Result<Vec<u8>, RegistryPackRevocationStoreError> {
-    if encoded.len() > limit.div_ceil(3) * 4 + 4 {
-        return Err(RegistryPackRevocationStoreError::TooLarge);
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(encoded)
-        .map_err(|_| RegistryPackRevocationStoreError::Corrupt)?;
-    if bytes.len() > limit {
-        return Err(RegistryPackRevocationStoreError::TooLarge);
-    }
-    Ok(bytes)
-}
-
-fn read_limited(
-    path: &Path,
-    limit: usize,
-) -> Result<Option<Vec<u8>>, RegistryPackRevocationStoreError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(RegistryPackRevocationStoreError::Storage(error.to_string())),
-    };
-    if !metadata.file_type().is_file() {
-        return Err(RegistryPackRevocationStoreError::Corrupt);
-    }
-    let size = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
-    if size > limit {
-        return Err(RegistryPackRevocationStoreError::TooLarge);
-    }
-    let mut file = fs::File::open(path)
-        .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(u64::try_from(limit).unwrap_or(u64::MAX) + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| RegistryPackRevocationStoreError::Storage(error.to_string()))?;
-    if bytes.len() > limit {
-        return Err(RegistryPackRevocationStoreError::TooLarge);
-    }
-    Ok(Some(bytes))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use base64::Engine as _;
     use chrono::TimeZone;
 
     use super::*;
+    use crate::util::atomic_io::write_private;
+
+    type StoredFeed = crate::signed_feed_store::StoredFeed<RegistryPackRevocationCheckpoint>;
 
     fn at(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)

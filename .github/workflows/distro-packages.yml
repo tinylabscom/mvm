@@ -5,9 +5,11 @@ name: Linux distro packages
 # distributions per format, on both architectures, where the installed mvmctl
 # is run and every installed file is checked against the tarball's bytes.
 #
-# release.yml calls this with `tarballs: build`, packaging the archives its
-# build job just made; the release job then signs, attests and publishes the
-# packages with the tarballs. Anywhere else it packages a published release's
+# Each package also carries the release's guest runtime under
+# /usr/lib/mvmctl/guest-runtime. release.yml calls this with `tarballs: build`,
+# packaging the archives its build job just made with the guest runtime its
+# guest-runtime job built; the release job then signs, attests and publishes
+# the packages with the tarballs. Anywhere else it packages a published release's
 # tarballs instead, so the packaging path is exercised without a release
 # build: on pull requests that change it, nightly from Extended CI, and on
 # dispatch.
@@ -38,8 +40,6 @@ on:
       - .github/workflows/distro-packages.yml
       - scripts/build-distro-packages.sh
       - scripts/distro-package-smoke.sh
-      - scripts/test-distro-package-assembly.py
-      - scripts/test_distro_package_assembly.py
       - scripts/smoke-installed-release.py
       - scripts/test_smoke_installed_release.py
       - scripts/published-installed-boot.py
@@ -70,7 +70,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s scripts -p 'test_smoke_installed_release.py' -v
-          python3 -m unittest discover -s scripts -p 'test_distro_package_assembly.py' -v
           python3 -m unittest discover -s tests -p 'test_published_installed_boot.py' -v
           python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
           python3 -m unittest discover -s nix/packaging/aur -p 'test_*.py' -v
@@ -118,7 +117,7 @@ jobs:
           path: tarballs
           merge-multiple: true
 
-      - name: Download this run's signed guest runtime
+      - name: Download this run's guest runtime
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
@@ -130,7 +129,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-          PR_FIXTURE: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
@@ -143,10 +141,6 @@ jobs:
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
             --pattern 'mvmctl-*-unknown-linux-gnu.tar.gz*' --dir tarballs
-          if [ "${PR_FIXTURE}" != true ]; then
-            gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
-              --pattern "mvm-guest-bins-${tag}.tar.gz*" --dir guest-runtime
-          fi
           for archive in tarballs/*.tar.gz; do
             cosign verify-blob --bundle "${archive}.bundle" \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -154,6 +148,22 @@ jobs:
               "${archive}"
           done
           echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+          # The release's guest runtime, when it publishes one. A release that
+          # predates the asset gets a labelled stand-in so the packaging and
+          # install path is still exercised; release mode never publishes what
+          # it builds, so the stand-in cannot reach a user.
+          runtime="mvm-guest-bins-${tag}.tar.gz"
+          mkdir -p guest-runtime
+          if gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" --json assets \
+               --jq '.assets[].name' | grep -x "${runtime}" >/dev/null; then
+            gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "${runtime}" --pattern "${runtime}.sha256" --dir guest-runtime
+          else
+            echo "::notice::${tag} publishes no guest runtime; packaging a stand-in"
+            printf 'stand-in guest runtime for %s\n' "${tag}" > guest-runtime/STAND-IN
+            tar czf "guest-runtime/${runtime}" -C guest-runtime STAND-IN
+            (cd guest-runtime && sha256sum "${runtime}" > "${runtime}.sha256")
+          fi
 
       - name: Download and authenticate the published packages
         if: ${{ inputs.published_packages }}
@@ -204,20 +214,12 @@ jobs:
         if: ${{ !inputs.published_packages }}
         env:
           VERSION: ${{ steps.source.outputs.version }}
-          PR_FIXTURE: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            if [ "${PR_FIXTURE}" = true ]; then
-              # Preserve PR assembly/install coverage before the first signed
-              # runtime exists. These distinctly named fixture artifacts are
-              # not release evidence and can never enter a tag run.
-              python3 scripts/test-distro-package-assembly.py \
-                "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages
-            else
-              bash scripts/build-distro-packages.sh \
-                "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages guest-runtime
-            fi
+            bash scripts/build-distro-packages.sh \
+              "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages \
+              "guest-runtime/mvm-guest-bins-v${VERSION}.tar.gz"
           done
           ls -la distro-packages/
 
@@ -227,7 +229,7 @@ jobs:
       - name: Upload the packages
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-packages' || (inputs.published_packages && 'published-distro-packages' || 'distro-packages') }}
+          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
           path: |
             distro-packages/*.deb
             distro-packages/*.rpm
@@ -239,7 +241,7 @@ jobs:
         if: ${{ !inputs.published_packages }}
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-package-payloads' || 'distro-package-payloads' }}
+          name: distro-package-payloads
           path: distro-packages/*.sha256sums
           retention-days: 7
 
@@ -266,13 +268,13 @@ jobs:
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
-          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-packages' || (inputs.published_packages && 'published-distro-packages' || 'distro-packages') }}
+          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
           path: distro-packages
 
       - name: Download the payload manifests
         uses: actions/download-artifact@v8
         with:
-          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-package-payloads' || 'distro-package-payloads' }}
+          name: distro-package-payloads
           path: distro-packages
 
       - name: Install, run, and remove the package

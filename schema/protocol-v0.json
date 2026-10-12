@@ -2465,6 +2465,17 @@
                     "null"
                   ]
                 },
+                "seccomp_tier": {
+                  "description": "The seccomp tier the claiming launch's signed plan admits, for a child restored out of a standby parent that booted with no plan and so admitted no tier. The agent admits it before it acknowledges and before anything else starts a workload process; a guest that already admitted a different tier refuses it. Omitted from the wire when absent, so a caller that sends none reaches an agent built before the field; an agent that predates it refuses a request carrying it, which fails the claim rather than leaving the child unfiltered.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/SeccompTier"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "token": {
                   "default": [
                     0,
@@ -3941,6 +3952,17 @@
                   "default": false,
                   "type": "boolean"
                 },
+                "seccomp_tier": {
+                  "description": "The workload seccomp tier the guest holds admitted after this restore. Reported only when the request named one, so a host that never asks never sees the field; `None` when admission failed.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/SeccompTier"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "success": {
                   "type": "boolean"
                 }
@@ -5263,6 +5285,46 @@
         }
       },
       "additionalProperties": false
+    },
+    "SeccompTier": {
+      "description": "Cumulative seccomp profile tiers. Each tier is a strict superset of the previous one, adding more syscall permissions for broader workload needs.\n\nThe syscall lists cover x86_64 and aarch64 Linux. A name that does not exist on the target arch is skipped when the filter is built, so a tier may name both a legacy syscall and its `*at` replacement; both are needed for the capability to survive on both arches. Tier membership is defined by [`SeccompTier::syscalls`], which returns the full set of allowed syscall names for that tier.",
+      "oneOf": [
+        {
+          "description": "~40 syscalls: just enough to load and exit a binary (linker, glibc init).",
+          "type": "string",
+          "enum": [
+            "essential"
+          ]
+        },
+        {
+          "description": "~110 syscalls: adds signals, pipes, timers, process control, polling.",
+          "type": "string",
+          "enum": [
+            "minimal"
+          ]
+        },
+        {
+          "description": "~140 syscalls: adds file manipulation, fs ops. Default for most workloads.",
+          "type": "string",
+          "enum": [
+            "standard"
+          ]
+        },
+        {
+          "description": "~160 syscalls: adds sockets, connect, bind, sendmsg. For networked agents.",
+          "type": "string",
+          "enum": [
+            "network"
+          ]
+        },
+        {
+          "description": "All syscalls allowed. Dev/debug mode, no restrictions.",
+          "type": "string",
+          "enum": [
+            "unrestricted"
+          ]
+        }
+      ]
     },
     "ServiceId": {
       "description": "Reverse-DNS-like service identifier with a mandatory version segment.\n\nExamples: `host.kv.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.\n\nStrings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).",
