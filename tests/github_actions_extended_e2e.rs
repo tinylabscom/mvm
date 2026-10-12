@@ -74,7 +74,7 @@ fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd(
     );
     let readme = job_block(&workflow, "bdd-live-readme");
     assert!(
-        readme.contains(r#"[{"witness":"tool_live","timeout":60}]"#),
+        readme.contains(r#"[{"witness":"tool_live","timeout":60,"slot":1}]"#),
         "the focused matrix must contain only tool_live"
     );
     assert!(

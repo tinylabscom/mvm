@@ -241,7 +241,9 @@ jobs:
         # bundle_boot_live seals an OCI image into a signed .mvmpkg with the
         # home's own signer and boots it as `machine run ./witness.mvmpkg`: the
         # Firecracker boot witness for the single-file artifact.
-        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60}]' || '[{"witness":"ci_live","timeout":90},{"witness":"tool_live","timeout":60},{"witness":"bundle_boot_live","timeout":60}]') }}
+        # slot is the per-witness digit in the isolated state base the
+        # always-run cleanup removes; the job-cleanup script validates it.
+        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60,"slot":1}]' || '[{"witness":"ci_live","timeout":90,"slot":2},{"witness":"tool_live","timeout":60,"slot":1},{"witness":"bundle_boot_live","timeout":60,"slot":3}]') }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
@@ -290,6 +292,22 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
+      # The witness can run on the shared self-hosted KVM box: isolate its
+      # HOME/MVM_HOME/TMPDIR so the always-run cleanup at the end can kill
+      # exactly what this job started and remove exactly what it wrote.
+      - name: Isolate test state
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
+          mkdir -m 700 -- "$base"
+          mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
+          {
+            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$HOME"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"
+            printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
+          } >> "$GITHUB_ENV"
+
       - name: Verify tool credential boundaries on Linux
         if: matrix.witness == 'tool_live'
         run: |
@@ -333,7 +351,7 @@ jobs:
       - name: Dump VMM diagnostics on failure
         if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "${MVM_HOME:-$HOME/.mvm}"/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
             for f in firecracker.log console.log; do
@@ -343,6 +361,19 @@ jobs:
               fi
             done
           done
+
+      # Last step, always: kill by PID whatever this job started (a VMM
+      # launched through `sudo setsid` outlives the job's process tree), then
+      # remove the isolated HOME/MVM_HOME/TMPDIR it used. Required on every
+      # job that can run on the KVM pool.
+      - name: Clean isolated state
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
+            printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
+          fi
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here
