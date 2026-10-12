@@ -21,6 +21,16 @@ use mvm_core::plan::{BundleSecurityPosture, EnvironmentDescriptor, SecretBinding
 
 use super::entrypoint_resolve::ResolvedEntrypoint;
 
+/// The signed environment of the installed bundle `id_or_slot` names, its
+/// manifest signature checked against the trust store again. `None` when the
+/// key is a template slot, names no installed bundle, or the bundle carries
+/// no descriptor.
+pub fn installed_bundle_environment(
+    id_or_slot: &str,
+) -> anyhow::Result<Option<EnvironmentDescriptor>> {
+    mvm_runtime::vm::template::lifecycle::installed_bundle_environment(id_or_slot)
+}
+
 /// What the launch provides, in the terms a descriptor can check.
 #[derive(Debug, Clone, Copy)]
 pub struct EnvironmentRequest<'a> {
