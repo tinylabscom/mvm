@@ -201,6 +201,7 @@ fn main() -> Result<()> {
                 &cfg.instance_id,
                 telemetry,
                 telemetry_fingerprints,
+                mvm_hostd::stream::redact::StreamRedaction::curated(&cfg.redaction),
             )
             .inspect_err(|error| {
                 warn!(

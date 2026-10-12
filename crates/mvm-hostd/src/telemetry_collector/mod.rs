@@ -897,11 +897,14 @@ fn status_path(config: &TelemetryEmbedConfig) -> std::path::PathBuf {
 /// The first snapshot is written before anything is dialed, so a slow or
 /// absent guest never looks like a failed start. `secret_fingerprints` are
 /// the endpoint's bound secrets: a record carrying one is withheld before it
-/// is queued or written.
+/// is queued or written. `redaction` is the stream plane's curated seam,
+/// built from the launch's redaction policy: every record is masked by it
+/// before it is queued, so telemetry and the transcript redact alike.
 pub fn start_embedded(
     vm_name: &str,
     config: &TelemetryEmbedConfig,
     secret_fingerprints: Vec<SecretFingerprint>,
+    redaction: crate::stream::redact::StreamRedaction,
 ) -> anyhow::Result<EmbeddedCollector> {
     use anyhow::Context as _;
 
@@ -931,6 +934,7 @@ pub fn start_embedded(
     let losses = Arc::new(LossCounters::default());
     let sink = ScrubbingSink::new(
         secret_fingerprints,
+        redaction,
         QueuedSink::spawn(vm_name, WRITE_QUEUE_RECORDS, records, Arc::clone(&losses))
             .context("starting the records writer")?,
         Arc::clone(&losses),

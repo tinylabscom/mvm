@@ -8,9 +8,10 @@
 //!    the fingerprints of the secrets this VM's endpoint holds. A record that
 //!    carries one is withheld before it is queued, so the plaintext never
 //!    reaches the queue, the disk or a reader. Stdio arrives in chunks, so a
-//!    VM with bound secrets also holds each stream's latest chunk back until
-//!    the next one has been scanned against its tail: a secret split across
-//!    two chunks withholds both.
+//!    VM with bound secrets also holds back as much of each stream as a
+//!    secret could straddle: a secret split across any number of chunks
+//!    withholds every one. Every record that passes is then masked by the
+//!    stream plane's curated redaction seam, the same rules a transcript gets.
 //! 2. [`QueuedSink`] — a bounded queue in front of a dedicated writer thread.
 //!    Admission is a single `try_send`; a full queue is a counted shed, never
 //!    a wait. A stalled disk costs records, not the session.
@@ -23,17 +24,22 @@
 //! the status writer snapshots; the reasons are distinct because a reader
 //! needs to tell "the disk was full" from "the guest printed a secret".
 
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::time::{Duration, Instant};
 
 use mvm_contract::stream::secret_fingerprint::SecretFingerprint;
 use mvm_core::protocol::telemetry::served::{HostLosses, ReceivedRecord};
 use mvm_core::protocol::telemetry::{
-    AttributeValue, Attributes, MAX_RECORD_BYTES, RecordBody, StdioStream, TelemetryRecord,
+    Attribute, AttributeValue, Attributes, BoundedList, MAX_RECORD_BYTES, RecordBody, StdioStream,
+    TelemetryRecord, Text,
 };
 
+use crate::stream::redact::{StreamRedaction, StreamRedactor as _};
 use crate::stream::secret_scan::SecretScanner;
 
 /// Records the writer queue holds before the receive loop starts shedding.
@@ -113,55 +119,97 @@ impl LossCounters {
     }
 }
 
-/// How long a stdio chunk may be held back waiting for the next one before it
-/// is passed on anyway. Bounds the latency the straddle check adds; a secret
-/// whose halves arrive further apart than this is missed, exactly as the
-/// stream plane's idle release misses one split across a silence.
-pub const STDIO_HOLD: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long a stdio chunk may be held back waiting for the rest of its stream
+/// before it is passed on anyway. Bounds the latency the straddle check adds;
+/// a secret whose pieces arrive further apart than this is missed, exactly as
+/// the stream plane's idle release misses one split across a silence.
+pub const STDIO_HOLD: Duration = Duration::from_millis(500);
 
-/// Stdio streams with a chunk held back at once. A guest has a handful of
-/// producers; past this the oldest hold is released early rather than grown.
+/// Stdio streams with chunks held back at once. A guest has a handful of
+/// producers; past this the stream held longest is released early rather
+/// than the set grown.
 const MAX_HELD_STREAMS: usize = 8;
 
-/// A held stdio chunk: the record, and when it was held.
-struct Held {
+/// The chunks of one stdio stream not yet passed on, oldest first.
+///
+/// Together they always cover at least the scanner's carry — the most bytes
+/// of a bound secret that can sit before a chunk boundary — unless the stream
+/// has not produced that much yet. So the next chunk is always scanned joined
+/// to every byte a straddling secret could have started in, however small the
+/// chunks the guest writes.
+struct HeldStream {
     key: (u32, StdioStream),
-    record: TelemetryRecord,
-    since: std::time::Instant,
+    chunks: VecDeque<(TelemetryRecord, Instant)>,
+    bytes: usize,
 }
 
-/// Withholds any record whose text or bytes contain a secret bound to this
-/// VM, before the record goes anywhere else.
+impl HeldStream {
+    fn oldest(&self) -> Option<Instant> {
+        self.chunks.front().map(|(_, since)| *since)
+    }
+
+    /// The last `carry` bytes held, in stream order.
+    fn tail(&self, carry: usize) -> Vec<u8> {
+        let mut tail = Vec::with_capacity(carry.min(self.bytes));
+        for (record, _) in self.chunks.iter().rev() {
+            let bytes = stdio_bytes(record);
+            let want = carry - tail.len();
+            let take = bytes.len().min(want);
+            // Prepend: walking newest to oldest.
+            tail.splice(0..0, bytes[bytes.len() - take..].iter().copied());
+            if tail.len() == carry {
+                break;
+            }
+        }
+        tail
+    }
+}
+
+/// The host's last check on what a guest record says before anything else
+/// sees it: withholds a record carrying a secret bound to this VM, and masks
+/// what the curated redaction seam masks in every other record.
 ///
 /// The guest never holds a bound secret — the endpoint substitutes it on
-/// egress — so a match means a workload printed something it was never
-/// handed, or a placeholder was resolved where it should not have been.
+/// egress — so a fingerprint match means a workload printed something it was
+/// never handed, or a placeholder was resolved where it should not have been.
 /// Either way the host is the last place it can be stopped. Each field is
 /// scanned whole; the limits are the scanner's own (no encoded or derived
 /// form of a secret is recognised).
 ///
-/// Stdio is the one source that arrives chopped: a secret printed across a
-/// chunk boundary is whole in neither chunk. So, only on a VM with bound
-/// secrets, each stream's latest chunk is held until the next chunk of the
-/// same stream has been scanned together with its tail, or until
-/// [`STDIO_HOLD`] passes, or until the session ends. A straddling match
-/// withholds both chunks.
+/// Stdio is the one source that arrives chopped: a secret printed across
+/// chunk boundaries is whole in no chunk. So, only on a VM with bound
+/// secrets, each stream's chunks are held until the stream has produced at
+/// least the scanner's carry beyond them, or until [`STDIO_HOLD`] passes, or
+/// until the session ends. A match across held chunks withholds all of them.
+///
+/// Then every text and byte field goes through the same
+/// [`StreamRedaction`] the stream plane uses, so a guest's telemetry is
+/// redacted to the same rules as its transcript. A field the seam cannot
+/// vouch for, or cannot hold once masked, withholds the record.
 pub struct ScrubbingSink<S> {
     scanner: Option<SecretScanner>,
+    redaction: StreamRedaction,
     inner: S,
     losses: Arc<LossCounters>,
-    held: Vec<Held>,
+    held: Vec<HeldStream>,
 }
 
 impl<S: RecordSink> ScrubbingSink<S> {
-    /// Scrub against `fingerprints`; an empty set scans nothing and holds
-    /// nothing back. Sheds this sink decides on its own (a held chunk
-    /// withheld, or refused by `inner` when released) count into `losses`.
-    pub fn new(fingerprints: Vec<SecretFingerprint>, inner: S, losses: Arc<LossCounters>) -> Self {
+    /// Scrub against `fingerprints` (an empty set scans nothing and holds
+    /// nothing back) and redact through `redaction`. Sheds this sink decides
+    /// on its own — a held chunk withheld, or refused by `inner` when
+    /// released — count into `losses`.
+    pub fn new(
+        fingerprints: Vec<SecretFingerprint>,
+        redaction: StreamRedaction,
+        inner: S,
+        losses: Arc<LossCounters>,
+    ) -> Self {
         let scanner =
             (!fingerprints.is_empty()).then(|| SecretScanner::new(Arc::new(fingerprints)));
         Self {
             scanner,
+            redaction,
             inner,
             losses,
             held: Vec::new(),
@@ -179,74 +227,122 @@ impl<S: RecordSink> ScrubbingSink<S> {
         found
     }
 
-    /// Hand a released record to the inner sink, counting its shed here,
-    /// since nobody else sees this outcome.
+    /// Redact a record that passed the secret checks and offer it to the
+    /// inner sink.
+    fn pass_on(&mut self, record: &TelemetryRecord) -> IngestOutcome {
+        match redact_record(&self.redaction, record) {
+            Some(Cow::Borrowed(record)) => self.inner.try_ingest(record),
+            Some(Cow::Owned(redacted)) => self.inner.try_ingest(&redacted),
+            None => IngestOutcome::Shed(LossClass::SecretWithheld),
+        }
+    }
+
+    /// Pass on a released record, counting its shed here, since nobody else
+    /// sees this outcome.
     fn forward(&mut self, record: &TelemetryRecord) {
-        if let IngestOutcome::Shed(class) = self.inner.try_ingest(record) {
+        if let IngestOutcome::Shed(class) = self.pass_on(record) {
             self.losses.record(class);
         }
     }
 
-    fn release_expired(&mut self, now: std::time::Instant) {
-        while let Some(at) = self
-            .held
-            .iter()
-            .position(|held| now.duration_since(held.since) >= STDIO_HOLD)
-        {
-            let held = self.held.remove(at);
-            self.forward(&held.record);
+    fn release_stream(&mut self, stream: HeldStream) {
+        for (record, _) in stream.chunks {
+            self.forward(&record);
         }
     }
 
-    /// Decide a stdio chunk that passed the whole-field scan: check it against
-    /// the held tail of its stream, then hold it in turn.
+    fn withhold_stream(&mut self, stream: HeldStream) {
+        for _ in stream.chunks {
+            self.losses.record(LossClass::SecretWithheld);
+        }
+    }
+
+    fn release_expired(&mut self, now: Instant) {
+        while let Some(at) = self.held.iter().position(|stream| {
+            stream
+                .oldest()
+                .is_some_and(|since| now.duration_since(since) >= STDIO_HOLD)
+        }) {
+            let stream = self.held.remove(at);
+            self.release_stream(stream);
+        }
+    }
+
+    /// Decide a stdio chunk that passed the whole-field scan: scan it joined
+    /// to the held tail of its stream, then hold it in turn and release
+    /// whatever the stream no longer needs to keep.
     fn ingest_stdio(
         &mut self,
         record: &TelemetryRecord,
         key: (u32, StdioStream),
         bytes: &[u8],
     ) -> IngestOutcome {
-        let Some(scanner) = &self.scanner else {
-            return self.inner.try_ingest(record);
+        let Some(carry) = self.scanner.as_ref().map(SecretScanner::carry) else {
+            return self.pass_on(record);
         };
-        if let Some(at) = self.held.iter().position(|held| held.key == key) {
-            let previous = self.held.remove(at);
-            let straddles = stdio_bytes(&previous.record).is_some_and(|tail| {
-                let tail = &tail[tail.len().saturating_sub(scanner.carry())..];
-                let mut joined = Vec::with_capacity(tail.len() + bytes.len());
-                joined.extend_from_slice(tail);
-                joined.extend_from_slice(bytes);
-                scanner.contains_bound_secret(&joined)
-            });
-            if straddles {
-                self.losses.record(LossClass::SecretWithheld);
-                return IngestOutcome::Shed(LossClass::SecretWithheld);
+        if carry == 0 || bytes.is_empty() {
+            return self.pass_on(record);
+        }
+        let mut stream = match self.held.iter().position(|held| held.key == key) {
+            Some(at) => self.held.remove(at),
+            None => HeldStream {
+                key,
+                chunks: VecDeque::new(),
+                bytes: 0,
+            },
+        };
+        let mut joined = stream.tail(carry);
+        joined.extend_from_slice(bytes);
+        let straddles = self
+            .scanner
+            .as_ref()
+            .is_some_and(|scanner| scanner.contains_bound_secret(&joined));
+        if straddles {
+            self.withhold_stream(stream);
+            return IngestOutcome::Shed(LossClass::SecretWithheld);
+        }
+        stream.chunks.push_back((record.clone(), Instant::now()));
+        stream.bytes += bytes.len();
+        // Keep only what a secret straddling into the next chunk could start
+        // in: the oldest chunk goes once the rest still cover the carry.
+        while let Some((front, _)) = stream.chunks.front() {
+            let front_len = stdio_bytes(front).len();
+            if stream.bytes - front_len < carry {
+                break;
             }
-            self.forward(&previous.record);
+            let (front, _) = stream.chunks.pop_front().expect("front exists");
+            stream.bytes -= front_len;
+            self.forward(&front);
         }
         if self.held.len() >= MAX_HELD_STREAMS {
-            let oldest = self.held.remove(0);
-            self.forward(&oldest.record);
+            let longest = self
+                .held
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, held)| held.oldest())
+                .map(|(at, _)| at);
+            if let Some(at) = longest {
+                let released = self.held.remove(at);
+                self.release_stream(released);
+            }
         }
-        self.held.push(Held {
-            key,
-            record: record.clone(),
-            since: std::time::Instant::now(),
-        });
+        if !stream.chunks.is_empty() {
+            self.held.push(stream);
+        }
         IngestOutcome::Ingested
     }
 }
 
-fn stdio_bytes(record: &TelemetryRecord) -> Option<&[u8]> {
+fn stdio_bytes(record: &TelemetryRecord) -> &[u8] {
     match record.body() {
-        RecordBody::Stdio { bytes, .. } => Some(bytes.as_slice()),
-        _ => None,
+        RecordBody::Stdio { bytes, .. } => bytes.as_slice(),
+        _ => &[],
     }
 }
 
 impl<S: RecordSink> RecordSink for ScrubbingSink<S> {
     fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
-        self.release_expired(std::time::Instant::now());
+        self.release_expired(Instant::now());
         if self.carries_secret(record) {
             return IngestOutcome::Shed(LossClass::SecretWithheld);
         }
@@ -254,16 +350,144 @@ impl<S: RecordSink> RecordSink for ScrubbingSink<S> {
             RecordBody::Stdio { stream, bytes } => {
                 self.ingest_stdio(record, (record.producer(), *stream), bytes.as_slice())
             }
-            _ => self.inner.try_ingest(record),
+            _ => self.pass_on(record),
         }
     }
 
     fn release_held(&mut self) {
-        for held in std::mem::take(&mut self.held) {
-            self.forward(&held.record);
+        for stream in std::mem::take(&mut self.held) {
+            self.release_stream(stream);
         }
         self.inner.release_held();
     }
+}
+
+/// `record` with every guest-authored text and byte field passed through the
+/// redaction seam: borrowed when nothing fired, rebuilt when something was
+/// masked, and `None` when the seam would not vouch for a field or a masked
+/// field no longer fits its bound — fail closed, the record is withheld.
+fn redact_record<'a>(
+    seam: &StreamRedaction,
+    record: &'a TelemetryRecord,
+) -> Option<Cow<'a, TelemetryRecord>> {
+    let mut fired = false;
+    let mut failed = false;
+    let mut bytes = |input: &[u8]| -> Option<Vec<u8>> {
+        match seam.redact(input) {
+            Ok(redacted) if redacted.rules_fired.is_empty() => Some(input.to_vec()),
+            Ok(redacted) => {
+                fired = true;
+                Some(redacted.body)
+            }
+            Err(_) => {
+                failed = true;
+                None
+            }
+        }
+    };
+    let body = redact_body(record.body(), &mut bytes);
+    if failed {
+        return None;
+    }
+    if !fired {
+        return Some(Cow::Borrowed(record));
+    }
+    let body = body?;
+    TelemetryRecord::builder()
+        .epoch(record.epoch())
+        .producer(record.producer())
+        .sequence(record.sequence())
+        .monotonic_ns(record.monotonic_ns())
+        .source(record.source())
+        .body(body)
+        .build()
+        .ok()
+        .map(Cow::Owned)
+}
+
+/// Rebuild `body` with every guest-authored field mapped through `redact`.
+/// `None` when `redact` refused a field or a result does not fit its bound.
+fn redact_body(
+    body: &RecordBody,
+    redact: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+) -> Option<RecordBody> {
+    fn text<const N: usize>(
+        value: &Text<N>,
+        redact: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+    ) -> Option<Text<N>> {
+        let masked = String::from_utf8(redact(value.as_str().as_bytes())?).ok()?;
+        Text::new(&masked).ok()
+    }
+    fn attributes(
+        attributes: &Attributes,
+        redact: &mut dyn FnMut(&[u8]) -> Option<Vec<u8>>,
+    ) -> Option<Attributes> {
+        let mut out = Vec::with_capacity(attributes.as_slice().len());
+        for attribute in attributes.as_slice() {
+            let value = match &attribute.value {
+                AttributeValue::Text(value) => AttributeValue::Text(text(value, redact)?),
+                other => other.clone(),
+            };
+            out.push(Attribute {
+                key: text(&attribute.key, redact)?,
+                value,
+            });
+        }
+        Attributes::new(out).ok()
+    }
+    Some(match body {
+        RecordBody::SpanOpen {
+            context,
+            parent,
+            name,
+            attributes: a,
+            links,
+        } => RecordBody::SpanOpen {
+            context: *context,
+            parent: *parent,
+            name: text(name, redact)?,
+            attributes: attributes(a, redact)?,
+            links: links.clone(),
+        },
+        RecordBody::SpanUpdate {
+            context,
+            attributes: a,
+        } => RecordBody::SpanUpdate {
+            context: *context,
+            attributes: attributes(a, redact)?,
+        },
+        RecordBody::Event {
+            context,
+            level,
+            name,
+            attributes: a,
+        } => RecordBody::Event {
+            context: *context,
+            level: *level,
+            name: text(name, redact)?,
+            attributes: attributes(a, redact)?,
+        },
+        RecordBody::Log {
+            context,
+            level,
+            message,
+            attributes: a,
+        } => RecordBody::Log {
+            context: *context,
+            level: *level,
+            message: text(message, redact)?,
+            attributes: attributes(a, redact)?,
+        },
+        RecordBody::Stdio { stream, bytes } => RecordBody::Stdio {
+            stream: *stream,
+            bytes: BoundedList::new(redact(bytes.as_slice())?).ok()?,
+        },
+        RecordBody::Coverage { state, code } => RecordBody::Coverage {
+            state: *state,
+            code: text(code, redact)?,
+        },
+        RecordBody::SpanClose { .. } | RecordBody::Loss { .. } => body.clone(),
+    })
 }
 
 /// Every guest-authored byte run a record carries: names, messages, attribute
@@ -411,9 +635,13 @@ pub struct CappedJsonlSink<F = std::fs::File> {
 
 impl CappedJsonlSink<std::fs::File> {
     pub fn create(path: &std::path::Path, cap: u64) -> std::io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Owner-only, like every other file under the state dir: the records
+        // are guest output, readable by the operator and nobody else.
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600)
             .open(path)?;
         Self::over(file, cap)
     }
@@ -465,9 +693,8 @@ impl<F: RecordFile> RecordSink for CappedJsonlSink<F> {
 mod tests {
     use super::*;
     use mvm_contract::stream::secret_fingerprint::SecretCategory;
-    use mvm_core::protocol::telemetry::{
-        Attribute, BoundedList, CoverageState, Level, ProducerEpoch, SourceKind,
-    };
+    use mvm_core::policy::RedactionPolicy;
+    use mvm_core::protocol::telemetry::{CoverageState, Level, ProducerEpoch, SourceKind};
     use std::sync::Mutex;
     use std::sync::mpsc::Sender;
 
@@ -492,6 +719,11 @@ mod tests {
                 code: "sink-witness".try_into().unwrap(),
             },
         )
+    }
+
+    /// The seam production builds, from a launch that set no redaction policy.
+    fn seam() -> StreamRedaction {
+        StreamRedaction::curated(&RedactionPolicy::default())
     }
 
     fn fingerprints() -> Vec<SecretFingerprint> {
@@ -551,7 +783,7 @@ mod tests {
     #[test]
     fn a_record_carrying_a_bound_secret_is_withheld_in_every_field_kind() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
         for record in records_carrying(SECRET) {
             assert_eq!(
                 sink.try_ingest(&record),
@@ -569,7 +801,7 @@ mod tests {
     #[test]
     fn records_without_a_bound_secret_pass_through_untouched() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
         for record in records_carrying("not-the-secret") {
             assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
         }
@@ -579,7 +811,7 @@ mod tests {
         assert_eq!(kept.0.lock().unwrap().len(), 3);
 
         // A VM with no bound secrets scans nothing at all.
-        let mut open = ScrubbingSink::new(Vec::new(), Keep::default(), Arc::default());
+        let mut open = ScrubbingSink::new(Vec::new(), seam(), Keep::default(), Arc::default());
         for record in records_carrying(SECRET) {
             assert_eq!(open.try_ingest(&record), IngestOutcome::Ingested);
         }
@@ -608,7 +840,8 @@ mod tests {
     fn a_secret_split_across_two_stdio_chunks_withholds_both() {
         let kept = Keep::default();
         let losses = Arc::new(LossCounters::default());
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::clone(&losses));
+        let mut sink =
+            ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::clone(&losses));
         let (head, tail) = SECRET.as_bytes().split_at(SECRET.len() / 2);
         let first = [b"key: ".as_slice(), head].concat();
         let second = [tail, b"\n".as_slice()].concat();
@@ -629,23 +862,146 @@ mod tests {
     }
 
     #[test]
-    fn benign_stdio_chunks_pass_in_order_once_the_next_chunk_or_the_hold_clears_them() {
+    fn benign_stdio_chunks_pass_in_order_once_the_stream_covers_the_carry_or_the_hold_ends() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(fingerprints(), kept.clone(), Arc::default());
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
         sink.try_ingest(&stdout(1, b"hello "));
-        assert!(kept_sequences(&kept).is_empty(), "the latest chunk is held");
         sink.try_ingest(&stdout(2, b"world\n"));
-        assert_eq!(kept_sequences(&kept), vec![1], "the next chunk clears it");
+        assert!(
+            kept_sequences(&kept).is_empty(),
+            "chunks shorter than the carry stay held"
+        );
+        sink.try_ingest(&stdout(3, &[b'.'; 64]));
+        assert_eq!(
+            kept_sequences(&kept),
+            vec![1, 2],
+            "a chunk longer than the carry clears what came before it"
+        );
 
-        // The hold is bounded in time, not only by the next chunk.
-        sink.release_expired(std::time::Instant::now() + STDIO_HOLD);
-        assert_eq!(kept_sequences(&kept), vec![1, 2]);
+        // The hold is bounded in time, not only by what follows.
+        sink.release_expired(Instant::now() + STDIO_HOLD);
+        assert_eq!(kept_sequences(&kept), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn a_secret_written_one_byte_per_chunk_is_withheld_with_every_held_piece() {
+        let kept = Keep::default();
+        let losses = Arc::new(LossCounters::default());
+        let mut sink =
+            ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::clone(&losses));
+        let mut outcomes = Vec::new();
+        for (at, byte) in SECRET.bytes().enumerate() {
+            outcomes.push(sink.try_ingest(&stdout(at as u64 + 1, &[byte])));
+        }
+        sink.release_held();
+        assert_eq!(
+            outcomes.last(),
+            Some(&IngestOutcome::Shed(LossClass::SecretWithheld)),
+            "the byte completing the secret is refused"
+        );
+        assert!(
+            kept_sequences(&kept).is_empty(),
+            "no piece of the secret reached the sink"
+        );
+        assert_eq!(
+            losses.snapshot().secret_withheld,
+            SECRET.len() as u64 - 1,
+            "every held piece is counted; the caller counts the last"
+        );
+    }
+
+    #[test]
+    fn a_secret_split_three_ways_is_withheld() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
+        let third = SECRET.len() / 3;
+        let (a, rest) = SECRET.as_bytes().split_at(third);
+        let (b, c) = rest.split_at(third);
+        sink.try_ingest(&stdout(1, a));
+        sink.try_ingest(&stdout(2, b));
+        assert_eq!(
+            sink.try_ingest(&stdout(3, c)),
+            IngestOutcome::Shed(LossClass::SecretWithheld)
+        );
+        sink.release_held();
+        assert!(kept_sequences(&kept).is_empty());
+    }
+
+    #[test]
+    fn pii_the_stream_plane_masks_is_masked_in_every_field_kind_before_the_sink() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(Vec::new(), seam(), kept.clone(), Arc::default());
+        let email = "ops.oncall@example.org";
+        for record in records_carrying(email) {
+            assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
+        }
+        let kept = kept.0.lock().unwrap();
+        assert_eq!(kept.len(), 3);
+        for record in kept.iter() {
+            // The fields themselves, not the encoding: stdio serializes as a
+            // byte array, where neither the address nor the mask is text.
+            let mut fields = Vec::new();
+            for_each_payload_field(record, |bytes| fields.extend_from_slice(bytes));
+            let fields = String::from_utf8_lossy(&fields);
+            assert!(
+                !fields.contains(email),
+                "record {} kept the address",
+                record.sequence()
+            );
+            assert!(
+                fields.contains("XXX"),
+                "record {} was not masked",
+                record.sequence()
+            );
+        }
+        // Identity and order survive the rewrite.
+        assert_eq!(
+            kept.iter()
+                .map(TelemetryRecord::sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn a_record_with_nothing_to_mask_is_passed_on_unchanged() {
+        let record = records_carrying("plain words").remove(0);
+        assert!(matches!(
+            redact_record(&seam(), &record),
+            Some(Cow::Borrowed(_))
+        ));
+    }
+
+    #[test]
+    fn a_withheld_record_never_reaches_the_records_file_in_any_encoding() {
+        let path = tempfile::tempdir().unwrap();
+        let file = path.path().join("records.jsonl");
+        let losses = Arc::new(LossCounters::default());
+        let mut sink = ScrubbingSink::new(
+            fingerprints(),
+            seam(),
+            CappedJsonlSink::create(&file, 1 << 20).unwrap(),
+            Arc::clone(&losses),
+        );
+        for record in records_carrying(SECRET) {
+            sink.try_ingest(&record);
+        }
+        sink.try_ingest(&coverage(9));
+        sink.release_held();
+        let written = std::fs::read(&file).unwrap();
+        let text = String::from_utf8_lossy(&written);
+        assert!(!text.contains(SECRET));
+        // The stdio chunk is serialized as a byte array: look for that too.
+        let as_array = serde_json::to_string(SECRET.as_bytes()).unwrap();
+        let inner = &as_array[1..as_array.len() - 1];
+        assert!(!text.contains(inner));
+        assert_eq!(text.lines().count(), 1, "only the coverage record");
     }
 
     #[test]
     fn a_vm_without_bound_secrets_holds_no_stdio_back() {
         let kept = Keep::default();
-        let mut sink = ScrubbingSink::new(Vec::new(), kept.clone(), Arc::default());
+        let mut sink = ScrubbingSink::new(Vec::new(), seam(), kept.clone(), Arc::default());
         sink.try_ingest(&stdout(1, b"no secrets here"));
         assert_eq!(kept_sequences(&kept), vec![1]);
     }
