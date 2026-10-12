@@ -235,6 +235,9 @@ fn build_manifest(
         PersistedManifest::from_manifest(&manifest, &canonical, &backend, Provenance::current())?;
     persisted.flake_ref = resolved_flake;
 
+    prepare_builder_vm_image_for_build()
+        .context("ensuring the builder VM image before the manifest build")?;
+
     // A selected checkout is the workload kernel's source here too: the
     // template's kernel fallback otherwise reaches the builder kernel,
     // which has no device-mapper and cannot activate a sealed rootfs.
@@ -404,6 +407,35 @@ fn build_manifest_from_image(
     Ok(())
 }
 
+/// Bring the builder image a flake build boots into the cache before the
+/// build starts: the pinned image fetched and verified, or the selected image
+/// checkout's builder built when local builder builds are allowed. A cached
+/// image is a no-op. This is the same acquisition `mvmctl bootstrap` runs, so
+/// no build asks the caller to run bootstrap first.
+fn prepare_builder_vm_image_for_build() -> Result<()> {
+    prepare_builder_vm_image_for_build_with(
+        build_stub_outdir_set(),
+        crate::commands::env::builder_vm::bootstrap_builder_vm_image,
+    )
+}
+
+/// `MVM_BUILD_STUB_OUTDIR` short-circuits the build itself — no builder VM is
+/// spawned — so it needs no builder image either; the same guard
+/// `mvm_build::dev_build::dev_build` honours.
+fn build_stub_outdir_set() -> bool {
+    std::env::var("MVM_BUILD_STUB_OUTDIR").is_ok_and(|value| !value.trim().is_empty())
+}
+
+fn prepare_builder_vm_image_for_build_with(
+    stubbed: bool,
+    acquire: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if stubbed {
+        return Ok(());
+    }
+    acquire()
+}
+
 fn build_mvmfile(path: &str, output: Option<&str>) -> Result<()> {
     let elf_path = match image::build(path, output) {
         Ok(p) => p,
@@ -430,23 +462,8 @@ fn build_flake(
     let build_env = mvm_runtime::build_env::default_build_env();
     let env = build_env.as_ref();
 
-    // A steady-state `mvmctl build` runs the user's nix build
-    // inside the builder VM, which needs the layer-1 builder image (vmlinux +
-    // rootfs.ext4) in cache. `mvmctl bootstrap` bootstraps it on macOS, but the native-
-    // Linux dev path never does — so ensure it here (Stage 0 honours the
-    // selected builder backend; a cached image is a no-op). Without this the
-    // first `mvmctl build` on a fresh Linux host fails in `ensure_builder_vm_image`.
-    //
-    // Skip when `MVM_BUILD_STUB_OUTDIR` short-circuits the build (the test
-    // escape hatch — no builder VM is spawned), mirroring the same guard
-    // `mvm_build::dev_build::dev_build` honours.
-    if std::env::var("MVM_BUILD_STUB_OUTDIR")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
-    {
-        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
-            .context("ensuring the builder VM image before the flake build (Stage 0 bootstrap)")?;
-    }
+    prepare_builder_vm_image_for_build()
+        .context("ensuring the builder VM image before the flake build")?;
 
     let resolved = resolve_flake_ref(flake_ref)?;
     let watch_enabled = watch && !resolved.contains(':');
@@ -759,22 +776,14 @@ pub(in crate::commands) fn build_flake_to_slot(
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
-    if std::env::var("MVM_BUILD_STUB_OUTDIR")
-        .map(|v| v.trim().is_empty())
-        .unwrap_or(true)
-    {
-        crate::commands::env::builder_vm::bootstrap_builder_vm_image()
-            .context("ensuring the builder VM image before flake build")?;
-    }
+    prepare_builder_vm_image_for_build()
+        .context("ensuring the builder VM image before the flake build")?;
 
     let resolved = resolve_flake_ref(flake_ref)?;
     // A flake slot may contain a sealed rootfs but no kernel of its own.
     // Populate the verified workload-kernel cache before slot installation so
     // it cannot fall back to the builder kernel, which lacks device-mapper.
-    if std::env::var("MVM_BUILD_STUB_OUTDIR")
-        .map(|value| value.trim().is_empty())
-        .unwrap_or(true)
-    {
+    if !build_stub_outdir_set() {
         crate::commands::env::builder_vm::ensure_workload_kernel()
             .context("resolving the dm-verity-capable workload kernel for flake slot")?;
     }
@@ -856,5 +865,33 @@ mod tests {
         );
         assert_eq!(persisted.flake_ref, resolved);
         assert_eq!(persisted.profile, "minimal");
+    }
+
+    #[test]
+    fn a_build_acquires_its_builder_image_once_before_it_starts() {
+        let mut calls = 0;
+        prepare_builder_vm_image_for_build_with(false, || {
+            calls += 1;
+            Ok(())
+        })
+        .expect("acquisition succeeded");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn a_failed_builder_image_acquisition_fails_the_build() {
+        let err = prepare_builder_vm_image_for_build_with(false, || {
+            anyhow::bail!("builder-vm-rootfs-aarch64.ext4: digest mismatch")
+        })
+        .expect_err("a refused acquisition must stop the build");
+        assert!(err.to_string().contains("digest mismatch"), "{err:#}");
+    }
+
+    #[test]
+    fn a_stubbed_build_needs_no_builder_image() {
+        prepare_builder_vm_image_for_build_with(true, || {
+            panic!("a stubbed build boots no builder")
+        })
+        .unwrap();
     }
 }

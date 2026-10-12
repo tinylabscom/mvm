@@ -385,8 +385,11 @@ flip their named unit regressions only.
 
 - [ ] Wire subscribers and adapters for all inventoried sources, including
       outside-span events and log bridges; preserve span parent/link relationships.
-- [ ] Bound every upstream/downstream queue and active-span/field allocation;
+- [x] Bound every upstream/downstream queue and active-span/field allocation;
       remove blocking completion sends and recursive diagnostics on capture paths.
+      W3a and W3b below bound the pipe handoffs and the outbox; outside-span
+      event state is bounded (#3657); the session's own waits are bounded as
+      described under the next item.
   - [x] W3a — Bound existing entrypoint pipe-reader handoffs and transfer completion
         tails without queue sends. Reuse retention rings, separate pipe-reader and
         consumer-handoff gap scopes, and mark reader failures as unknown tails.
@@ -406,8 +409,23 @@ flip their named unit regressions only.
         admission. Source callbacks, event-driven worker ownership and automatic
         wire loss summaries remain required; this is not complete guest capture.
         See [validation record](../sprint/delivery/3422-telemetry-outbox.md).
-- [ ] Add independent loss accounting, bounded summaries and cancellation/reaping;
+- [x] Add independent loss accounting, bounded summaries and cancellation/reaping;
       prove a stopped peer/full queue does not stall workload or pipe draining.
+      Loss accounting and the reserved summary path landed with the capture
+      core and session (#3828, #4049). The capture session now bounds every
+      wait: the handshake runs under one overall deadline, each sealed frame
+      is written under a deadline with non-blocking writes that wait for room
+      only for the time left (a kernel send timeout alone restarts per wakeup
+      on macOS), and a turn sends at most 64
+      records before the loop checks stop and summarizes losses, with
+      summaries on a one-second clock rather than a turn count. Regressions
+      in `telemetry_capture::session`: a capped turn leaves the rest queued;
+      stop is observed within one capped turn under a continuous flood; loss
+      summaries cross while a flood keeps the queue full; a host that stops
+      reading fails the session within its write deadline while producers
+      keep emitting without waiting; a host reading one byte at a time
+      cannot stretch a frame past its deadline; and a host that never answers
+      the handshake is dropped at the handshake deadline.
 
 ### W4 — Host collector owned for the VM lifetime
 

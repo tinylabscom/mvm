@@ -79,11 +79,16 @@ pub(crate) fn e2e_home() -> PathBuf {
 /// process, so the number asserted is the number the launch budget is defined
 /// in: guest-dispatchable, excluding process startup and teardown.
 fn parse_dispatch_window_ms(output: &str) -> Option<f64> {
+    parse_phase_timing_ms(output, "dispatch_window=")
+}
+
+/// Parse one `<key><n>ms` token out of the `phase-timing` line.
+fn parse_phase_timing_ms(output: &str, key: &str) -> Option<f64> {
     output
         .lines()
         .find(|line| line.contains("phase-timing:"))?
         .split_whitespace()
-        .find_map(|token| token.strip_prefix("dispatch_window="))?
+        .find_map(|token| token.strip_prefix(key))?
         .strip_suffix("ms")?
         .parse()
         .ok()
@@ -548,6 +553,21 @@ fn warm_launch_meets_hard_dispatch_ceiling(world: &mut CliWorld) {
     assert!(
         mvm_cli::launch_contract::within_warm_start_slo_ms(observed),
         "dispatch window was {observed:.1}ms; the warm-claim contract is strictly under {:.0}ms",
+        mvm_cli::launch_contract::WARM_START_MAX_MS,
+    );
+    // The dispatch window starts at admission. The ceiling is held from the
+    // caller's command, which also covers resolution and admission.
+    let startup = parse_phase_timing_ms(&record.combined(), "startup=").unwrap_or_else(|| {
+        panic!(
+            "no `startup=` token in the phase-timing line, so the launch could not be \
+             measured from invocation.\n--- combined ---\n{}",
+            record.combined()
+        )
+    });
+    assert!(
+        mvm_cli::launch_contract::within_warm_start_slo_ms(startup),
+        "startup from invocation was {startup:.1}ms; the warm-claim contract is strictly \
+         under {:.0}ms",
         mvm_cli::launch_contract::WARM_START_MAX_MS,
     );
 }

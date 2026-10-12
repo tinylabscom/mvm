@@ -38,7 +38,7 @@ mod session;
 mod sidecar_selection;
 mod startup_slo;
 mod transient;
-use startup_slo::enforce_startup_slo;
+use startup_slo::StartupClock;
 
 pub use launch_plan::load_launch_plan;
 
@@ -593,7 +593,9 @@ fn run_inner(
     let sample_path = crate::commands::vm::launch_sample::sample_path_from_env();
     let timing_mode = crate::commands::vm::phase_timing::mode();
     let timing = timing_mode.is_on() || sample_path.is_some();
-    let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
+    // Sub-phase marks are always taken: the startup ceiling names the slow
+    // phase when it refuses a launch, whether or not timing was requested.
+    let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
     // Keep every writable disk image's sidecar lock alive until after the VM
@@ -623,6 +625,7 @@ fn run_inner(
         root_strategy,
         image: resolved,
     } = launch;
+    let startup_admitted = std::time::Instant::now();
     let vm_name = start_config.name.clone();
 
     // Report the resolved strategy to the command layer for chain-audit. This is
@@ -654,7 +657,13 @@ fn run_inner(
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;
-    let t_backend_started = timing.then(std::time::Instant::now);
+    let startup_clock = StartupClock {
+        launch_mode,
+        started: startup_started,
+        admitted: startup_admitted,
+        booted: std::time::Instant::now(),
+    };
+    let t_backend_started = timing.then_some(startup_clock.booted);
 
     // Read the backend's own phase sidecar now: teardown removes the state
     // directory that holds it, and by the time the sample is assembled it is
@@ -695,20 +704,14 @@ fn run_inner(
             Err(e) => Err(e),
         }
     } else if boots_baked_entrypoint(&req) {
-        dispatch_baked_entrypoint(&vm_name, &req, startup_started, launch_mode, &mut sub_marks)
-            .and_then(|(status, ready)| {
+        dispatch_baked_entrypoint(&vm_name, &req, &startup_clock, &mut sub_marks).and_then(
+            |(status, ready)| {
                 baked_entrypoint_result(status, capture, &vm_name)
                     .map(|result| (result, Some(ready)))
-            })
-    } else {
-        run_in_guest(
-            &vm_name,
-            &req,
-            capture,
-            startup_started,
-            launch_mode,
-            &mut sub_marks,
+            },
         )
+    } else {
+        run_in_guest(&vm_name, &req, capture, &startup_clock, &mut sub_marks)
     };
     let reported_exit_code = reported_exit_code(&run_outcome);
     let workload_completed = run_outcome.is_ok();
@@ -781,6 +784,7 @@ fn run_inner(
     ) {
         let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
             launch_mode,
+            invoked: startup_started,
             start,
             image_resolved,
             drives_ready,

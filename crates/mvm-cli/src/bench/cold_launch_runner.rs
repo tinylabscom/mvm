@@ -489,6 +489,7 @@ mod tests {
                 command_ms: 5.0,
                 teardown_ms: 7.0,
                 total_ms,
+                startup_ms: None,
             },
             sub_phases: LaunchSubTimings {
                 vmm_create_ms: Some(90.0),

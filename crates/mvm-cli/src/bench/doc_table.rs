@@ -52,7 +52,12 @@ pub fn sample_contract_sentence() -> String {
          lanes additionally require every measured dispatch to be strictly \
          under {PREPARED_COLD_HARD_MAX_MS:.0} ms, and the warm-claim lane every \
          measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms, \
-         even below the publication sample floor."
+         both on its dispatch window and from the moment the command was \
+         invoked (`startup=` on the phase-timing line), even below the \
+         publication sample floor. `mvmctl` holds each warm launch to the same \
+         ceiling itself: one that has not reached the guest strictly under \
+         {WARM_CLAIM_HARD_MAX_MS:.0} ms after invocation is refused before its \
+         workload is sent."
     )
 }
 
