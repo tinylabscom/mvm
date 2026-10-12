@@ -105,6 +105,10 @@ pub struct IntegritySidecar {
     /// format. Replay defence.
     pub epoch: u64,
     pub mvmctl_version: String,
+    /// Exact runtime generation, authenticated together with memory and epoch.
+    /// Absent for legacy snapshots; absence grants no external-runtime authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_launch_binding: Option<crate::protocol::runtime_release::RuntimeLaunchBinding>,
     /// HMAC-SHA256 tag, hex-encoded (lowercase, 64 chars).
     pub tag_hex: String,
 }
@@ -231,6 +235,19 @@ pub fn compute_tag(
     mvmctl_version: &str,
     key: &[u8; HMAC_KEY_BYTES],
 ) -> Result<(IntegritySidecar, [u8; 32])> {
+    compute_tag_with_runtime(files, epoch, mvmctl_version, key, None)
+}
+
+/// Authenticate the runtime generation with the snapshot rather than relying
+/// on an independently replaceable runtime metadata file. The absent case
+/// retains the original byte encoding for legacy baked-runtime snapshots.
+pub fn compute_tag_with_runtime(
+    files: &SnapshotFiles,
+    epoch: u64,
+    mvmctl_version: &str,
+    key: &[u8; HMAC_KEY_BYTES],
+    runtime: Option<&crate::protocol::runtime_release::RuntimeLaunchBinding>,
+) -> Result<(IntegritySidecar, [u8; 32])> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(&SIDECAR_SCHEMA_VERSION.to_be_bytes());
     mac.update(&epoch.to_be_bytes());
@@ -248,6 +265,13 @@ pub fn compute_tag(
     mac.update(&version_len.to_be_bytes());
     mac.update(version_bytes);
 
+    if let Some(runtime) = runtime {
+        let bytes = serde_json::to_vec(runtime).context("encoding snapshot runtime binding")?;
+        mac.update(b"mvm.snapshot.runtime-binding.v1\0");
+        mac.update(&(bytes.len() as u64).to_be_bytes());
+        mac.update(&bytes);
+    }
+
     let tag = mac.finalize().into_bytes();
     let mut tag_arr = [0u8; 32];
     tag_arr.copy_from_slice(&tag);
@@ -259,6 +283,7 @@ pub fn compute_tag(
         mem_len,
         epoch,
         mvmctl_version: mvmctl_version.to_string(),
+        runtime_launch_binding: runtime.cloned(),
         tag_hex: hex_encode(&tag_arr),
     };
     Ok((sidecar, tag_arr))
@@ -306,7 +331,19 @@ pub fn seal(
     mvmctl_version: &str,
     key: &[u8; HMAC_KEY_BYTES],
 ) -> Result<IntegritySidecar> {
-    let (sidecar, _tag) = compute_tag(files, epoch, mvmctl_version, key)?;
+    seal_with_runtime(snap_dir, files, epoch, mvmctl_version, key, None)
+}
+
+/// Seal a snapshot and its exact inherited runtime in one HMAC envelope.
+pub fn seal_with_runtime(
+    snap_dir: &Path,
+    files: &SnapshotFiles,
+    epoch: u64,
+    mvmctl_version: &str,
+    key: &[u8; HMAC_KEY_BYTES],
+    runtime: Option<&crate::protocol::runtime_release::RuntimeLaunchBinding>,
+) -> Result<IntegritySidecar> {
+    let (sidecar, _tag) = compute_tag_with_runtime(files, epoch, mvmctl_version, key, runtime)?;
     let json = serde_json::to_vec_pretty(&sidecar).context("serialize sidecar")?;
 
     let final_path = snap_dir.join(SIDECAR_FILENAME);
@@ -395,8 +432,14 @@ pub fn verify(
         });
     }
 
-    let (recomputed, tag_bytes) = compute_tag(files, sidecar.epoch, &sidecar.mvmctl_version, key)
-        .map_err(|e| VerifyError::Io(e.to_string()))?;
+    let (recomputed, tag_bytes) = compute_tag_with_runtime(
+        files,
+        sidecar.epoch,
+        &sidecar.mvmctl_version,
+        key,
+        sidecar.runtime_launch_binding.as_ref(),
+    )
+    .map_err(|e| VerifyError::Io(e.to_string()))?;
     let _ = recomputed; // we return the original sidecar for the caller's audit
 
     let stored_bytes = hex_decode(&sidecar.tag_hex).ok_or(VerifyError::BadTagEncoding)?;
@@ -535,6 +578,103 @@ mod tests {
         std::fs::write(&v, b"vmstate-bytes-here").unwrap();
         std::fs::write(&m, b"memory-image-bytes").unwrap();
         SnapshotFiles { vmstate: v, mem: m }
+    }
+
+    fn runtime_binding() -> crate::protocol::runtime_release::RuntimeLaunchBinding {
+        use crate::protocol::runtime_release::{RuntimeLaunchBinding, RuntimeReleaseProof};
+        RuntimeLaunchBinding::CliAssembly(
+            crate::protocol::runtime_release::CliRuntimeLaunchBinding {
+                provenance: crate::protocol::runtime_release::RuntimeBindingProvenance::Release {
+                    proof: RuntimeReleaseProof {
+                        archive: "/release/archive".into(),
+                        checksum: "/release/checksum".into(),
+                        signature_bundle: "/release/signature".into(),
+                        archive_sha256: "ab".repeat(32),
+                        version: "1.2.3".into(),
+                        arch: crate::arch::GuestArch::X86_64,
+                    },
+                },
+                overlay_path: "/runtime/generation-1/overlay.ext4".into(),
+                overlay_verity_path: "/runtime/generation-1/overlay.verity".into(),
+                initramfs_path: "/runtime/generation-1/initramfs".into(),
+                overlay_roothash: "cd".repeat(32),
+            },
+        )
+    }
+
+    #[test]
+    fn runtime_binding_is_authenticated_with_the_snapshot_not_a_self_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = make_snap(dir.path());
+        let key = [7; HMAC_KEY_BYTES];
+        let runtime = runtime_binding();
+        let sidecar =
+            seal_with_runtime(dir.path(), &files, 5, "1.2.3", &key, Some(&runtime)).unwrap();
+        let verified = verify(dir.path(), &files, 5, "1.2.3", &key, false).unwrap();
+        assert_eq!(verified.runtime_launch_binding.as_ref(), Some(&runtime));
+        let value = serde_json::to_value(&sidecar).unwrap();
+        for pointer in [
+            "/runtime_launch_binding/provenance/proof/archive",
+            "/runtime_launch_binding/provenance/proof/checksum",
+            "/runtime_launch_binding/provenance/proof/signature_bundle",
+            "/runtime_launch_binding/provenance/proof/archive_sha256",
+            "/runtime_launch_binding/provenance/proof/version",
+            "/runtime_launch_binding/overlay_path",
+            "/runtime_launch_binding/overlay_verity_path",
+            "/runtime_launch_binding/initramfs_path",
+            "/runtime_launch_binding/overlay_roothash",
+        ] {
+            let mut changed = value.clone();
+            *changed.pointer_mut(pointer).unwrap() = "different-generation".into();
+            std::fs::write(
+                dir.path().join(SIDECAR_FILENAME),
+                serde_json::to_vec(&changed).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    verify(dir.path(), &files, 5, "1.2.3", &key, false),
+                    Err(VerifyError::TagMismatch)
+                ),
+                "{pointer}"
+            );
+        }
+        let mut stripped = value;
+        stripped
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime_launch_binding");
+        std::fs::write(
+            dir.path().join(SIDECAR_FILENAME),
+            serde_json::to_vec(&stripped).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            verify(dir.path(), &files, 5, "1.2.3", &key, false),
+            Err(VerifyError::TagMismatch)
+        ));
+    }
+
+    #[test]
+    fn runtime_generation_survives_key_rotation_and_rejects_old_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = make_snap(dir.path());
+        let old_key = [7; HMAC_KEY_BYTES];
+        let new_key = [8; HMAC_KEY_BYTES];
+        let runtime = runtime_binding();
+        seal_with_runtime(dir.path(), &files, 5, "1.2.3", &old_key, Some(&runtime)).unwrap();
+        EpochStore::new(dir.path().join(".epoch"))
+            .advance(5)
+            .unwrap();
+        super::super::key_rotation::reseal_snapshot(dir.path(), &old_key, &new_key, "1.2.3")
+            .unwrap();
+        let verified = verify(dir.path(), &files, 6, "1.2.3", &new_key, false).unwrap();
+        assert_eq!(verified.runtime_launch_binding.as_ref(), Some(&runtime));
+        assert_eq!(verified.epoch, 6);
+        assert!(matches!(
+            verify(dir.path(), &files, 7, "1.2.3", &new_key, false),
+            Err(VerifyError::EpochRollback { .. })
+        ));
     }
 
     #[test]

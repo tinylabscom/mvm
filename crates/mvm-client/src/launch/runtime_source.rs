@@ -15,8 +15,9 @@ pub use mvm_runtime::sdk_sidecar::SdkSidecarAttachment;
 pub use mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached;
 
 use crate::launch::runtime_overlay::{
-    RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
+    AcquiredRuntimeOverlay, RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams,
+    acquire_runtime_overlay, acquire_runtime_overlay_for_launch, runtime_overlay_acquire_mode,
+    runtime_overlay_source_checkout_root,
 };
 use mvm_runtime::ui;
 
@@ -38,10 +39,24 @@ fn apply_runtime_overlay_artifact(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     artifact: mvm_fs::overlay::RuntimeOverlayArtifact,
 ) {
+    // A layout-only cache hit does not authenticate the archive that produced
+    // it. Never retain a previous selection's proof across replacement.
+    start_config.runtime_release_proof = None;
+    start_config.unsigned_runtime_development = false;
     start_config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
     start_config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
     start_config.runtime_overlay_version = Some(artifact.version);
     start_config.runtime_overlay_roothash = Some(artifact.roothash);
+}
+
+fn apply_acquired_runtime_overlay(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    acquired: AcquiredRuntimeOverlay,
+) {
+    apply_runtime_overlay_artifact(start_config, acquired.artifact);
+    start_config.runtime_release_proof = acquired.release_proof;
+    // A request for development admission, never authority to bypass it.
+    start_config.unsigned_runtime_development = acquired.unsigned_source;
 }
 
 /// Attach the verity-sealed runtime overlay by
@@ -183,13 +198,13 @@ pub fn attach_runtime_overlay_if_cached_version(
                 "a selected image checkout cannot provide the guest runtime; run a source-built mvmctl or use the published runtime"
             )
         })?;
-        let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+        let artifact = acquire_runtime_overlay_for_launch(&RuntimeOverlayAcquireParams {
             cache_root: &cache_root,
             expected_version: version,
             arch,
             source_checkout_root: Some(&workspace_root),
         })?;
-        apply_runtime_overlay_artifact(start_config, artifact);
+        apply_acquired_runtime_overlay(start_config, artifact);
         return Ok(());
     }
     if expected_version.is_none()
@@ -199,13 +214,13 @@ pub fn attach_runtime_overlay_if_cached_version(
     {
         let workspace_root = runtime_overlay_source_checkout_root()
             .expect("source build mode already verified a source checkout");
-        let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+        let artifact = acquire_runtime_overlay_for_launch(&RuntimeOverlayAcquireParams {
             cache_root: &cache_root,
             expected_version: version,
             arch,
             source_checkout_root: Some(&workspace_root),
         })?;
-        apply_runtime_overlay_artifact(start_config, artifact);
+        apply_acquired_runtime_overlay(start_config, artifact);
         return Ok(());
     }
     if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
@@ -220,18 +235,18 @@ pub fn attach_runtime_overlay_if_cached_version(
         .flatten(),
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
     };
-    let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+    let artifact = acquire_runtime_overlay_for_launch(&RuntimeOverlayAcquireParams {
         cache_root: &cache_root,
         expected_version: version,
         arch,
         source_checkout_root: source_checkout_root.as_deref(),
     })?;
     tracing::info!(
-        runtime_overlay_version = %artifact.version,
+        runtime_overlay_version = %artifact.artifact.version,
         backend = hypervisor,
         "runtime overlay cache populated for required-overlay boot"
     );
-    apply_runtime_overlay_artifact(start_config, artifact);
+    apply_acquired_runtime_overlay(start_config, artifact);
     Ok(())
 }
 
@@ -769,6 +784,88 @@ mod sdk_sidecar_host_resolution_tests {
 #[cfg(test)]
 mod runtime_overlay_attach_tests {
     use super::*;
+
+    fn mock_proof() -> mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+        mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+            archive: "/mock/archive".into(),
+            checksum: "/mock/checksum".into(),
+            signature_bundle: "/mock/signature".into(),
+            archive_sha256: "a".repeat(64),
+            version: "selected-release".into(),
+            arch: mvm_core::arch::GuestArch::host(),
+        }
+    }
+
+    fn mock_artifact() -> mvm_fs::overlay::RuntimeOverlayArtifact {
+        mvm_fs::overlay::RuntimeOverlayArtifact {
+            overlay_ext4: "/mock/overlay".into(),
+            sidecar: "/mock/verity".into(),
+            roothash_file: "/mock/roothash".into(),
+            roothash: "b".repeat(64),
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            version: "selected-release".into(),
+        }
+    }
+
+    #[test]
+    fn selected_runtime_proof_handoff_is_not_cryptographic_verification() {
+        let mut config = VmStartConfig::default();
+        apply_acquired_runtime_overlay(
+            &mut config,
+            AcquiredRuntimeOverlay {
+                artifact: mock_artifact(),
+                release_proof: Some(mock_proof()),
+                unsigned_source: false,
+            },
+        );
+        let proof = config.runtime_release_proof.as_ref().unwrap();
+        assert_eq!(proof.archive, std::path::Path::new("/mock/archive"));
+        assert_eq!(
+            config.runtime_overlay_version.as_deref(),
+            Some("selected-release")
+        );
+        assert!(!config.unsigned_runtime_development);
+        // Synthetic locator fixture only: forwarding never makes it verified.
+        assert!(
+            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
+                proof,
+                "selected-release",
+                GuestArch::host(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn replacing_selected_runtime_clears_stale_proof_and_development_request() {
+        let mut config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            unsigned_runtime_development: true,
+            ..Default::default()
+        };
+        apply_runtime_overlay_artifact(&mut config, mock_artifact());
+        assert!(config.runtime_release_proof.is_none());
+        assert!(!config.unsigned_runtime_development);
+    }
+
+    #[test]
+    fn source_runtime_handoff_requests_development_without_inventing_proof() {
+        let mut config = VmStartConfig {
+            runtime_release_proof: Some(mock_proof()),
+            ..Default::default()
+        };
+        apply_acquired_runtime_overlay(
+            &mut config,
+            AcquiredRuntimeOverlay {
+                artifact: mock_artifact(),
+                release_proof: None,
+                unsigned_source: true,
+            },
+        );
+        assert!(config.runtime_release_proof.is_none());
+        assert!(config.unsigned_runtime_development);
+    }
+
     use crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;

@@ -25,7 +25,11 @@
 
 pub mod build_env;
 mod host_shell;
+mod legacy_bundle_runtime;
+#[cfg(feature = "test-support")]
+pub use legacy_bundle_runtime::fixtures::signed_legacy_runtime_fixture;
 pub mod machine;
+pub mod runtime_evidence;
 pub mod sdk_sidecar;
 pub mod security;
 pub mod storage;

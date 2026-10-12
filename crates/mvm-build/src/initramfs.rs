@@ -801,6 +801,17 @@ pub fn download_initramfs_from(
     Ok(artifact)
 }
 
+/// Parse an authenticated legacy archive into a caller-owned empty private
+/// directory, without populating a cache or granting publisher authority.
+pub fn parse_authenticated_legacy_initramfs(
+    archive_path: &Path,
+    stage: &Path,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    extract_initramfs_archive(archive_path, stage)?;
+    verify_staged_image_hash(stage)?;
+    mvm_fs::initramfs::read_initramfs_artifact_from_dir(stage).map_err(Into::into)
+}
+
 fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), InitramfsBuildError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -833,7 +844,10 @@ fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), In
         match entry.header().entry_type() {
             tar::EntryType::Regular => {
                 let dest = stage.join(name);
-                let mut out = std::fs::File::create(&dest)?;
+                let mut out = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&dest)?;
                 std::io::copy(&mut entry, &mut out)?;
                 set_cache_perms(&dest)?;
                 seen.insert(name.to_string());
@@ -858,7 +872,7 @@ fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), In
         mvm_fs::initramfs::VERSION_FILE,
         mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
     ] {
-        if !seen.contains(required) && !stage.join(required).is_file() {
+        if !seen.contains(required) {
             return Err(InitramfsBuildError::InvalidArchive {
                 archive_path: archive_path.to_path_buf(),
                 reason: format!("missing required archive member {required}"),
@@ -919,6 +933,7 @@ mod tests {
         let mut runtime = crate::guest_runtime::GuestRuntime {
             root: source.path().to_path_buf(),
             digest: "d".repeat(64),
+            release_proof: None,
             manifest: crate::guest_bins::GuestBinsManifest {
                 schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
                 version: "1.2.3".into(),
@@ -929,6 +944,7 @@ mod tests {
                     worktree: WorktreeState::Clean,
                 },
                 files,
+                assemblies: Default::default(),
             },
         };
         let artifact =
@@ -1626,6 +1642,74 @@ mod tests {
         header.set_size(u64::try_from(bytes.len()).unwrap());
         header.set_cksum();
         tar.append_data(&mut header, path, bytes).unwrap();
+    }
+
+    #[test]
+    fn pure_legacy_initramfs_parser_preserves_payload_without_cache_install() {
+        let archive_dir = tempfile::tempdir().unwrap();
+        let archive = archive_dir.path().join("initramfs.tar.gz");
+        std::fs::write(&archive, served_initramfs_archive("legacy-original")).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        let parsed = parse_authenticated_legacy_initramfs(&archive, stage.path()).unwrap();
+        assert_eq!(parsed.version, "legacy-original");
+        assert_eq!(parsed.image_path, stage.path().join("initramfs.cpio.gz"));
+        assert!(parse_authenticated_legacy_initramfs(&archive, stage.path()).is_err());
+    }
+
+    #[test]
+    fn legacy_initramfs_extraction_refuses_duplicate_links_and_unsafe_paths() {
+        for (name, kind, copies) in [
+            ("initramfs.cpio.gz", tar::EntryType::Regular, 2),
+            ("initramfs.cpio.gz", tar::EntryType::Symlink, 1),
+            ("../outside", tar::EntryType::Regular, 1),
+            ("/outside", tar::EntryType::Regular, 1),
+            ("nested/initramfs.cpio.gz", tar::EntryType::Regular, 1),
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let archive = home.path().join("bad.tar.gz");
+            let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            let mut tar = tar::Builder::new(encoder);
+            for _ in 0..copies {
+                let mut header = tar::Header::new_gnu();
+                header.set_mode(0o644);
+                header.set_size(0);
+                header.set_entry_type(kind);
+                header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+                header.set_cksum();
+                tar.append(&header, std::io::empty()).unwrap();
+            }
+            std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+            let stage = tempfile::tempdir().unwrap();
+            let error = extract_initramfs_archive(&archive, stage.path()).unwrap_err();
+            assert!(!error.to_string().contains("missing required"), "{error}");
+        }
+    }
+
+    #[test]
+    fn legacy_initramfs_extraction_requires_members_from_the_archive() {
+        let home = tempfile::tempdir().unwrap();
+        let archive = home.path().join("empty.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let tar = tar::Builder::new(encoder);
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        write_initramfs_artifact(stage.path(), "legacy-original", b"original");
+        std::fs::write(stage.path().join("checksums-sha256.txt"), b"").unwrap();
+        assert!(extract_initramfs_archive(&archive, stage.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_initramfs_extraction_does_not_follow_preexisting_symlinks() {
+        let home = tempfile::tempdir().unwrap();
+        let archive = home.path().join("initramfs.tar.gz");
+        std::fs::write(&archive, served_initramfs_archive("legacy-original")).unwrap();
+        let outside = home.path().join("outside");
+        std::fs::write(&outside, b"unchanged").unwrap();
+        let stage = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&outside, stage.path().join("initramfs.cpio.gz")).unwrap();
+        assert!(extract_initramfs_archive(&archive, stage.path()).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"unchanged");
     }
 
     // --- deterministic cargo artifact assembly ---

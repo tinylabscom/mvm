@@ -145,6 +145,79 @@ pub struct AdmittedPlan {
     signer_id: String,
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
+}
+
+/// Private evidence that admission checked an assurance-compatible runtime
+/// against the actual image and artifact bytes selected for this launch.
+#[derive(Debug, PartialEq)]
+struct AssuranceRuntimeBinding {
+    vm_name: String,
+    selection: serde_json::Value,
+}
+
+impl AssuranceRuntimeBinding {
+    fn verify(config: &VmStartConfig, plan: &ExecutionPlan) -> Result<Self> {
+        let release =
+            crate::operator_admitted_trial_booter::verify_assurance_guest_protocol(config)?;
+        let declaration = release
+            .as_ref()
+            .map(|release| release.declaration(mvm_core::arch::GuestArch::host()))
+            .transpose()?;
+        let mut files = Vec::new();
+        for (role, path) in [
+            ("rootfs", Some(config.rootfs_path.as_str())),
+            ("kernel", config.kernel_path.as_deref()),
+            ("verity", config.verity_path.as_deref()),
+            ("overlay", config.runtime_overlay_path.as_deref()),
+            (
+                "overlay_verity",
+                config.runtime_overlay_verity_path.as_deref(),
+            ),
+            ("initramfs", config.initrd_path.as_deref()),
+        ] {
+            if let Some(path) = path {
+                let digest =
+                    mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(path))
+                        .with_context(|| format!("hashing assurance {role}"))?;
+                if role == "rootfs" && digest != plan.image.sha256 {
+                    anyhow::bail!("assurance rootfs differs from the admitted image");
+                }
+                if let Some(declaration) = declaration {
+                    verify_declared_runtime_digest(role, &digest, declaration)?;
+                }
+                files.push((role, path, digest));
+            }
+        }
+        Ok(Self {
+            vm_name: config.name.clone(),
+            selection: serde_json::json!({
+                "files": files,
+                "roothash": config.roothash,
+                "runtime_roothash": config.runtime_overlay_roothash,
+                "runtime_version": config.runtime_overlay_version,
+                "release_proof": config.runtime_release_proof,
+                "legacy_bundle_runtime": config.legacy_bundle_runtime,
+            }),
+        })
+    }
+}
+
+fn verify_declared_runtime_digest(
+    role: &str,
+    digest: &str,
+    declaration: &mvm_build::guest_bins::assembly::RuntimeAssembly,
+) -> Result<()> {
+    let expected = match role {
+        "overlay" => Some(declaration.overlay_sha256.as_str()),
+        "overlay_verity" => Some(declaration.overlay_verity_sha256.as_str()),
+        "initramfs" => Some(declaration.initramfs_sha256.as_str()),
+        _ => None,
+    };
+    if expected.is_some_and(|expected| digest != expected) {
+        anyhow::bail!("assurance {role} bytes differ from the authenticated runtime declaration");
+    }
+    Ok(())
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -155,6 +228,28 @@ pub struct AdmittedExtension {
 }
 
 impl AdmittedPlan {
+    /// Assurance cannot be added to an admission that never checked its
+    /// actual runtime, or that checked only contributor-source artifacts.
+    pub(crate) fn require_assurance_runtime(&self, vm: &str) -> Result<()> {
+        let binding = self
+            .assurance_runtime
+            .as_ref()
+            .context("admission has no verified assurance runtime binding")?;
+        if binding.vm_name != vm {
+            anyhow::bail!("assurance session VM differs from the runtime-bound launch identity");
+        }
+        Ok(())
+    }
+
+    fn verify_assurance_launch(&self, config: &VmStartConfig) -> Result<()> {
+        self.require_assurance_runtime(&config.name)?;
+        let actual = AssuranceRuntimeBinding::verify(config, &self.plan)?;
+        if self.assurance_runtime.as_ref() != Some(&actual) {
+            anyhow::bail!("assurance launch runtime differs from its admitted selection");
+        }
+        Ok(())
+    }
+
     /// The verified plan body — what every downstream authorization decision
     /// reads.
     #[must_use]
@@ -209,7 +304,26 @@ impl AdmittedPlan {
             plan,
             signed,
             extensions: Vec::new(),
+            assurance_runtime: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_assurance_runtime_for_test(mut self, config: &VmStartConfig) -> Self {
+        self.assurance_runtime = Some(
+            AssuranceRuntimeBinding::verify(config, &self.plan).expect("verified test runtime"),
+        );
+        self
+    }
+
+    /// Session-only fixtures do not boot or claim runtime authentication.
+    #[cfg(test)]
+    pub(crate) fn with_mock_assurance_runtime_for_test(mut self, vm: &str) -> Self {
+        self.assurance_runtime = Some(AssuranceRuntimeBinding {
+            vm_name: vm.to_string(),
+            selection: serde_json::Value::Null,
+        });
+        self
     }
 }
 
@@ -328,6 +442,8 @@ pub fn admit_plan_for_run(
     extension_ctx: Option<&ExtensionAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;
     let extensions = verify_extension_packs(plan, extension_ctx)?;
     verify_registry_pack_assets(plan)?;
@@ -365,6 +481,7 @@ pub fn admit_plan_for_run(
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -410,6 +527,8 @@ pub fn admit_signed_plan_for_run(
         verify_plan(signed, &trusted_refs).context("verifying externally-signed plan")?;
     let signer_id = signed.0.signer_id.clone();
 
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(&verified)?;
     validate_extension_bindings(&verified)?;
     // No extension verification context on this path: a plan that binds
     // optional extensions is refused rather than admitted unchecked.
@@ -425,6 +544,7 @@ pub fn admit_signed_plan_for_run(
         signed: signed.clone(),
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -448,6 +568,7 @@ struct VerifiedAdmission<'a> {
     signer_id: String,
     /// Re-verified extension artifacts, empty when the plan binds none.
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
     clock: &'a dyn Clock,
     ledger: &'a InMemoryNonceLedger,
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
@@ -466,6 +587,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -558,6 +680,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         plan: verified,
         signed,
         extensions,
+        assurance_runtime,
     })
 }
 
@@ -764,12 +887,13 @@ fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
 /// gate that read it would be deciding which resource controls apply from a
 /// string a caller picked.
 #[derive(Debug, Clone, Copy)]
-pub struct RunPosture {
+pub struct RunPosture<'a> {
     variant: Variant,
     backend: Option<BackendKind>,
+    runtime_config: Option<&'a VmStartConfig>,
 }
 
-impl RunPosture {
+impl<'a> RunPosture<'a> {
     /// A run whose backend is in hand. The only shape that can measure a grant
     /// against the mechanisms that will really be there.
     #[must_use]
@@ -777,6 +901,7 @@ impl RunPosture {
         Self {
             variant,
             backend: Some(backend),
+            runtime_config: None,
         }
     }
 
@@ -792,7 +917,32 @@ impl RunPosture {
         Self {
             variant,
             backend: None,
+            runtime_config: None,
         }
+    }
+
+    /// The actual launch selection, not claims copied from plan JSON.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime_config: Option<&'a VmStartConfig>) -> Self {
+        self.runtime_config = runtime_config;
+        self
+    }
+
+    fn verify_runtime(&self) -> Result<()> {
+        let Some(config) = self.runtime_config else {
+            return Ok(());
+        };
+        verify_selected_runtime(config)
+    }
+
+    fn assurance_runtime(&self, plan: &ExecutionPlan) -> Result<Option<AssuranceRuntimeBinding>> {
+        let Some(config) = self.runtime_config else {
+            return Ok(None);
+        };
+        if crate::operator_admitted_trial_booter::verify_assurance_guest_protocol(config).is_err() {
+            return Ok(None);
+        }
+        AssuranceRuntimeBinding::verify(config, plan).map(Some)
     }
 
     /// The sealed-production / developer posture this run carries.
@@ -800,6 +950,15 @@ impl RunPosture {
     pub fn variant(&self) -> Variant {
         self.variant
     }
+}
+
+fn verify_selected_runtime(config: &VmStartConfig) -> Result<()> {
+    mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+        config,
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+    )
+    .context("verifying selected guest runtime at admission")?;
+    Ok(())
 }
 
 /// Refuse a run whose grants this host will not admit.
@@ -2063,12 +2222,21 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
-    let mut config = match run_post_admission_gates(
-        params.config,
-        &admitted,
-        backend.kind(),
-        params.policy_bundle,
-    ) {
+    let gated = (|| {
+        if params.assurance.is_some() || admitted.assurance_runtime.is_some() {
+            admitted
+                .verify_assurance_launch(&params.config)
+                .map_err(|error| ("assurance-runtime", error))?;
+        }
+        verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
+        run_post_admission_gates(
+            params.config,
+            &admitted,
+            backend.kind(),
+            params.policy_bundle,
+        )
+    })();
+    let mut config = match gated {
         Ok(config) => config,
         Err((stage, err)) => {
             if let Some(emitter) = params.emitter
@@ -2177,7 +2345,11 @@ pub fn admit_and_start(
     // name: the grant gate decides which resource controls a run is measured
     // against, and deciding that from a string is how a plan ends up measured
     // against a tier it is not running on.
-    let posture = RunPosture::on_backend(params.variant, backend.kind());
+    let posture =
+        RunPosture::on_backend(params.variant, backend.kind()).with_runtime(Some(&params.config));
+    if params.assurance.is_some() {
+        crate::operator_admitted_trial_booter::verify_assurance_guest_protocol(&params.config)?;
+    }
 
     // Synthesize the plan up-front so a refusal can be recorded with the
     // plan context if admission fails. Synthesis failures have no plan to
@@ -2359,6 +2531,35 @@ mod tests {
 
     /// This module's own source, for the unforgeability check below.
     const SOURCE: &str = include_str!("plan_admission.rs");
+
+    #[test]
+    fn runtime_gate_refuses_unverified_unsigned_request_with_forged_plan() {
+        let config = VmStartConfig {
+            unsigned_runtime_development: true,
+            plan_json: Some(r#"{"build_mode":"dev","verified":true}"#.to_string()),
+            ..Default::default()
+        };
+        for variant in [Variant::Dev, Variant::Prod] {
+            RunPosture::on_backend(variant, BackendKind::Hvf)
+                .with_runtime(Some(&config))
+                .verify_runtime()
+                .expect_err("request and plan JSON cannot grant source runtime authority");
+        }
+    }
+
+    #[test]
+    fn runtime_gate_refuses_selected_overlay_without_proof() {
+        let config = VmStartConfig {
+            runtime_overlay_path: Some("/untrusted/runtime.ext4".to_string()),
+            ..Default::default()
+        };
+        for variant in [Variant::Dev, Variant::Prod] {
+            RunPosture::on_backend(variant, BackendKind::Hvf)
+                .with_runtime(Some(&config))
+                .verify_runtime()
+                .expect_err("dev posture alone does not bypass signed runtime verification");
+        }
+    }
 
     /// The production half of it — everything before this test module, so the
     /// checks below cannot be satisfied by a string literal written here.
@@ -4834,6 +5035,178 @@ mod tests {
     // admit_and_start: the shared admitted-boot entrypoint
     // ───────────────────────────────────────────────────────────────
 
+    fn baked_assurance_config(directory: &std::path::Path) -> VmStartConfig {
+        mvm_runtime::signed_legacy_runtime_fixture(
+            directory,
+            std::path::Path::new(&mvm_core::config::mvm_home()),
+            false,
+        )
+    }
+
+    #[test]
+    fn every_runtime_artifact_must_match_the_authenticated_declaration() {
+        // Exercises the comparison used after verification, not a successful
+        // signature verification. No trusted runtime handle is fabricated.
+        let declaration = mvm_build::guest_bins::assembly::RuntimeAssembly {
+            assembly_format: mvm_build::guest_bins::assembly::RUNTIME_ASSEMBLY_FORMAT,
+            arch: mvm_core::arch::GuestArch::host(),
+            protocol_version: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+            min_supported_protocol_version:
+                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            overlay_sha256: "a".repeat(64),
+            overlay_verity_sha256: "b".repeat(64),
+            overlay_roothash: "c".repeat(64),
+            initramfs_sha256: "d".repeat(64),
+        };
+        for (role, expected) in [
+            ("overlay", &declaration.overlay_sha256),
+            ("overlay_verity", &declaration.overlay_verity_sha256),
+            ("initramfs", &declaration.initramfs_sha256),
+        ] {
+            verify_declared_runtime_digest(role, expected, &declaration).unwrap();
+            assert!(
+                verify_declared_runtime_digest(role, &"e".repeat(64), &declaration).is_err(),
+                "{role} substitution must not mint an assurance capability"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsigned_release_proof_cannot_mint_an_assurance_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("runtime.tar.gz");
+        let checksum = directory.path().join("runtime.tar.gz.sha256");
+        let signature = directory.path().join("runtime.tar.gz.bundle");
+        std::fs::write(&archive, b"unsigned archive").unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&archive).unwrap();
+        std::fs::write(&checksum, format!("{digest}  runtime.tar.gz\n")).unwrap();
+        std::fs::write(&signature, b"{}").unwrap();
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive,
+                checksum,
+                signature_bundle: signature,
+                archive_sha256: digest,
+                version: "1.2.3".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            runtime_overlay_version: Some("1.2.3".into()),
+            runtime_overlay_path: Some(directory.path().join("overlay").display().to_string()),
+            runtime_overlay_verity_path: Some(
+                directory.path().join("verity").display().to_string(),
+            ),
+            runtime_overlay_roothash: Some("a".repeat(64)),
+            initrd_path: Some(directory.path().join("initramfs").display().to_string()),
+            ..Default::default()
+        };
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan_binding(&[])).is_err());
+    }
+
+    #[test]
+    fn changed_runtime_after_admission_records_failure_without_starting_backend() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let config = VmStartConfig {
+            name: "changed-assurance-runtime".into(),
+            ..baked_assurance_config(directory.path())
+        };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let mut synthesis = fixture_input(&config.name);
+        synthesis.image_sha256 = &image_sha256;
+        synthesis
+            .services
+            .push(mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").unwrap());
+        let admitted = admit_for_run(
+            &synthesis,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(directory.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+        )
+        .unwrap();
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
+            audit.path(),
+        )
+        .unwrap();
+        crate::audit::durability::record_admission(
+            Some(&emitter),
+            admitted.plan(),
+            admitted.signer_id(),
+            crate::audit::durability::AuditDurability::BestEffort,
+        )
+        .unwrap();
+        std::fs::write(&config.rootfs_path, b"changed after admission").unwrap();
+        let vm_id = mvm_core::vm_backend::VmId(config.name.clone());
+        start_admitted(StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        })
+        .expect_err("admitted artifact substitution must refuse before spawn");
+        assert!(!matches!(
+            backend.status(&vm_id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.admitted"), "{chain}");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("assurance-runtime"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn assurance_binding_requires_matching_image_and_unchanged_launch_bytes() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = directory.path().join("kernel");
+        std::fs::write(&kernel, b"original kernel").unwrap();
+        let config = VmStartConfig {
+            name: "assurance-bound".into(),
+            kernel_path: Some(kernel.display().to_string()),
+            ..baked_assurance_config(directory.path())
+        };
+        let mut plan = plan_binding(&[]);
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan).is_err());
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let unchecked = AdmittedPlan::for_test(plan, signer_id, signed);
+        assert!(unchecked.require_assurance_runtime(&config.name).is_err());
+        let admitted = unchecked.with_assurance_runtime_for_test(&config);
+        admitted.require_assurance_runtime(&config.name).unwrap();
+        assert!(
+            admitted
+                .require_assurance_runtime("different-machine")
+                .is_err()
+        );
+        admitted.verify_assurance_launch(&config).unwrap();
+
+        let renamed = VmStartConfig {
+            name: "different-machine".into(),
+            ..config.clone()
+        };
+        assert!(admitted.verify_assurance_launch(&renamed).is_err());
+        std::fs::write(&kernel, b"replacement kernel").unwrap();
+        assert!(admitted.verify_assurance_launch(&config).is_err());
+        std::fs::write(&config.rootfs_path, b"replacement rootfs").unwrap();
+        assert!(AssuranceRuntimeBinding::verify(&config, admitted.plan()).is_err());
+    }
+
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
         let (_env, _home) = host_with_ceiling(Default::default());
@@ -4945,9 +5318,12 @@ mod tests {
         synthesis.services = vec![service];
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-rollback".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let err = admit_and_start(
             &backend,
@@ -5220,9 +5596,12 @@ mod tests {
         );
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-assurance".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let started = admit_and_start(
             &backend,
@@ -5269,8 +5648,7 @@ mod tests {
                 synthesis: &refused_synthesis,
                 config: mvm_core::vm_backend::VmStartConfig {
                     name: "vm-assurance-refused".into(),
-                    rootfs_path: "/store/rootfs.ext4".into(),
-                    ..Default::default()
+                    ..baked_assurance_config(dir.path())
                 },
                 clock: &SystemClock,
                 ledger: &InMemoryNonceLedger::new(),

@@ -62,6 +62,8 @@ pub struct HostChannels {
     /// write-only: the console carries guest output to the host and never the
     /// other way.
     pub console_log: Option<PathBuf>,
+    /// Local boot-input observer, serviced only by the primary vCPU loop.
+    pub runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     /// Optional host-visible marker acknowledged after the run loop enters its
     /// pause hold. It is removed when resume is observed.
     pub pause_state: Option<PathBuf>,

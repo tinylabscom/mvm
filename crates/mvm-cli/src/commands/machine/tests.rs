@@ -1743,6 +1743,7 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             accessible: false,
             rootfs_path: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         },
     )
@@ -1779,6 +1780,7 @@ fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
                 accessible,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
             },
         )

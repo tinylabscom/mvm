@@ -4,6 +4,7 @@ pub mod broker_control;
 pub mod handler;
 #[allow(clippy::module_inception)]
 pub mod protocol;
+pub mod runtime_release;
 pub mod signed_config;
 pub mod telemetry;
 pub mod vm_backend;

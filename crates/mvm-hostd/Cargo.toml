@@ -177,6 +177,7 @@ hickory-proto = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+mvm-build = { workspace = true, features = ["test-support"] }
 xtask = { path = "../../xtask" }
 # The release-only networking probe drives the guest FlowMux client the
 # loopback adapters use. A dependency's binaries are never built, so only the

@@ -489,6 +489,55 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl build guest-bins --out <dir>` | Write the archive and its checksum into `<dir>` (created if missing) |
 | `mvmctl build guest-bins --arch x86_64` | Build only the named architecture; repeat `--arch` for more than one |
 
+Guest-bins manifest schema 2 also records an `assemblies` declaration per guest
+architecture: assembly format 1, the guest control protocol and its minimum
+supported version, SHA-256 digests of the deterministic overlay image, verity
+tree and compressed initramfs, and the overlay's verity root. The producer
+computes these from the exact captured archive members before signing; no
+cache fingerprint authenticates them. A producer whose compiled protocol
+source differs from the selected checkout refuses the build: rebuild `mvmctl`
+from that checkout first.
+
+Release runtime verification requires these declarations for both architectures
+and rejects unsupported schemas or assembly formats. Source development
+artifacts remain unsigned; legacy schema 1 development caches remain readable
+but are never release evidence. Authenticating these
+declarations and copying matching artifact bytes is not, by itself, assurance
+of what a detached VM executed: launch admission must still bind those owned
+bytes to the backend for the VM's lifetime.
+
+Cold workload starts and newly booted standby parents bind release artifacts
+to fresh private generations under
+`$MVM_HOME/runtime-evidence/<vm-name>/` (normally
+`~/.mvm/runtime-evidence/<vm-name>/`). The launcher authenticates the signed
+release, checks the selected guest RPC protocol and verity root, and copies
+and hashes the selected overlay, verity tree and initramfs in the same read
+stream. It publishes the generation before spawning and boots those private
+paths, not the mutable cache paths. A deserialized proof or a source-cache
+fingerprint grants no authority.
+
+Contributor runtimes use a separate, explicitly unsigned source-integrity
+path, available only to binaries whose compiled distribution channel permits
+source builds. The launcher checks the actual checkout and source archive,
+derives the runtime declaration, and checks the selected artifact bytes before
+snapshotting. Choosing a development flag is not authorization, and choosing a
+sealed workload does not disable the contributor workflow. Source integrity
+does not become signed-release assurance.
+
+The retained namespace is canonicalized and its ancestor ownership and write
+permissions are checked before use. A private VM directory beneath an
+unprotected writable ancestor is refused; private permissions on the leaf
+alone cannot prevent another account from replacing the pathname.
+
+These generations deliberately outlive launch handles, failed starts and VM
+stops. Current backend stop interfaces do not prove which launch generation
+they terminated; PID disappearance alone cannot authorize deletion. Launch
+and stop logs report the retained directory, generation count and byte count.
+Account for this retained disk usage. Do not remove a generation merely because
+a PID file is absent or a VM name was reused: remove it only after independently
+establishing that no running, detached, restoring or forked VM can still read
+it. There is no automatic runtime-generation garbage collection.
+
 ## Networks
 
 | Command                         | Description                                               |
@@ -1149,6 +1198,26 @@ gate `machine checkpoint verify` and `machine checkpoint fork` enforce. A
 completed checkpoint restore emits a chain-signed `checkpoint.restored` entry
 and an image restore an `image.reverted` entry, each carrying the initiating
 verb (`revert` / `rewind` / `advance`) as its `via` label.
+
+Full-VM captures also record the runtime configuration observed while the
+backend is paused. An external runtime must match an authenticated, retained
+runtime generation; a launch metadata file alone is not sufficient. Restore
+and fork authenticate the checkpoint first, then reverify that generation and
+the captured runtime evidence before loading it. Older full-VM checkpoints
+without this evidence are refused with a recapture instruction. This does not
+replace the base-image integrity or admission checks for runtimes baked into
+the root filesystem. Retained runtime artifacts and release proofs must remain
+available for later restores. Restoring a checkpoint does not turn its inherited
+RAM into a newly measured boot; runtime evidence must retain that distinction.
+
+Firecracker runtime observation supports repository-managed devices with
+canonical `blk{slot}` identifiers. Capture and restore bind their complete
+device layout, including writable devices, and recheck read-only backing
+bytes before resuming. The identifiers preserve the managed launch's device
+mapping when Firecracker returns restored configuration in a different array
+order. This is verified configuration lineage under the protected host-state
+boundary, not an independent measurement of loaded guest RAM or MMIO slots.
+Arbitrary unmanaged Firecracker device identifiers are refused.
 
 A target is a checkpoint id or a `sha256:<hex>` content-address; a digest may
 name a node in the checkpoint store, the image store, or (rarely) both, in which

@@ -554,6 +554,7 @@ fn fc_live_fork_n_children_from_running_parent() {
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,
             tag: None,

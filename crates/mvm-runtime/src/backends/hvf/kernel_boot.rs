@@ -567,7 +567,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         timeout,
         stop,
         paused,
-        channels,
+        mut channels,
         cpu_millicores,
         quota_record,
     } = params;
@@ -633,6 +633,21 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         if !extra.is_empty() {
             bootargs.push(' ');
             bootargs.push_str(extra);
+        }
+    }
+    if let Some(observer) = &mut channels.runtime_observer {
+        if let Some(frame) = &restore_frame {
+            let parsed = super::snapshot::parse_hvf_snapshot_frame(
+                frame,
+                HVF_SNAPSHOT_BACKEND_KIND,
+                guest_ram.len(),
+            )
+            .map_err(|_| HvfError::SnapshotState("runtime evidence frame invalid"))?;
+            observer
+                .inherit_verified_snapshot(parsed.artifact_digests)
+                .map_err(|_| HvfError::SnapshotState("runtime evidence lineage invalid"))?;
+        } else {
+            observer.set_kernel_cmdline(bootargs.clone());
         }
     }
     let initrd_bounds = initramfs.map(|rd| {
@@ -708,6 +723,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
+                runtime_observer: channels.runtime_observer,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
@@ -777,6 +793,7 @@ struct RunInputs {
     builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
+    runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
@@ -1035,6 +1052,7 @@ struct PrimaryRun<'a> {
     /// writing it would have them racing to create and remove the same path.
     pause_ack: Arc<AtomicBool>,
     pause_state: Option<PathBuf>,
+    runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     snapshot: SnapshotPaths,
     /// CPUs this machine has. A snapshot frame holds one vCPU's registers, so a
     /// request that arrives on a machine with more is refused rather than
@@ -1054,6 +1072,7 @@ fn run_primary<B: run::DeviceBus>(
         guest_ram,
         pause_ack,
         pause_state,
+        runtime_observer,
         snapshot,
         vcpus,
     } = input;
@@ -1062,6 +1081,7 @@ fn run_primary<B: run::DeviceBus>(
         ram: snapshot_ram,
         frame: snapshot_frame,
     } = snapshot;
+    let runtime_observer = runtime_observer.as_ref();
 
     run::run_on_bus(
         vcpu,
@@ -1078,6 +1098,9 @@ fn run_primary<B: run::DeviceBus>(
             // freezing guest RAM + device state in place until resume clears it.
             should_pause: move || {
                 let requested = shared.paused.load(Ordering::Relaxed);
+                if !requested && let Some(observer) = runtime_observer {
+                    observer.service(|| None::<()>);
+                }
                 if requested {
                     if !pause_ack.swap(true, Ordering::AcqRel)
                         && let Some(path) = &pause_state
@@ -1092,6 +1115,19 @@ fn run_primary<B: run::DeviceBus>(
                 requested
             },
             on_pause: move |vcpu: &HvfVcpu, devices: &[&dyn SnapshotDeviceState]| {
+                if let Some(observer) = runtime_observer {
+                    observer.service(|| {
+                        let parked = shared
+                            .parked_states
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Secondaries must clear their parked state under this
+                        // same lock before resuming. The primary is here.
+                        (shared.paused.load(Ordering::Acquire)
+                            && parked.iter().skip(1).all(Option::is_some))
+                        .then_some(parked)
+                    });
+                }
                 let (Some(request_path), Some(ram_path), Some(frame_path)) = (
                     snapshot_request.as_deref(),
                     snapshot_ram.as_deref(),
@@ -1133,6 +1169,11 @@ fn run_primary<B: run::DeviceBus>(
                 let mut vcpu_states = Vec::with_capacity(vcpus as usize);
                 vcpu_states.push(vcpu.capture_state()?);
                 vcpu_states.extend(secondary_states);
+                let artifact_digests = runtime_observer
+                    .map(|observer| observer.snapshot_payload())
+                    .transpose()
+                    .map_err(|_| HvfError::SnapshotState("runtime evidence capture failed"))?
+                    .unwrap_or_default();
                 let frame = super::snapshot::encode_hvf_snapshot_frame(
                     HVF_SNAPSHOT_BACKEND_KIND,
                     0,
@@ -1140,7 +1181,7 @@ fn run_primary<B: run::DeviceBus>(
                     &device_bytes,
                     &gic_bytes,
                     &vcpu_states,
-                    &[],
+                    &artifact_digests,
                 )
                 .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
                 mvm_core::util::atomic_io::atomic_write(frame_path, &frame)
@@ -1435,6 +1476,7 @@ unsafe fn run(
         console_data_sockets,
         builder_control_sockets,
         console_log,
+        runtime_observer,
         pause_state,
         snapshot_request,
         snapshot_ram,
@@ -1902,6 +1944,7 @@ unsafe fn run(
                 guest_ram: &*guest_ram,
                 pause_ack,
                 pause_state,
+                runtime_observer,
                 snapshot: SnapshotPaths {
                     request: snapshot_request,
                     ram: snapshot_ram,

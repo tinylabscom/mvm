@@ -696,6 +696,7 @@ pub(crate) mod tests {
         let mut runtime = crate::guest_runtime::GuestRuntime {
             root: source.path().to_path_buf(),
             digest: "d".repeat(64),
+            release_proof: None,
             manifest: crate::guest_bins::GuestBinsManifest {
                 schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
                 version: FIXTURE_VERSION.into(),
@@ -706,6 +707,7 @@ pub(crate) mod tests {
                     worktree: WorktreeState::Clean,
                 },
                 files,
+                assemblies: Default::default(),
             },
         };
         for libc in [GuestLibc::Glibc, GuestLibc::Musl] {

@@ -38,6 +38,17 @@ pub use mvm_contract::protocol::vm_backend::{
 // VmStartConfig — backend-agnostic VM launch configuration
 // ---------------------------------------------------------------------------
 
+/// Untrusted inputs for a legacy image's baked runtime. The runtime boundary
+/// re-verifies the pin against the host's enrolled publishers and binds the
+/// selected rootfs and initrd to signed artifact roles. This is not authority
+/// to bypass verification, and the archive cannot supply its own trust store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyBundleRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+}
+
 /// Backend-agnostic configuration describing *what* to run.
 ///
 /// Callers build a `VmStartConfig` from CLI arguments and build output.
@@ -74,6 +85,9 @@ pub struct VmStartConfig {
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
+    /// Untrusted pinned bundle inputs for a baked runtime and per-image initrd.
+    /// External CLI runtime selections still require their own release/source proof.
+    pub legacy_bundle_runtime: Option<LegacyBundleRuntimeProof>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
     /// Present when the flake was built with `verifiedBoot = true`
     /// (the production default). Must be paired with `roothash`.
@@ -104,6 +118,12 @@ pub struct VmStartConfig {
     /// runtime metadata so lifecycle operations can reason about the exact
     /// overlay the VM booted with rather than consulting mutable cache state.
     pub runtime_overlay_version: Option<String>,
+    /// Untrusted release inputs. The launch boundary authenticates the archive
+    /// and snapshots the selected boot artifacts before a backend can read them.
+    pub runtime_release_proof: Option<super::runtime_release::RuntimeReleaseProof>,
+    /// Explicit unsigned contributor runtime. Never sufficient for production
+    /// assurance, regardless of cache fingerprints or declared protocol.
+    pub unsigned_runtime_development: bool,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).

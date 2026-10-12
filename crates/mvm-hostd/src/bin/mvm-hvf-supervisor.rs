@@ -306,6 +306,7 @@ fn main() -> anyhow::Result<()> {
     // its writes are dropped on exit (a workload rootfs that must not mutate its
     // shared base image).
     let mut disks = Vec::with_capacity(cfg.disks.len());
+    let mut observed_disks = Vec::new();
     for d in &cfg.disks {
         let img = if d.read_only {
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, true)
@@ -318,8 +319,32 @@ fn main() -> anyhow::Result<()> {
             mvm_runtime::backends::hvf::DiskImage::open(&d.path, false)
                 .with_context(|| format!("open read-write disk {}", d.path.display()))?
         };
+        if let Some(artifact) =
+            mvm_vmm::runtime_artifacts::RuntimeArtifact::disk(d.path.clone(), &img)?
+        {
+            observed_disks.push(artifact);
+        }
         disks.push(img);
     }
+    // The loader replaces initramfs/cmdline evidence on restore using only
+    // the authenticated inherited frame, after checking selected identity.
+    let runtime_artifacts = Some(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+        initramfs: cfg
+            .initramfs
+            .clone()
+            .zip(initramfs.as_deref())
+            .map(|(path, bytes)| mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(path, bytes))
+            .transpose()?,
+        disks: observed_disks,
+        kernel_cmdline: String::new(),
+        firecracker_drives: None,
+    });
+    let runtime_observer = mvm_vmm::runtime_artifacts::Observer::bind(
+        cfg.pid_file
+            .parent()
+            .context("supervisor state directory missing")?,
+        runtime_artifacts,
+    )?;
     // Take the exclusive store-image lock before the guest can attach the
     // image, and hold it for this process's life — which, for the persistent
     // builder that sets this, is the VM's life. A named binding, not `_`:
@@ -442,6 +467,7 @@ fn main() -> anyhow::Result<()> {
                 // reaches the agent has to be diagnosed. The authoritative
                 // rewrite after the run loop returns is unchanged.
                 console_log: Some(cfg.console_log.clone()),
+                runtime_observer: Some(runtime_observer),
                 pause_state: cfg.pause_state.clone(),
                 snapshot_request: cfg.snapshot_request.clone(),
                 snapshot_ram: cfg.snapshot_ram.clone(),

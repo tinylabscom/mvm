@@ -407,7 +407,7 @@ pub fn reseal_snapshot(
     let files = crate::crypto::snapshot_hmac::files_in(snapshot_dir);
     let epoch_store = crate::crypto::snapshot_hmac::EpochStore::new(snapshot_dir.join(".epoch"));
     let current_epoch = epoch_store.load();
-    crate::crypto::snapshot_hmac::verify(
+    let verified = crate::crypto::snapshot_hmac::verify(
         snapshot_dir,
         &files,
         current_epoch,
@@ -427,8 +427,15 @@ pub fn reseal_snapshot(
     let next_epoch = epoch_store
         .next()
         .with_context(|| format!("advancing epoch for {}", snapshot_dir.display()))?;
-    crate::crypto::snapshot_hmac::seal(snapshot_dir, &files, next_epoch, mvmctl_version, new_key)
-        .with_context(|| {
+    crate::crypto::snapshot_hmac::seal_with_runtime(
+        snapshot_dir,
+        &files,
+        next_epoch,
+        mvmctl_version,
+        new_key,
+        verified.runtime_launch_binding.as_ref(),
+    )
+    .with_context(|| {
         format!(
             "sealing snapshot at {} under new key",
             snapshot_dir.display()

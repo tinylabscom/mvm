@@ -160,6 +160,7 @@ mod tests {
                     worktree: WorktreeState::Clean,
                 },
                 files: BTreeMap::from([("x86_64/bin/mvm-guest-agent".into(), "d".repeat(64))]),
+                assemblies: Default::default(),
             },
         };
         let summary = render_summary(&written);

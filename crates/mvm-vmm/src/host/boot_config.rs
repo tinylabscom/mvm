@@ -89,14 +89,18 @@ pub fn build_runtime_overlay_cmdline_args(
 }
 
 /// Whether this boot attached the universal initramfs (as opposed to a
-/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
-/// resolves the artifact out of the shared initramfs cache, so the path
-/// itself is the discriminant — a cold-cache legacy boot keeps its
-/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
+/// legacy per-rootfs verity initramfs or no initramfs at all). Release
+/// assemblies use the universal ABI even after their verified initramfs is
+/// moved to a private launch generation. Proof presence selects an ABI here,
+/// not authority: the launch boundary must authenticate it before spawning.
+/// Legacy cache resolution remains supported for contributor boots.
 pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
     let Some(initrd) = &config.initrd_path else {
         return false;
     };
+    if config.runtime_release_proof.is_some() || config.unsigned_runtime_development {
+        return true;
+    }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     std::path::Path::new(initrd).starts_with(&cache_root)
 }
@@ -223,6 +227,28 @@ pub fn balloon_body(amount_mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_generation_uses_the_universal_abi_outside_the_cache() {
+        let config = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: Some("/private/generation/initramfs.cpio.gz".into()),
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: "/release/archive".into(),
+                checksum: "/release/checksum".into(),
+                signature_bundle: "/release/signature".into(),
+                archive_sha256: "a".repeat(64),
+                version: "1.2.3".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            ..Default::default()
+        };
+        assert!(booted_with_universal_initramfs(&config));
+        let without_initramfs = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: None,
+            ..config
+        };
+        assert!(!booted_with_universal_initramfs(&without_initramfs));
+    }
 
     // ------------------------------------------------------------------
     // Firecracker API body builders — byte-identical pins

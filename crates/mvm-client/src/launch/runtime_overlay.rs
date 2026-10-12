@@ -82,6 +82,19 @@ impl OverlayAcquisition<'_> {
 pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
+    Ok(acquire_runtime_overlay_for_launch(params)?.artifact)
+}
+
+/// The selected overlay and the evidence from the archive that produced it.
+pub struct AcquiredRuntimeOverlay {
+    pub artifact: RuntimeOverlayArtifact,
+    pub release_proof: Option<mvm_core::protocol::runtime_release::RuntimeReleaseProof>,
+    pub unsigned_source: bool,
+}
+
+pub fn acquire_runtime_overlay_for_launch(
+    params: &RuntimeOverlayAcquireParams<'_>,
+) -> Result<AcquiredRuntimeOverlay> {
     let acquisition = OverlayAcquisition::for_params(params);
     if let OverlayAcquisition::BuildFromSource { workspace_root } = acquisition
         && mvm_build::guest_runtime::cached_source_guest_runtime(
@@ -111,6 +124,11 @@ pub fn acquire_runtime_overlay(
                     workspace_root.display()
                 )
             })
+            .map(|artifact| AcquiredRuntimeOverlay {
+                artifact,
+                release_proof: None,
+                unsigned_source: true,
+            })
         }
         OverlayAcquisition::Download => {
             let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime(
@@ -119,13 +137,27 @@ pub fn acquire_runtime_overlay(
                 params.arch,
             )
             .context("resolve signed released guest runtime for the runtime overlay")?;
-            mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+            let proof = runtime
+                .release_proof
+                .clone()
+                .context("published guest runtime has no signed release proof")?;
+            mvm_build::guest_runtime::evidence::verify_runtime_release_proof(
+                &proof,
+                params.expected_version,
+                params.arch,
+            )?;
+            let artifact = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
                 params.cache_root,
                 params.expected_version,
                 params.arch,
                 &runtime,
             )
-            .context("assemble runtime overlay from the signed released guest runtime")
+            .context("assemble runtime overlay from the signed released guest runtime")?;
+            Ok(AcquiredRuntimeOverlay {
+                artifact,
+                release_proof: Some(proof),
+                unsigned_source: false,
+            })
         }
     }
 }

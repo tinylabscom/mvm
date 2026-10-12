@@ -699,6 +699,7 @@ pub(in crate::commands) fn run_secure(
             assets,
             volumes,
             bundle_archive,
+            runtime_config,
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
@@ -718,6 +719,7 @@ pub(in crate::commands) fn run_secure(
             rootfs_path: rootfs,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config,
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
