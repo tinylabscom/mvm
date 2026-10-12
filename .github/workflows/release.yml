@@ -20,7 +20,7 @@ on:
 permissions:
   contents: write
   id-token: write        # Required for cosign keyless signing via OIDC
-  actions: write         # Required to dispatch publish-crates workflow
+  actions: write         # Required for post-promotion workflow dispatch
   attestations: write    # Required to record build provenance for the release binaries
 
 env:
@@ -728,21 +728,6 @@ jobs:
           else
             echo "no dry-run draft ${tag} to delete"
           fi
-
-      # The "release: published" event fired by `gh release create` runs under
-      # GITHUB_TOKEN, which by design does not trigger downstream workflows.
-      # workflow_dispatch is exempt from that rule, so chain publish-crates
-      # explicitly here. This keeps crates.io in sync with GitHub releases.
-      - name: Trigger crates.io publish workflow
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh workflow run publish-crates.yml \
-            --ref "${TAG_NAME}" \
-            -f tag="${TAG_NAME}" \
-            -f dry_run=false
 
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle

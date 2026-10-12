@@ -121,7 +121,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 
-The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under, and that same tier is what the guest enforces. The host names it on the guest kernel cmdline, and the guest agent compiles the `mvm_core::crypto::seccomp::SeccompTier` allowlist once at activation and installs it, with `no_new_privs`, in every process it starts for the workload. Admission raises a tier below `network` to `network` when the run admits egress, an ingress mapping or a host service, because the workload needs sockets to use any of them.
+The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under, and that same tier is what the guest enforces. The host names it on the guest kernel cmdline, and the guest agent compiles the `mvm_core::crypto::seccomp::SeccompTier` allowlist once at activation and installs it, with `no_new_privs`, in every process it starts for the workload. Admission raises a tier below `network` to `network` when the run admits egress, an ingress mapping or a host service, because the workload needs sockets to use any of them. A GPU-granted run that needs none of them is raised to `vsock` instead, which allows `socket` only for `AF_VSOCK`: enough for the GPU shims to reach the host endpoint, and no other address family.
 
 ## Per-backend tier matrix
 

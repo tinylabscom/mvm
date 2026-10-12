@@ -10,9 +10,9 @@ name: Publish to crates.io
 # whole closure out of the plan rather than leaving its dependencies to be
 # uploaded alone.
 #
-# release.yml dispatches this with dry_run=false on every tag push, because a
-# GITHUB_TOKEN-raised release event starts no downstream workflow. A dry run
-# needs no token: it packages and build-verifies the whole plan with
+# Publication is a separate, explicitly authorized step after the installed
+# release gates, never an automatic consequence of creating a GitHub release.
+# A dry run needs no token: it packages and build-verifies the whole plan with
 # `cargo package`, which resolves the plan's crates against each other
 # instead of against crates.io, so it works before any of them is published.
 # It runs on pull requests that change the publish machinery and nightly from

@@ -816,6 +816,9 @@ pub enum PlanSeccompTier {
     Minimal,
     #[default]
     Standard,
+    /// `standard` plus `AF_VSOCK` stream sockets, and no other address
+    /// family: what a GPU-granted launch needs to reach its host endpoint.
+    Vsock,
     Network,
     Unrestricted,
 }
@@ -826,6 +829,7 @@ impl core::fmt::Display for PlanSeccompTier {
             Self::Essential => write!(f, "essential"),
             Self::Minimal => write!(f, "minimal"),
             Self::Standard => write!(f, "standard"),
+            Self::Vsock => write!(f, "vsock"),
             Self::Network => write!(f, "network"),
             Self::Unrestricted => write!(f, "unrestricted"),
         }
@@ -840,6 +844,7 @@ impl core::str::FromStr for PlanSeccompTier {
             "essential" => Ok(Self::Essential),
             "minimal" => Ok(Self::Minimal),
             "standard" => Ok(Self::Standard),
+            "vsock" => Ok(Self::Vsock),
             "network" => Ok(Self::Network),
             "unrestricted" => Ok(Self::Unrestricted),
             _ => Err(PlanSeccompTierParseError {
@@ -851,7 +856,7 @@ impl core::str::FromStr for PlanSeccompTier {
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[error(
-    "unknown seccomp tier {value:?} (expected: essential, minimal, standard, network, unrestricted)"
+    "unknown seccomp tier {value:?} (expected: essential, minimal, standard, vsock, network, unrestricted)"
 )]
 pub struct PlanSeccompTierParseError {
     pub value: String,
@@ -2334,6 +2339,7 @@ mod plan_vocabulary_tests {
             ("essential", PlanSeccompTier::Essential),
             ("minimal", PlanSeccompTier::Minimal),
             ("standard", PlanSeccompTier::Standard),
+            ("vsock", PlanSeccompTier::Vsock),
             ("network", PlanSeccompTier::Network),
             ("unrestricted", PlanSeccompTier::Unrestricted),
         ] {

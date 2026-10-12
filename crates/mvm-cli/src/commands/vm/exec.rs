@@ -32,10 +32,13 @@ pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
 mod run_mode;
+mod transient_mounts;
+
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
 pub(in crate::commands) use run_mode::resolve_run_mode;
+use transient_mounts::parse_transient_mounts;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -662,6 +665,8 @@ pub(in crate::commands) fn run_secure_started(
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
+    // The start config arms the GPU endpoint from this same flag.
+    let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
@@ -709,6 +714,7 @@ pub(in crate::commands) fn run_secure_started(
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
                 .with_materialized_mounts(&instruction_mounts),
@@ -898,31 +904,6 @@ pub(in crate::commands) fn run_secure_started(
             startup_started,
         },
     )
-}
-
-struct TransientMounts {
-    dir_shares: Vec<crate::commands::DirShareSpec>,
-    disk_volumes: Vec<mvm_core::vm_backend::VmVolume>,
-}
-
-fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
-    let mut dir_shares = Vec::new();
-    let mut disk_volumes = Vec::new();
-    for raw in specs {
-        let parsed = super::shared::parse_volume_spec(raw)?;
-        match parsed {
-            super::shared::VolumeSpec::DirShare { .. } => {
-                dir_shares.push(crate::commands::parse_dir_share_spec(raw)?);
-            }
-            super::shared::VolumeSpec::Disk { .. } => {
-                disk_volumes.push(super::shared::vm_volume_from_spec_validated(&parsed)?);
-            }
-        }
-    }
-    Ok(TransientMounts {
-        dir_shares,
-        disk_volumes,
-    })
 }
 
 /// The boot-time admission hook plus the plumbing needed to chain-audit the

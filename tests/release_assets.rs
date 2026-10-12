@@ -1547,6 +1547,10 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
 
     let promote = job_block(&workflow, "promote-release");
     assert!(
+        !workflow.contains("gh workflow run publish-crates.yml"),
+        "creating a GitHub release must not publish crates before installed-release gates"
+    );
+    assert!(
         promote.contains(
             "    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
         ) && promote.contains("needs.published-installed-boot.result == 'success'")

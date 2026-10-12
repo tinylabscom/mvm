@@ -63,7 +63,7 @@ mod tests {
     use super::dto::*;
     use super::lease::AttachmentLeaseCatalog;
     use super::service::{LocalVolumeService, VolumeService};
-    use super::test_support::TestVolumeHome;
+    use super::test_support::{TEST_VOLUME_MIB, TestVolumeHome};
     use crate::profile::RunProfile;
 
     fn service() -> LocalVolumeService {
@@ -108,7 +108,7 @@ mod tests {
         for custom in [false, true] {
             let mut builder = CreateBlockVolumeRequest::builder("work")
                 .unwrap()
-                .capacity_mib(16);
+                .capacity_mib(TEST_VOLUME_MIB);
             let root = if custom {
                 let root = home.path().join("custom");
                 builder = builder.root(&root);
@@ -162,7 +162,7 @@ mod tests {
             }));
         let request = CreateBlockVolumeRequest::builder("work")
             .unwrap()
-            .capacity_mib(16)
+            .capacity_mib(TEST_VOLUME_MIB)
             .root(&root)
             .build()
             .unwrap();
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn unlock_on_unverified_storage_keeps_the_volume_locked_and_its_ciphertext_intact() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let ciphertext = fs::read(ciphertext_path("work")).unwrap();
         for svc in [LocalVolumeService::new(), unverified_service()] {
             let error = svc.unlock_volume("work").unwrap_err();
@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn attach_rechecks_storage_and_never_loses_writable_data() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         let bytes = append_byte(&host_path("work"), 0x7a);
 
@@ -219,7 +219,7 @@ mod tests {
     fn attach_tightens_an_unlocked_image_another_user_could_read() {
         use std::os::unix::fs::PermissionsExt as _;
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         fs::set_permissions(host_path("work"), fs::Permissions::from_mode(0o644)).unwrap();
         service()
@@ -231,7 +231,7 @@ mod tests {
     #[test]
     fn launch_rechecks_an_explicitly_unlocked_volume_before_leasing() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -256,7 +256,7 @@ mod tests {
         for name in ["first", "second"] {
             let request = CreateBlockVolumeRequest::builder(name)
                 .unwrap()
-                .capacity_mib(16)
+                .capacity_mib(TEST_VOLUME_MIB)
                 .root(home.path().join(name))
                 .build()
                 .unwrap();
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn release_recovery_and_sealing_need_no_probe() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn sealing_leaves_nothing_but_ciphertext_beside_the_archive() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         append_byte(&host_path("work"), 0x33);
         service().lock_volume("work").unwrap();
@@ -346,7 +346,7 @@ mod tests {
         let svc = unverified_service();
         let request = CreateBlockVolumeRequest::builder("work")
             .unwrap()
-            .capacity_mib(16)
+            .capacity_mib(TEST_VOLUME_MIB)
             .build()
             .unwrap();
         svc.create_block_volume(&request).expect("create");
@@ -430,14 +430,16 @@ mod tests {
         let _home = TestVolumeHome::new();
         let request = CreateBlockVolumeRequest::builder("work")
             .unwrap()
-            .capacity_mib(16)
+            .capacity_mib(TEST_VOLUME_MIB)
             .build()
             .unwrap();
         let record = service().create_block_volume(&request).unwrap();
         assert_eq!(record.name, "work");
         assert_eq!(
             record.source,
-            VolumeSourceKind::ManagedBlock { capacity_mib: 16 }
+            VolumeSourceKind::ManagedBlock {
+                capacity_mib: TEST_VOLUME_MIB
+            }
         );
         assert_eq!(record.encryption, EncryptionState::Locked);
         assert_eq!(record.host_artifact, None);
@@ -454,7 +456,7 @@ mod tests {
     #[test]
     fn volume_records_never_carry_key_material() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let record = service().describe_volume("work").unwrap();
 
         // The on-disk catalog knows the wrapped DEK; the DTO must not.
@@ -479,7 +481,7 @@ mod tests {
     #[test]
     fn unlock_lock_roundtrip_preserves_bytes_and_states() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
 
         let unlocked = service().unlock_volume("work").unwrap();
         assert_eq!(unlocked.encryption, EncryptionState::Unlocked);
@@ -510,7 +512,7 @@ mod tests {
     #[test]
     fn tampered_ciphertext_is_refused_at_unlock() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let ciphertext = ciphertext_path("work");
         let mut bytes = fs::read(&ciphertext).unwrap();
         let last = bytes.len() - 1;
@@ -530,7 +532,7 @@ mod tests {
     #[test]
     fn dek_bound_to_different_artifact_is_refused() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let mut catalog = LocalVolumeCatalog::load().unwrap();
         if let LocalVolumeEncryption::MvmManaged(enc) =
             &mut catalog.get_mut("work").unwrap().encryption
@@ -548,7 +550,7 @@ mod tests {
     #[test]
     fn attach_defaults_read_only_and_resolves_for_launch() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         let record = service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -573,7 +575,7 @@ mod tests {
     #[test]
     fn permitted_read_write_attachment_resolves_writable() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
@@ -585,7 +587,7 @@ mod tests {
     #[test]
     fn sealed_profile_refuses_read_write_launch() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
@@ -606,7 +608,7 @@ mod tests {
     #[test]
     fn a_writable_managed_volume_leases_under_every_granting_profile() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(
@@ -643,7 +645,7 @@ mod tests {
     #[test]
     fn restrictive_profile_refuses_read_write_launch() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
@@ -662,7 +664,7 @@ mod tests {
     #[test]
     fn duplicate_guest_path_between_explicit_and_registered_is_refused() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -714,8 +716,8 @@ mod tests {
     #[test]
     fn duplicate_registered_guest_path_is_refused_at_attach() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
-        home.create_block("other", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
+        home.create_block("other", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service().unlock_volume("other").unwrap();
         service()
@@ -743,7 +745,7 @@ mod tests {
     #[test]
     fn lease_is_exclusive_until_released_and_rolls_back_uncommitted() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -792,7 +794,7 @@ mod tests {
     #[test]
     fn launch_refuses_volume_locked_after_registration() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -807,7 +809,7 @@ mod tests {
     #[test]
     fn attach_refuses_locked_missing_and_unknown_volumes() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let err = service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
             .unwrap_err();
@@ -830,7 +832,7 @@ mod tests {
     #[test]
     fn just_in_time_unlock_then_final_release_relocks() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         // Register while unlocked (the registration gate), then re-seal so
         // the launch meets a locked volume.
         service().unlock_volume("work").unwrap();
@@ -865,7 +867,7 @@ mod tests {
     #[test]
     fn failed_launch_rolls_back_a_just_in_time_unlock() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -893,7 +895,7 @@ mod tests {
     #[test]
     fn refused_resolution_relocks_a_just_in_time_unlock() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadWrite))
@@ -918,7 +920,7 @@ mod tests {
     #[test]
     fn detach_removes_the_registration_and_reports_it() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -939,7 +941,7 @@ mod tests {
     #[test]
     fn orphaned_lease_recovery_after_process_crash_is_idempotent() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -966,7 +968,7 @@ mod tests {
     #[test]
     fn leases_persist_across_service_restarts() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
         service()
             .prepare_attachment(&attach("vm-1", "work", "/data/work", AccessMode::ReadOnly))
@@ -996,7 +998,7 @@ mod tests {
     #[test]
     fn interrupted_seal_recovers_without_losing_plaintext() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().unlock_volume("work").unwrap();
 
         let mut catalog = LocalVolumeCatalog::load().unwrap();
@@ -1047,7 +1049,7 @@ mod tests {
         let source_dir = home.path().join("adhoc-source");
         fs::create_dir(&source_dir).unwrap();
         let image = home.path().join("adhoc.ext4");
-        create_ext4_image(&image, 16);
+        create_ext4_image(&image, TEST_VOLUME_MIB);
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
@@ -1061,7 +1063,7 @@ mod tests {
                 &source_dir,
                 &image,
                 "0000000000000000000000000000000000000000000000000000000000000000",
-                16,
+                TEST_VOLUME_MIB,
             )
             .unwrap();
         assert_eq!(record.source, AttachmentSource::AdHocHost);
@@ -1073,7 +1075,7 @@ mod tests {
         let home = TestVolumeHome::new();
         let source_dir = home.path().join("adhoc-source");
         fs::create_dir(&source_dir).unwrap();
-        home.create_block("source", 16);
+        home.create_block("source", TEST_VOLUME_MIB);
         service().unlock_volume("source").unwrap();
         let image = host_path("source");
         let request = AttachmentRequest::builder("vm-1", "input")
@@ -1090,7 +1092,7 @@ mod tests {
                 &source_dir,
                 &image,
                 "0000000000000000000000000000000000000000000000000000000000000000",
-                16,
+                TEST_VOLUME_MIB,
             )
             .unwrap();
         assert_eq!(record.source, AttachmentSource::AdHocHost);
@@ -1154,7 +1156,7 @@ mod tests {
         let source_dir = home.path().join("adhoc-source");
         fs::create_dir(&source_dir).unwrap();
         let image = home.path().join("adhoc.ext4");
-        create_ext4_image(&image, 16);
+        create_ext4_image(&image, TEST_VOLUME_MIB);
         let svc = service();
 
         // Accepted by the general name type but too loose for the conservative
@@ -1172,7 +1174,7 @@ mod tests {
                     &source_dir,
                     &image,
                     "0000000000000000000000000000000000000000000000000000000000000000",
-                    16,
+                    TEST_VOLUME_MIB,
                 )
                 .unwrap_err();
             assert!(
@@ -1188,7 +1190,7 @@ mod tests {
         let source_dir = home.path().join("adhoc-source");
         fs::create_dir(&source_dir).unwrap();
         let image = home.path().join("adhoc.ext4");
-        create_ext4_image(&image, 16);
+        create_ext4_image(&image, TEST_VOLUME_MIB);
         let request = AttachmentRequest::builder("vm-1", "input")
             .unwrap()
             .guest_path("/work/input")
@@ -1201,7 +1203,7 @@ mod tests {
                 &source_dir,
                 &image,
                 "0000000000000000000000000000000000000000000000000000000000000000",
-                16,
+                TEST_VOLUME_MIB,
             )
             .unwrap();
 
@@ -1219,7 +1221,7 @@ mod tests {
     #[test]
     fn lease_error_messages_never_carry_key_material() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let err = service().unlock_volume("missing").unwrap_err();
         let chain = format!("{err:#}");
         let ciphertext = fs::read(ciphertext_path("work")).unwrap();
@@ -1232,7 +1234,7 @@ mod tests {
     #[test]
     fn snapshot_and_restore_surface_through_the_service() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         service().snapshot_volume("work", "baseline").unwrap();
         service().restore_volume("work", "baseline").unwrap();
         assert_eq!(managed_state("work"), LocalVolumeState::Locked);

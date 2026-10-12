@@ -40,6 +40,7 @@ impl Host {
         let keys = self.dir.path().join("keys");
         let audit = self.dir.path().join("audit");
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),

@@ -1041,7 +1041,7 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("work")
                 .unwrap()
-                .capacity_mib(16)
+                .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
                 .build()
                 .unwrap(),
         )
@@ -1101,7 +1101,7 @@ async fn launch_attaches_a_writable_managed_volume_under_standard_only_when_gran
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .unwrap()
-                .capacity_mib(16)
+                .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
                 .build()
                 .unwrap(),
         )

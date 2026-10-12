@@ -289,6 +289,8 @@ pub fn admit_and_boot_local(
             &network_policy,
             &[],
             &[],
+            // The local run request carries no GPU grant.
+            false,
         ),
         network_policy_ref: None,
         fs_policy_ref: None,

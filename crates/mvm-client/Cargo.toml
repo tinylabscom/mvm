@@ -142,6 +142,12 @@ toml = { workspace = true }
 # Only under `schema`; 0.8 matches the version every other crate pins.
 schemars = { version = "0.8", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+# Pack scenario collection opens workload-written files with O_NOFOLLOW and
+# O_NONBLOCK, so a path swapped for a symlink or a FIFO is refused, not read.
+# Already in this crate's closure through mvm-runtime.
+libc.workspace = true
+
 [[bin]]
 name = "emit_policy_schema"
 path = "src/bin/emit_policy_schema.rs"

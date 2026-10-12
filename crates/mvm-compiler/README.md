@@ -38,10 +38,22 @@ digest over file paths, modes and contents, lowered workload digest, compiler
 version and mvm revision. `compile_frozen` recomputes that lock, names every
 stale field, and compiles from the verified snapshot only when nothing differs.
 
-Lowering refuses build-scoped packages, exact package versions, language
-dependency files and copy operations, because the IR and Nix factories cannot
-honor them yet. A successful frozen compile resolves no packages, installs no
-dependencies and runs no build.
+Copy operations run in authored order against the verified snapshot and
+assemble the application tree the guest sees at `/app`; without any, the whole
+source tree lands there. Destinations outside `/app`, symlinks anywhere a copy
+reads, and a file replacing a directory (or the reverse) are refused. An npm
+`package.json` + `package-lock.json` at the source root lowers to the IR's Node
+dependency declaration: the lockfile must carry an integrity hash for every
+entry, and the generated flake builds `node_modules` from it in the builder VM,
+so nothing installs at boot.
+
+Lowering still refuses build-scoped packages, exact package versions, Python
+dependency files, other Node lockfiles and more than one dependency
+declaration, because the IR and Nix factories cannot honor them for a command
+workload yet. A successful frozen compile runs no build; `mvmctl pack lock` and
+`mvmctl pack compile` are the command-line surface over `lock_pack` and
+`compile_frozen`. A `pack.lock.json` at the source root is the lock itself and
+is left out of the snapshot it digests.
 
 ## Validation
 

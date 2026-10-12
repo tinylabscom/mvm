@@ -2,12 +2,15 @@
 //!
 //! A root proof authenticates member declarations, not files. Every config check
 //! hashes the actual selected files against those declarations. This module does
-//! not acquire artifacts, choose a revocation authority, or start a backend.
+//! not acquire artifacts or start a backend. The only revocation authority it
+//! accepts for the base image set is the host's applied, authenticated
+//! image-set list; the registry-pack feed is a different authority.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::arch::GuestArch;
@@ -16,6 +19,7 @@ use crate::image_set::{
     WorkloadImageProfile, image_set_root_proof_cache, image_train_lock, read_cached_image_set_root,
     select_workload_image,
 };
+use crate::image_set_revocation::{ImageSetRevocationStore, VerifiedImageSetRevocations};
 use crate::kernel_format::KernelFormat;
 use crate::packs::{PackRevocationChecker, Sha256Hex};
 use crate::plan::{AssetKind, ExecutionPlan};
@@ -36,13 +40,42 @@ pub struct BuiltPackBootContract {
 }
 
 impl BuiltPackBootContract {
-    /// Reopen under current publisher, pin and mandatory pack-revocation policy.
-    /// The caller must also supply its independently authenticated image-set
-    /// revocation checker; an absent checker is not an offline exception.
+    /// Reopen for admission under the host's applied image-set revocation list.
+    ///
+    /// Reads only prepared local state: the list and checkpoint under
+    /// `MVM_HOME`, the retained root proof and the installed pack. A missing,
+    /// stale, rolled-back or modified list refuses; it is never read as an
+    /// empty list, and nothing here fetches a replacement.
+    pub fn open_for_admission(pin: &PackPin, host: &HostProtocolSupport) -> Result<Self> {
+        Self::open_with_store(
+            pin,
+            host,
+            &ImageSetRevocationStore::in_mvm_home(),
+            Utc::now(),
+        )
+    }
+
+    fn open_with_store(
+        pin: &PackPin,
+        host: &HostProtocolSupport,
+        store: &ImageSetRevocationStore,
+        now: DateTime<Utc>,
+    ) -> Result<Self> {
+        let revocations = store
+            .load(now)
+            .context("built-pack admission requires the host's image-set revocation list")?;
+        Self::open(pin, host, &revocations)
+    }
+
+    /// Reopen under current publisher, pin and mandatory pack-revocation policy,
+    /// and check the base root against an image-set revocation list.
+    ///
+    /// The list type is the authenticated image-set feed, so neither the
+    /// registry-pack feed nor an empty checker can stand in for it.
     pub fn open(
         pin: &PackPin,
         host: &HostProtocolSupport,
-        image_revocations: &dyn PackRevocationChecker,
+        image_revocations: &VerifiedImageSetRevocations,
     ) -> Result<Self> {
         use crate::registry_pack_store::{
             load_pack_lockfile, load_publisher_policy_or_official_default,
@@ -71,7 +104,7 @@ impl BuiltPackBootContract {
             &image_set_root_proof_cache(),
             accepted,
             host,
-            Some(image_revocations),
+            Some(image_revocations as &dyn PackRevocationChecker),
         )?;
         ensure!(
             root.manifest_sha256() == &image.base_set.manifest_sha256,
