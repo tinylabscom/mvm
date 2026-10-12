@@ -8,7 +8,7 @@
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
 
-use crate::ir::PythonTool;
+use crate::ir::{NodeTool, PythonTool};
 
 /// Authored schema version, independent of bundle and Workload IR versions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +92,27 @@ pub enum DependencyFiles {
         manifest: String,
         lockfile: String,
     },
+    /// A Node package manifest and its integrity-pinned lockfile. No Node
+    /// runtime is implied; declare one as a runtime package.
+    Node {
+        tool: NodeTool,
+        manifest: String,
+        lockfile: String,
+    },
+}
+
+impl DependencyFiles {
+    /// The manifest and lockfile paths, relative to the source root.
+    pub fn files(&self) -> (&str, &str) {
+        match self {
+            Self::Python {
+                manifest, lockfile, ..
+            }
+            | Self::Node {
+                manifest, lockfile, ..
+            } => (manifest, lockfile),
+        }
+    }
 }
 
 /// Copy a source-relative file/tree to a guest-absolute destination.
@@ -243,9 +264,7 @@ impl PackSpec {
             }
         }
         for dependency in &self.dependencies {
-            let DependencyFiles::Python {
-                manifest, lockfile, ..
-            } = dependency;
+            let (manifest, lockfile) = dependency.files();
             relative_path(manifest, false)?;
             relative_path(lockfile, false)?;
         }

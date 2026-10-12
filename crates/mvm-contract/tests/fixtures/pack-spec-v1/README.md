@@ -9,7 +9,8 @@ execution of Claude Code.
 `minimal.json` needs one generic package and no language dependencies.
 `python.json` separately declares generic packages and ordered Python manifest
 and lockfile references. The existing Workload IR `PythonTool` vocabulary is
-reused. No language runtime is inferred from `.package(name, version=...)`.
+reused, and a `node` dependency entry reuses `NodeTool` the same way. No
+language runtime is inferred from `.package(name, version=...)`.
 
 ## Wire rules
 

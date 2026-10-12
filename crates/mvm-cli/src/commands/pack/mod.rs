@@ -9,6 +9,7 @@ use mvm_core::user_config::MvmConfig;
 
 use super::{Cli, pull, search};
 
+mod author;
 mod download;
 mod inspect;
 mod list;
@@ -94,6 +95,10 @@ pub(in crate::commands) enum PackAction {
         #[arg(long)]
         json: bool,
     },
+    /// Resolve an authored pack spec against its source into a frozen lock
+    Lock(author::LockArgs),
+    /// Compile a pack spec into a flake artifact, refusing a missing or stale lock
+    Compile(author::CompileArgs),
     /// Search available workload packs
     Search(search::Args),
     /// Fetch, verify, install, and pin a workload pack
@@ -259,6 +264,8 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         },
         PackAction::Info { reference, json } => inspect::run(&reference, json, false),
         PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
+        PackAction::Lock(args) => author::run_lock(args),
+        PackAction::Compile(args) => author::run_compile(args),
         PackAction::Search(args) => search::run(cli, args, cfg),
         PackAction::Pull(args) => pull::run(cli, args, cfg),
         PackAction::Registry(action) => registry::run(cli, action, cfg),

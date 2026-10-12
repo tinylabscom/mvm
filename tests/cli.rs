@@ -570,7 +570,7 @@ fn pack_help_lists_all_subcommands() {
     );
     let help = String::from_utf8_lossy(&out.stdout);
     for verb in [
-        "ls", "rm", "system", "list", "rollback", "prune", "download", "update",
+        "ls", "rm", "system", "list", "rollback", "prune", "download", "update", "lock", "compile",
     ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }

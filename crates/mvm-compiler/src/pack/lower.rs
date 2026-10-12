@@ -2,9 +2,10 @@
 
 use super::PackError;
 use mvm_contract::ir::{
-    App, Entrypoint, IR_MAJOR, IR_MINOR, Image, Resources, Source, Workload, validate,
+    App, Dependencies, Entrypoint, IR_MAJOR, IR_MINOR, Image, NodeTool, Resources, Source,
+    Workload, validate,
 };
-use mvm_contract::pack_spec::{PackSource, PackSpec, PackageScope};
+use mvm_contract::pack_spec::{DependencyFiles, PackSource, PackSpec, PackageScope};
 use std::collections::BTreeMap;
 
 /// Workload extension key carrying the full pack identity and target, which
@@ -15,36 +16,52 @@ pub const PACK_EXTENSION: &str = "mvm.pack";
 /// rootfs request; this matches the SDK's default.
 pub const PACK_ROOTFS_SIZE_MIB: u32 = 512;
 
-/// Working directory of a lowered command, the IR's own default.
-const WORKING_DIR: &str = "/app";
+/// Working directory of a lowered command, the IR's own default. The
+/// application tree is mounted here in the guest.
+pub const APP_DIR: &str = "/app";
+
+/// Source path a lowered workload names when the spec declares copy
+/// operations: the compiler reads the tree assembled from them, never the
+/// author's whole source directory.
+pub const APP_TREE: &str = ".mvm-pack-app";
+
+/// The npm manifest and lockfile a Node dependency must name. The Nix factory
+/// builds `node_modules` from exactly these two files at the application root.
+pub const NPM_MANIFEST: &str = "package.json";
+pub const NPM_LOCKFILE: &str = "package-lock.json";
 
 /// Lower a validated spec into a single-app, command-entrypoint Workload and
 /// validate the result.
 ///
+/// Copy operations select what lands in the application tree at [`APP_DIR`];
+/// without any, the whole source tree does. An npm lockfile lowers to the IR's
+/// Node dependency declaration, which the Nix factory installs at build time.
+///
 /// Requests the current IR and Nix factories cannot honor are refused rather
 /// than dropped: build-scoped packages (the IR has one unscoped package list),
 /// exact package versions (nixpkgs is pinned only through the mvm revision),
-/// language dependency files (nothing installs them yet), and copy operations.
+/// Python dependency files and non-npm Node lockfiles (nothing installs them
+/// for a command workload yet), and copies outside the application tree.
 pub fn lower(spec: &PackSpec) -> Result<Workload, PackError> {
     spec.validate()?;
     let packages = runtime_packages(spec)?;
-    reject_unmaterialized_inputs(spec)?;
+    let dependencies = lower_dependencies(spec)?;
+    let path = source_path(spec)?;
     let id = workload_id(spec);
-    let PackSource::Local { path } = &spec.source;
     let workload = Workload {
         schema_version: format!("{IR_MAJOR}.{IR_MINOR}"),
         id: id.clone(),
         apps: vec![App {
             name: id,
             source: Source::LocalPath {
-                path: path.clone(),
+                path,
                 include: vec!["**".to_string()],
                 exclude: Vec::new(),
             },
             image: Image::NixPackages { packages },
             entrypoints: vec![Entrypoint::Command {
                 command: spec.entrypoint.clone(),
-                working_dir: WORKING_DIR.to_string(),
+                working_dir: APP_DIR.to_string(),
                 env: BTreeMap::new(),
             }],
             env: BTreeMap::new(),
@@ -55,7 +72,7 @@ pub fn lower(spec: &PackSpec) -> Result<Workload, PackError> {
                 memory_mb: spec.resources.memory_mb,
                 rootfs_size_mb: PACK_ROOTFS_SIZE_MIB,
             },
-            dependencies: None,
+            dependencies,
             threat_tier: Default::default(),
             addons: Vec::new(),
             hooks: Default::default(),
@@ -90,14 +107,51 @@ fn runtime_packages(spec: &PackSpec) -> Result<Vec<String>, PackError> {
         .collect()
 }
 
-fn reject_unmaterialized_inputs(spec: &PackSpec) -> Result<(), PackError> {
-    if !spec.dependencies.is_empty() {
-        return Err(PackError::UnsupportedDependencies);
+/// At most one dependency declaration, and only an npm lockfile at the source
+/// root: that is the one shape the factory installs for a command workload.
+fn lower_dependencies(spec: &PackSpec) -> Result<Option<Dependencies>, PackError> {
+    match spec.dependencies.as_slice() {
+        [] => Ok(None),
+        [
+            DependencyFiles::Node {
+                tool: NodeTool::Npm,
+                manifest,
+                lockfile,
+            },
+        ] if manifest == NPM_MANIFEST && lockfile == NPM_LOCKFILE => Ok(Some(Dependencies::Node {
+            lockfile: NPM_LOCKFILE.to_string(),
+            tool: NodeTool::Npm,
+        })),
+        [DependencyFiles::Node { .. }] => Err(PackError::UnsupportedNodeDependencies),
+        [DependencyFiles::Python { .. }] => Err(PackError::UnsupportedDependencies),
+        _ => Err(PackError::MultipleDependencies),
     }
-    if !spec.copy.is_empty() {
-        return Err(PackError::UnsupportedCopy);
+}
+
+/// The tree the compiler reads: the authored source, or the tree assembled
+/// from copy operations, each of which must land inside [`APP_DIR`].
+fn source_path(spec: &PackSpec) -> Result<String, PackError> {
+    let PackSource::Local { path } = &spec.source;
+    if spec.copy.is_empty() {
+        return Ok(path.clone());
     }
-    Ok(())
+    for copy in &spec.copy {
+        app_relative(&copy.destination)?;
+    }
+    Ok(APP_TREE.to_string())
+}
+
+/// A copy destination's path inside the application tree. The tree itself is
+/// not a valid destination, and neither is anything outside it: the image
+/// carries no other writable location a pack can populate.
+pub(crate) fn app_relative(destination: &str) -> Result<&str, PackError> {
+    destination
+        .strip_prefix(APP_DIR)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .ok_or_else(|| PackError::CopyOutsideApp {
+            destination: destination.to_string(),
+        })
 }
 
 /// The name segment of `namespace/name`. IR validation refuses a segment the
@@ -124,7 +178,7 @@ mod tests {
     use super::*;
     use crate::pack::test_support::spec;
     use mvm_contract::ir::{ErrorCode, PythonTool, ir_hash};
-    use mvm_contract::pack_spec::{CopyOperation, DependencyFiles, PackageRequest};
+    use mvm_contract::pack_spec::{CopyOperation, PackageRequest};
 
     #[test]
     fn lowers_identity_packages_entrypoint_and_resources() {
@@ -219,14 +273,43 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn dependency_files_are_refused_rather_than_declared() {
+    fn with_dependencies(dependencies: Vec<DependencyFiles>) -> PackSpec {
         let mut spec = spec();
-        spec.dependencies.push(DependencyFiles::Python {
+        spec.dependencies = dependencies;
+        spec
+    }
+
+    fn npm(manifest: &str, lockfile: &str) -> DependencyFiles {
+        DependencyFiles::Node {
+            tool: NodeTool::Npm,
+            manifest: manifest.into(),
+            lockfile: lockfile.into(),
+        }
+    }
+
+    #[test]
+    fn an_npm_lockfile_lowers_to_node_dependencies() {
+        let workload = lower(&with_dependencies(vec![npm(
+            "package.json",
+            "package-lock.json",
+        )]))
+        .unwrap();
+        assert_eq!(
+            workload.apps[0].dependencies,
+            Some(Dependencies::Node {
+                lockfile: "package-lock.json".into(),
+                tool: NodeTool::Npm,
+            })
+        );
+    }
+
+    #[test]
+    fn python_dependency_files_are_refused_rather_than_declared() {
+        let spec = with_dependencies(vec![DependencyFiles::Python {
             tool: PythonTool::Uv,
             manifest: "pyproject.toml".into(),
             lockfile: "uv.lock".into(),
-        });
+        }]);
         assert!(matches!(
             lower(&spec),
             Err(PackError::UnsupportedDependencies)
@@ -234,13 +317,59 @@ mod tests {
     }
 
     #[test]
-    fn copy_operations_are_refused_rather_than_dropped() {
+    fn other_node_lockfile_shapes_are_refused() {
+        for dependency in [
+            npm("web/package.json", "web/package-lock.json"),
+            npm("package.json", "npm-shrinkwrap.json"),
+            DependencyFiles::Node {
+                tool: NodeTool::Pnpm,
+                manifest: "package.json".into(),
+                lockfile: "pnpm-lock.yaml".into(),
+            },
+        ] {
+            assert!(matches!(
+                lower(&with_dependencies(vec![dependency])),
+                Err(PackError::UnsupportedNodeDependencies)
+            ));
+        }
+    }
+
+    #[test]
+    fn more_than_one_dependency_declaration_is_refused() {
+        let spec = with_dependencies(vec![
+            npm("package.json", "package-lock.json"),
+            npm("package.json", "package-lock.json"),
+        ]);
+        assert!(matches!(lower(&spec), Err(PackError::MultipleDependencies)));
+    }
+
+    #[test]
+    fn copies_lower_to_the_assembled_application_tree() {
         let mut spec = spec();
         spec.copy.push(CopyOperation {
             source: "hello.txt".into(),
             destination: "/app/hello.txt".into(),
         });
-        assert!(matches!(lower(&spec), Err(PackError::UnsupportedCopy)));
+        let workload = lower(&spec).unwrap();
+        assert!(matches!(
+            &workload.apps[0].source,
+            Source::LocalPath { path, .. } if path == APP_TREE
+        ));
+    }
+
+    #[test]
+    fn copies_outside_the_application_tree_are_refused() {
+        for destination in ["/app", "/etc/hello.txt", "/application/x", "/apps/x"] {
+            let mut spec = spec();
+            spec.copy.push(CopyOperation {
+                source: "hello.txt".into(),
+                destination: destination.into(),
+            });
+            assert!(
+                matches!(lower(&spec), Err(PackError::CopyOutsideApp { .. })),
+                "{destination}"
+            );
+        }
     }
 
     #[test]
