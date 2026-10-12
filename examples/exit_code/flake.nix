@@ -3,13 +3,9 @@
 
   # ── What this fixture tests ────────────────────────────────────────
   #
-  # Plan 152 WS-A wires the guest /init to:
-  #   1. Source /etc/mvm/entrypoint (or /etc/mvm/boot) as a child process.
-  #   2. Capture its $? via MVM_CODE=$?.
-  #   3. Call mvm-exit-report "$MVM_CODE" over the control vsock port.
-  #   4. Sync + poweroff -f.
-  #
-  # The host (mvmctl machine run --flake .) reads the reported code and exits with it.
+  # The guest agent runs /etc/mvm/entrypoint when the host asks and
+  # reports its exit code back over vsock. The host
+  # (mvmctl machine run --flake .) exits with that code.
   # This fixture bakes `sh -c 'exit 7'` as the sealed workload so a clean
   # E2E run of `mvmctl machine run --flake ./examples/exit_code` must exit 7.
   # Adding `--timeout` declares a wall-clock grant, which a backend that cannot
