@@ -880,12 +880,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             self.driver.workload_base_bootargs(has_disk)
         });
         let identity = spawner::prepare_standby_identity(&self.spawner, spec)?;
-        spawner::assert_standby_telemetry(&state_dir, &mut boot.cmdline).map_err(|e| {
-            StandbyError::SpawnFailed(format!(
-                "recording standby parent '{}' telemetry provisioning: {e:#}",
-                spec.id
-            ))
-        })?;
+        spawner::assert_standby_telemetry(&state_dir, &mut boot.cmdline);
         // The same truncation refusal a workload boot gets, for the same reason
         // and then some: a child inherits its parent's cmdline out of restored
         // memory rather than deriving its own, so a parent whose trailing tokens

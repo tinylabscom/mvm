@@ -152,17 +152,26 @@ fn telemetry_for_boot(collection_enabled: bool, identity: FlowMuxIdentitySource<
 /// Assert telemetry on a standby parent's command line when collection is on,
 /// and record it, so every child claimed from it serves the listener its own
 /// collector dials. The parent itself gets no collector: nothing it records
-/// before it is snapshotted belongs to a workload.
-pub(super) fn assert_standby_telemetry(state_dir: &Path, cmdline: &mut String) -> Result<()> {
+/// before it is snapshotted belongs to a workload. A parent whose provisioning
+/// cannot be recorded asserts nothing, and its children are simply not
+/// collected; the pool is not refused over telemetry.
+pub(super) fn assert_standby_telemetry(state_dir: &Path, cmdline: &mut String) {
     let enabled = mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled();
-    mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(state_dir, enabled)?;
-    if enabled {
+    let recorded =
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(state_dir, enabled);
+    if let Err(error) = &recorded {
+        tracing::warn!(
+            state_dir = %state_dir.display(),
+            error = %error,
+            "standby parent telemetry provisioning not recorded; its children are not collected"
+        );
+    }
+    if enabled && recorded.is_ok() {
         if !cmdline.is_empty() {
             cmdline.push(' ');
         }
         cmdline.push_str("mvm.telemetry=1");
     }
-    Ok(())
 }
 
 /// Provision a parent's guest key without tenant workload authority or egress.
