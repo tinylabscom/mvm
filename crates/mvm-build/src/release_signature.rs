@@ -110,21 +110,25 @@ pub enum ReleaseTrain {
 ///
 /// Errors name the asset and never echo bundle or archive bytes, so the message
 /// is safe to surface to an operator verbatim.
+///
+/// Return the exact verified bundle for offline proof retention. An explicit
+/// development bypass yields no proof and cannot seed an authenticated cache.
 pub fn verify_release_archive_signature(
     request: &ReleaseSignatureRequest<'_>,
-) -> Result<(), RuntimeOverlayError> {
+) -> Result<Option<Vec<u8>>, RuntimeOverlayError> {
     if std::env::var_os(SKIP_COSIGN_VERIFY_ENV).is_some() {
         tracing::warn!(
             asset = request.asset,
             "{SKIP_COSIGN_VERIFY_ENV} set — skipping release signature verification. \
              This is an emergency-rotation escape hatch; never set it in CI."
         );
-        return Ok(());
+        return Ok(None);
     }
 
     let bundle = fetch_bundle(request)?;
     let archive = std::fs::read(request.archive_path)?;
-    verify_against_release_identities(&archive, &bundle, request)
+    verify_against_release_identities(&archive, &bundle, request)?;
+    Ok(Some(bundle))
 }
 
 /// Download the archive's signature bundle. A release that published an archive
@@ -240,6 +244,7 @@ mod tests {
             version: FIXTURE_VERSION,
             train: ReleaseTrain::Cli,
         })
+        .map(|_| ())
         .map_err(|e| e.to_string())
     }
 
@@ -350,6 +355,7 @@ mod tests {
                 version,
                 train,
             })
+            .map(|_| ())
         }
 
         /// Verification runs offline against the embedded trust root, so a

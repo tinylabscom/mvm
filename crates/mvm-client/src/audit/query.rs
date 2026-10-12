@@ -7,8 +7,8 @@ pub use certificate::{
 };
 mod chain;
 pub use chain::{
-    AppendOnlyReport, ChainVerification, PruneIntent, PruneReport, PruneRequest, PublishedRoot,
-    WitnessDivergence, WitnessReport, prune_chain, publish_root, verify_chain,
+    AppendOnlyReport, ChainVerification, PublishedRoot, WitnessDivergence, WitnessReport,
+    publish_root, verify_chain,
 };
 mod decisions;
 pub use decisions::{
@@ -375,19 +375,6 @@ mod tests {
                 .to_string()
                 .contains("invalid audit tenant")
             );
-            for intent in [
-                PruneIntent::Preview,
-                PruneIntent::AcknowledgeEvidenceRemoval,
-            ] {
-                assert!(
-                    prune_chain(&PruneRequest {
-                        tenant: tenant.into(),
-                        through: 1,
-                        intent
-                    })
-                    .is_err()
-                );
-            }
             let receipts = ReceiptExportRequest {
                 tenant: tenant.into(),
                 plan_id: None,

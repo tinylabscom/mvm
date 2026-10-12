@@ -34,6 +34,11 @@ mod ui {
     pub fn warn(message: &str) {
         tracing::warn!("{message}");
     }
+    /// Printed whatever the verbosity: reserved for the few lines an operator
+    /// (or a smoke test reading plain output) must see.
+    pub fn notice(message: &str) {
+        mvm_runtime::ui::notice(message);
+    }
 }
 
 fn images_built_from_source() -> bool {

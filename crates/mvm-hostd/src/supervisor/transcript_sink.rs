@@ -68,12 +68,15 @@ impl TranscriptCaptureSink {
                 // operator's retention choice is what the sealed root commits
                 // to, and re-opening must not quietly change it.
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
+                generation_budget: manifest.generation_budget,
+                payload_encoding: manifest.payload_encoding,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             };
             return Ok(Some(Self {
-                writer: TranscriptWriter::new(&dir, data_key, cfg),
+                writer: TranscriptWriter::new(&dir, data_key, cfg)?,
                 capture_id: manifest.capture_id,
                 dir,
             }));
@@ -156,11 +159,14 @@ mod tests {
                 max_chunks: 64,
             },
             retention: RetentionPolicy::FailClosed,
+            at_rest: None,
+            generation_budget: None,
+            payload_encoding: Default::default(),
             created_unix_secs: 1_700_000_000,
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: transcript::wrap_data_key(&kek, &data_key),
         };
-        let manifest = TranscriptWriter::new(&dir, data_key, cfg).seal();
+        let manifest = TranscriptWriter::new(&dir, data_key, cfg).unwrap().seal();
         std::fs::write(
             dir.join(MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),

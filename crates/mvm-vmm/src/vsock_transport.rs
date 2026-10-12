@@ -44,8 +44,9 @@ pub fn firecracker_transport_supported(platform: Platform) -> bool {
 
 /// Connects through a Firecracker vsock UDS multiplexer.
 ///
-/// The `instance_dir` is the runtime-state directory where Firecracker
-/// places `runtime/v.sock`; see [`mvm_agentd::vsock::vsock_uds_path`].
+/// The `instance_dir` is the VM's runtime-state directory. The mux lives at
+/// `runtime/v.sock` under its canonical socket directory, which may be relocated
+/// for long state paths; see [`mvm_agentd::vsock::vsock_uds_path`].
 pub struct FirecrackerTransport {
     instance_dir: String,
     timeout_secs: u64,
@@ -391,6 +392,86 @@ mod tests {
             msg.contains("/tmp/no-such-instance"),
             "error didn't mention instance dir: {msg}"
         );
+    }
+
+    #[test]
+    fn firecracker_transport_connects_to_relocated_mux_without_symlink() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        let state = tempfile::tempdir().unwrap();
+        let instance = state.path().join("deep".repeat(40)).join("vm");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&instance);
+        assert_ne!(socket_dir, instance);
+        // Claim only this test's hashed namespace; TempDir cleans it on panic too.
+        let _sockets = tempfile::Builder::new()
+            .prefix(socket_dir.file_name().unwrap())
+            .rand_bytes(0)
+            .tempdir_in(socket_dir.parent().unwrap())
+            .unwrap();
+        let runtime = socket_dir.join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        let listener = UnixListener::bind(runtime.join("v.sock")).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        assert!(
+            !instance.exists(),
+            "no raw state directory or compatibility symlink"
+        );
+
+        let server = std::thread::spawn(move || {
+            let mut poll = mio::Poll::new().unwrap();
+            let fd = listener.as_raw_fd();
+            poll.registry()
+                .register(
+                    &mut mio::unix::SourceFd(&fd),
+                    mio::Token(0),
+                    mio::Interest::READABLE,
+                )
+                .unwrap();
+            let mut events = mio::Events::with_capacity(1);
+            poll.poll(&mut events, Some(Duration::from_secs(5)))
+                .unwrap();
+            assert!(!events.is_empty(), "mux accept deadline elapsed");
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(false).unwrap();
+            mvm_agentd::vsock::run_with_stream_deadline(
+                &mut stream,
+                Instant::now() + Duration::from_secs(5),
+                |stream| {
+                    let mut command = String::new();
+                    BufReader::new(&mut *stream).read_line(&mut command)?;
+                    assert_eq!(command, "CONNECT 5252\n");
+                    stream.write_all(b"OK 5252\n")?;
+                    let mut data = [0; 4];
+                    stream.read_exact(&mut data)?;
+                    assert_eq!(&data, b"echo");
+                    stream.write_all(&data)?;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        });
+        let result = (|| -> Result<()> {
+            let transport = FirecrackerTransport::new(instance.to_string_lossy(), 1);
+            let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+            mvm_agentd::vsock::run_with_stream_deadline(
+                &mut stream,
+                Instant::now() + Duration::from_secs(5),
+                |stream| {
+                    stream.write_all(b"echo")?;
+                    let mut data = [0; 4];
+                    stream.read_exact(&mut data)?;
+                    assert_eq!(&data, b"echo");
+                    Ok(())
+                },
+            )
+        })();
+        let server_result = server.join();
+        result.expect("transport must dial the canonical relocated mux");
+        server_result.unwrap();
+        assert!(!instance.exists());
     }
 
     #[test]

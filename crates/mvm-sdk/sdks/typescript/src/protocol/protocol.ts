@@ -124,6 +124,10 @@ host_epoch_secs?: (number | null)
  */
 hostname?: (string | null)
 /**
+ * The seccomp tier the claiming launch's signed plan admits, for a child restored out of a standby parent that booted with no plan and so admitted no tier. The agent admits it before it acknowledges and before anything else starts a workload process; a guest that already admitted a different tier refuses it. Omitted from the wire when absent, so a caller that sends none reaches an agent built before the field; an agent that predates it refuses a request carrying it, which fails the claim rather than leaving the child unfiltered.
+ */
+seccomp_tier?: (SeccompTier | null)
+/**
  * @minItems 16
  * @maxItems 16
  */
@@ -378,6 +382,12 @@ path: string
 }
 })
 /**
+ * Cumulative seccomp profile tiers. Each tier is a strict superset of the previous one, adding more syscall permissions for broader workload needs.
+ * 
+ * The syscall lists cover x86_64 and aarch64 Linux. A name that does not exist on the target arch is skipped when the filter is built, so a tier may name both a legacy syscall and its `*at` replacement; both are needed for the capability to survive on both arches. Tier membership is defined by [`SeccompTier::syscalls`], which returns the full set of allowed syscall names for that tier.
+ */
+export type SeccompTier = ("essential" | "minimal" | "standard" | "network" | "unrestricted")
+/**
  * One input event bound for the guest display.
  */
 export type DisplayInputEvent = ({
@@ -536,6 +546,10 @@ reseed_shortfall?: (ReseedShortfall | null)
  * `true` iff the delivered generation token changed and the guest rekeyed its kernel generator from it (a fresh clone). `false` for an unchanged/zero token (a plain wake or no-rotation restore) and for a reseed that failed. Defaults to `false` on the wire for forward-compat with a pre-rotation ack.
  */
 reseeded?: boolean
+/**
+ * The workload seccomp tier the guest holds admitted after this restore. Reported only when the request named one, so a host that never asks never sees the field; `None` when admission failed.
+ */
+seccomp_tier?: (SeccompTier | null)
 success: boolean
 }
 } | {

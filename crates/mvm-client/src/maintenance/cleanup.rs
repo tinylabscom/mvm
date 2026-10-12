@@ -2,9 +2,11 @@
 //! wipe host-side cache / state directories (`--cache` / `--state` /
 //! `--nuclear`).
 //!
-//! Without any tier flag the command is the same lightweight in-VM
-//! cleanup it has always been (clears the dev VM's `/tmp`, prunes
-//! `~/.mvm/dev/builds/`, runs `nix-collect-garbage -d`). The tier
+//! Without any tier flag the command prunes `~/.mvm/dev/builds/` and, when
+//! the Linux environment is a dev VM, clears that VM's `/tmp` and runs
+//! `nix-collect-garbage -d` inside it. Where the Linux environment is this
+//! host (native Linux, macOS 13-25) those two steps are skipped: they would
+//! be run against the host itself. The tier
 //! flags add host-side directory sweeps that run after the in-VM
 //! step and are gated by a confirmation prompt.
 //!
@@ -31,7 +33,7 @@ use anyhow::{Result, anyhow};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use mvm_runtime::shell;
+use mvm_runtime::{linux_env, shell};
 use mvm_vmm::host::process_liveness::state_dir_has_live_process;
 
 /// Explicit authorization is required even for the in-VM step.
@@ -167,6 +169,9 @@ pub enum Event {
         count: usize,
         retention: Retention,
     },
+    /// The Linux environment is this host, so the dev-VM scratch sweep and
+    /// garbage collection were not run against it.
+    DevVmMaintenanceSkipped,
     GarbageCollectionSkipped,
     GarbageCollectionStarted,
     GarbageCollectionOutput(String),
@@ -322,7 +327,32 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
     }
 }
 
+/// Whether `cleanup` may run its dev-VM maintenance scripts.
+///
+/// Those scripts (`rm -rf /tmp/*`, `nix-collect-garbage -d`, clearing Nix
+/// profiles) are only safe inside a disposable dev VM. Where the Linux
+/// environment is this host, `run_in_vm` is a plain host shell, and sending
+/// them there wipes every other process's files under `/tmp` and collects the
+/// host's own Nix store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VmMaintenance {
+    Run,
+    Skip,
+}
+
+impl VmMaintenance {
+    fn for_env(env_runs_on_host: bool) -> Self {
+        if env_runs_on_host {
+            VmMaintenance::Skip
+        } else {
+            VmMaintenance::Run
+        }
+    }
+}
+
 trait VmOperations {
+    /// Whether guest commands run on this host rather than in a dev VM.
+    fn env_runs_on_host(&self) -> bool;
     fn disk_usage(&mut self) -> Option<u8>;
     fn run(&mut self, command: &str) -> Result<()>;
     fn stdout(&mut self, command: &str) -> Result<String>;
@@ -332,6 +362,9 @@ trait VmOperations {
 struct HostVm;
 
 impl VmOperations for HostVm {
+    fn env_runs_on_host(&self) -> bool {
+        linux_env::default_env_runs_on_host()
+    }
     fn disk_usage(&mut self) -> Option<u8> {
         vm_disk_usage_pct()
     }
@@ -358,18 +391,31 @@ fn run_vm_cleanup_with(
     retention: Retention,
     observe: &mut dyn FnMut(Event),
 ) -> Result<usize> {
-    let before = vm.disk_usage();
-    if let Some(pct) = before {
-        observe(Event::DiskBefore(pct));
-    }
-    observe(Event::ClearingTemporaryFiles);
-    let _ = vm.run("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+    let maintenance = VmMaintenance::for_env(vm.env_runs_on_host());
+    let before = match maintenance {
+        VmMaintenance::Run => {
+            let before = vm.disk_usage();
+            if let Some(pct) = before {
+                observe(Event::DiskBefore(pct));
+            }
+            observe(Event::ClearingTemporaryFiles);
+            let _ = vm.run("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
+            before
+        }
+        VmMaintenance::Skip => {
+            observe(Event::DevVmMaintenanceSkipped);
+            None
+        }
+    };
     let (count, paths) = vm.prune(retention.count())?;
     observe(Event::BuildsRemoved {
         paths,
         count,
         retention,
     });
+    if maintenance == VmMaintenance::Skip {
+        return Ok(count);
+    }
     if before.is_none() {
         observe(Event::GarbageCollectionSkipped);
     } else {
@@ -1083,11 +1129,15 @@ mod tests {
     #[derive(Default)]
     struct FakeVm {
         running: bool,
+        on_host: bool,
         fail_prune: bool,
         calls: Vec<String>,
     }
 
     impl VmOperations for FakeVm {
+        fn env_runs_on_host(&self) -> bool {
+            self.on_host
+        }
         fn disk_usage(&mut self) -> Option<u8> {
             self.calls.push("disk".into());
             self.running.then_some(80)
@@ -1107,6 +1157,35 @@ mod tests {
             }
             Ok((1, vec!["old-build".into()]))
         }
+    }
+
+    #[test]
+    fn dev_vm_maintenance_never_runs_against_the_host() {
+        assert_eq!(VmMaintenance::for_env(true), VmMaintenance::Skip);
+        assert_eq!(VmMaintenance::for_env(false), VmMaintenance::Run);
+    }
+
+    /// Where guest commands run on this host, the sweep of `/tmp` and the
+    /// Nix garbage collection would run against the host itself: only the
+    /// host-side build prune happens.
+    #[test]
+    fn a_host_linux_environment_only_prunes_builds() {
+        let mut vm = FakeVm {
+            running: true,
+            on_host: true,
+            ..FakeVm::default()
+        };
+        let mut events = Vec::new();
+        assert_eq!(
+            run_vm_cleanup_with(&mut vm, Retention::All, &mut |event| events.push(event)).unwrap(),
+            1
+        );
+        assert_eq!(vm.calls, vec!["prune:0"]);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::DevVmMaintenanceSkipped))
+        );
     }
 
     #[test]

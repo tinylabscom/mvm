@@ -8,7 +8,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -230,6 +229,8 @@ fn relay_supervisor_config_with_handoff(
     };
 
     Ok(HvfSupervisorConfig {
+        console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
+        vm_name: spec.name.clone(),
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
@@ -341,7 +342,6 @@ fn boot_with_handoff(
     let state_dir = vm_state_dir(&spec.name);
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-    let _ = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("console.log"));
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -361,12 +361,11 @@ fn boot_with_handoff(
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
-    let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-            &paths.state_dir,
-        ))
+    let mut command = bounded_supervisor_command(&supervisor, spec, &paths.state_dir);
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
     child
@@ -386,17 +385,15 @@ fn boot_with_handoff(
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor exited before writing its PID file (status: {status}); {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
@@ -412,9 +409,8 @@ fn boot_with_handoff(
     }) {
         let _ = child.kill();
         return Err(error).context(format!(
-            "HVF supervisor failed readiness; see {}{}",
-            paths.console_log.display(),
-            mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+            "HVF supervisor failed readiness; {}",
+            mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
         ));
     }
 
@@ -756,6 +752,20 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
     Ok(HandoffReply::parse(&response))
 }
 
+/// How much longer than the parent's own capture handoff bound the claimant
+/// waits for a reply.
+const HANDOFF_RESPONSE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// When the claimant stops waiting for the parent's handoff reply.
+///
+/// The parent may spend up to [`mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT`]
+/// preparing protected capture before it answers, and then answers with its
+/// reason. Giving up at or before that bound would replace the parent's
+/// account of a refusal with a bare local timeout.
+fn handoff_response_deadline(now: Instant) -> Instant {
+    now + mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+}
+
 /// Read the parent's one-line handoff reply: `OK`, `RETRY <reason>`, or
 /// `ERR <reason>`.
 ///
@@ -764,7 +774,7 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
 /// with no account of what the parent had refused.
 fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = handoff_response_deadline(Instant::now());
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while response.len() < HANDOFF_RESPONSE_MAX_BYTES && response.last() != Some(&b'\n') {
@@ -863,14 +873,30 @@ fn wait_for_agent_socket(
     }
 }
 
+/// How long a factory parent's guest agent has to start answering.
+const STANDBY_AGENT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Do not capture a factory parent until its guest agent has completed init.
 /// The child resumes from the captured CPU/device state rather than rebooting,
 /// so a parent captured before the agent listener is serving would make every
 /// later post-restore identity handshake impossible.
 fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
-    let socket = hvf_agent_socket(state_dir);
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    wait_for_standby_agent(&hvf_agent_socket(state_dir), STANDBY_AGENT_READY_TIMEOUT)
+}
+
+/// Poll `socket` until a guest agent answers the authenticated readiness probe
+/// in either serving state.
+///
+/// A parent booted with the universal initramfs is still waiting for
+/// `ActivateEnvironment` here — the runner activates it only after this
+/// returns — and that agent answers every `Ping` with `NotActivated`. That
+/// answer is the agent serving, so it counts. Requiring `Pong` instead waits
+/// for a reply the guest cannot give until the caller's next step, and fails
+/// every such parent at the deadline.
+fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
+    let mut last_error: Option<anyhow::Error> = None;
     while Instant::now() < deadline {
         if socket.exists() {
             // The HVF agent socket is the bridge's direct stream endpoint. It
@@ -879,19 +905,27 @@ fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
             // the first four bytes of an RPC frame. Probe the authenticated
             // RPC stream directly; this waits for a real guest response rather
             // than treating the host-side listener as readiness.
-            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
-                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-                let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-                if mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok() {
-                    return Ok(());
+            match std::os::unix::net::UnixStream::connect(socket) {
+                Ok(mut stream) => {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+                    match mvm_agentd::vsock::probe_agent_serving(&mut stream) {
+                        Ok(_) => return Ok(()),
+                        Err(error) => last_error = Some(error),
+                    }
                 }
+                Err(error) => last_error = Some(error.into()),
             }
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
+    let reason = last_error.map_or_else(
+        || "the socket was never bound".to_string(),
+        |error| format!("last probe: {error:#}"),
+    );
     anyhow::bail!(
-        "guest agent socket {} was not responsive within 10s",
+        "guest agent socket {} was not responsive within {timeout:?} ({reason})",
         socket.display()
     )
 }
@@ -1213,6 +1247,25 @@ mod tests {
     }
 
     #[test]
+    fn a_valid_capture_handoff_ack_may_arrive_after_the_old_deadline() {
+        use std::io::Write;
+        let (mut client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            // Model bounded capture preparation, not a readiness polling loop.
+            let (_timer, elapsed) = std::sync::mpsc::channel::<()>();
+            assert!(matches!(
+                elapsed.recv_timeout(std::time::Duration::from_millis(2100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            peer.write_all(mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED)
+                .unwrap();
+        });
+        let response = read_handoff_response(&mut client).unwrap();
+        assert_eq!(response, mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED);
+        writer.join().unwrap();
+    }
+
+    #[test]
     fn handoff_response_reader_handles_a_ready_unix_stream() {
         let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
         let writer = std::thread::spawn(move || {
@@ -1231,6 +1284,87 @@ mod tests {
     /// with `HVF parent rejected live handoff: ERR` and nothing else, on a path
     /// where the parent is a paused process you cannot attach to and the reply
     /// is the only account of what it refused.
+    /// Serve one connection on `socket` as an authenticated guest agent that
+    /// answers the readiness `Ping` with `answer`. The host signer key the probe
+    /// authenticates with is seeded under the isolated `MVM_HOME`.
+    fn serve_one_agent_answer(
+        socket: &Path,
+        answer: mvm_agentd::vsock::GuestResponse,
+    ) -> std::thread::JoinHandle<()> {
+        let host_seed = [7u8; 32];
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).expect("create keys dir");
+        std::fs::write(keys.join("host-signer.ed25519"), host_seed).expect("seed host signer");
+        let anchor = ed25519_dalek::SigningKey::from_bytes(&host_seed).verifying_key();
+        let listener = std::os::unix::net::UnixListener::bind(socket).expect("bind agent socket");
+        std::thread::spawn(move || {
+            let (mut guest, _) = listener.accept().expect("accept probe");
+            guest
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .expect("guest read timeout");
+            let mut session = mvm_agentd::vsock::AuthenticatedSession::guest(
+                &mut guest,
+                ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let request: mvm_agentd::vsock::GuestRequest =
+                session.read(&mut guest).expect("read probe request");
+            assert!(
+                matches!(request, mvm_agentd::vsock::GuestRequest::Ping),
+                "got {request:?}"
+            );
+            session.write(&mut guest, &answer).expect("write answer");
+        })
+    }
+
+    /// The regression: a standby parent booted with the universal initramfs is
+    /// waited on before the runner activates it, so its agent can only answer
+    /// `NotActivated`. Requiring `Pong` failed every HVF `pool warm` at the
+    /// 10 s deadline while cold boots — which activate first — worked.
+    #[test]
+    fn standby_readiness_accepts_an_agent_awaiting_activation() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let guest = serve_one_agent_answer(&socket, mvm_agentd::vsock::GuestResponse::NotActivated);
+
+        wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
+            .expect("a pre-activation agent is serving and must read as ready");
+        guest.join().expect("guest thread");
+    }
+
+    #[test]
+    fn standby_readiness_accepts_an_activated_agent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let guest = serve_one_agent_answer(&socket, mvm_agentd::vsock::GuestResponse::Pong);
+
+        wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
+            .expect("a ponging agent is ready");
+        guest.join().expect("guest thread");
+    }
+
+    /// A bound socket with nothing serving behind it is still not readiness,
+    /// and the deadline error says what the last probe saw.
+    #[test]
+    fn standby_readiness_times_out_on_a_socket_nothing_serves() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind agent socket");
+
+        let error = wait_for_standby_agent(&socket, std::time::Duration::from_millis(200))
+            .expect_err("nothing answered the probe");
+        let message = format!("{error:#}");
+        assert!(message.contains("not responsive within"), "{message}");
+        assert!(message.contains("last probe"), "{message}");
+    }
+
     #[test]
     fn a_refused_handoff_reports_the_parents_whole_reason() {
         let (mut peer, mut stream) = std::os::unix::net::UnixStream::pair().expect("unix pair");
@@ -1268,6 +1402,16 @@ mod tests {
         let response = read_handoff_response(&mut stream).expect("read available refusal reason");
         writer.join().expect("join handoff writer");
         assert_eq!(response, b"ERR parent stopped");
+    }
+
+    #[test]
+    fn the_claimant_outwaits_the_parents_capture_handoff_bound() {
+        let now = Instant::now();
+        assert_eq!(
+            handoff_response_deadline(now) - now,
+            mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT + HANDOFF_RESPONSE_GRACE
+        );
+        assert!(!HANDOFF_RESPONSE_GRACE.is_zero());
     }
 
     /// Whatever the parent sends, the host stops at a bound rather than reading

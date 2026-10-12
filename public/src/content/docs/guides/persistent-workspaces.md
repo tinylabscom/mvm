@@ -65,6 +65,76 @@ mvmctl machine volume unmount agent-sandbox /data/cache
 mvmctl machine volume lock agent-cache
 ```
 
+### Lifetimes: unlock, attach, release, relock
+
+A managed volume is plaintext on the host only between an unlock and the lock
+that follows it. Which lock that is depends on who unlocked it:
+
+- **Explicit unlock** (`mvmctl machine volume unlock`) persists. The volume
+  stays unlocked across any number of machine starts and stops until you run
+  `mvmctl machine volume lock`; stopping a machine does not re-seal it.
+- **Just-in-time unlock** happens when a library or SDK start (`LocalBackend`,
+  the host library) finds a registered volume locked. The start unlocks it,
+  holds the attachment lease for the life of the machine, and re-seals it when
+  that lease is released at stop. It re-seals only what it unlocked itself.
+- **A refused or failed start** re-seals every volume it unlocked just in time
+  before it returns, including the ones unlocked before the refusal, and
+  releases its leases. A volume you unlocked explicitly is left unlocked.
+- **Attachment** (`volume mount`) only registers the volume for a machine; it
+  needs the volume already unlocked and never unlocks it.
+- **Locking** writes only ciphertext. It streams the plaintext into a private
+  staging directory beside the archive and renames the result into place, so
+  no plaintext copy is ever made next to the ciphertext. An interrupted lock
+  recovers to the unlocked image with its writes intact.
+
+### Where unlocked plaintext may live
+
+Unlocked plaintext is written under the volume root's `unlocked/` directory —
+`~/.mvm/volumes/mvm-managed/unlocked` by default, or `<root>/unlocked` for a
+volume created with `--root`. That directory and the volume root are created
+owner-only (`0700`), and the image is `0600`. The directory must also be on
+storage that is **verified encrypted**:
+
+- **macOS**: the APFS volume holding it reports `FileVault: Yes` (or
+  `Encrypted: Yes`) in `diskutil info`. A volume that is only hardware
+  "encrypted at rest" with FileVault off does not count — its key is not bound
+  to your login, so the data is readable by anyone who can boot or attach the
+  disk.
+- **Linux**: it is on an ext2/ext3/ext4 filesystem with no external journal,
+  and every block device beneath it is a dm-crypt/LUKS mapping. Proving the
+  journal is internal runs `tune2fs -l` on the device, which needs read access
+  to it (root, or the `disk` group on most distributions). Other filesystems
+  and layouts are reported as unverified rather than guessed at.
+
+The check runs before anything is written, at every point plaintext could
+appear or be used: `volume create` (before a key is minted), `volume unlock`
+and just-in-time unlock (before decrypting), `volume mount`, and every start
+that leases the volume — an explicitly unlocked volume is re-checked at each
+start, so moving its root to other storage later is caught. A refusal leaves
+locked ciphertext untouched and never deletes an unlocked image, so writable
+data is never lost to a refusal; `volume lock` needs no check and always works.
+
+When the check fails, the command refuses and says why:
+
+```text
+refusing to place managed volume plaintext at …/unlocked: the storage is not
+verified encrypted. Enable FileVault (macOS) or put the location on a
+dm-crypt/LUKS ext4 filesystem (Linux), or choose a location that is. For local
+development only, set MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1 to proceed anyway;
+each use is audited and --prod refuses it
+```
+
+`mvmctl doctor` reports the same verdict for the default location on its
+`volume storage (encrypted backing)` line.
+
+**Development override.** On a laptop or CI host without FileVault or LUKS, set
+`MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` to accept unverified storage. It is
+never on by default and only the value `1` turns it on. Each use writes a
+`volume_storage_override` entry (purpose, path, and the reason the check
+failed) to the local audit log at `~/.mvm/state/log/audit.jsonl`; if that entry
+cannot be written the operation is refused. `--prod` refuses a run that carries
+the variable at all.
+
 Security rules:
 
 - `volume mount` refuses a managed volume while it is locked;
@@ -80,6 +150,26 @@ Security rules:
   when the machine's profile is `standard` (the default), `dev`, or
   `permissive`, and refuses it under `restrictive`. `volume mount --rw` against
   an existing `restrictive` machine is refused at registration.
+
+## Explicit disk images
+
+`--mount HOST.img:/GUEST:SIZE[:rw]` on `mvmctl run`, `mvmctl machine run`, or a
+persistent machine names an image file directly instead of a managed volume. It
+is not registered in the volume catalog, has no lock or unlock, and is never
+encrypted by mvm: whatever the guest writes sits in that file as plaintext. So
+a **writable** (`:rw`) image follows the same rules as unlocked managed-volume
+plaintext, checked before anything is created:
+
+- the filesystem it will live on must be verified encrypted, with the same
+  development override and the same `--prod` refusal;
+- a missing image is created `0600`, and any missing directory above it `0700`;
+- an existing image is used only if it is a regular file no other user can
+  read or write (fix with `chmod 600 <image>`); mvm never changes the mode of a
+  file or directory you already own;
+- an image in a directory other users can write to (`/tmp`, a `0777` share) is
+  refused, since they could replace it.
+
+A read-only image is only read by the guest, so none of these apply to it.
 
 ## Durable tenant volumes through mvmd
 
@@ -160,8 +250,11 @@ mvmctl machine volume mount agent-sandbox \
   --rw
 ```
 
-The host directory must live on encrypted backing storage. If encryption cannot
-be verified, the command fails closed — the check runs against the source
+The host directory must live on verified encrypted backing storage, judged by
+the same check as unlocked managed volumes (see
+[Where unlocked plaintext may live](#where-unlocked-plaintext-may-live)), with
+the same development override. If encryption cannot be verified and the
+override is not set, the command fails closed — the check runs against the source
 directory and independently against the private mount-image cache before any
 snapshot bytes are written. Files are streamed into the cache rather than held
 as a whole tree in memory, and a file that changes while its snapshot is being

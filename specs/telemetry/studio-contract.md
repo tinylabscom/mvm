@@ -64,6 +64,18 @@ The served shapes are frozen beside them
 | `status-collecting.json` | A live collector under boot generation 1, with the snapshot's age and the records file's size. |
 | `status-degraded.json` | Collection impaired with a short `code` and a non-zero host-side `shed` count. |
 | `page-healthy-boot.json` | The healthy-boot stream as one served page: each record in its envelope with its `received_at_ms`, the cursor past the last persisted line, `undecodable` zero, `exhausted` true. |
+| `records-page.json` | The first page of the same stream read with `limit` 3: `exhausted` false and a `next_cursor` that, handed back, serves the remaining two records and lands on the full page's cursor. |
+| `collector-status.jsonl` | One served status per line covering every state the badge must render: `not_provisioned`, then `connecting`, `collecting` (with and without shed records), `degraded` and `stopped`. Each line is the snapshot label typed through the reader's own conversion; `snapshot_age_ms` is left out because it is measured at read time. |
+
+`crates/mvm-client/tests/studio_telemetry_fixtures.rs` replays the served
+fixtures through the real local reader: it stages the files the collector
+would have written and asserts the reader answers with the committed JSON,
+so a fixture is something the seam serves and not merely something that
+decodes. For tests and offline development against the facade itself,
+`MockBackend` can be seeded per machine (`set_telemetry_status`,
+`push_telemetry_records`, `reset_telemetry_records`); its cursors are the
+same persisted byte offsets the reader hands out, and it refuses a cursor
+off a line boundary as the reader does.
 
 ## The record shape
 
@@ -139,7 +151,7 @@ unbounded line.
 
 `state` is a tagged object on `kind`: `connecting`, `collecting` with its
 boot `generation`, `degraded` with a short `code`, or `stopped`. The
-`status-*.json` fixtures above freeze all of it.
+`status-*.json` fixtures and `collector-status.jsonl` above freeze all of it.
 
 ## The page
 

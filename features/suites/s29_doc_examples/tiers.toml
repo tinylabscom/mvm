@@ -5,7 +5,8 @@
 #   exec   additionally executed for real against an isolated MVM_HOME.
 #          Only for commands that touch nothing outside that home, reach no
 #          network, and boot no VM.
-#   live   additionally boots a real microVM (the @live scenarios).
+#   live   additionally executes real acquisition/materialization or microVM
+#          workflows (the opt-in @live scenarios).
 #
 # A lookup falls back to the longest registered prefix, so a group entry
 # covers its leaves unless a leaf overrides it. The assignment is total: a
@@ -37,9 +38,14 @@ tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
+path = "bundle build"
+tier = "live"
+reason = "acquires OCI and authenticated runtime assets, materializes a real rootfs, and signs the archive; the live bundle scenario verifies outputs and publisher trust"
+
+[[command]]
 path = "bundle fetch"
-tier = "parse"
-reason = "needs a signed .mvmpkg published by a real publisher key; scripts/make-bundle-fixture.sh builds one, wiring it in is follow-on work"
+tier = "live"
+reason = "the live bundle scenario verifies a freshly built signed archive, first refusing its unenrolled publisher and then accepting explicit trust"
 
 [[command]]
 path = "bundle install"

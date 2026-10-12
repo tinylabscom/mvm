@@ -1260,6 +1260,7 @@ mod captured_tests {
                     display_socket: None,
                     redaction: &redaction,
                     retention: mvm_core::plan::StreamRetention::Persist,
+                    supervisor_owned: false,
                 })
                 .expect("attach a plane");
 
@@ -1468,6 +1469,7 @@ mod captured_tests {
                 display_socket: None,
                 redaction: &redaction,
                 retention: mvm_core::plan::StreamRetention::Persist,
+                supervisor_owned: false,
             })
             .expect("attach a plane");
 

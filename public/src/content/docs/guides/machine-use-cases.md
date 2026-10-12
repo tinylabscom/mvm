@@ -17,7 +17,7 @@ boundary only when a workflow actually needs Linux build or evaluation work.
 | --- | --- | --- |
 | Sandbox untrusted code | `mvmctl machine run --image alpine -- <cmd>` | Fresh transient microVM, command output, teardown on exit. |
 | Run a command in an OCI image | `mvmctl machine run --image ghcr.io/org/app:tag -- <cmd>` | OCI provenance, cache reuse, admission, receipts, and audit. |
-| Run an offline, pre-sealed workload | `mvmctl bundle install ./app.mvmpkg` then `mvmctl machine run --manifest <bundle-sha256>` | Offline-friendly input through the signed-bundle verify/admission path. |
+| Run an offline, pre-sealed workload | `mvmctl run ./app.mvmpkg -- <cmd>` | Offline-friendly input through the signed-bundle verify/admission path. |
 | Keep a dev machine around | `mvmctl machine create dev --image alpine` | Durable spec plus `start`, `exec`, `shell`, `stop`, `inspect`, and `rm`. |
 | Start a machine, creating it if missing | `mvmctl machine start dev --image alpine` | Combines `create` + `start`; useful for scripts and idempotent workflows. |
 | Declare a repeatable machine | `mvmctl machine create dev --manifest ./mvm.toml` | TOML-backed image, sizing, network, volume, and dev-init settings. |
@@ -35,9 +35,14 @@ advanced workflows.
 Use one-shot runs when the result is the command output, not a retained machine:
 
 ```bash
+mvmctl image pull alpine:3.20
+export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
+mvmctl pool warm --image alpine:3.20
 mvmctl machine run --image alpine:3.20 -- uname -a
 ```
 
+An unnamed one-shot run claims a prepared warm standby of the same image and
+sizing and refuses rather than cold-booting without one; `--name` boots it cold.
 The first run may pull and materialize the image. Later runs can reuse cached
 inputs when the image digest and policy inputs still match. Cache reuse never
 skips admission or verification.

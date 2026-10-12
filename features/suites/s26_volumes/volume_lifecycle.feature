@@ -5,7 +5,7 @@ Feature: Encrypted block volume lifecycle and attachment
   path, plan, and backend boundaries.
 
   Scenario: an immutable snapshot restores prior encrypted volume bytes
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume unlock work"
@@ -27,7 +27,7 @@ Feature: Encrypted block volume lifecycle and attachment
     And managed volume "work" ends with byte 65
 
   Scenario: a locked managed volume cannot be registered for launch
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create locked --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume mount bdd-locked --volume locked --guest /data"
@@ -35,7 +35,7 @@ Feature: Encrypted block volume lifecycle and attachment
     And the error output contains "is locked"
 
   Scenario: a guest mount path cannot traverse into a denied system prefix
-    Given an isolated mvm home
+    Given an isolated mvm home on encrypted backing storage
     When I run mvmctl in the isolated mvm home with "machine volume create guarded --size 16M"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine volume unlock guarded"
@@ -44,13 +44,38 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 1
     And the error output contains "rejected by policy"
 
+  # Unlocked plaintext has to sit on storage that is verified encrypted. A host
+  # that cannot show that is refused at create, and the refusal names the fix
+  # and the development override; the override admits the volume and records
+  # each use in the local audit log.
+  Scenario: a managed volume on unverified storage is refused unless the override is set
+    Given an isolated mvm home on unencrypted backing storage
+    When I run mvmctl in the isolated mvm home with "machine volume create plain --size 16M"
+    Then the command exits with code 1
+    And the error output contains "not verified encrypted"
+    And the error output contains "MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1"
+    When I run mvmctl in the isolated mvm home with "machine volume create plain --size 16M" allowing unverified volume storage
+    Then the command exits with code 0
+    And the isolated home audit log records a volume storage override
+
   Scenario: a volume absent from the signed plan is refused
     Given a signed execution plan with no admitted volume shares
     Then the unadmitted volume attachment is refused
 
-  Scenario: a backend reports unsupported block attachment honestly
-    When I ask the Docker backend to attach a block volume
-    Then the backend refuses the unsupported block volume before boot
+  Scenario: the removed Docker backend refuses a volume-bearing launch before boot
+    Given an isolated mvm home on encrypted backing storage
+    When I run mvmctl in the isolated mvm home with "machine create bdd-docker-volume --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume create work --size 16M"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume unlock work"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine volume mount bdd-docker-volume --volume work --guest /data"
+    Then the command exits with code 0
+    When I attempt a direct start of machine "bdd-docker-volume" with backend "docker"
+    Then the command exits with code 1
+    And the error output contains "Docker backend has been removed"
+    And the local volume attachment lease catalog is empty
 
   Scenario: remote volume operations require explicit authenticated configuration
     When I run remote volume catalog without gateway configuration
@@ -72,7 +97,7 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 1
     And the local volume attachment lease catalog is empty
 
-  @live @firecracker @workload_kernel @guest_bins
+  @live @firecracker @workload_kernel
   Scenario: a writable block volume persists guest bytes across restart
     Given an isolated mvm home on encrypted backing storage
     And a cached live workload kernel
@@ -100,7 +125,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine volume lock work"
     Then the command exits with code 0
 
-  @live @firecracker @workload_kernel @guest_bins
+  @live @firecracker @workload_kernel
   Scenario: a read-only block attachment refuses a guest write
     Given an isolated mvm home on encrypted backing storage
     And a cached live workload kernel
@@ -148,7 +173,7 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 1
     And the error output contains "does not exist"
 
-  @live @firecracker @workload_kernel @guest_bins
+  @live @firecracker @workload_kernel
   Scenario: restarting refreshes a registered host directory snapshot
     Given an isolated mvm home
     And a cached live workload kernel
@@ -172,7 +197,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine stop bdd-refresh-dir-volume --yes"
     Then the command exits with code 0
 
-  @live @ci_live @ps11_live @firecracker @workload_kernel @guest_bins
+  @live @ci_live @ps11_live @firecracker @workload_kernel
   Scenario: an instruction-bearing writable host snapshot is effectively read-only
     Given an isolated mvm home
     And a cached live workload kernel
@@ -229,7 +254,7 @@ Feature: Encrypted block volume lifecycle and attachment
   # terminal prompt is unit-tested against a scripted terminal. The entrypoint
   # script stands in for an agent: it deletes the seeded marker and writes a
   # file, giving the apply one removal and one write.
-  @live @workload_kernel @guest_bins
+  @live @workload_kernel
   Scenario: a run that ends without a terminal applies nothing and names the command
     Given an isolated mvm home
     And a cached live workload kernel
@@ -248,7 +273,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine stop bdd-exit-pointer --yes"
     Then the command exits with code 0
 
-  @live @workload_kernel @guest_bins
+  @live @workload_kernel
   Scenario: a run that ends with --apply applies the workspace without asking
     Given an isolated mvm home
     And a cached live workload kernel

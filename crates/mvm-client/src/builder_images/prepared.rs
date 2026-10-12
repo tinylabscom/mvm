@@ -105,12 +105,19 @@ pub fn resolve_workload_kernel(vmlinux: &str, hypervisor: &str) -> Result<String
 }
 
 /// The selector is evaluated only if this backend actually needs a fallback.
+///
+/// Kernel-less images (mkGuest ships no kernel) still need a real kernel file
+/// on every VMM that boots one — hvf, firecracker and libkrun, whose workload
+/// driver refuses a launch that names none — so fall back to the cached
+/// workload kernel. qemu resolves its own cached fallback in its driver.
 pub fn resolve_workload_kernel_with(
     vmlinux: &str,
     hypervisor: &str,
     selected_checkout: impl FnOnce() -> Result<Option<LocalImageCheckout>>,
 ) -> Result<String> {
-    if std::path::Path::new(vmlinux).exists() || !matches!(hypervisor, "hvf" | "firecracker") {
+    if std::path::Path::new(vmlinux).exists()
+        || !matches!(hypervisor, "hvf" | "firecracker" | "libkrun")
+    {
         return Ok(vmlinux.to_owned());
     }
     if let Some(checkout) = selected_checkout()? {

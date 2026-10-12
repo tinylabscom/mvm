@@ -150,6 +150,17 @@ pub struct PackIdentity {
     pub version: String,
 }
 
+impl PackIdentity {
+    /// Check the namespace/name grammar and SemVer 2.0 version text.
+    pub fn validate(&self) -> Result<(), PackSpecError> {
+        if pack_name(&self.name) && release_version(&self.version) {
+            Ok(())
+        } else {
+            Err(PackSpecError::Identity)
+        }
+    }
+}
+
 /// Neutral authored DTO. All fields except package versions are required;
 /// empty lists explicitly mean no packages, dependency files, or copies.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -223,9 +234,7 @@ pub enum PackSpecError {
 impl PackSpec {
     /// Validate both deserialized and directly constructed authored input.
     pub fn validate(&self) -> Result<(), PackSpecError> {
-        if !pack_name(&self.identity.name) || !release_version(&self.identity.version) {
-            return Err(PackSpecError::Identity);
-        }
+        self.identity.validate()?;
         let PackSource::Local { path } = &self.source;
         relative_path(path, true)?;
         for package in &self.packages {
@@ -298,7 +307,7 @@ fn pack_component(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
 }
 
-fn token(value: &str) -> bool {
+pub(crate) fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
         && value.as_bytes()[0].is_ascii_alphanumeric()

@@ -27,6 +27,9 @@ use mvm_conformance::IsolatedHome;
 /// and reclaimed by the next run's teardown, instead of accumulating.
 const JOURNEY_MACHINE: &str = "bdd-journey";
 const REPLAY_MACHINE: &str = "bdd-journey-replay";
+/// The image the journey guest boots. See [`ensure_journey_machine`] for why it
+/// is not a bare `alpine`.
+const JOURNEY_IMAGE: &str = "nginx";
 const REPLAY_MARKER: &str = "/tmp/bdd-journey-replay-marker";
 
 /// The home the journey machine lives in, booted once per process.
@@ -82,12 +85,23 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
         // boots, finds nothing to run and exits, and the state directory is
         // gone by the next scenario — which then reports "never booted" and
         // reads as a broken verb rather than a finished guest.
+        //
+        // A start boots only an image already prepared in its own home, so the
+        // journey prepares it here, through the verb an operator runs, rather
+        // than relying on whichever images the runner happened to pull.
+        let pull = run_in_journey_home(["image", "pull", JOURNEY_IMAGE]);
+        if !pull.status.success() {
+            return Err(format!(
+                "image pull {JOURNEY_IMAGE} failed: {}",
+                String::from_utf8_lossy(&pull.stderr).trim()
+            ));
+        }
         let create = run_in_journey_home([
             "machine",
             "create",
             JOURNEY_MACHINE,
             "--image",
-            "nginx",
+            JOURNEY_IMAGE,
             // One vCPU, not two: HVF supports exactly one and refuses anything
             // else, and it is the default backend on macOS. Pinning it here
             // keeps the journey about the documented verbs rather than about

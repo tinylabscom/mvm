@@ -1,0 +1,13 @@
+{
+  "schema": "mvm.pack-lock/v1",
+  "identity": { "name": "acme/hello", "version": "1.0.0" },
+  "target": "aarch64-linux",
+  "spec_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "source_tree_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "workload_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+  "compiler": {
+    "toolchain_version": "0.23.1",
+    "artifact_format_version": "1.1",
+    "mvm_revision": "4e65b221744885e536ec91a3f2948cdc508dcb49"
+  }
+}

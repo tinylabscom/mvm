@@ -39,11 +39,13 @@ pub(crate) fn run(args: &[String]) -> Result<()> {
 struct Pin {
     release_tag: String,
     manifest_sha256: Sha256Hex,
-    guest_agent_protocol: (u32, u32),
     builder_cache_contract: u32,
     /// Absent when the root predates the field, and then absent from the lock
     /// too: the lock copies what the root declares, and does not invent a 0.
     builder_boot_abi: Option<u32>,
+    /// Absent when the root predates the declaration, and then absent from
+    /// the lock too, which `mvmctl` checks as the legacy contract.
+    base_image_contract: Option<u32>,
     stage0: Vec<(GuestArch, MemberArtifact)>,
 }
 
@@ -58,13 +60,15 @@ impl Pin {
             .into_iter()
             .map(|arch| Ok((arch, stage0_artifact(&manifest, arch)?)))
             .collect::<Result<Vec<_>>>()?;
-        let protocol = manifest.compatibility.guest_agent_protocol;
         Ok(Self {
             release_tag: release.release_tag.as_str().to_string(),
             manifest_sha256: Sha256Hex::from_bytes(bytes),
-            guest_agent_protocol: (protocol.min(), protocol.max()),
             builder_cache_contract: manifest.compatibility.builder_cache_contract,
             builder_boot_abi: manifest.compatibility.builder_boot_abi.map(|abi| abi.get()),
+            base_image_contract: manifest
+                .compatibility
+                .base_image_contract
+                .map(|contract| contract.get()),
             stage0,
         })
     }
@@ -105,14 +109,6 @@ pub(crate) fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
         ),
         (
             "compatibility",
-            "guest_agent_protocol",
-            format!(
-                "{{ min = {}, max = {} }}",
-                pin.guest_agent_protocol.0, pin.guest_agent_protocol.1
-            ),
-        ),
-        (
-            "compatibility",
             "builder_cache_contract",
             pin.builder_cache_contract.to_string(),
         ),
@@ -127,6 +123,22 @@ pub(crate) fn repin(lock: &str, bytes: &[u8]) -> Result<String> {
         "builder_boot_abi",
         "builder_cache_contract",
         pin.builder_boot_abi.map(|abi| abi.to_string()),
+    )?;
+    text = set_optional_value(
+        &text,
+        "compatibility",
+        "base_image_contract",
+        "builder_cache_contract",
+        pin.base_image_contract.map(|contract| contract.to_string()),
+    )?;
+    // The retired guest-agent range is never copied; a lock written before it
+    // was retired loses it on the next repin.
+    text = set_optional_value(
+        &text,
+        "compatibility",
+        "guest_agent_protocol",
+        "builder_cache_contract",
+        None,
     )?;
     for (arch, artifact) in &pin.stage0 {
         let section = format!("stage0_kernel.artifact.{arch}");
@@ -240,10 +252,14 @@ fn check_reads_back(text: &str, pin: &Pin) -> Result<()> {
     {
         bail!("the rewritten lock does not pin the candidate root");
     }
-    let protocol = lock.compatibility.guest_agent_protocol;
-    if (protocol.min(), protocol.max()) != pin.guest_agent_protocol
+    if lock.compatibility.guest_agent_protocol.is_some()
         || lock.compatibility.builder_cache_contract != pin.builder_cache_contract
         || lock.compatibility.builder_boot_abi.map(|abi| abi.get()) != pin.builder_boot_abi
+        || lock
+            .compatibility
+            .base_image_contract
+            .map(|contract| contract.get())
+            != pin.base_image_contract
     {
         bail!("the rewritten lock does not carry the candidate's compatibility");
     }
@@ -380,6 +396,38 @@ mod tests {
         let lock = ImageTrainLock::parse(&text).unwrap();
         assert_eq!(lock.compatibility.builder_boot_abi, None);
         assert!(!text.contains("builder_boot_abi"), "{text}");
+    }
+
+    /// A root declaring its base-image contract carries it into the lock, and
+    /// one without it leaves the lock without it. A lock still carrying the
+    /// retired guest-agent range loses it on the next repin.
+    #[test]
+    fn the_base_image_contract_follows_the_root_and_the_retired_range_is_dropped() {
+        let older_lock = checked_in_lock().replace(
+            "[compatibility]\n",
+            "[compatibility]\nguest_agent_protocol = { min = 2, max = 2 }\n",
+        );
+        assert!(older_lock.contains("guest_agent_protocol"));
+        let mut declared: serde_json::Value = serde_json::from_slice(&next_root()).unwrap();
+        declared["compatibility"]["base_image_contract"] = serde_json::json!(1);
+        let declared = serde_json::to_vec(&declared).unwrap();
+
+        let text = repin(&older_lock, &declared).expect("repin a declaring root");
+        let lock = ImageTrainLock::parse(&text).unwrap();
+        assert_eq!(
+            lock.compatibility
+                .base_image_contract
+                .map(|contract| contract.get()),
+            Some(1)
+        );
+        assert_eq!(lock.compatibility.guest_agent_protocol, None);
+        assert!(!text.contains("guest_agent_protocol ="), "{text}");
+        assert_eq!(repin(&text, &declared).unwrap(), text, "idempotent");
+
+        let text = repin(&text, &next_root()).expect("repin a root without it");
+        let lock = ImageTrainLock::parse(&text).unwrap();
+        assert_eq!(lock.compatibility.base_image_contract, None);
+        assert!(!text.contains("base_image_contract ="), "{text}");
     }
 
     #[test]

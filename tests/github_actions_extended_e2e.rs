@@ -71,7 +71,9 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release.yml must call the shared documented-surface workflow"
     );
     assert!(
-        workflow.contains("needs: [bdd, e2e-docs, build, release-archive-smoke, distro-packages]"),
+        workflow.contains(
+            "needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]"
+        ),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
@@ -94,6 +96,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "bdd",
         "e2e-docs",
         "build",
+        "guest-runtime",
         "release-archive-smoke",
         "distro-packages",
     ] {
@@ -274,11 +277,32 @@ fn each_live_job_budget_exceeds_the_suite_deadline() {
         if job == "e2e-docs-linux" {
             assert!(
                 suite_seconds >= 10_800,
-                "{job}: the 120-minute suite reached only 287 of 367 scenarios on 2026-10-08; \
-                 leave enough time to run the remaining documented surface"
+                "{job}: retain a bounded per-shard deadline with headroom for cold live boots"
             );
         }
     }
+}
+
+#[test]
+fn linux_documented_surface_requires_both_complete_inventory_shards() {
+    let workflow = extended_ci();
+    let linux = job_block(&workflow, "e2e-docs-linux");
+    let script = documented_surface_script();
+
+    assert!(
+        linux.contains("shard: [\"0/2\", \"1/2\"]")
+            && linux.contains("MVM_BDD_SHARD: ${{ matrix.shard }}")
+            && linux.contains("fail-fast: false"),
+        "both disjoint shards must be required CI jobs, even when one fails"
+    );
+    assert!(
+        !script.contains("export MVM_BDD_ONLY_TAG="),
+        "the release gate must partition the full inventory, not narrow to a tag"
+    );
+    assert!(
+        script.contains("all shards must pass"),
+        "a single green shard must not be presented as full coverage"
+    );
 }
 
 /// First `key value` occurrence in a job block, as a trimmed string.
@@ -291,6 +315,79 @@ fn field_after(block: &str, key: &str) -> Option<String> {
 
 fn documented_surface_script() -> String {
     fs::read_to_string("scripts/e2e-documented-surface.sh").expect("read documented-surface runner")
+}
+
+/// The images the runner prepares in the shared home, as its array lists them.
+fn documented_surface_live_images(script: &str) -> Vec<String> {
+    let line = script
+        .lines()
+        .find_map(|line| line.strip_prefix("E2E_LIVE_IMAGES=("))
+        .expect("the runner declares the images it prepares");
+    line.trim_end_matches(')')
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every image a live scenario prepares is prepared by the runner too, under
+/// both guest-runtime sources the suite launches with, and a pull that fails
+/// stops the run.
+///
+/// The pull used to be best-effort and ran under the published runtime only. A
+/// rootfs is keyed by the runtime injected into it, so every live-home scenario
+/// (which selects this checkout's runtime) found its image "not launch-ready",
+/// and the journey's `nginx` was never pulled at all; both surfaced an hour
+/// later as a dozen scenarios naming an image instead of the pull.
+#[test]
+fn the_documented_surface_runner_prepares_every_live_image_or_stops() {
+    let script = documented_surface_script();
+    let images = documented_surface_live_images(&script);
+
+    let mut prepared_by_scenarios = std::collections::BTreeSet::new();
+    let mut features = vec![std::path::PathBuf::from("features")];
+    while let Some(path) = features.pop() {
+        if path.is_dir() {
+            for entry in fs::read_dir(&path).expect("read features dir") {
+                features.push(entry.expect("feature entry").path());
+            }
+        } else if path.extension().is_some_and(|ext| ext == "feature") {
+            let text = fs::read_to_string(&path).expect("read feature");
+            for line in text.lines() {
+                if let Some(rest) = line.split("the image \"").nth(1)
+                    && let Some((image, tail)) = rest.split_once('"')
+                    && tail.contains("is prepared in the live home")
+                {
+                    prepared_by_scenarios.insert(image.to_string());
+                }
+            }
+        }
+    }
+    // The journey boots its guest from a step rather than a feature line.
+    prepared_by_scenarios.insert("nginx".to_string());
+    for image in &prepared_by_scenarios {
+        assert!(
+            images.contains(image),
+            "a live scenario boots {image}, which the runner does not prepare: {images:?}"
+        );
+    }
+
+    assert!(
+        script.contains("E2E_RUNTIME_SOURCES=(download build)"),
+        "the runner must prepare each image under both guest-runtime sources"
+    );
+    assert!(
+        script.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=\"$runtime_source\""),
+        "each pull must select the runtime source it prepares for"
+    );
+    let pulls = script
+        .split("e2e_phase images")
+        .nth(1)
+        .and_then(|rest| rest.split("e2e_phase launch-artifacts").next())
+        .expect("the runner has an images phase");
+    assert!(
+        pulls.contains("exit 1") && !pulls.contains("|| echo"),
+        "a failed pull must stop the run:\n{pulls}"
+    );
 }
 
 /// The builder's store-image flock must lose to the suite deadline.
@@ -755,12 +852,15 @@ fn the_source_bootstrap_job_grants_nothing_only_qemu_needed() {
 }
 
 /// Every step of the source witness is fatal, in the order the path runs.
+/// The builder image is bootstrapped through the unembedded binary: packing
+/// sidecars no longer reaches a builder VM, so this is the step that proves a
+/// binary without a payload hands Stage 0 to the helper it produces.
 #[test]
 fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     let script = source_bootstrap_script();
     let steps = [
         "\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
-        "\"$MVMCTL\" bootstrap",
+        "\"$UNEMBEDDED_MVMCTL\" bootstrap",
         "\"$MVMCTL\" machine build --flake \"$FLAKE\"",
     ];
     let mut last = 0;
@@ -779,8 +879,15 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
         .find("export MVM_ALLOW_LOCAL_BUILDER_BUILD=1")
         .expect("the witness must opt into a local builder-image build, or `build` is refused");
     assert!(
-        opt_in < script.find("\"$MVMCTL\" bootstrap").unwrap_or(0),
+        opt_in < script.find("\"$UNEMBEDDED_MVMCTL\" bootstrap").unwrap_or(0),
         "the opt-in must be exported before the builder image is bootstrapped"
+    );
+    let source_runtime = script
+        .find("export MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build")
+        .expect("bootstrap must assemble every guest piece from this tree's guest runtime");
+    assert!(
+        source_runtime < script.find("\"$UNEMBEDDED_MVMCTL\" bootstrap").unwrap_or(0),
+        "the source guest runtime must be selected before bootstrap prepares the pieces"
     );
     assert!(
         !script.contains("|| true") && !script.contains("if ! "),
@@ -788,10 +895,11 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     );
 }
 
-/// The image recipes the witness builds from live in mvm-images, so the job
-/// has to hand it a checkout — at the commit that produced the pinned set.
-/// Without one, the first image the witness asks for is refused after the
-/// whole workspace has compiled.
+/// The builder image recipe the witness builds from lives in mvm-images, so the
+/// job has to hand it a checkout — at the commit that produced the pinned set.
+/// Without one, the builder image is refused after the whole workspace has
+/// compiled. The checkout is the Linux layer only: the job also selects this
+/// tree's guest runtime, so no guest piece is pair-built through it.
 #[test]
 fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
     let workflow = ci_full();
@@ -802,6 +910,11 @@ fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
         field_after(job, "MVM_IMAGES_DIR:").as_deref(),
         Some(format!("${{{{ github.workspace }}}}/{checkout_path}").as_str()),
         "the witness must name the mvm-images checkout it builds from"
+    );
+    assert_eq!(
+        field_after(job, "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE:").as_deref(),
+        Some("build"),
+        "the guest runtime must come from this tree, not the image checkout or the set"
     );
     let resolve = job
         .find("cargo run -q -p xtask -- image-source-ref")
@@ -971,8 +1084,10 @@ fn documented_surface_installs_a_deterministic_encrypted_backing_fixture() {
 
     assert!(
         script.contains("provision_encrypted_backing_probes()")
-            && script.contains("/dev/mapper/mvm-e2e-crypt")
-            && script.contains("' crypt\"")
+            && script.contains("\"source\":\"/dev/mapper/mvm-e2e-crypt\",\"fstype\":\"ext4\"")
+            && script.contains("'Journal inode: 8'")
+            && script.contains("\"type\":\"crypt\"")
+            && script.contains("\"$probe_bin/tune2fs\"")
             && script.contains("'FileVault: Yes'")
             && script.contains("export PATH=\"$probe_bin:$PATH\""),
         "live volume and mount-cache scenarios need a declared encrypted-backing fixture; the hosted runner's root disk is not one"
@@ -1240,10 +1355,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     );
 }
 
-/// The sidecar is still built through the unembedded binary, but after the
-/// builder image is acquired: the embedded binary fetches and verifies it once,
-/// so the helper the unembedded binary re-executes finds it ready instead of
-/// being compiled only to acquire it.
+/// The sidecar is still packed through the unembedded binary, after the
+/// builder image is acquired: a binary without a host payload must pack both
+/// variants on the host from the checkout's guest runtime.
 #[test]
 fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
@@ -1286,95 +1400,63 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     }
 }
 
-/// A release boots the image set it pins; Extended CI keeps building from
-/// the tree. The release passes the input, both jobs translate it into the
-/// image-arm knob, the image checkout is skipped exactly when it is set, and
-/// the runner hands the knob to the two image verbs without demanding a
-/// checkout under `pinned`.
+/// Neither caller of the documented surface pair-builds guest pieces through
+/// mvm-images: the jobs check out no image repository and set no image-arm
+/// knob, the release passes no image input, and the runner packs the sidecar
+/// from the tree while adopting the Linux-layer dev image from the pinned set.
 #[test]
-fn the_release_lane_boots_the_pinned_image_set_and_the_nightly_builds_from_the_tree() {
+fn the_documented_surface_builds_no_guest_piece_through_mvm_images() {
     let release =
         fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
-    let call = job_block(&release, "e2e-docs");
-    assert!(
-        call.contains("boot_pinned_images: true"),
-        "the release must test the pinned image set its users boot"
-    );
     let nightly =
         fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
-    assert!(
-        !nightly.contains("boot_pinned_images"),
-        "Extended CI keeps pair-building the sidecar and dev image from the tree"
-    );
-
     let workflow = extended_ci();
-    assert!(
-        workflow.contains("      boot_pinned_images:\n")
-            && workflow.contains("        default: false\n"),
-        "the input must exist and default off"
-    );
+    for (name, text) in [
+        ("release.yml", release.as_str()),
+        ("ci-full.yml", nightly.as_str()),
+        ("e2e-docs.yml", workflow.as_str()),
+    ] {
+        assert!(
+            !text.contains("boot_pinned_images"),
+            "{name}: the image-arm input is gone; there is no pair-build arm to choose"
+        );
+    }
     for job in ["e2e-docs-linux", "e2e-docs-macos"] {
         let block = job_block(&workflow, job);
-        assert!(
-            block.contains(
-                "MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}"
-            ),
-            "{job} must select the image arm from the input"
-        );
-        for step in [
-            "- name: Resolve the mvm-images commit images.lock pins\n        if: ${{ !inputs.boot_pinned_images }}",
-            "- name: Check out mvm-images for the source-matched SDK sidecar\n        if: ${{ !inputs.boot_pinned_images }}",
+        for forbidden in [
+            "tinylabscom/mvm-images",
+            "image-source-ref",
+            "MVM_E2E_IMAGES_DIR",
+            "MVM_IMAGES_DIR",
+            "MVM_FETCH_UNCHANGED_IMAGES",
         ] {
             assert!(
-                block.contains(step),
-                "{job}: the image checkout must be skipped when the pinned set is booted"
+                !block.contains(forbidden),
+                "{job} must not reach mvm-images for a guest piece: found `{forbidden}`"
             );
         }
     }
 
     let script = documented_surface_script();
-    assert!(
-        script.contains("E2E_FETCH_MODE=\"${MVM_FETCH_UNCHANGED_IMAGES:-1}\"")
-            && script.contains("unset MVM_FETCH_UNCHANGED_IMAGES"),
-        "the runner must take the knob from the job and keep it away from the scenarios"
-    );
-    assert!(
-        script.contains("if [[ \"$E2E_FETCH_MODE\" != pinned ]]; then"),
-        "only the pair-build arm may demand an image checkout"
-    );
-    for verb in [
-        "env \"${E2E_IMAGE_ENV[@]}\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
-        "env \"${E2E_IMAGE_ENV[@]}\" \"$MVMCTL\" image dev ensure",
-    ] {
+    for forbidden in ["MVM_E2E_IMAGES_DIR", "MVM_IMAGES_DIR=", "E2E_IMAGE_ENV"] {
         assert!(
-            script.contains(verb),
-            "both image verbs must run under the chosen arm: {verb}"
+            !script.contains(forbidden),
+            "the runner must not hand an image checkout to any step: found `{forbidden}`"
         );
     }
-}
-
-/// An unrecognised arm stops the runner before it builds anything, rather than
-/// silently picking one.
-#[cfg(unix)]
-#[test]
-fn the_documented_surface_refuses_an_unknown_image_arm() {
-    let home = tempfile::tempdir().expect("create home fixture");
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg(
-            "sed -n '/^E2E_FETCH_MODE=/,/^esac$/p' scripts/e2e-documented-surface.sh > \"$1\" \
-             && bash \"$1\"",
-        )
-        .arg("bash")
-        .arg(home.path().join("arm.sh"))
-        .env("MVM_FETCH_UNCHANGED_IMAGES", "pinnned")
-        .output()
-        .expect("run the arm selection");
-    assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("takes 1 or pinned"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        !script.contains("MVM_FETCH_UNCHANGED_IMAGES"),
+        "fetch-when-unchanged is gone; the runner must not set its knob"
+    );
+    assert!(
+        script.contains(
+            "MVM_HOME=\"$E2E_HOME\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build --source build"
+        ),
+        "the sidecar must be packed from the tree"
+    );
+    assert!(
+        script.contains("MVM_HOME=\"$E2E_HOME\" \"$MVMCTL\" image dev ensure"),
+        "the dev default image is Linux layer and is installed from the pinned set"
     );
 }
 

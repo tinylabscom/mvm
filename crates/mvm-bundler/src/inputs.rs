@@ -8,6 +8,16 @@ use mvm_core::policy::security::AgentProfile;
 
 use crate::debug::DebugOutput;
 
+/// Authenticated original image-set bytes and the two selected archive files.
+/// Acquisition and publisher verification belong to the caller.
+#[derive(Debug, Clone)]
+pub struct BootAssetsInputs<'a> {
+    pub manifest_bytes: &'a [u8],
+    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
+    pub runtime_overlay: &'a Path,
+    pub initramfs: &'a Path,
+}
+
 /// Everything one export reads.
 ///
 /// The verity pair is taken as the caller found it rather than as one value:
@@ -15,6 +25,7 @@ use crate::debug::DebugOutput;
 /// that is refused.
 #[derive(Debug, Clone)]
 pub struct BundleExportInputs<'a> {
+    pub boot_assets: Option<BootAssetsInputs<'a>>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -54,6 +65,7 @@ impl<'a> BundleExportInputs<'a> {
     /// An export of a kernel and a rootfs, with nothing optional set.
     pub fn new(vmlinux: &'a str, rootfs: &'a str, arch_label: &'a str, out: &'a Path) -> Self {
         Self {
+            boot_assets: None,
             vmlinux,
             initrd: None,
             rootfs,

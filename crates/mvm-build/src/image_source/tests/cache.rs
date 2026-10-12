@@ -141,9 +141,9 @@ fn kernel_target() -> ImageBuildTarget {
     }
 }
 
-fn overlay_target() -> ImageBuildTarget {
+fn image_role_target() -> ImageBuildTarget {
     ImageBuildTarget {
-        role: ImageBuildRole::RuntimeOverlay,
+        role: ImageBuildRole::RootlessTenant,
         attr: FlakeAttr::new("default").unwrap(),
     }
 }
@@ -294,8 +294,8 @@ fn the_key_names_every_input_it_was_derived_from() {
         Sha256Hex::from_bytes(b"{\"kernel\": 1}\n")
     );
     // The root flake's lock is what an image role evaluates instead.
-    let overlay = fx.key_for(&overlay_target(), GuestArch::Aarch64);
-    assert_eq!(overlay.flake_locks[0].path, "flake.lock");
+    let image = fx.key_for(&image_role_target(), GuestArch::Aarch64);
+    assert_eq!(image.flake_locks[0].path, "flake.lock");
 }
 
 #[test]
@@ -305,7 +305,10 @@ fn every_input_changes_the_key() {
     let mut digests = vec![base.digest()];
 
     digests.push(fx.key_for(&kernel_target(), GuestArch::X86_64).digest());
-    digests.push(fx.key_for(&overlay_target(), GuestArch::Aarch64).digest());
+    digests.push(
+        fx.key_for(&image_role_target(), GuestArch::Aarch64)
+            .digest(),
+    );
     let other_attr = ImageBuildTarget {
         role: ImageBuildRole::Kernel,
         attr: FlakeAttr::new("workload-vmlinux-debug").unwrap(),
@@ -1085,14 +1088,14 @@ fn a_seeded_entry_carrying_a_digest_sidecar_still_hits() {
 /// eviction reason, if any.
 type Admitted = Vec<(String, Option<String>)>;
 
-/// Drive a pair build of the overlay target up to the builder, which refuses,
+/// Drive a pair build of an image-role target up to the builder, which refuses,
 /// so nothing past admission runs.
-fn build_overlay_until_the_builder(fx: &Fixture, admitted: &mut Admitted) -> String {
+fn build_image_until_the_builder(fx: &Fixture, admitted: &mut Admitted) -> String {
     let mut ran_job = false;
     let err = super::build::build_target_for_pair_with(
         &fx.images,
         &fx.mvm(),
-        overlay_target(),
+        image_role_target(),
         GuestArch::Aarch64,
         &fx.cache,
         super::build::PairBuildHooks {
@@ -1118,16 +1121,16 @@ fn a_pair_build_after_an_eviction_reports_the_reason_and_a_miss_does_not() {
     let mut env = TestEnv::new();
     env.isolate_mvm_home(scratch.path());
     let fx = Fixture::new();
-    let overlay = fx.key_for(&overlay_target(), GuestArch::Aarch64);
+    let image = fx.key_for(&image_role_target(), GuestArch::Aarch64);
     let mut admitted = Admitted::new();
 
-    build_overlay_until_the_builder(&fx, &mut admitted);
-    std::fs::create_dir_all(fx.cache.entry_dir(&overlay)).unwrap();
-    std::fs::write(fx.cache.entry_dir(&overlay).join("junk"), b"junk").unwrap();
-    let err = build_overlay_until_the_builder(&fx, &mut admitted);
+    build_image_until_the_builder(&fx, &mut admitted);
+    std::fs::create_dir_all(fx.cache.entry_dir(&image)).unwrap();
+    std::fs::write(fx.cache.entry_dir(&image).join("junk"), b"junk").unwrap();
+    let err = build_image_until_the_builder(&fx, &mut admitted);
 
     assert!(err.contains("no builder in this test"), "{err}");
-    let artifact = "the runtime-overlay.default image".to_string();
+    let artifact = "the rootless-tenant.default image".to_string();
     assert_eq!(
         admitted[0],
         (artifact.clone(), None),
@@ -1137,5 +1140,5 @@ fn a_pair_build_after_an_eviction_reports_the_reason_and_a_miss_does_not() {
     let reason = admitted[1].1.as_deref().expect("the eviction reason");
     assert!(reason.contains(ENTRY_RECORD_NAME), "{reason}");
     assert_eq!(admitted.len(), 2);
-    assert!(!fx.cache.entry_dir(&overlay).exists());
+    assert!(!fx.cache.entry_dir(&image).exists());
 }

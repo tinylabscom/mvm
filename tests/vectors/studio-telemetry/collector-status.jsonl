@@ -1,0 +1,6 @@
+{"collection":"not_provisioned"}
+{"collection":"provisioned","vm_name":"web","state":{"kind":"connecting"},"shed":0,"records_bytes":0}
+{"collection":"provisioned","vm_name":"web","state":{"kind":"collecting","generation":3},"shed":0,"records_bytes":0}
+{"collection":"provisioned","vm_name":"web","state":{"kind":"collecting","generation":3},"shed":37,"records_bytes":0}
+{"collection":"provisioned","vm_name":"web","state":{"kind":"degraded","code":"authentication-failed"},"shed":37,"records_bytes":0}
+{"collection":"provisioned","vm_name":"web","state":{"kind":"stopped"},"shed":37,"records_bytes":0}

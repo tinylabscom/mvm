@@ -283,6 +283,11 @@ Two notes from experience:
   Once a PR is queued, further pushes restart its checks. Wait for green checks
   plus queue merge before considering the work landed, and sync the main checkout
   (`git fetch origin && git pull --ff-only origin main`) immediately after.
+- The release and nightly documented-surface Linux gate runs two required
+  Firecracker jobs with `MVM_BDD_SHARD=0/2` and `1/2`. Each executes a disjoint,
+  deterministic partition of the complete scenario inventory; a green shard
+  alone is not full coverage. The macOS/HVF lane retains its unsharded inventory
+  and existing host-capability and recorded-run gates.
 
 Treat CI as the outer loop of the ladder above: everything through rung 7 should
 already be green locally before a PR is opened, so CI failures mean a

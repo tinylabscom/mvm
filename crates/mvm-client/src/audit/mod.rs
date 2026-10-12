@@ -1,4 +1,8 @@
-//! Verified, normalized local audit events for UI consumers.
+//! Verified local audit access and deliberate pruning for client consumers.
+//!
+//! [`prune_audit`] provides the shared preview/commit operation. Frontends
+//! render its payload-free outcomes; the signer retains mandatory admission
+//! and lifetime ownership inside the actual prune transaction.
 //!
 //! [`LocalAuditReader`] is the one seam through which a local consumer
 //! (mvm-studio, `mvmctl trust audit verify`) reads mvm's chain-signed audit
@@ -37,6 +41,7 @@ mod event;
 pub mod follow;
 mod normalize;
 pub mod posture;
+mod prune;
 pub mod query;
 mod sanitize;
 pub mod sessions;
@@ -50,6 +55,7 @@ pub use event::{
     AuditReadResponse, AuditRefusalKind, AuditSourceId, AuditSourceKind, AuditSourceRefusal,
     DEFAULT_READ_LIMIT, MAX_READ_LIMIT, VerifiedAuditEvent, VerifiedSourceSummary,
 };
+pub use prune::{AuditPruneMode, AuditPruneOutcome, prune_audit};
 pub use sanitize::{MAX_DETAIL_LEN, MAX_FIELD_LEN, REDACTED_PATH, sanitize_free_text};
 
 use std::path::{Path, PathBuf};

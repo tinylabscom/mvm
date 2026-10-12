@@ -87,8 +87,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # `mvmctl bootstrap` verifies these with the in-binary sigstore
+          # verifier, which reads only the Sigstore bundle format carrying
+          # `verificationMaterial`. Without --new-bundle-format, cosign v2
+          # writes its legacy bundle and every source build refuses it.
           for archive in dist/*.tar.gz; do
-            cosign sign-blob --yes --bundle "${archive}.bundle" "${archive}"
+            cosign sign-blob \
+              --yes \
+              --new-bundle-format \
+              --bundle "${archive}.bundle" \
+              "${archive}"
           done
       - name: Publish rolling source-build assets
         env:

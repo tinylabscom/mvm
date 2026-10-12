@@ -317,12 +317,10 @@ pub struct CliWorld {
     /// Per-scenario SDK-sidecar cache root, so a developer's populated cache
     /// can never satisfy a scenario for the wrong reason.
     pub sdk_sidecar_cache: Option<tempfile::TempDir>,
-    /// Per-scenario directory serving the image set the acquire scenarios
-    /// fetch from, so the download path runs against local bytes and never the
-    /// network.
+    /// Per-scenario directory holding the release guest runtime the assembly
+    /// scenarios install from, as `install.sh` stages it beside `mvmctl`, so
+    /// they never reach the network.
     pub sdk_sidecar_release: Option<tempfile::TempDir>,
-    /// Where that set is served from, and the lock pinning its root.
-    pub sdk_sidecar_image_set: Option<mvm_build::published_image_set::ImageSetSource>,
     /// Host-service bindings the scenario's plan carries.
     pub sdk_sidecar_services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// Ordinary workload mounts assembled beside the reserved SDK sidecar.
@@ -401,10 +399,10 @@ pub struct CliWorld {
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
 
-    /// RAII guard that keeps a scenario-local `MVM_HOME` override active
-    /// across the warm-restore steps. Dropping it restores the previous
-    /// value so later scenarios see a clean environment.
-    pub warm_restore_home_guard: Option<MvmHomeGuard>,
+    /// RAII guard that keeps a scenario-local `MVM_HOME` and snapshot key
+    /// active across the warm-restore steps. Dropping it restores the
+    /// previous values so later scenarios see a clean environment.
+    pub warm_restore_home_guard: Option<ScenarioEnvGuard>,
 
     /// Outcome of the most recent warm-restore guard step.
     pub warm_restore_result: Option<Result<String, String>>,

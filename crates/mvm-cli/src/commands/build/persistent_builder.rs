@@ -114,6 +114,9 @@ fn print_result(result: PersistentBuilderResult) {
     for warning in result.warnings {
         eprintln!("warning: {warning}");
     }
+    if let Some(roothash) = result.rootfs_roothash {
+        println!("rootfs.roothash: {roothash}");
+    }
     if let Some(dir) = result.artifact_dir {
         println!("artifact_dir: {}", dir.display());
     }

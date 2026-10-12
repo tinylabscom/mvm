@@ -23,7 +23,6 @@ use anyhow::{Context, Result};
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
 /// so `mvmctl trust audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
-#[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
     mvm_client::builder_images::verification::bump_verify_outcome(outcome);
 }
@@ -35,7 +34,6 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
 /// URL is not enough — splitting one back apart would have to guess where the
 /// asset name starts. A params struct also stops three same-typed strings from
 /// being transposed silently.
-#[cfg(test)]
 pub(crate) use mvm_client::builder_images::verification::ChecksumManifest;
 
 /// Download the per-release `sha256sum`-format checksum file, prove it against
@@ -56,7 +54,6 @@ pub(crate) use mvm_client::builder_images::verification::ChecksumManifest;
 ///
 /// Returns only entries for the artifacts in `wanted`; missing names
 /// short-circuit to a clear error.
-#[cfg(test)]
 pub(crate) fn fetch_expected_hashes(
     manifest: &ChecksumManifest<'_>,
     wanted: &[&str],
@@ -106,7 +103,6 @@ pub(crate) fn fetch_expected_hashes(
 ///
 /// A refusal here is attack-shaped, so it feeds the same counter and audit
 /// line as a bad artifact signature rather than looking like a network blip.
-#[cfg(test)]
 pub(super) fn verify_manifest_signature(
     manifest: &ChecksumManifest<'_>,
     staged: &std::path::Path,
@@ -120,6 +116,7 @@ pub(super) fn verify_manifest_signature(
             train: manifest.train,
         },
     )
+    .map(|_| ())
     .map_err(|error| {
         bump_verify_outcome("sig_invalid");
         anyhow::Error::new(error).context(format!(

@@ -15,17 +15,26 @@ Each release includes, alongside the `.tar.gz` archives:
 
 | File | Purpose |
 |------|---------|
-| `checksums-sha256.txt` | SHA256 digests for all archives (verified automatically by `mvmctl env update`) |
+| `checksums-sha256.txt` | SHA256 digests for all archives (signature and digests verified automatically by `mvmctl env update`) |
 | `mvmctl-<target>.tar.gz.bundle` | Cosign signature bundle for each platform archive |
 | `sbom.cdx.json` | Software Bill of Materials (CycloneDX JSON) |
 | `sbom.cdx.json.bundle` | Cosign signature bundle for the SBOM |
-| `runtime-overlay-<arch>.tar.gz.bundle` | Cosign signature bundle for the runtime overlay (verified in-binary before install) |
-| `sdk-sidecar-<arch>.tar.gz.bundle` | Cosign signature bundle for the SDK sidecar (verified in-binary before install) |
+| `mvm-guest-bins-v<version>.tar.gz` | The guest runtime this CLI ships with: the programs and libraries mvm runs inside a guest, for both guest architectures, listed in `checksums-sha256.txt` |
+| `mvm-guest-bins-v<version>.tar.gz.bundle` | Cosign signature bundle for the guest runtime (verified in-binary before `mvmctl` reads it) |
+| `mvm-guest-bins-v<version>.tar.gz.sha256` and its `.bundle` | The guest runtime's digest, which `mvmctl` checks before the signature |
 
 Every bundle is a [Sigstore bundle](https://docs.sigstore.dev/about/bundle/)
 (`--new-bundle-format`). There is one format across the whole release — the
-in-binary verifier `mvmctl` uses for the overlay and sidecar reads only this
+in-binary verifier `mvmctl` uses for the guest runtime reads only this
 shape, and `cosign verify-blob --bundle` takes it directly.
+
+Boot images (kernels, root filesystems, the builder image and the Stage 0
+seeds) are not CLI release assets: they are members of the signed image set
+`mvmctl` pins, verified against that set's own signature. A release binary
+assembles its runtime overlay, universal initramfs and SDK sidecars on the host
+from the guest runtime above, after `mvmctl bootstrap`. The image set still
+publishes its own copies of those three; a binary uses them only until it has
+adopted its guest runtime, and refuses them after.
 
 ---
 
@@ -115,7 +124,7 @@ cosign verify-blob \
 
 ## Verifying Checksums
 
-`mvmctl env update` automatically downloads `checksums-sha256.txt` and verifies the SHA256 digest of the downloaded archive before installing. No manual step needed.
+`mvmctl env update` automatically downloads `checksums-sha256.txt` and its `.bundle`, verifies the manifest's signature under the release tag before reading it, and then checks the SHA256 digest of the downloaded archive against it before installing. No manual step needed.
 
 To verify manually:
 
@@ -126,17 +135,21 @@ shasum -a 256 --check <(grep "mvmctl-${TARGET}.tar.gz" checksums-sha256.txt)
 
 ## Verifying boot images (the image set)
 
-Boot images — the builder VM, the default workload image, the runtime overlay,
-the SDK sidecar, the initramfs and the kernels — are not attached to a CLI
-release. They are members of one signed image set published by
+Boot images — the builder VM, the default workload image, the kernels and the
+Stage 0 seeds — are not attached to a CLI release. They are members of one signed image set published by
 [mvm-images](https://github.com/tinylabscom/mvm-images), and `mvmctl` pins that
 set in `crates/mvm-core/images.lock`: the release tag, the SHA-256 of the root
 manifest `image-set.json`, and the workflow identity that signed it. Every
 download checks the root's digest against the pin, the root's cosign bundle
 against that identity, then each member's size and digest against the root.
 
+The image set also still publishes a runtime overlay, SDK sidecars and an
+initramfs. A release binary that ships a guest runtime assembles those from it
+instead, once `mvmctl bootstrap` has run, and then refuses the image set's
+copies; an older release, or a binary that has not bootstrapped yet, uses them.
+
 `mvmctl image boot verify` runs that chain over files you already have. To walk
-it by hand for the runtime overlay:
+it by hand for the image set's runtime overlay:
 
 ```bash
 TAG=image-set/v0.1.0   # the release_tag in images.lock
@@ -162,9 +175,10 @@ tar xzf "runtime-overlay-${ARCH}.tar.gz"
 shasum -a 256 --check checksums-sha256.txt
 ```
 
-When `mvmctl build runtime-overlay build --source download` installs this
-payload into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, it runs the same
-chain, then verifies the extracted inner files against the embedded
+When a release that predates the guest-runtime asset installs this payload
+with `mvmctl build runtime-overlay build --source download`, into
+`~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`,
+it runs the same chain, then verifies the extracted inner files against the embedded
 `checksums-sha256.txt`, and later required-overlay boots recheck those cached
 file hashes before attach. A drifted cache entry is refused.
 
@@ -185,11 +199,14 @@ Use this checklist when promoting a release that changes guest runtime
 binaries:
 
 1. Verify the `mvmctl` archive for the target tag.
-2. Verify the runtime overlay in the image set that release pins, for each
+2. Verify the release's guest runtime, `mvm-guest-bins-v<version>.tar.gz`, the
+   same way as the `mvmctl` archive. For a release that predates it, verify
+   the runtime overlay in the image set that release pins, for each
    architecture.
-3. Preload the overlay cache with
-   `mvmctl build runtime-overlay build --source download` on hosts that should
-   pick up the release immediately.
+3. Run `mvmctl bootstrap` with the new release on hosts that should pick it up
+   immediately; it assembles the overlay from the guest runtime. For a release
+   without one, preload the cache with
+   `mvmctl build runtime-overlay build --source download`.
 4. Restart stopped VMs when you want them to adopt the new runtime overlay.
 5. Restart already-running VMs only during a planned maintenance window; they
    keep the runtime they booted with until then.
@@ -201,10 +218,11 @@ This is a next-boot rollout, not a live remount rollout.
 If you must roll back a release:
 
 1. Downgrade `mvmctl` to the older release.
-2. Ensure the older release's runtime overlay is available again, either by
-   re-running `mvmctl build runtime-overlay build --source download` with the
-   older `mvmctl` (it fetches from the image set that release pins) or by
-   restoring the older cached artifact under
+2. Ensure the older release's runtime overlay is available again: run
+   `mvmctl bootstrap` with the older `mvmctl` if it ships a guest runtime, or
+   re-run `mvmctl build runtime-overlay build --source download` with it (it
+   fetches from the image set that release pins), or restore the older cached
+   artifact under
    `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, where
    `<root-sha256>` is the digest of the image set that release pins.
 3. Restart affected VMs so they boot with the downgraded release's overlay.

@@ -32,24 +32,6 @@ impl Default for OciCacheIndex {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct OciImageConfigInner {
-    #[serde(default, rename = "Entrypoint")]
-    pub(super) entrypoint: Option<Vec<String>>,
-    #[serde(default, rename = "Cmd")]
-    pub(super) cmd: Option<Vec<String>>,
-    #[serde(default, rename = "Env")]
-    pub(super) env: Vec<String>,
-    #[serde(default, rename = "WorkingDir")]
-    pub(super) working_dir: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub(super) struct OciImageConfig {
-    #[serde(default, rename = "config")]
-    pub(super) config: OciImageConfigInner,
-}
-
 pub(super) fn schema_version() -> u32 {
     1
 }

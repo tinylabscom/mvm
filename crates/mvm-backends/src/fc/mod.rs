@@ -93,10 +93,7 @@ pub fn fc_vsock_runtime_dir(dir: &str) -> PathBuf {
 /// same socket used by the verified snapshot restore paths, without
 /// reimplementing the layout.
 pub fn firecracker_vsock_uds_path(dir: &str) -> String {
-    fc_vsock_runtime_dir(dir)
-        .join(FC_VSOCK_MUX)
-        .display()
-        .to_string()
+    mvm_agentd::vsock::vsock_uds_path(dir)
 }
 
 /// Refuse a VM whose Firecracker sockets were moved out of its state dir,
@@ -125,17 +122,35 @@ pub fn ensure_fc_sockets_in_state_dir(dir: &str, what: &str) -> Result<()> {
 const FC_API_SOCKET: &str = "fc.socket";
 /// The subdirectory holding the vsock mux and the guest-dialed sockets.
 const FC_VSOCK_RUNTIME_DIR: &str = "runtime";
-/// The vsock mux socket file name. Firecracker derives each guest-dialed
-/// socket from it as `v.sock_<port>`.
-const FC_VSOCK_MUX: &str = "v.sock";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Firecracker derives each guest-dialed socket as `v.sock_<port>`.
+    const FC_VSOCK_MUX: &str = "v.sock";
+
     /// The longest socket Firecracker creates under its socket dir.
     fn longest_fc_socket(dir: &str) -> PathBuf {
         fc_vsock_runtime_dir(dir).join(format!("{FC_VSOCK_MUX}_{}", u32::from(u16::MAX)))
+    }
+
+    #[test]
+    fn agent_transport_and_driver_share_the_vsock_mux_path() {
+        for dir in [
+            "/srv/vms/vm",
+            "/tmp/mvm-firecracker-bundle-wwnt4g18/recipient/mvm/vms/bundle-wwnt4g18-first",
+            &format!("/tmp/{}/vm", "deep".repeat(40)),
+        ] {
+            assert_eq!(
+                firecracker_vsock_uds_path(dir),
+                mvm_agentd::vsock::vsock_uds_path(dir)
+            );
+            assert_eq!(
+                PathBuf::from(firecracker_vsock_uds_path(dir)),
+                fc_vsock_runtime_dir(dir).join(FC_VSOCK_MUX)
+            );
+        }
     }
 
     #[test]

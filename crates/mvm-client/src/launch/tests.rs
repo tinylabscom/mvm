@@ -1008,12 +1008,16 @@ fn firecracker_admitted_boot_receives_a_concrete_kernel_path() {
     );
     assert!(!cached.exists(), "the rejected entry is evicted");
 
-    // Bundled-kernel backends need no host kernel path: libkrun boots the
-    // libkrunfw kernel, the hermetic mock boots nothing.
+    // libkrun boots an explicit kernel too. `None` became a bundled-kernel
+    // spec that its workload driver refuses, so an embedder launch on libkrun
+    // could never boot; it gets the same verified kernel as every other
+    // backend. Only the hermetic mock boots nothing.
+    std::fs::write(&cached, b"kernel-bytes").unwrap();
+    mvm_build::kernel_fetch::record_kernel_digest(&cached).unwrap();
     let libkrun = mvm_runtime::AnyBackend::from_hypervisor("libkrun");
     assert_eq!(
         LocalBackend::resolve_workload_kernel(&libkrun).unwrap(),
-        None
+        Some(cached.clone())
     );
     let mock = mvm_runtime::AnyBackend::from_hypervisor("mock");
     assert_eq!(LocalBackend::resolve_workload_kernel(&mock).unwrap(), None);
@@ -1032,7 +1036,7 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
     let rootfs = home.rootfs();
 
     // A managed encrypted block volume, unlocked so it can be attached.
-    let volumes = crate::volume::LocalVolumeService::new();
+    let volumes = crate::volume::test_support::service();
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("work")
@@ -1092,7 +1096,7 @@ async fn launch_attaches_a_writable_managed_volume_under_standard_only_when_gran
     let home = Isolated::new();
     let client = mock_client();
     let rootfs = home.rootfs();
-    let volumes = crate::volume::LocalVolumeService::new();
+    let volumes = crate::volume::test_support::service();
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")

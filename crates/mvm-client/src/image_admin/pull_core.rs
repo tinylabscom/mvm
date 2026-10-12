@@ -21,9 +21,9 @@ use super::cache::{
 };
 use super::cache::{safe_cache_path, sha256_hex, unpacked_dir_if_present};
 use super::materialize::{
-    RuntimeMaterializer, cached_rootfs_is_current, ensure_rootfs_verity_sidecars,
-    inject_runtime_and_materialize, oci_entrypoint_from_cache_path, oci_runtime_tag,
-    prepare_rootfs_only_tree, rematerialize_cached_image,
+    RuntimeMaterializer, adopt_prepared_rootfs, cached_rootfs_is_current,
+    ensure_rootfs_verity_sidecars, inject_runtime_and_materialize, oci_entrypoint_from_cache_path,
+    oci_runtime_tag, prepare_rootfs_only_tree, rematerialize_cached_image,
 };
 use super::oci_types::{CachedOciImage, CachedOciLayer, OciTrustDecision, ResolvedOciRunImage};
 use super::source;
@@ -180,11 +180,14 @@ fn resolve_run_image_with(
         (Some(cached), Some(trust)) if cached_rootfs_is_current(&cached, &runtime_tag, prod) => {
             (cached, false, trust, None)
         }
-        (Some(cached), Some(_)) if acquisition == RunImageAcquisition::PreparedOnly => {
-            bail!(
-                "cached OCI image {} is not launch-ready; run `mvmctl image pull {reference}` first",
-                cached.reference
-            );
+        (Some(cached), Some(trust)) if acquisition == RunImageAcquisition::PreparedOnly => {
+            let cached_reference = cached.reference.clone();
+            match adopt_prepared_rootfs(cache_root, cached, &runtime_tag, prod)? {
+                Some(adopted) => (adopted, false, trust, None),
+                None => bail!(
+                    "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
+                ),
+            }
         }
         (Some(cached), Some(trust)) => {
             match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize, prod)? {
@@ -1055,6 +1058,12 @@ mod tests {
         }
     }
 
+    fn refusing_runtime_materialize(
+        call: super::super::materialize::MaterializeCall<'_>,
+    ) -> Result<()> {
+        panic!("a launch materialized {}", call.rootfs_abs.display());
+    }
+
     fn fake_runtime_materialize(
         call: super::super::materialize::MaterializeCall<'_>,
     ) -> Result<()> {
@@ -1800,6 +1809,271 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
                 .any(|image| image.reference == reference),
             "explicit preparation must publish the supplied local reference"
         );
+    }
+
+    /// Seed an indexed dev image whose rootfs set is current for the seeded
+    /// guest runtime, returning the rootfs path relative to `cache_root`.
+    fn seed_current_dev_image(cache_root: &Path, digest: &str) -> String {
+        seed_guest_runtime_cache(cache_root);
+        let rel = dev_rootfs_rel(cache_root, digest);
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some(rel.clone());
+        image.runtime_tag = Some(oci_runtime_tag(cache_root));
+        write_index(
+            cache_root,
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        let dir = Path::new(&rel).parent().expect("rootfs dir");
+        write_file(cache_root, &rel, b"rootfs");
+        write_file(
+            cache_root,
+            &dir.join("rootfs.verity").to_string_lossy(),
+            b"verity",
+        );
+        write_file(
+            cache_root,
+            &dir.join("rootfs.roothash").to_string_lossy(),
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        );
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("alpine", false, true)
+            .write_to_dir(&cache_root.join(dir))
+            .expect("publish the sidecar that marks the set complete");
+        rel
+    }
+
+    /// A local archive or stdin is read only by an explicit pull. A launch
+    /// resolves the entry that pull published and never ingests the source
+    /// itself. `--prod` makes each path refuse with its own message before
+    /// touching the archive or stdin, which tells the two paths apart.
+    #[test]
+    fn local_sources_are_ingested_only_when_acquisition_allows_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        for (reference, ingest_refusal) in [
+            (
+                "oci-archive:/nonexistent/image.tar",
+                "local OCI archives are dev-only",
+            ),
+            ("-", "stdin OCI archives are dev-only"),
+        ] {
+            let pull = resolve_run_image_with(
+                tmp.path(),
+                reference,
+                true,
+                fake_runtime_materialize,
+                &verifier,
+                RunImageAcquisition::Allow,
+            )
+            .expect_err("a prod pull of a local source is refused");
+            assert!(
+                pull.to_string().contains(ingest_refusal),
+                "{reference}: an explicit pull must reach ingest, got {pull:#}"
+            );
+
+            let launch = resolve_run_image_with(
+                tmp.path(),
+                reference,
+                true,
+                fake_runtime_materialize,
+                &verifier,
+                RunImageAcquisition::PreparedOnly,
+            )
+            .expect_err("a prod launch of a local source is refused");
+            let launch = launch.to_string();
+            assert!(
+                launch.contains("local OCI sources are dev-only")
+                    && !launch.contains(ingest_refusal),
+                "{reference}: a launch must not ingest the source, got {launch}"
+            );
+        }
+    }
+
+    /// A cached image whose rootfs is not current for this runtime is repaired
+    /// by an explicit pull, never by a launch.
+    #[test]
+    fn a_launch_refuses_a_cached_image_that_is_not_launch_ready() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![sample_image(
+                    "docker.io/library/alpine:3.20",
+                    digest,
+                    "blobs/a",
+                )],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+
+        let err = resolve_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch must not rematerialize a stale cached image");
+        assert!(err.to_string().contains("not launch-ready"), "{err:#}");
+        assert!(
+            !tmp.path().join(dev_rootfs_rel(tmp.path(), digest)).exists(),
+            "a launch materialized a rootfs"
+        );
+    }
+
+    /// A pull under a second guest runtime moves the index entry to that
+    /// runtime's rootfs and leaves the first one's on disk. A launch under the
+    /// first runtime boots the rootfs it prepared rather than refusing, and
+    /// materializes nothing to do it.
+    #[test]
+    fn a_launch_adopts_the_rootfs_a_pull_prepared_for_its_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let rel = seed_current_dev_image(tmp.path(), digest);
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        std::fs::create_dir_all(super::super::materialize::prepared_virtiofs_root(
+            tmp.path(),
+            digest,
+            &oci_runtime_tag(tmp.path()),
+        ))
+        .expect("the pull prepared this runtime's launch tree too");
+        let mut index = load_index(tmp.path()).expect("load index");
+        index.images[0].runtime_tag = Some("another-runtime".to_string());
+        index.images[0].rootfs_path = Some("rootfs/another-runtime/rootfs.ext4".to_string());
+        write_index(tmp.path(), &index);
+
+        let resolved = resolve_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            refusing_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect("a launch adopts the rootfs prepared for its runtime");
+        assert!(!resolved.pulled);
+        assert_eq!(resolved.rootfs_path, tmp.path().join(&rel));
+        let entry = &load_index(tmp.path()).expect("load index").images[0];
+        assert_eq!(entry.rootfs_path.as_deref(), Some(rel.as_str()));
+        assert_eq!(
+            entry.runtime_tag.as_deref(),
+            Some(oci_runtime_tag(tmp.path()).as_str())
+        );
+    }
+
+    /// The other side of the launch refusal: an explicit pull of an image
+    /// the cache has never seen goes to the registry rather than refusing.
+    #[test]
+    fn an_explicit_pull_of_an_uncached_image_reaches_the_registry() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let err = resolve_run_image_with(
+            tmp.path(),
+            "127.0.0.1:1/library/not-cached:latest",
+            false,
+            fake_runtime_materialize,
+            &AcceptingVerifier(std::cell::Cell::new(0)),
+            RunImageAcquisition::Allow,
+        )
+        .expect_err("nothing listens on the registry port");
+        assert!(
+            !err.to_string().contains("is not prepared"),
+            "an explicit pull was refused as a launch: {err:#}"
+        );
+    }
+
+    /// A production pull writes the verification receipt a later production
+    /// launch admits the image on.
+    #[test]
+    fn a_prod_pull_records_its_verification_receipt() {
+        let fixture = prod_fixture();
+        resolve(&fixture, true, fake_runtime_materialize).expect("prod resolves");
+        let index = load_index(&fixture.cache).expect("load index");
+        let image = index.images.first().expect("indexed image");
+        let receipt = image
+            .verification_receipt_path
+            .as_deref()
+            .expect("a prod pull records a verification receipt");
+        assert!(fixture.cache.join(receipt).is_file(), "{receipt}");
+    }
+
+    /// A launch boots the launch tree an explicit pull prepared, and refuses
+    /// rather than preparing one itself from the raw unpacked layers.
+    #[test]
+    fn a_launch_boots_only_a_prepared_launch_tree() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        seed_current_dev_image(tmp.path(), digest);
+        create_unpacked_root(tmp.path(), digest);
+        let prepared = super::super::materialize::prepared_virtiofs_root(
+            tmp.path(),
+            digest,
+            &oci_runtime_tag(tmp.path()),
+        );
+
+        let err = resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+            .expect_err("a launch must not prepare a launch tree");
+        assert!(
+            err.to_string().contains("no prepared launch tree"),
+            "{err:#}"
+        );
+        assert!(!prepared.exists(), "a launch prepared the tree itself");
+
+        std::fs::create_dir_all(&prepared).expect("prepare the launch tree");
+        let resolved =
+            resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+                .expect("a prepared launch tree resolves");
+        assert_eq!(resolved.unpacked_root.as_deref(), Some(prepared.as_path()));
+    }
+
+    /// A local source prepared for another guest runtime is stale, even when
+    /// its index entry still names a rootfs.
+    #[test]
+    fn a_launch_refuses_a_local_source_prepared_for_another_runtime() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let source = tmp.path().join("local-root");
+        std::fs::create_dir_all(source.join("etc")).expect("create local root");
+        std::fs::write(source.join("etc/issue"), b"prepared locally\n").expect("write fixture");
+        let reference = format!("rootfs-dir:{}", source.display());
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::Allow,
+        )
+        .expect("explicit pull prepares local rootfs");
+
+        let mut index = load_index(tmp.path()).expect("load index");
+        let entry = index
+            .images
+            .iter_mut()
+            .find(|image| image.reference == reference)
+            .expect("the pull published the local reference");
+        assert!(entry.rootfs_path.is_some());
+        entry.runtime_tag = Some("another-runtime".to_string());
+        write_index(tmp.path(), &index);
+
+        let err = resolve_run_image_with(
+            tmp.path(),
+            &reference,
+            false,
+            fake_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a local source prepared for another runtime is stale");
+        assert!(err.to_string().contains("is stale"), "{err:#}");
     }
 
     #[test]

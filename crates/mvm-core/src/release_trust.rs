@@ -126,6 +126,106 @@ pub fn revocation_keyless_trust() -> KeylessTrust {
     }
 }
 
+/// Workflow that signs the image-set revocation list, up to the ref.
+///
+/// This authority is separate from three others on purpose: the image-set
+/// release workflow (which signs the sets being revoked, and so must not be
+/// able to un-revoke them), this repository's pack revocation workflow, and
+/// the registry-pack revocation feed. A signature from any of those is refused
+/// here, and this identity is accepted by none of them.
+const IMAGE_SET_REVOCATION_WORKFLOW: &str =
+    "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml";
+
+/// The only ref the image-set revocation workflow publishes from. The producer
+/// pushes the next `revocation-list/v<N>` tag for every publication, so `N` is
+/// an authenticated publication counter carried by the signing certificate.
+const IMAGE_SET_REVOCATION_REF_PREFIX: &str = "@refs/tags/revocation-list/v";
+
+/// The publication number `N` of an image-set revocation signer identity, or
+/// `None` when `identity` is not exactly
+/// `<revocations workflow>@refs/tags/revocation-list/v<N>`.
+///
+/// `N` must be a canonical positive decimal: no sign, no leading zero, no
+/// suffix. Any other repository, workflow, branch, or tag shape is refused.
+pub fn image_set_revocation_publication(identity: &str) -> Option<u64> {
+    let digits = identity
+        .strip_prefix(IMAGE_SET_REVOCATION_WORKFLOW)?
+        .strip_prefix(IMAGE_SET_REVOCATION_REF_PREFIX)?;
+    if digits.is_empty()
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// The signer identity for publication `n` of the image-set revocation list.
+pub fn image_set_revocation_identity(publication: u64) -> String {
+    format!("{IMAGE_SET_REVOCATION_WORKFLOW}{IMAGE_SET_REVOCATION_REF_PREFIX}{publication}")
+}
+
+#[cfg(test)]
+mod image_set_revocation_trust_tests {
+    use super::*;
+
+    #[test]
+    fn the_published_identity_parses_to_its_publication_number() {
+        assert_eq!(
+            image_set_revocation_publication(
+                "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v1"
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            image_set_revocation_publication(&image_set_revocation_identity(42)),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn every_other_identity_shape_is_refused() {
+        let refused = [
+            // Another repository's revocation workflow.
+            "https://github.com/tinylabscom/mvm/.github/workflows/revocations.yml@refs/tags/revocation-list/v1",
+            "https://github.com/tinylabscom/mvm/.github/workflows/revocations.yml@refs/tags/revocations",
+            // The image-set release workflow signs sets, not their revocation.
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/revocation-list/v1",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v0.1.0",
+            // A branch, the retired tag namespace, and malformed counters.
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/heads/main",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocations/v1",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v0",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v01",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v1.0",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v+1",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v1 ",
+            "https://github.com/tinylabscom/mvm-images/.github/workflows/revocations.yml@refs/tags/revocation-list/v99999999999999999999999",
+        ];
+        for identity in refused {
+            assert_eq!(
+                image_set_revocation_publication(identity),
+                None,
+                "{identity} must not be an image-set revocation signer"
+            );
+        }
+    }
+
+    #[test]
+    fn the_authority_is_disjoint_from_every_other_compiled_identity() {
+        let others = revocation_keyless_trust()
+            .accepted_identities
+            .into_iter()
+            .chain(accepted_image_set_identities("0.1.0"))
+            .chain(accepted_boot_image_identities("0.1.0"))
+            .chain(accepted_release_identities("0.1.0"));
+        for identity in others {
+            assert_eq!(image_set_revocation_publication(&identity), None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

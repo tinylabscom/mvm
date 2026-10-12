@@ -12,6 +12,7 @@ Feature: GPU over vsock — end-to-end witness
 @live @gpu_e2e
 Scenario: a --gpu launch remotes CUDA driver and NVML calls to the host endpoint
   Given a gpu probe staging dir
+  And the image "python:3.12" is prepared in the live home
   When I run mvmctl in an isolated live home with a gpu staging mount and "machine create bdd-gpu-witness --image python:3.12 --gpu"
   Then the command exits with code 0
   When I run mvmctl in an isolated live home with a gpu staging mount and "machine volume mount bdd-gpu-witness --volume gpu-shims --host @STAGING@ --guest /data/shims"
@@ -32,6 +33,7 @@ Scenario: a --gpu launch remotes CUDA driver and NVML calls to the host endpoint
 @live @gpu_e2e
 Scenario: a launch without --gpu refuses the GPU channel
   Given a gpu probe staging dir
+  And the image "python:3.12" is prepared in the live home
   When I run mvmctl in an isolated live home with a gpu staging mount and "machine create bdd-gpu-negative --image python:3.12"
   Then the command exits with code 0
   When I run mvmctl in an isolated live home with a gpu staging mount and "machine volume mount bdd-gpu-negative --volume gpu-shims --host @STAGING@ --guest /data/shims"

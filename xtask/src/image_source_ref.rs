@@ -3,13 +3,13 @@
 //! Print the `mvm-images` commit that produced the image set
 //! `crates/mvm-core/images.lock` pins.
 //!
-//! Some CI lanes build from an `mvm-images` checkout rather than fetching the
-//! published images: the documented-surface lanes build the source-matched SDK
-//! sidecar through its recipe, and the merge queue's guest-image witness builds
-//! the default tenant and runtime overlay with the `mvm` input overridden to the
-//! tree under test. Those checkouts used to track `mvm-images` `main`, so a
-//! change landing in the other repository could fail this one's release after
-//! it was tagged. The ref has to be the one this tree is known to work with,
+//! Some CI lanes build Linux-layer images from an `mvm-images` checkout rather
+//! than fetching the published ones: the cold source-bootstrap witness builds
+//! the builder image through Stage 0, and the no-KVM lane builds the workload
+//! kernel. No lane builds a guest-runtime piece through it; those are
+//! assembled from this tree. Those checkouts used to track `mvm-images`
+//! `main`, so a change landing in the other repository could fail this one's
+//! release after it was tagged. The ref has to be the one this tree is known to work with,
 //! and the lock is the only place that knowledge lives.
 //!
 //! The lock pins a release tag and the root manifest's digest. The commit comes

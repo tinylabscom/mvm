@@ -17,6 +17,7 @@ pub mod journey;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
 pub mod prompt_fixture;
+pub mod sharding;
 pub mod source_commands;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
@@ -491,8 +492,8 @@ impl ScenarioGate {
                  mvm-egress-client, mvm-oci-entrypoint)",
             ),
             Self::NeedsSdkSidecar => Some(
-                "need the SDK sidecar image in the mvm cache (build it from an \
-                 mvm-images checkout with `mvmctl build sdk-sidecar build`)",
+                "need the SDK sidecar image in the mvm cache (prepare it with \
+                 `mvmctl bootstrap`)",
             ),
             Self::NeedsPerfBudgetHost => Some(
                 "need MVM_BDD_PERF_BUDGET=1 on a host that can hold the launch \

@@ -44,6 +44,12 @@ pub(in crate::commands) enum TranscriptAction {
         #[arg(long, default_value = DEFAULT_TENANT)]
         tenant: String,
     },
+    /// Reconcile one sealed capture's authenticated retention deadline.
+    Reconcile {
+        capture_id: String,
+        #[arg(long, default_value = DEFAULT_TENANT)]
+        tenant: String,
+    },
     /// List captures, optionally filtered by tenant.
     List {
         #[arg(long)]
@@ -94,6 +100,10 @@ fn run_with(
             writeln!(output, "{id}")?;
         }
         TranscriptAction::Disarm { capture_id, tenant } => ctx.disarm(&tenant, &capture_id)?,
+        TranscriptAction::Reconcile { capture_id, tenant } => {
+            let outcome = ctx.reconcile(&tenant, &capture_id)?;
+            writeln!(output, "{outcome:?}")?;
+        }
         TranscriptAction::List { tenant, json } => {
             render_list(&ctx.list(tenant.as_deref())?, json, output)?
         }

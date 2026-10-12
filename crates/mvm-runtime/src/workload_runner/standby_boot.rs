@@ -158,6 +158,7 @@ pub fn factory_parent_config(
         gpu,
         gpu_device,
         initrd_path,
+        bundle_boot_assets,
         verity_path,
         roothash,
         runtime_overlay_path,
@@ -189,6 +190,7 @@ pub fn factory_parent_config(
         cpu_grant: None,
         memory_mib: spec.mem_mib,
         initrd_path: initrd_path.clone(),
+        bundle_boot_assets: bundle_boot_assets.clone(),
         verity_path: verity_path.clone(),
         roothash: roothash.clone(),
         runtime_overlay_path: runtime_overlay_path.clone(),
@@ -419,11 +421,17 @@ mod tests {
         })
     }
 
+    /// Drop the tokens that legitimately differ between a parent and the cold
+    /// boot it stands in for: the per-boot hostname and clock, and the
+    /// admitted plan's seccomp tier. A parent boots before any workload is
+    /// admitted, so it holds no plan and names no tier.
     fn without_per_boot_tokens(cmdline: &str) -> String {
         cmdline
             .split_whitespace()
             .filter(|token| {
-                !token.starts_with("mvm.hostname=") && !token.starts_with("mvm.hostepoch=")
+                !token.starts_with("mvm.hostname=")
+                    && !token.starts_with("mvm.hostepoch=")
+                    && !token.starts_with("mvm.seccomp=")
             })
             .collect::<Vec<_>>()
             .join(" ")

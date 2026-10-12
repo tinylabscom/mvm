@@ -62,10 +62,7 @@ pub(crate) use default_microvm::{
 pub(crate) use kernel::KernelSource;
 pub(crate) use kernel::resolve_kernel_source;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
-#[cfg(test)]
-pub(crate) use local_pair::derive_pair_key;
 pub(crate) use local_pair::ensure_pair_built;
-pub(crate) use local_pair::staged_contract_files;
 pub(in crate::commands) use stage0_cache::stage0_active_in_process;
 
 pub(super) fn builder_vm_host_arch() -> &'static str {

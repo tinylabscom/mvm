@@ -133,6 +133,9 @@ static LIBKRUN: BackendCompat = BackendCompat {
 };
 
 // QEMU is the Linux dev/test substrate. It has no guest NIC; egress uses vsock.
+// On x86_64 an ELF kernel boots only when it carries a PVH entry note, which a
+// format row cannot express; `check_direct_boot_loadable` refuses one without
+// it at admission and again in the driver.
 static QEMU: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Qemu,
     guest_arches: &[X86_64, Aarch64],

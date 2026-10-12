@@ -321,12 +321,24 @@ fn existing_path_passes_through_unchanged() {
 }
 
 #[test]
-fn non_hvf_hypervisor_passes_through_even_when_missing() {
+fn qemu_passes_through_even_when_missing() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let tmp = tempfile::tempdir().unwrap();
     env.isolate_mvm_home(tmp.path());
-    let result = resolve_released_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
+    let result = resolve_released_workload_kernel("/nonexistent/vmlinux", "qemu").unwrap();
     assert_eq!(result, "/nonexistent/vmlinux");
+}
+
+/// libkrun's workload driver refuses a launch without a kernel image, so a
+/// kernel-less image needs the same fallback hvf and firecracker get.
+#[test]
+fn libkrun_missing_kernel_falls_back_to_cached_workload_kernel() {
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    let tmp = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(tmp.path());
+    let fallback = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", true);
+    let result = resolve_released_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
+    assert_eq!(result, fallback.to_str().unwrap());
 }
 
 /// Stage a workload kernel in the cache under `MVM_HOME`, optionally

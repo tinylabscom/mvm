@@ -15,7 +15,7 @@
 
 use super::cold_launch::{
     COLD_LAUNCH_SCHEMA_VERSION, LaunchLane, MATRIX_WARMUP_SAMPLES, MIN_MATRIX_SAMPLES,
-    PREPARED_COLD_HARD_MAX_MS,
+    PREPARED_COLD_HARD_MAX_MS, WARM_CLAIM_HARD_MAX_MS,
 };
 
 /// Delimiters bounding the generated region of the performance page. The text
@@ -50,8 +50,9 @@ pub fn sample_contract_sentence() -> String {
          version {COLD_LAUNCH_SCHEMA_VERSION}. A report that misses any of \
          those is refused rather than published with a caveat. Prepared-cold \
          lanes additionally require every measured dispatch to be strictly \
-         under {PREPARED_COLD_HARD_MAX_MS:.0} ms, even below the publication \
-         sample floor."
+         under {PREPARED_COLD_HARD_MAX_MS:.0} ms, and the warm-claim lane every \
+         measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms, \
+         even below the publication sample floor."
     )
 }
 
@@ -128,8 +129,8 @@ mod tests {
         // The prepared-cold contract: 200/250/300 ms at p50/p95/p99.
         assert!(rendered.contains("| 200 ms | 250 ms | 300 ms | < 200 ms |"));
         // The warm-claim contract publishes no p95, and says so with a dash
-        // rather than a zero.
-        assert!(rendered.contains("| 30 ms | — | 50 ms | — |"));
+        // rather than a zero; every claim is held under the launch ceiling.
+        assert!(rendered.contains("| 30 ms | — | 50 ms | < 300 ms |"));
     }
 
     #[test]
@@ -184,6 +185,9 @@ mod tests {
         )));
         assert!(sentence.contains(&format!("schema version {COLD_LAUNCH_SCHEMA_VERSION}")));
         assert!(sentence.contains(&format!("strictly under {PREPARED_COLD_HARD_MAX_MS:.0} ms")));
+        assert!(sentence.contains(&format!(
+            "every measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms"
+        )));
         assert!(render_budget_section().contains(&sentence));
     }
 }

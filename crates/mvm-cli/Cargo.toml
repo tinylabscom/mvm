@@ -1,5 +1,6 @@
 [package]
 name = "mvm-cli"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "CLI commands, UI, and bootstrap for mvm"

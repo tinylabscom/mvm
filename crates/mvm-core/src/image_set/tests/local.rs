@@ -561,12 +561,19 @@ mod local_path {
             .verify(
                 &current,
                 GuestArch::Aarch64,
-                &[
-                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
-                    ImageSetRole::RuntimeOverlay,
-                ],
+                &[ImageSetRole::WorkloadKernel(
+                    WorkloadImageProfile::DefaultTenant,
+                )],
             )
             .unwrap();
+        // The emitter still writes a runtime-overlay member; it is read as a
+        // retired role and its artifact is held to its digest like any other.
+        assert!(
+            manifest
+                .members
+                .iter()
+                .any(|member| member.role.is_retired())
+        );
 
         assert_eq!(read.tier(), ImageTrustTier::LocalDev);
         assert_eq!(read.checkouts, current);
@@ -748,7 +755,7 @@ mod local_path {
     #[test]
     fn a_missing_role_is_refused() {
         let mut manifest = local_manifest();
-        let musl = ImageSetRole::SdkSidecar(GuestLibc::Musl);
+        let musl = ImageSetRole::Stage0BootstrapKernel;
         manifest.members.retain(|member| member.role != musl);
         let set = stage(manifest);
         let err = set
@@ -861,7 +868,11 @@ mod local_path {
         let set = stage(local_manifest());
         let current = checkouts();
         let host = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(5, 6).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(5),
+                BaseImageContract::new(6),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: BuilderBootAbiRange::WITH_PAYLOAD,
         };

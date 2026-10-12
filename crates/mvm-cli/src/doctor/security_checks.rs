@@ -5,6 +5,7 @@ use anyhow::Result;
 
 use super::Check;
 use super::builder::dev_vm_socket_path;
+use mvm_core::host_storage_encryption::HostFdeStatus;
 use mvm_core::platform::{self, Platform};
 
 const LANDLOCK_REMEDIATION: &str = "enable CONFIG_SECURITY_LANDLOCK=y, include landlock in the active LSM list, and use Linux 5.19+";
@@ -343,21 +344,66 @@ pub(super) fn security_host_fde_check() -> Check {
     }
 }
 
-pub(crate) use mvm_vmm::host::encryption::HostFdeStatus;
-#[cfg(test)]
-use mvm_vmm::host::encryption::{
-    parse_linux_volume_backing_types, parse_macos_diskutil_encryption_status,
-};
-
-/// Enforce encrypted backing for a LocalBackend volume mount.
+/// Enforce the volume storage rule for a host directory snapshot's location.
 ///
-/// Local virtio-fs volumes are plaintext while mounted in the guest, so the
-/// backing directory itself must live on an encrypted filesystem or encrypted
-/// device. Unknown detection fails closed here because mounting the volume is
-/// the point where mvm would otherwise expose sensitive local data without the
-/// documented at-rest guarantee.
+/// A directory snapshot is plaintext guest data on the host, so where it is
+/// kept must be verified encrypted, or the operator accepted unverified
+/// storage with the audited development override. Unknown detection refuses.
+/// The detector is the one the volume service uses for managed volume
+/// plaintext, so the two cannot disagree.
 pub(crate) fn require_local_volume_host_path_encrypted(path: &std::path::Path) -> Result<()> {
-    mvm_client::volume::require_host_path_encrypted(path)
+    mvm_core::host_storage_encryption::require_volume_storage(path, "host directory snapshot")
+}
+
+/// Where managed volume plaintext is materialized by default, and whether that
+/// storage is verified encrypted.
+///
+/// Warn-only, like the host FDE line: an unverified host can still run
+/// everything that does not unlock a managed volume or create a writable disk
+/// image, and those refuse on their own with the same explanation.
+pub(super) fn security_volume_storage_check() -> Check {
+    let target = mvm_core::config::volumes_dir()
+        .join("mvm-managed")
+        .join("unlocked");
+    let probe_at = mvm_core::host_storage_encryption::nearest_existing_ancestor(&target)
+        .unwrap_or_else(|| target.clone());
+    volume_storage_check_from(
+        &target,
+        mvm_core::host_storage_encryption::detect_host_path_encryption_status(&probe_at),
+        mvm_core::host_storage_encryption::override_requested(),
+    )
+}
+
+pub(super) fn volume_storage_check_from(
+    target: &std::path::Path,
+    status: HostFdeStatus,
+    override_set: bool,
+) -> Check {
+    let env = mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV;
+    let info = match (status.enabled, override_set) {
+        (true, _) => format!(
+            "verified encrypted: managed volume plaintext at {} ({})",
+            target.display(),
+            status.info
+        ),
+        (false, false) => format!(
+            "NOT verified encrypted: unlocking a managed volume or creating a writable \
+             disk image there is refused ({}). Enable FileVault / dm-crypt+LUKS, use \
+             `--root` on encrypted storage, or for local development set {env}=1",
+            status.info
+        ),
+        (false, true) => format!(
+            "NOT verified encrypted, and {env}=1 is set: plaintext will be placed there \
+             anyway and each use audited; --prod refuses this ({})",
+            status.info
+        ),
+    };
+    Check {
+        name: "volume storage (encrypted backing)",
+        category: "security",
+        ok: true,
+        info,
+    }
 }
 
 /// Best-effort detection of host full-disk encryption.
@@ -730,6 +776,48 @@ pub(super) fn security_snapshot_key_check() -> Check {
     }
 }
 
+/// Where the key that encrypts instance snapshots and warm standbys comes
+/// from. Read-only: doctor reports the source and never provisions one.
+///
+/// No key is informational on a host that has not paused or warmed anything
+/// yet; a source holding an unusable key (unreadable, wrong length, a file
+/// another user could read) is a finding, because every pause refuses on it.
+pub(super) fn security_snapshot_encryption_key_check() -> Check {
+    let (ok, info) =
+        snapshot_encryption_key_status(mvm_client::snapshot::host_snapshot_key_source());
+    Check {
+        name: "snapshot encryption key",
+        category: "security",
+        ok,
+        info,
+    }
+}
+
+/// The doctor line for a resolved snapshot key source, or why there is none.
+pub(super) fn snapshot_encryption_key_status(
+    resolved: Result<
+        mvm_client::snapshot::SnapshotKeySource,
+        mvm_client::snapshot::SnapshotKeyError,
+    >,
+) -> (bool, String) {
+    use mvm_client::snapshot::{SnapshotKeyError, SnapshotKeySource};
+    match resolved {
+        Ok(origin @ SnapshotKeySource::HomeKeyFile) => {
+            (true, format!("from {origin} (provisioned by mvmctl)"))
+        }
+        Ok(origin) => (true, format!("from {origin}")),
+        Err(SnapshotKeyError::Missing) => (
+            true,
+            format!(
+                "none yet — `mvmctl bootstrap` or the first `mvmctl pool warm` provisions one \
+                 at {}",
+                SnapshotKeySource::HomeKeyFile
+            ),
+        ),
+        Err(refusal) => (false, refusal.to_string()),
+    }
+}
+
 /// All template snapshot directories should be mode 0700.
 /// Walks `~/.mvm/templates/*/artifacts/*/snapshot/`,
 /// reports the first looser-perm directory found (or "all OK" /
@@ -940,9 +1028,15 @@ mod tests {
 
     #[test]
     fn local_volume_encryption_requirement_fails_closed_for_an_unknown_path() {
+        let mut env = TestEnv::new();
+        env.remove(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV);
         let missing = std::path::Path::new("/definitely/missing/mvm-encryption-probe");
-        let error = require_local_volume_host_path_encrypted(missing).unwrap_err();
-        assert!(error.to_string().contains("encrypted backing storage"));
+        let error = format!(
+            "{:#}",
+            require_local_volume_host_path_encrypted(missing).unwrap_err()
+        );
+        assert!(error.contains("not verified encrypted"), "{error}");
+        assert!(error.contains("encrypted backing storage"), "{error}");
     }
 
     struct EnvGuard {
@@ -1399,69 +1493,53 @@ mod tests {
     }
 
     #[test]
-    fn linux_volume_backing_parser_accepts_crypt_chain() {
-        let path = std::path::Path::new("/volumes/work");
-        let status =
-            parse_linux_volume_backing_types(path, "/dev/mapper/mvm-volume-work", "crypt\n");
-        assert!(status.enabled, "expected enabled: {}", status.info);
-        assert!(
-            status.info.contains("dm-crypt/LUKS"),
-            "expected dm-crypt marker, got: {}",
-            status.info
-        );
-    }
+    fn volume_storage_line_reports_verified_unverified_and_override() {
+        let target = std::path::Path::new("/synthetic/volumes/mvm-managed/unlocked");
+        let env = mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV;
 
-    #[test]
-    fn linux_volume_backing_parser_rejects_plain_chain() {
-        let path = std::path::Path::new("/volumes/work");
-        let status = parse_linux_volume_backing_types(path, "/dev/sda2", "disk\npart\n");
-        assert!(!status.enabled, "expected disabled");
+        let verified =
+            volume_storage_check_from(target, HostFdeStatus::enabled("synthetic FileVault"), false);
+        assert!(verified.ok);
         assert!(
-            status.info.contains("does NOT appear"),
-            "expected encrypted-backing refusal, got: {}",
-            status.info
+            verified.info.starts_with("verified encrypted"),
+            "{}",
+            verified.info
         );
-    }
-
-    #[test]
-    fn macos_diskutil_parser_accepts_filevault_volume() {
-        let path = std::path::Path::new("/Users/alice/volumes/work");
-        let status = parse_macos_diskutil_encryption_status(
-            path,
-            "Device Identifier: disk3s1\nFileVault: Yes (Unlocked)\n",
-        );
-        assert!(status.enabled, "expected enabled: {}", status.info);
         assert!(
-            status.info.contains("reported as encrypted"),
-            "expected encrypted marker, got: {}",
-            status.info
+            verified.info.contains("/synthetic/volumes"),
+            "{}",
+            verified.info
         );
-    }
 
-    #[test]
-    fn macos_diskutil_parser_accepts_encrypted_volume() {
-        let path = std::path::Path::new("/Volumes/secure-work");
-        let status = parse_macos_diskutil_encryption_status(
-            path,
-            "Device Identifier: disk4s1\nEncrypted: Yes\n",
+        let refused = volume_storage_check_from(
+            target,
+            HostFdeStatus::not_enabled("synthetic plain disk"),
+            false,
         );
-        assert!(status.enabled, "expected enabled: {}", status.info);
-    }
-
-    #[test]
-    fn macos_diskutil_parser_rejects_unencrypted_volume() {
-        let path = std::path::Path::new("/Volumes/plain");
-        let status = parse_macos_diskutil_encryption_status(
-            path,
-            "Device Identifier: disk4s1\nEncrypted: No\nFileVault: No\n",
-        );
-        assert!(!status.enabled, "expected disabled");
+        assert!(refused.ok, "warn-only like the host FDE line");
+        assert!(refused.info.contains("is refused"), "{}", refused.info);
         assert!(
-            status
-                .info
-                .contains("not on a macOS volume reported as encrypted"),
-            "expected encrypted-backing refusal, got: {}",
-            status.info
+            refused.info.contains("synthetic plain disk"),
+            "{}",
+            refused.info
         );
+        assert!(refused.info.contains(env), "{}", refused.info);
+
+        let overridden = volume_storage_check_from(
+            target,
+            HostFdeStatus::not_enabled("synthetic plain disk"),
+            true,
+        );
+        assert!(
+            overridden.info.contains(&format!("{env}=1 is set")),
+            "{}",
+            overridden.info
+        );
+        assert!(
+            overridden.info.contains("--prod refuses"),
+            "{}",
+            overridden.info
+        );
+        assert_eq!(overridden.name, "volume storage (encrypted backing)");
     }
 }

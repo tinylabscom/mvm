@@ -8,6 +8,8 @@
 //! mutation/export emits a local audit kind; disarm also emits a signed chain
 //! anchor. Raw payload bytes never enter diagnostics or audit records. Export
 //! only reads existing keys and capture files (but records its audit outcome).
+//! `reconcile` retires one sealed capture's payload once its authenticated
+//! at-rest deadline passes, preserving the manifest and the signed evidence.
 //! This service does not control the lifetime of the live capture producer.
 
 use std::path::{Path, PathBuf};
@@ -31,7 +33,9 @@ use mvm_hostd::supervisor::audit::{
 };
 use mvm_hostd::supervisor::verify_audit_chain_entries;
 
-use mvm_hostd::audit::host_keypair::PUBLIC_FILENAME;
+use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, SECRET_FILENAME};
+
+pub use mvm_hostd::audit::transcript_retirement::RetirementOutcome;
 
 // Bound untrusted manifest decoding independently of its declared capture budget.
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
@@ -112,12 +116,7 @@ impl TranscriptService {
         );
         let manifest: TranscriptManifest = serde_json::from_slice(&raw)
             .map_err(|_| anyhow::anyhow!("invalid capture manifest"))?;
-        validate_component(&manifest.capture_id)?;
-        validate_component(&manifest.binding.tenant_id)?;
-        validate_component(&manifest.binding.vm_name)?;
-        if let Some(session) = &manifest.binding.session_id {
-            validate_session(session)?;
-        }
+        validate_manifest_identity(&manifest)?;
         Ok((dir, manifest))
     }
 
@@ -134,9 +133,15 @@ impl TranscriptService {
         if let Some(session) = session {
             validate_session(session)?;
         }
+        anyhow::ensure!(
+            bounds.max_duration_secs > 0 && bounds.max_duration_secs <= 3600,
+            "protected capture duration must be between 1 and 3600 seconds"
+        );
         let capture_id = uuid::Uuid::new_v4().to_string();
         let dir = self.capture_dir(tenant, &capture_id);
-        mvm_core::private_fs::ensure_private_dir(&dir)
+        config::create_private_dir(&self.transcripts_dir)?;
+        config::create_private_dir(self.transcripts_dir.join(tenant))?;
+        config::create_private_dir(&dir)
             .with_context(|| format!("creating capture dir {}", dir.display()))?;
 
         // Per-capture data key, wrapped under the host KEK for the manifest.
@@ -156,12 +161,15 @@ impl TranscriptService {
             // A forensic capture of discrete frames is right to stop at its
             // bound rather than quietly drop the start of what it recorded.
             retention: RetentionPolicy::FailClosed,
-            created_unix_secs: now_unix_secs(),
+            at_rest: Some(transcript::AtRestRetention::default()),
+            generation_budget: None,
+            payload_encoding: Default::default(),
+            created_unix_secs: transcript::retention_now()?,
             recipient: KEK_RECIPIENT.to_string(),
             wrapped_data_key_b64: wrapped,
         };
         // No chunks yet — the live bridge sink fills them out of band.
-        let manifest = TranscriptWriter::new(&dir, data_key, cfg).seal();
+        let manifest = TranscriptWriter::new(&dir, data_key, cfg)?.seal();
         write_manifest(&dir, &manifest)?;
 
         self.audit(LocalAuditKind::TranscriptArmed, vm)
@@ -176,8 +184,18 @@ impl TranscriptService {
     /// Anchor a capture against its persisted admitted plan. The persistence
     /// helper accepts both bare local plans and signed admission envelopes;
     /// this operation does not re-admit the plan or choose a new trust policy.
+    /// Refuses while a live producer holds the capture directory's writer
+    /// lease.
     pub fn disarm(&self, tenant: &str, capture_id: &str) -> Result<()> {
-        let (_dir, manifest) = self.load_manifest(tenant, capture_id)?;
+        validate_component(tenant)?;
+        validate_component(capture_id)?;
+        let dir = self.capture_dir(tenant, capture_id);
+        let lease = transcript::secure_cleanup::CaptureDirectory::for_writer(&dir)
+            .context("cannot disarm a capture with an active producer")?;
+        let mut manifest = lease
+            .read_manifest()
+            .map_err(|_| anyhow::anyhow!("invalid capture manifest"))?;
+        validate_manifest_identity(&manifest)?;
         self.validate_manifest_binding(tenant, capture_id, &manifest)?;
 
         let plan_path = self
@@ -193,6 +211,12 @@ impl TranscriptService {
             anyhow::bail!("admitted plan workload does not match transcript VM");
         }
 
+        if manifest.at_rest.is_some() && manifest.sealed_unix_secs.is_none() {
+            // The exclusive directory lease excludes a live protected writer.
+            // Reconstructed counters are a floor; preserve the opened lifetime.
+            transcript::recover_abandoned_at(&mut manifest, transcript::retention_now()?)?;
+            write_manifest(&dir, &manifest)?;
+        }
         let signer = mvm_hostd::audit::host_keypair::load_or_init_at(&self.keys_dir)
             .context("loading the host signer to anchor the sealed transcript")?;
         match self.matching_chain_anchors(tenant, capture_id, &manifest)? {
@@ -221,6 +245,42 @@ impl TranscriptService {
             ))
             .emit();
         Ok(())
+    }
+
+    /// Retire one sealed capture's payload once its authenticated at-rest
+    /// deadline has passed. Authority comes from the signed seal in the host
+    /// chain, never from the VM's current plan; the existing host signer is
+    /// required and a missing one is never minted.
+    pub fn reconcile(&self, tenant: &str, capture_id: &str) -> Result<RetirementOutcome> {
+        use mvm_hostd::audit::transcript_retirement::{RetirementContext, reconcile_capture};
+        let (_, manifest) = self.load_manifest(tenant, capture_id)?;
+        self.validate_manifest_binding(tenant, capture_id, &manifest)?;
+        let trusted = self.trusted_verifying_key()?;
+        if manifest.at_rest.is_some() && manifest.sealed_unix_secs.is_some() {
+            transcript::evidence::authenticated_retirement(&self.audit_dir, &trusted, &manifest)?;
+        }
+        let (signing, verifying) = mvm_core::crypto::ed25519_keypair::load_existing(
+            &self.keys_dir.join(SECRET_FILENAME),
+            &self.verifying_key_path,
+        )
+        .map_err(|_| anyhow::anyhow!("existing host signer is unavailable; refusing reconcile"))?;
+        anyhow::ensure!(
+            verifying == trusted,
+            "host signer does not match trusted audit key"
+        );
+        let emitter = AuditEmitter::with_dir(signing, &self.audit_dir)?;
+        let relative = PathBuf::from(tenant).join(capture_id);
+        reconcile_capture(
+            RetirementContext {
+                root: &self.transcripts_dir,
+                relative_capture: &relative,
+                capture_id,
+                tenant,
+                vm: &manifest.binding.vm_name,
+                emitter: &emitter,
+            },
+            transcript::retention_now()?,
+        )
     }
 
     /// List metadata only, without decrypting payloads or creating keys.
@@ -266,6 +326,17 @@ impl TranscriptService {
 
         let recover = || -> Result<Vec<u8>> {
             self.verify_chain_anchor(tenant, capture_id, &manifest)?;
+            if manifest.at_rest.is_some() {
+                let trusted = self.trusted_verifying_key()?;
+                anyhow::ensure!(
+                    !transcript::evidence::authenticated_retirement(
+                        &self.audit_dir,
+                        &trusted,
+                        &manifest,
+                    )?,
+                    "transcript payload has authenticated retirement evidence"
+                );
+            }
             let kek = transcript::load_kek(&self.keys_dir)
                 .context("loading the host transcript KEK")?
                 .context(
@@ -319,6 +390,7 @@ impl TranscriptService {
         capture_id: &str,
         manifest: &TranscriptManifest,
     ) -> Result<()> {
+        validate_component(&manifest.binding.vm_name)?;
         transcript::verify_sealed_root(manifest)
             .map_err(|_| anyhow::anyhow!("verifying transcript manifest root failed"))?;
         if manifest.capture_id != capture_id || manifest.binding.tenant_id != tenant {
@@ -337,8 +409,7 @@ impl TranscriptService {
     ) -> Result<usize> {
         self.validate_manifest_binding(tenant, capture_id, manifest)?;
 
-        let verifying_key = crate::audit::query::load_verifying_key(&self.verifying_key_path)
-            .map_err(|_| anyhow::anyhow!("loading trusted host audit verifying key failed"))?;
+        let verifying_key = self.trusted_verifying_key()?;
         let chain_path = self.audit_dir.join(format!("{tenant}.jsonl"));
         if !chain_path.exists() {
             return Ok(0);
@@ -370,6 +441,11 @@ impl TranscriptService {
         Ok(matching.len())
     }
 
+    fn trusted_verifying_key(&self) -> Result<ed25519_dalek::VerifyingKey> {
+        crate::audit::query::load_verifying_key(&self.verifying_key_path)
+            .map_err(|_| anyhow::anyhow!("loading trusted host audit verifying key failed"))
+    }
+
     fn audit(&self, kind: LocalAuditKind, vm: &str) -> LocalAuditBuilder {
         let b = event(kind).vm_name(vm);
         match &self.audit_path {
@@ -387,6 +463,7 @@ fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
 }
 
 fn validate_component(value: &str) -> Result<()> {
+    transcript::check_safe_name(value)?;
     anyhow::ensure!(
         !value.is_empty()
             && value.len() <= 128
@@ -397,6 +474,17 @@ fn validate_component(value: &str) -> Result<()> {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')),
         "invalid transcript identifier"
     );
+    Ok(())
+}
+
+/// Identity fields of an untrusted manifest, checked before any path use.
+fn validate_manifest_identity(manifest: &TranscriptManifest) -> Result<()> {
+    validate_component(&manifest.capture_id)?;
+    validate_component(&manifest.binding.tenant_id)?;
+    validate_component(&manifest.binding.vm_name)?;
+    if let Some(session) = &manifest.binding.session_id {
+        validate_session(session)?;
+    }
     Ok(())
 }
 
@@ -417,13 +505,6 @@ fn read_subdirs(dir: &Path) -> Vec<String> {
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
         .collect()
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -497,6 +578,166 @@ mod tests {
             max_bytes: 1 << 20,
             max_chunks: 1000,
         }
+    }
+
+    #[test]
+    fn reconciliation_before_expiry_does_not_need_current_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        c.disarm("local", &id).unwrap();
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
+        c.reconcile("local", &id).unwrap();
+        // A different tenant's replacement plan must not supply authority.
+        persist_plan(&c, "replacement-tenant", "vm1");
+        c.reconcile("local", &id).unwrap();
+    }
+
+    #[test]
+    fn signed_partial_retirement_survives_removal_of_current_plan() {
+        use mvm_core::transcript::evidence::{
+            TRANSCRIPT_RETIRED_EVENT, authenticated_retirement_at, labels,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        let (dir, opened) = c.load_manifest("local", &id).unwrap();
+        let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
+        let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: id.clone(),
+                binding: opened.binding,
+                bounds: CaptureBounds {
+                    max_bytes: 4 * transcript::SEGMENT_MAX_CIPHERTEXT_BYTES,
+                    ..opened.bounds
+                },
+                retention: opened.retention,
+                at_rest: opened.at_rest,
+                generation_budget: None,
+                payload_encoding: Default::default(),
+                created_unix_secs: 100,
+                recipient: opened.recipient,
+                wrapped_data_key_b64: opened.wrapped_data_key_b64,
+            },
+        )
+        .unwrap();
+        let payload = vec![b'x'; transcript::SEGMENT_MAX_CIPHERTEXT_BYTES as usize / 2];
+        writer.push(Direction::Stdout, &payload).unwrap();
+        writer.push(Direction::Stdout, &payload).unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        assert_ne!(terminal.chunks[0].file, terminal.chunks[1].file);
+        write_manifest(&dir, &terminal).unwrap();
+        drop(writer);
+        c.disarm("local", &id).unwrap();
+        let trusted = crate::audit::query::load_verifying_key(&c.verifying_key_path).unwrap();
+        let (mut entry, _) =
+            authenticated_retirement_at(&c.audit_dir, &trusted, &terminal, Some(605_000)).unwrap();
+        entry.event = TRANSCRIPT_RETIRED_EVENT.into();
+        entry.labels = labels(&terminal).unwrap();
+        let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
+            &c.keys_dir
+                .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME),
+            &c.verifying_key_path,
+        )
+        .unwrap();
+        AuditEmitter::with_dir(signing, &c.audit_dir)
+            .unwrap()
+            .emit_entry_for_evidence(&entry, mvm_hostd::audit::evidence::EvidenceReceipt::Omitted)
+            .unwrap();
+        // This fixture isolates historical authority from current plan state.
+        // Actual partial-unlink fault boundaries are exercised in core cleanup.
+        std::fs::remove_file(dir.join(&terminal.chunks[0].file)).unwrap();
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
+        let evidence = std::fs::read(c.audit_dir.join("local.jsonl")).unwrap();
+        c.reconcile("local", &id).unwrap();
+        c.reconcile("local", &id).unwrap();
+        assert!(!dir.join(&terminal.chunks[1].file).exists());
+        assert_eq!(
+            std::fs::read(c.audit_dir.join("local.jsonl")).unwrap(),
+            evidence
+        );
+        assert_eq!(c.load_manifest("local", &id).unwrap().1, terminal);
+    }
+
+    #[test]
+    fn operator_reconcile_expires_only_authorized_payload_and_preserves_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        let (dir, opened) = c.load_manifest("local", &id).unwrap();
+        assert_eq!(opened.at_rest, Some(transcript::AtRestRetention::default()));
+        let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
+        let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: id.clone(),
+                binding: opened.binding,
+                bounds: opened.bounds,
+                retention: opened.retention,
+                at_rest: opened.at_rest,
+                generation_budget: None,
+                payload_encoding: Default::default(),
+                created_unix_secs: 100,
+                recipient: opened.recipient,
+                wrapped_data_key_b64: opened.wrapped_data_key_b64,
+            },
+        )
+        .unwrap();
+        writer
+            .push(Direction::Stdout, b"synthetic retention marker")
+            .unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        write_manifest(&dir, &terminal).unwrap();
+        assert!(
+            c.disarm("local", &id).is_err(),
+            "live writer lease excludes control"
+        );
+        drop(writer);
+        c.disarm("local", &id).unwrap();
+        // Historical cleanup cannot depend on mutable or deleted VM state.
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
+        let original = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
+        assert!(
+            c.export("local", &id).is_err(),
+            "deadline refuses before cleanup"
+        );
+        assert!(dir.join(&terminal.chunks[0].file).exists());
+        std::fs::write(dir.join("foreign"), b"synthetic foreign").unwrap();
+        let signer_path = c
+            .keys_dir
+            .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME);
+        let original_signer = std::fs::read(&signer_path).unwrap();
+        std::fs::remove_file(&signer_path).unwrap();
+        assert!(c.reconcile("local", &id).is_err());
+        assert!(
+            !signer_path.exists(),
+            "reconciliation must not mint a signer"
+        );
+        assert!(dir.join(&terminal.chunks[0].file).exists());
+        mvm_core::util::atomic_io::write_private(&signer_path, &original_signer).unwrap();
+        c.reconcile("local", &id).unwrap();
+        c.reconcile("local", &id).unwrap();
+        assert!(!dir.join(&terminal.chunks[0].file).exists());
+        assert_eq!(
+            std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap(),
+            original
+        );
+        assert_eq!(
+            std::fs::read(dir.join("foreign")).unwrap(),
+            b"synthetic foreign"
+        );
+        assert!(c.export("local", &id).is_err());
+        let evidence = std::fs::read_to_string(c.audit_dir.join("local.jsonl")).unwrap();
+        assert!(!evidence.contains("synthetic retention marker"));
+        assert!(evidence.contains("transcript.retired"));
     }
 
     fn audit_contains(c: &TranscriptService, token: &str) -> bool {
@@ -607,11 +848,15 @@ mod tests {
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
+                generation_budget: manifest.generation_budget,
+                payload_encoding: manifest.payload_encoding,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
         w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
         let sealed = w.seal();
@@ -664,11 +909,15 @@ mod tests {
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
+                generation_budget: manifest.generation_budget,
+                payload_encoding: manifest.payload_encoding,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"secret").unwrap();
         let sealed = w.seal();
         write_manifest(&dir, &sealed).unwrap();

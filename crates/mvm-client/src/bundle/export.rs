@@ -158,6 +158,7 @@ fn export_inner(
             cmdline: cmdline.as_deref(),
             posture,
             provenance,
+            boot_assets: None,
             out: &request.out,
             debug_out: None,
         },

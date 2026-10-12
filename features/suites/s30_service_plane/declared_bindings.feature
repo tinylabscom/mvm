@@ -29,6 +29,7 @@ Feature: A catalog runtime declares the host services it needs
 
   @live @sdk_sidecar @dir_share
   Scenario: a workload may bind the key-value store at launch
+    Given the image "alpine" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-kv-bind --image alpine --host-service host.kv.v1 --timeout 120 -- /bin/echo mvm-bdd-kv-bound"
     Then the command exits with code 0
     And the output contains "mvm-bdd-kv-bound"

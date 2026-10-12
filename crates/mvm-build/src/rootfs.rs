@@ -1038,12 +1038,22 @@ fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<Str
     if !input.emit_verity {
         return Ok(None);
     }
+    Ok(Some(emit_verity_sidecars(&input.output)?))
+}
 
-    let image = std::fs::read(&input.output).map_err(|source| RootfsError::ReadOutput {
-        path: input.output.clone(),
+/// Seal the ext4 image at `image_path` as it is now: write `rootfs.verity` and
+/// `rootfs.roothash` beside it, computed in process under the pinned boot
+/// contract, and return the root hash as 64 lowercase hex characters.
+///
+/// The sidecars are written with a plain create-or-truncate, so a caller
+/// sealing a directory it does not control removes whatever already sits at
+/// those two names first.
+pub fn emit_verity_sidecars(image_path: &std::path::Path) -> Result<String, RootfsError> {
+    let image = std::fs::read(image_path).map_err(|source| RootfsError::ReadOutput {
+        path: image_path.to_path_buf(),
         source,
     })?;
-    Ok(Some(emit_verity_sidecars_for_image(&input.output, &image)?))
+    emit_verity_sidecars_for_image(image_path, &image)
 }
 
 fn emit_verity_sidecars_for_image(

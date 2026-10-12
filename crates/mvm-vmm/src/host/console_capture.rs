@@ -14,6 +14,8 @@ use std::io;
 use std::path::Path;
 use std::process::Stdio;
 
+pub mod bounded;
+
 /// Open a write-only, truncated console log file.
 ///
 /// This is the shared primitive used by every concrete backend to capture

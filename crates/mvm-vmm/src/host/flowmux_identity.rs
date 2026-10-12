@@ -34,7 +34,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::TryRng;
 
 use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
-use mvm_core::atomic_io::write_private;
+use mvm_core::atomic_io::write_private_ephemeral;
 
 // The drive's label and filenames are declared on the reading side, in
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename
@@ -277,7 +277,10 @@ impl GuestIdentityMaterial {
             &BuildOptions::default().with_volume_name(IDENTITY_DRIVE_LABEL.as_bytes()),
         )
         .map_err(|e| anyhow::anyhow!("building the FlowMux identity drive: {e}"))?;
-        write_private(path, &image)
+        // Per boot: the VMM reads it from the page cache, a host crash ends the
+        // guest that would read it, and the next boot mints a new one, so
+        // syncing it only added two fsyncs to every cold boot.
+        write_private_ephemeral(path, &image)
             .with_context(|| format!("writing the FlowMux identity drive to {}", path.display()))?;
         Ok(())
     }

@@ -49,6 +49,7 @@ pub mod artifact;
 // `mvm-cli`'s `run --image` can ingest a local archive through the same
 // digest-verified path as a registry pull. Filesystem-free (reads a `Read`).
 pub mod archive;
+pub mod config;
 pub mod layer;
 pub mod manifest;
 // The manifest DTOs live in `mvm-contract` so the browser slice can parse a

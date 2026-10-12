@@ -61,15 +61,15 @@ pub use local_set::{LocalSetError, LocalSetRequest};
 pub const MVM_IMAGES_DIR_ENV: &str = "MVM_IMAGES_DIR";
 
 /// Files every `mvm-images` checkout carries at its root, relative paths. A
-/// directory missing any of them is not one, whatever else it holds.
+/// directory missing any of them is not one, whatever else it holds. Only
+/// Linux-layer definitions are markers: the guest runtime's image definitions
+/// leave that repository, so a checkout without them is still one.
 pub const IMAGES_CHECKOUT_MARKERS: &[&str] = &[
     "flake.nix",
     "flake.lock",
     "kernel/flake.nix",
     "images/builder-vm/image.nix",
     "images/default-tenant/image.nix",
-    "images/runtime-overlay/image.nix",
-    "images/initramfs/image.nix",
 ];
 
 /// Why an image source was refused.
@@ -393,10 +393,11 @@ pub fn mvm_source_checkout(channel: DistributionChannel) -> Option<PathBuf> {
 pub const GUEST_RUNTIME_SOURCE_ROOT_ENV: &str = "MVM_RUNTIME_OVERLAY_SOURCE_ROOT";
 
 /// The mvm checkout a contributor build compiles its guest runtime from: the
-/// runtime overlay and the universal initramfs are assembled from guest
-/// binaries cargo builds in that checkout, with no image flake involved. The
-/// override wins when it names an mvm checkout; otherwise it is the checkout
-/// this binary was compiled from. A release build has none.
+/// guest-runtime archive, and the OCI guest set, runtime overlay, universal
+/// initramfs and SDK sidecar assembled from it, all come from this one tree,
+/// with no image flake involved. The override wins when it names an mvm
+/// checkout; otherwise it is the checkout this binary was compiled from — never
+/// the shell's current directory. A release build has none.
 #[must_use]
 pub fn guest_runtime_source_checkout() -> Option<PathBuf> {
     let channel = crate::artifact_acquisition::compiled_channel();

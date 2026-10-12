@@ -457,36 +457,68 @@ fn public_cve_corpus_is_integrity_checked_and_non_certifying() {
     assert!(guide.contains("non-certifying"));
 }
 
-/// Every signed blob in the release uses the one bundle format this project
-/// ships: `--new-bundle-format`.
+/// The `cosign sign-blob` invocations in a workflow, each with every flag up to
+/// and including the line that ends its shell continuation.
+fn sign_blob_invocations(workflow: &str) -> Vec<String> {
+    workflow
+        .match_indices("cosign sign-blob")
+        .map(|(offset, _)| {
+            let mut invocation = Vec::new();
+            for line in workflow[offset..].lines() {
+                invocation.push(line);
+                if !line.trim_end().ends_with('\\') {
+                    break;
+                }
+            }
+            invocation.join("\n")
+        })
+        .collect()
+}
+
+/// Every blob signed for the in-binary verifier uses the one bundle format this
+/// project ships: `--new-bundle-format`.
 ///
 /// The in-binary Rust sigstore stack parses only that shape, and
 /// `cosign verify-blob --bundle` documents it as the preferred input — so a
 /// single format serves both consumers and there is no legacy fallback to keep
 /// in step. A bare `--bundle` left behind would sign an artifact the in-binary
-/// verifier cannot read, and nothing surfaces that until a real release ships.
+/// verifier cannot read, and nothing surfaces that until a consumer fetches it.
+///
+/// Two workflows feed that verifier: the tagged CLI release, and the rolling
+/// commit-addressed host helpers `mvmctl bootstrap` installs into a source
+/// build. The second once signed with a bare `--bundle`, and every source-built
+/// bootstrap on a host without a local helper build refused the result.
 #[test]
 fn every_signed_release_blob_uses_the_one_bundle_format() {
-    let workflow = release_workflow();
-    let mut checked = 0usize;
-    for (offset, _) in workflow.match_indices("cosign sign-blob") {
-        // The invocation is a line-continued shell command; its flags run up to
-        // the first line that is not a continuation.
-        let invocation: String = workflow[offset..]
-            .lines()
-            .take_while(|line| line.trim_end().ends_with('\\'))
-            .collect::<Vec<_>>()
-            .join("\n");
+    for workflow_path in [
+        ".github/workflows/release.yml",
+        ".github/workflows/source-host-helpers.yml",
+    ] {
+        let workflow = fs::read_to_string(workflow_path)
+            .unwrap_or_else(|error| panic!("failed to read {workflow_path}: {error}"));
+        let invocations = sign_blob_invocations(&workflow);
         assert!(
-            invocation.contains("--new-bundle-format"),
-            "every `cosign sign-blob` must use --new-bundle-format; found one without it:\n{invocation}"
+            !invocations.is_empty(),
+            "expected {workflow_path} to sign its artifacts with `cosign sign-blob`"
         );
-        checked += 1;
+        for invocation in invocations {
+            assert!(
+                invocation.contains("--new-bundle-format"),
+                "every `cosign sign-blob` in {workflow_path} must use --new-bundle-format; \
+                 found one without it:\n{invocation}"
+            );
+        }
     }
-    assert!(
-        checked >= 1,
-        "expected to find the release's signing invocation, found {checked}"
-    );
+}
+
+#[test]
+fn sign_blob_invocations_include_single_line_and_final_continuation_flags() {
+    let workflow = "run: |\n  cosign sign-blob --yes --bundle a.bundle a\n  cosign sign-blob \\\n    --yes \\\n    --bundle b.bundle b --new-bundle-format\n  echo done\n";
+    let invocations = sign_blob_invocations(workflow);
+    assert_eq!(invocations.len(), 2);
+    assert!(!invocations[0].contains("--new-bundle-format"));
+    assert!(invocations[1].contains("--new-bundle-format"));
+    assert!(!invocations[1].contains("echo done"));
 }
 
 /// Build provenance must cover the artifacts the release signs directly, and be
@@ -586,7 +618,7 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 
     let job = job_block(&workflow, "distro-packages");
     assert!(
-        job.contains("needs: build")
+        job.contains("needs: [build, guest-runtime]")
             && job.contains("uses: ./.github/workflows/distro-packages.yml")
             && job.contains("tarballs: build"),
         "the release must package the tarballs its own build job produced:\n{job}"
@@ -642,6 +674,10 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
 /// lock pins; a CLI release that rebuilt, mirrored or re-signed one would be a
 /// second producer under a second identity, which is what moving images out
 /// of this repository ended.
+///
+/// The guest runtime is not an image and is admitted by name: it is the
+/// guest programs and libraries built from this tree, and the CLI release is
+/// the one place it ships from.
 #[test]
 fn the_cli_release_carries_no_image() {
     let workflow = release_workflow();
@@ -662,6 +698,131 @@ fn the_cli_release_carries_no_image() {
             "release.yml names {image_asset:?}; images ship from mvm-images, not from a CLI release"
         );
     }
+    assert!(
+        workflow.contains("artifacts/mvm-guest-bins-v*.tar.gz"),
+        "the guest runtime is the one guest artifact a CLI release carries, by name"
+    );
+}
+
+/// The guest runtime ships with every CLI release the way a tarball does:
+/// built by the guest-bins workflow before publication, required by the
+/// publish job, held to the tag's version, signed with the tarballs and with
+/// its digest sidecar, listed in the signed checksum manifest, covered by
+/// build provenance and attached with its bundles.
+#[test]
+fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
+    let workflow = release_workflow();
+
+    let job = job_block(&workflow, "guest-runtime");
+    assert!(
+        job.contains("uses: ./.github/workflows/guest-bins.yml"),
+        "the release must build its guest runtime with the guest-bins workflow:\n{job}"
+    );
+    let lane = fs::read_to_string(".github/workflows/guest-bins.yml").expect("guest-bins.yml");
+    assert!(
+        lane.contains("  workflow_call:\n")
+            && lane.contains("build guest-bins --out dist")
+            && lane.contains("name: mvm-guest-bins\n"),
+        "guest-bins.yml must be callable and upload the archive under the name the release reads"
+    );
+
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("guest-runtime, release-archive-smoke")
+            && release.contains("needs.guest-runtime.result == 'success'"),
+        "publication must wait for the guest runtime build and require it to succeed"
+    );
+    assert!(
+        release.contains(r#"artifacts/mvm-guest-bins-${TAG_NAME}.tar.gz"#),
+        "a tag must publish the guest runtime named for its own version"
+    );
+    assert!(
+        release.contains("guest-runtime job one for its archive")
+            && release.contains("cat ./*.sha256 > checksums-sha256.txt"),
+        "the runtime's sidecar must join the combined checksum manifest"
+    );
+
+    let sign_loop = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step")
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    for blob in [
+        "artifacts/*.tar.gz",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+    ] {
+        assert!(sign_loop.contains(blob), "{blob} must be cosign-signed");
+    }
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+    for asset in [
+        "artifacts/*.tar.gz",
+        "artifacts/*.tar.gz.bundle",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
+        "artifacts/mvm-guest-bins-v*.tar.gz.sha256.bundle",
+    ] {
+        assert!(
+            assets.contains(asset),
+            "{asset} must be attached to the release"
+        );
+    }
+
+    let attest = workflow
+        .find("actions/attest-build-provenance")
+        .expect("the release job must attest build provenance");
+    assert!(
+        workflow[attest..]
+            .lines()
+            .take(7)
+            .any(|line| line.trim() == "artifacts/*.tar.gz"),
+        "build provenance must cover the guest runtime with the tarballs"
+    );
+
+    let verify = fs::read_to_string("nix/packaging/release/verify-release-assets.sh")
+        .expect("verify-release-assets.sh");
+    assert!(
+        verify.contains("check_guest_runtime\n")
+            && verify.contains(r#"mvm-guest-bins-v${EXPECT_VERSION}.tar.gz"#),
+        "the post-publish verifier must require the guest runtime of the tag's version"
+    );
+}
+
+/// The archive smoke stages the guest runtime its release run built beside
+/// the unpublished mvmctl, so the CLI and the runtime it ships with are paired
+/// before anything is published.
+#[test]
+fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
+    let lane = fs::read_to_string(".github/workflows/release-archive-smoke.yml")
+        .expect("release-archive-smoke.yml");
+    let smoke = job_block(&lane, "release-archive-smoke");
+    assert_eq!(
+        smoke.matches("name: mvm-guest-bins\n").count(),
+        2,
+        "both download paths must fetch the guest runtime the release run built"
+    );
+    assert!(
+        smoke.contains(r#"sha256sum --check "${runtimes[0]}.sha256""#)
+            && smoke
+                .contains("MVM_SMOKE_GUEST_RUNTIME: ${{ steps.guest-runtime.outputs.archive }}"),
+        "the smoke must stage the checked runtime beside the unpacked mvmctl"
+    );
+    let script = fs::read_to_string("scripts/smoke-fresh-install.sh").expect("smoke script");
+    assert!(
+        script.contains("ready (installed beside mvmctl)"),
+        "the smoke must require bootstrap to adopt the staged runtime"
+    );
+    assert!(
+        script.contains("assembled from release guest runtime $runtime_name")
+            && script.contains("release archive $runtime_name"),
+        "the smoke must require the launch pieces to come from the staged runtime"
+    );
 }
 
 /// Slice one job's block out of a workflow — from its key to the next line at
@@ -1321,7 +1482,7 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
 
     let gate = job_block(&workflow, "release-archive-smoke");
     assert!(
-        gate.contains("    needs: [build]\n")
+        gate.contains("    needs: [build, guest-runtime]\n")
             && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
         "the archive smoke must run the shared lane on what `build` uploaded"
     );
@@ -1560,6 +1721,34 @@ fn remote_image_contract_checks_follow_the_locked_version() {
     assert!(downloader.contains("locked-image-tag.sh\" compatibility builder_cache_contract"));
     assert!(downloader.contains(".compatibility.builder_cache_contract == $contract"));
     assert!(pin_update.contains(".compatibility.builder_cache_contract == 5"));
+}
+
+/// The shell consumers of the signed root check the base-image contract with
+/// the same window `mvmctl` boots, reading an absent declaration as the legacy
+/// contract 0, and none of them consults the retired guest-agent range.
+#[test]
+fn remote_base_image_contract_checks_follow_the_cli_window() {
+    let supported = mvmctl::core::image_set::BaseImageContractRange::SUPPORTED;
+    assert_eq!(
+        supported.min(),
+        mvmctl::core::image_set::BaseImageContract::LEGACY
+    );
+    let check = format!(
+        "(.compatibility.base_image_contract // 0) <= {}",
+        supported.max()
+    );
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/update-image-pin.yml",
+        "scripts/download-qemu-wasm-smoke-pack.sh",
+    ] {
+        let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(text.contains(&check), "{path} must check `{check}`");
+        assert!(
+            !text.contains("guest_agent_protocol"),
+            "{path} must not consult the retired guest-agent range"
+        );
+    }
 }
 
 #[test]

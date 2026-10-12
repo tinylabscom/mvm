@@ -1,6 +1,7 @@
 //! `mvmctl trust audit` subcommand handlers.
 
 mod inspect;
+mod prune;
 mod sessions;
 #[cfg(test)]
 pub(in crate::commands) use sessions::{SessionsArgs, ShowArgs, VerifyArgs};
@@ -24,6 +25,7 @@ use super::Cli;
 use mvm_client::audit::query::{self, DecisionRequest};
 
 use inspect::audit_tail;
+use prune::audit_prune;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -1062,45 +1064,6 @@ fn audit_verify(tenant: &str) -> Result<()> {
             source_path(&dir, &refusal.source).display(),
             refusal.detail
         );
-    }
-    Ok(())
-}
-
-/// Delete a prefix of retired segments, recording the removal in the chain.
-///
-/// Dry-run unless `--ack`. Pruning removes evidence that cannot be
-/// reconstructed, and the entries it removes stop being independently
-/// verifiable forever — so the default is to say what would go and stop.
-fn audit_prune(tenant: &str, through: u64, ack: bool) -> Result<()> {
-    let report = query::prune_chain(&query::PruneRequest {
-        tenant: tenant.to_string(),
-        through,
-        intent: if ack {
-            query::PruneIntent::AcknowledgeEvidenceRemoval
-        } else {
-            query::PruneIntent::Preview
-        },
-    })?;
-    match report {
-        query::PruneReport::Nothing { floor, through } => ui::info(&format!(
-            "Nothing to prune for tenant '{tenant}': no retired segments in {floor}..={through}."
-        )),
-        query::PruneReport::Preview {
-            floor,
-            through,
-            segments,
-            entries,
-        } => ui::warn(&format!(
-            "Would remove {segments} segment(s) ({floor}..={through}) and {entries} entries from tenant \
-             '{tenant}'.\nThose entries stop being independently verifiable — the surviving \
-             chain will attest that they were removed, and how many, but never again what \
-             they said.\nRe-run with --ack to proceed."
-        )),
-        query::PruneReport::Pruned { through, entries } => ui::success(&format!(
-            "Pruned segments 1..={through} from tenant '{tenant}': {entries} entries removed and recorded in \
-             the chain. `mvmctl trust audit verify` will now report the chain as verified with a \
-             deliberate gap."
-        )),
     }
     Ok(())
 }

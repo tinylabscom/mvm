@@ -160,8 +160,8 @@ fn fc_base_bootargs(has_disk: bool) -> String {
 }
 
 /// Resolve the explicit host kernel path from the spec, rejecting a bundled
-/// kernel. Firecracker has no bundled kernel (libkrun's libkrunfw is the only
-/// bundled-kernel backend), so a `Bundled` spec must not reach the API.
+/// kernel. Firecracker has no bundled kernel, so a `Bundled` spec must not
+/// reach the API.
 fn resolve_fc_kernel_path(spec: &VmmSpec) -> Result<PathBuf> {
     match &spec.kernel {
         KernelImage::Path(p) => Ok(p.clone()),

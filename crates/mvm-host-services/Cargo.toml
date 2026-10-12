@@ -1,5 +1,6 @@
 [package]
 name = "mvm-host-services"
+publish = false
 description = "In-guest host-services C ABI (libmvm_host_services.so) — one JSON-in/JSON-out entry point over the vsock broker, loaded by every language SDK."
 version.workspace = true
 edition.workspace = true

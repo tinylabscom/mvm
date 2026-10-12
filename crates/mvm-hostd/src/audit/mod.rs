@@ -17,6 +17,10 @@ pub mod leaf_cache;
 pub mod merkle;
 pub mod output_audit;
 pub mod plan_persist;
+#[cfg(unix)]
+pub(crate) mod prune_pins;
+#[cfg(unix)]
+pub use prune_pins::validate_tenant as validate_prune_tenant;
 /// Writer for `.mvmev` evidence archives over the chain-signed audit log.
 pub mod receipt_archive;
 /// Verifier for `.mvmev` evidence archives.
@@ -29,6 +33,8 @@ pub mod receipt_store;
 /// Per-session seals, the session ledger derived from them, and the
 /// per-session verdict.
 pub mod session;
+#[cfg(unix)]
+pub mod transcript_retirement;
 pub mod unsealed;
 pub mod witness;
 

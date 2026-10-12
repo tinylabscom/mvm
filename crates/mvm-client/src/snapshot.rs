@@ -12,6 +12,42 @@
 use anyhow::{Context, Result};
 
 pub use mvm_runtime::vm::instance_snapshot::{InstanceSnapshotEntry, list_instance_snapshots};
+pub use mvm_runtime::vm::snapshot_key::{
+    HostSnapshotKey, SnapshotKeyError, SnapshotKeyProvisionError, SnapshotKeySource,
+    ensure_host_snapshot_key,
+};
+
+/// Make sure the host has a snapshot key, minting one under the mvm key
+/// directory when no source holds any, and say so when one was minted: the
+/// key is the only way back into every snapshot sealed under it.
+pub fn ensure_host_snapshot_key_announced() -> Result<HostSnapshotKey> {
+    let outcome = ensure_host_snapshot_key().context("preparing the host snapshot key")?;
+    if let Some(line) = provisioned_notice(&outcome) {
+        mvm_runtime::ui::notice(&line);
+    }
+    Ok(outcome)
+}
+
+/// The line announcing a newly minted key; nothing for one that existed.
+pub fn provisioned_notice(outcome: &HostSnapshotKey) -> Option<String> {
+    match outcome {
+        HostSnapshotKey::Created(path) => Some(format!(
+            "Created the host snapshot key at {} (mode 0600). Back it up: encrypted \
+             snapshots and warm standbys cannot be resumed without it.",
+            path.display()
+        )),
+        HostSnapshotKey::Existing(_) => None,
+    }
+}
+
+/// Which source supplies the host snapshot key, or why none does. Reads only;
+/// never provisions one.
+pub fn host_snapshot_key_source() -> std::result::Result<SnapshotKeySource, SnapshotKeyError> {
+    use mvm_runtime::vm::snapshot_key::{SNAPSHOT_TENANT_ID, SnapshotKeyResolver};
+    SnapshotKeyResolver::host()
+        .admit_naming_source(SNAPSHOT_TENANT_ID)
+        .map(|(_, source)| source)
+}
 
 /// Remove a machine's sealed instance snapshot. Returns `true` when a
 /// snapshot existed and was removed, `false` when the machine has none.

@@ -178,7 +178,7 @@ pub fn resolve_prepared_image(request: &ResolveImageRequest) -> Result<ResolvedO
 }
 
 pub fn oci_cache_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("oci")
+    mvm_core::config::oci_cache_dir()
 }
 
 /// Compatibility entry for native launch consumers; identical cache-only

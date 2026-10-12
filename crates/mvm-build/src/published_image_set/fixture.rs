@@ -33,6 +33,11 @@ pub struct ImageSetFixture {
 }
 
 impl ImageSetFixture {
+    /// Consume the fixture as a manifest for offline bundle export tests.
+    pub fn into_manifest(self) -> ImageSetManifest {
+        self.manifest
+    }
+
     /// A complete release of the shipped lock's set whose members each declare
     /// one placeholder artifact that is never served.
     pub fn complete() -> Self {
@@ -189,33 +194,57 @@ impl ImageSetFixture {
         self
     }
 
-    /// Stamp `source_fingerprint` on every SDK sidecar member for `arch`
-    /// (None clears it), for the fetch-when-unchanged tests.
+    /// Add the guest-runtime members image sets published before the guest
+    /// runtime moved to the CLI release: an overlay, both SDK sidecars (with
+    /// the source fingerprint they carried) and an initramfs per
+    /// architecture. Nothing serves them; a consumer must never ask.
     #[must_use]
-    pub fn with_sidecar_fingerprints(
-        mut self,
-        arch: mvm_core::arch::GuestArch,
-        fingerprint: Option<String>,
-    ) -> Self {
-        for member in &mut self.manifest.members {
-            if matches!(
-                member.role,
-                mvm_core::image_set::ImageSetRole::SdkSidecar(_)
-            ) && member.target == mvm_core::image_set::MemberTarget::Arch(arch)
-            {
-                member.source_fingerprint =
-                    fingerprint.clone().map(|fp| Sha256Hex::new(fp).unwrap());
+    pub fn with_retired_guest_runtime(mut self) -> Self {
+        use mvm_contract::guest_libc::GuestLibc;
+        use mvm_core::image_set::RetiredGuestRuntimeRole;
+        for arch in [
+            mvm_core::arch::GuestArch::X86_64,
+            mvm_core::arch::GuestArch::Aarch64,
+        ] {
+            for retired in [
+                RetiredGuestRuntimeRole::RuntimeOverlay,
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+                RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+                RetiredGuestRuntimeRole::Initramfs,
+            ] {
+                let mut member = placeholder_member(
+                    ImageSetRole::RetiredGuestRuntime(retired),
+                    MemberTarget::Arch(arch),
+                );
+                if matches!(retired, RetiredGuestRuntimeRole::SdkSidecar(_)) {
+                    member.source_fingerprint = Some(Sha256Hex::from_bytes(b"sdk-sources"));
+                }
+                self.manifest.members.push(member);
             }
         }
         self
     }
 
-    /// Declare `range` as the guest-agent protocol the set supports. The lock
+    /// Declare `contract` as the set's base-image contract. The lock
     /// [`Self::serve_from`] derives copies it, so only the host compatibility
     /// check can refuse the set over it.
     #[must_use]
-    pub fn with_guest_agent_protocol(mut self, range: mvm_core::image_set::ProtocolRange) -> Self {
-        self.manifest.compatibility.guest_agent_protocol = range;
+    pub fn with_base_image_contract(
+        mut self,
+        contract: Option<mvm_core::image_set::BaseImageContract>,
+    ) -> Self {
+        self.manifest.compatibility.base_image_contract = contract;
+        self
+    }
+
+    /// Record `range` as the retired guest-agent protocol range, as every set
+    /// up to `image-set/v0.2.4` does.
+    #[must_use]
+    pub fn with_retired_guest_agent_protocol(
+        mut self,
+        range: mvm_core::image_set::ProtocolRange,
+    ) -> Self {
+        self.manifest.compatibility.guest_agent_protocol = Some(range);
         self
     }
 
@@ -241,6 +270,8 @@ impl ImageSetFixture {
     pub fn serve_from(&self, dir: &Path) -> ImageSetSource {
         let mut train: ImageTrainLock = mvm_core::image_set::image_train_lock().clone();
         train.compatibility = self.manifest.compatibility.clone();
+        // The checked-in lock never copies the retired guest-agent range.
+        train.compatibility.guest_agent_protocol = None;
         let root = serde_json::to_vec(&self.manifest).unwrap();
         train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&root);
         std::fs::create_dir_all(dir).unwrap();

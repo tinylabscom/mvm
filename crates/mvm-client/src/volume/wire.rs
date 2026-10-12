@@ -66,11 +66,11 @@ pub struct SnapshotRequest {
     pub snapshot: String,
 }
 
-/// The same host-encryption diagnostic used by imperative volume mounting.
+/// The local volume service, bound to the same storage detector `mvmctl
+/// doctor` reports from: managed volume plaintext and a directory snapshotted
+/// by `--host` are both checked before anything is written or read.
 pub fn service() -> LocalVolumeService {
-    LocalVolumeService::with_host_encryption_probe(super::probe_from_fn(
-        super::require_host_path_encrypted,
-    ))
+    LocalVolumeService::with_system_host_encryption_probe()
 }
 
 pub fn create(request: &CreateRequest) -> Result<VolumeRecord> {

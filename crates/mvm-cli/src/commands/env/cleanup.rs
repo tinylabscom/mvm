@@ -171,6 +171,10 @@ fn render(event: Event, verbose: bool) {
                 )),
             }
         }
+        Event::DevVmMaintenanceSkipped => ui::info(
+            "No dev VM to clean: guest commands run on this host, so the \
+             host's /tmp and Nix store are left alone.",
+        ),
         Event::GarbageCollectionSkipped => {
             ui::info("Skipping nix-collect-garbage: dev VM is not running.")
         }

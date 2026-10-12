@@ -18,6 +18,7 @@ pub mod syscall_table;
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum SeccompTier {
     /// ~40 syscalls: just enough to load and exit a binary (linker, glibc init).
     Essential,
@@ -85,6 +86,20 @@ impl SeccompTier {
             action: SeccompAction::KillProcess,
             allowed_syscalls: self.syscalls().iter().map(|s| (*s).to_string()).collect(),
         })
+    }
+}
+
+/// The filter a signed plan's tier name selects.
+impl From<crate::plan::PlanSeccompTier> for SeccompTier {
+    fn from(tier: crate::plan::PlanSeccompTier) -> Self {
+        use crate::plan::PlanSeccompTier as Plan;
+        match tier {
+            Plan::Essential => Self::Essential,
+            Plan::Minimal => Self::Minimal,
+            Plan::Standard => Self::Standard,
+            Plan::Network => Self::Network,
+            Plan::Unrestricted => Self::Unrestricted,
+        }
     }
 }
 
@@ -283,6 +298,8 @@ fn minimal_extra() -> &'static [&'static str] {
         "rt_sigtimedwait",
         "rt_sigqueueinfo",
         "rt_sigreturn",
+        "rt_sigsuspend",
+        "restart_syscall",
         "sigaltstack",
         "kill",
         "tkill",
@@ -402,6 +419,9 @@ fn standard_extra() -> &'static [&'static str] {
         "truncate",
         "ftruncate",
         "fallocate",
+        // A connected AF_UNIX pair reaches no address, so it belongs with the
+        // file tier rather than the network one.
+        "socketpair",
         // Data transfer
         "sendfile",
         "splice",
@@ -419,7 +439,6 @@ fn standard_extra() -> &'static [&'static str] {
 fn network_extra() -> &'static [&'static str] {
     &[
         "socket",
-        "socketpair",
         "bind",
         "listen",
         "accept",
@@ -441,6 +460,22 @@ fn network_extra() -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
+    /// A plan's tier and the filter it selects share a name, which is how the
+    /// cmdline carries it; the conversion has to agree with that.
+    #[test]
+    fn every_plan_tier_selects_the_filter_of_the_same_name() {
+        use crate::plan::PlanSeccompTier;
+        for plan in [
+            PlanSeccompTier::Essential,
+            PlanSeccompTier::Minimal,
+            PlanSeccompTier::Standard,
+            PlanSeccompTier::Network,
+            PlanSeccompTier::Unrestricted,
+        ] {
+            assert_eq!(SeccompTier::from(plan).to_string(), plan.to_string());
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -538,6 +573,32 @@ mod tests {
         assert!(manifest.allowed_syscalls.contains(&"mkdir".to_string()));
         // Standard should NOT have network syscalls
         assert!(!manifest.allowed_syscalls.contains(&"socket".to_string()));
+    }
+
+    /// A tier enforced on general workload processes has to let them wait for
+    /// a signal and resume an interrupted sleep. Without `rt_sigsuspend` a
+    /// shell's `wait` builtin fails with EPERM instead of blocking; without
+    /// `restart_syscall` a `nanosleep` interrupted by SIGSTOP/SIGCONT returns
+    /// EPERM instead of resuming.
+    #[test]
+    fn minimal_lets_a_process_wait_for_a_signal_and_resume_a_sleep() {
+        let minimal = SeccompTier::Minimal.syscalls();
+        for name in ["rt_sigsuspend", "restart_syscall"] {
+            assert!(minimal.contains(&name), "minimal must grant {name}");
+        }
+    }
+
+    /// `socketpair` creates a connected `AF_UNIX` pair and nothing else: it can
+    /// reach no address. Interpreters use it for in-process wakeups (Python's
+    /// asyncio self-pipe among them), so `standard` grants it while still
+    /// refusing `socket`, which is what reaches a network.
+    #[test]
+    fn standard_grants_a_socket_pair_but_not_a_socket() {
+        let standard = SeccompTier::Standard.syscalls();
+        assert!(standard.contains(&"socketpair"));
+        for name in ["socket", "connect", "bind", "listen"] {
+            assert!(!standard.contains(&name), "standard must not grant {name}");
+        }
     }
 
     #[test]

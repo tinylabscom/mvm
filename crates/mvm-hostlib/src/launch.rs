@@ -493,6 +493,47 @@ mod tests {
         );
     }
 
+    /// A launch that fails before its machine boots leaves no stopped machine
+    /// behind for the inventory to report. An image tree nothing has prepared
+    /// a guest runtime for fails while it materializes, after the definition
+    /// was written.
+    #[test]
+    fn a_launch_that_fails_before_boot_leaves_no_machine() {
+        let mut home = Home::new();
+        home._env
+            .remove(mvm_client::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        let tree = home.dir.path().join("unpacked");
+        std::fs::create_dir_all(tree.join("etc")).expect("tree");
+        std::fs::write(tree.join("etc/hostname"), b"image\n").expect("tree");
+        let backend = mock();
+
+        let outcome = call(
+            &backend,
+            MACHINE_RUN,
+            serde_json::json!({
+                "image": tree.to_string_lossy(),
+                "mode": "persistent",
+                "name": "sdk-unbooted",
+            }),
+        );
+
+        assert_ne!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert!(
+            body(&outcome)
+                .to_string()
+                .contains("guest runtime is not prepared"),
+            "{}",
+            body(&outcome)
+        );
+        let inventory =
+            run(mvm_client::inventory::list_local_inventory(&backend)).expect("inventory");
+        assert!(
+            inventory.iter().all(|record| record.name != "sdk-unbooted"),
+            "{inventory:?}"
+        );
+        assert!(!mvm_core::config::machine_spec_path("sdk-unbooted").exists());
+    }
+
     /// An egress allow-list becomes the definition's grant, which every boot
     /// of it is admitted under, rather than being dropped.
     #[test]

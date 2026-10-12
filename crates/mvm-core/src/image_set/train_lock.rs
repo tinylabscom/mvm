@@ -214,7 +214,6 @@ workflow = ".github/workflows/release.yml"
 tag_ref = "refs/tags/image-set/v1.2.3"
 
 [compatibility]
-guest_agent_protocol = { min = 2, max = 2 }
 builder_cache_contract = 4
 
 [boot_image]

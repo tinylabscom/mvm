@@ -733,6 +733,9 @@ fn finalize_typed_persistent_build(
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-utf8 output dir {}", host_out.display()))?;
         copy_staged_artifacts(host_out_str, &final_dir)?;
+        // The daemon ran the `before_build` hook over the rootfs, so the pair
+        // is computed here, over the bytes it exported, as a one-shot build's is.
+        crate::builder_output::seal_declared_rootfs(std::path::Path::new(&final_dir))?;
     }
     // Best-effort: drop the per-build export subdir under the `/job` share.
     if let Some(job_sub) = host_out.parent() {
