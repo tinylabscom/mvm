@@ -265,6 +265,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     // directory) and touch no host state, like `build compile`.
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
+    ("build", AuditPosture::Emits("PackBuild")),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),

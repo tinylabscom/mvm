@@ -209,6 +209,17 @@ pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32
 }
 
 fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
+    let exit_code = boot_entrypoint(call)?;
+    if exit_code != 0 {
+        mvm_observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Boot the slot an entrypoint call names under the admitted path, dispatch
+/// its baked entrypoint, and return the workload's exit status rather than
+/// exiting with it.
+pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall) -> Result<i32> {
     warn_accepted_but_inert(&call);
 
     // The entrypoint action targets a manifest slot, resolved through the same
@@ -277,11 +288,7 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
     out.finish_denials();
     let outcome = outcome?;
     flush_inherited();
-    let exit_code = outcome.exit_code();
-    if exit_code != 0 {
-        mvm_observability::exit(exit_code);
-    }
-    Ok(())
+    Ok(outcome.exit_code())
 }
 
 /// Say which accepted flags this build does not act on, rather than ignoring
