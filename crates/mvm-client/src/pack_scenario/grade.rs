@@ -8,6 +8,10 @@ use std::path::Path;
 /// Largest private expectation a check reads.
 const MAX_EXPECTED_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Longest failure reason a report carries. A runner's error text is not
+/// ours to size, so it is cut here rather than copied whole into every report.
+pub const MAX_REASON_BYTES: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", content = "reason", rename_all = "snake_case")]
 pub enum CheckOutcome {
@@ -37,7 +41,7 @@ pub fn grade_collected(
             name: check.name().to_string(),
             outcome: match one(check, collected, private, &mut verify) {
                 Ok(()) => CheckOutcome::Passed,
-                Err(reason) => CheckOutcome::Failed(reason),
+                Err(reason) => CheckOutcome::Failed(clip(reason)),
             },
         })
         .collect()
@@ -92,13 +96,26 @@ fn one(
     }
 }
 
+fn clip(mut reason: String) -> String {
+    if reason.len() > MAX_REASON_BYTES {
+        let mut end = MAX_REASON_BYTES;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+        reason.push_str("...");
+    }
+    reason
+}
+
 fn missing(path: &str) -> String {
     format!("{path:?} was not collected as a regular file")
 }
 
 fn collected_bytes(collected: &Collected, path: &str) -> Result<Vec<u8>, String> {
     let file = collected.file(path).ok_or_else(|| missing(path))?;
-    std::fs::read(file).map_err(|e| format!("reading collected {path:?}: {e}"))
+    read_bounded(&file, collected.byte_limit)
+        .map_err(|e| format!("reading collected {path:?}: {e}"))
 }
 
 fn expected_bytes(private: &Path, relative: &str) -> Result<Vec<u8>, String> {

@@ -1,11 +1,24 @@
-//! Staging and collection that never follow a symlink.
+//! Staging and collection that never follow a symlink and never read past a
+//! bound.
+//!
+//! Every walk is held to a [`Budget`] while it reads, not after: a directory
+//! listing stops at the first entry over the remaining entry count, a copy
+//! stops at the first byte over the remaining byte count, and recursion stops
+//! at [`MAX_TREE_DEPTH`]. Directories count as entries, so a tree of empty
+//! directories is bounded like a tree of files. Files are opened without
+//! following a final symlink and without blocking, and the opened handle is
+//! checked to be a regular file, so a path swapped for a symlink or a FIFO
+//! after it was inspected is refused rather than read.
 
 use super::ScenarioError;
-use mvm_contract::pack_scenario::PackScenario;
+use mvm_contract::pack_scenario::{MAX_OUTPUT_BYTES, MAX_OUTPUT_FILES, PackScenario};
 use std::collections::BTreeMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Deepest directory nesting walked below a staged or collected path.
+pub const MAX_TREE_DEPTH: usize = 32;
 
 /// Outputs copied out of a finished run's workspace.
 #[derive(Debug, Clone)]
@@ -15,6 +28,8 @@ pub struct Collected {
     /// Workspace-relative path of every collected regular file, with its size.
     pub files: BTreeMap<String, u64>,
     pub bytes: u64,
+    /// The scenario's byte limit, which also bounds every read of a copy.
+    pub byte_limit: u64,
 }
 
 impl Collected {
@@ -27,7 +42,8 @@ impl Collected {
 }
 
 /// Copy each initial file from `public` into `workspace`, which must be an
-/// existing empty directory.
+/// existing empty directory. Staging is held to the schema's output ceilings,
+/// so a public tree cannot stage more than a run could ever collect.
 pub fn stage_workspace(
     public: &Path,
     scenario: &PackScenario,
@@ -39,34 +55,30 @@ pub fn stage_workspace(
     if !fresh {
         return Err(ScenarioError::WorkspaceNotFresh(workspace.to_path_buf()));
     }
+    let mut budget = Budget::new("staged files", MAX_OUTPUT_BYTES, MAX_OUTPUT_FILES);
     for file in &scenario.initial_files {
         let source = resolve(public, &file.source)?;
         let destination = workspace.join(&file.destination);
         make_parents(workspace, &file.destination)?;
-        copy_tree(
-            &source,
-            &destination,
-            &file.source,
-            &mut Budget::unbounded(),
-        )?;
+        copy_tree(&source, &destination, &file.source, 0, &mut budget)?;
     }
     Ok(())
 }
 
 /// Copy the declared outputs out of `workspace` into `dest`, within the
 /// scenario's limits. An absent output collects nothing; its checks fail.
+/// `max_output_files` counts every collected entry, directories included.
 pub fn collect_outputs(
     workspace: &Path,
     scenario: &PackScenario,
     dest: &Path,
 ) -> Result<Collected, ScenarioError> {
-    let mut budget = Budget {
-        bytes_left: scenario.limits.max_output_bytes,
-        files_left: u64::from(scenario.limits.max_output_files),
-        byte_limit: scenario.limits.max_output_bytes,
-        file_limit: u64::from(scenario.limits.max_output_files),
-        files: BTreeMap::new(),
-    };
+    let limits = &scenario.limits;
+    let mut budget = Budget::new(
+        "collected outputs",
+        limits.max_output_bytes,
+        limits.max_output_files,
+    );
     for output in &scenario.outputs {
         let source = match resolve(workspace, output) {
             Ok(source) => source,
@@ -78,32 +90,58 @@ pub fn collect_outputs(
             Err(error) => return Err(error),
         };
         make_parents(dest, output)?;
-        copy_tree(&source, &dest.join(output), output, &mut budget)?;
+        copy_tree(&source, &dest.join(output), output, 0, &mut budget)?;
     }
-    let bytes = scenario.limits.max_output_bytes - budget.bytes_left;
     Ok(Collected {
         root: dest.to_path_buf(),
+        bytes: limits.max_output_bytes - budget.bytes_left,
+        byte_limit: limits.max_output_bytes,
         files: budget.files,
-        bytes,
     })
 }
 
 struct Budget {
+    tree: &'static str,
     bytes_left: u64,
-    files_left: u64,
+    entries_left: u64,
     byte_limit: u64,
-    file_limit: u64,
+    entry_limit: u64,
     files: BTreeMap<String, u64>,
 }
 
 impl Budget {
-    fn unbounded() -> Self {
+    fn new(tree: &'static str, bytes: u64, entries: u32) -> Self {
         Self {
-            bytes_left: u64::MAX,
-            files_left: u64::MAX,
-            byte_limit: u64::MAX,
-            file_limit: u64::MAX,
+            tree,
+            bytes_left: bytes,
+            entries_left: u64::from(entries),
+            byte_limit: bytes,
+            entry_limit: u64::from(entries),
             files: BTreeMap::new(),
+        }
+    }
+
+    fn take_entry(&mut self) -> Result<(), ScenarioError> {
+        if self.entries_left == 0 {
+            return Err(self.entries_exceeded());
+        }
+        self.entries_left -= 1;
+        Ok(())
+    }
+
+    fn entries_exceeded(&self) -> ScenarioError {
+        ScenarioError::Limit {
+            tree: self.tree,
+            limit: self.entry_limit,
+            unit: "files and directories",
+        }
+    }
+
+    fn bytes_exceeded(&self) -> ScenarioError {
+        ScenarioError::Limit {
+            tree: self.tree,
+            limit: self.byte_limit,
+            unit: "bytes",
         }
     }
 }
@@ -146,8 +184,10 @@ fn copy_tree(
     source: &Path,
     destination: &Path,
     relative: &str,
+    depth: usize,
     budget: &mut Budget,
 ) -> Result<(), ScenarioError> {
+    budget.take_entry()?;
     let meta = fs::symlink_metadata(source)
         .map_err(|e| ScenarioError::io(format!("reading {relative:?}"), e))?;
     let kind = meta.file_type();
@@ -155,22 +195,21 @@ fn copy_tree(
         return Err(escape(relative, "symbolic link"));
     }
     if kind.is_dir() {
+        if depth >= MAX_TREE_DEPTH {
+            return Err(ScenarioError::Limit {
+                tree: budget.tree,
+                limit: MAX_TREE_DEPTH as u64,
+                unit: "levels of nesting",
+            });
+        }
         fs::create_dir(destination)
             .map_err(|e| ScenarioError::io(format!("creating {relative:?}"), e))?;
-        let mut entries: Vec<_> = fs::read_dir(source)
-            .map_err(|e| ScenarioError::io(format!("listing {relative:?}"), e))?
-            .collect::<Result<_, _>>()
-            .map_err(|e| ScenarioError::io(format!("listing {relative:?}"), e))?;
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let name = entry.file_name();
-            let name = name
-                .to_str()
-                .ok_or_else(|| escape(relative, "non-UTF-8 file name"))?;
+        for name in list_bounded(source, relative, budget)? {
             copy_tree(
-                &entry.path(),
-                &destination.join(name),
+                &source.join(&name),
+                &destination.join(&name),
                 &format!("{relative}/{name}"),
+                depth + 1,
                 budget,
             )?;
         }
@@ -179,16 +218,30 @@ fn copy_tree(
     if !kind.is_file() {
         return Err(escape(relative, "neither a regular file nor a directory"));
     }
-    if budget.files_left == 0 {
-        return Err(ScenarioError::OutputLimit {
-            limit: budget.file_limit,
-            unit: "files",
-        });
-    }
-    budget.files_left -= 1;
     let copied = copy_bounded(source, destination, relative, budget)?;
     budget.files.insert(relative.to_string(), copied);
     Ok(())
+}
+
+/// The sorted names in `dir`, refusing a listing longer than the entries the
+/// budget has left before holding more of it in memory.
+fn list_bounded(dir: &Path, relative: &str, budget: &Budget) -> Result<Vec<String>, ScenarioError> {
+    let mut names = Vec::new();
+    let entries =
+        fs::read_dir(dir).map_err(|e| ScenarioError::io(format!("listing {relative:?}"), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| ScenarioError::io(format!("listing {relative:?}"), e))?;
+        if names.len() as u64 >= budget.entries_left {
+            return Err(budget.entries_exceeded());
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| escape(relative, "non-UTF-8 file name"))?;
+        names.push(name);
+    }
+    names.sort();
+    Ok(names)
 }
 
 /// Copy at most the remaining byte budget, refusing a file that is longer
@@ -200,8 +253,7 @@ fn copy_bounded(
     relative: &str,
     budget: &mut Budget,
 ) -> Result<u64, ScenarioError> {
-    let input =
-        File::open(source).map_err(|e| ScenarioError::io(format!("opening {relative:?}"), e))?;
+    let input = open_regular(source, relative)?;
     let mut output = File::create_new(destination)
         .map_err(|e| ScenarioError::io(format!("creating copy of {relative:?}"), e))?;
     let mut limited = input.take(budget.bytes_left.saturating_add(1));
@@ -216,10 +268,7 @@ fn copy_bounded(
         }
         copied += read as u64;
         if copied > budget.bytes_left {
-            return Err(ScenarioError::OutputLimit {
-                limit: budget.byte_limit,
-                unit: "bytes",
-            });
+            return Err(budget.bytes_exceeded());
         }
         output
             .write_all(&buffer[..read])
@@ -229,18 +278,47 @@ fn copy_bounded(
     Ok(copied)
 }
 
-pub(super) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ScenarioError> {
-    let meta = fs::symlink_metadata(path)
-        .map_err(|e| ScenarioError::io(format!("reading {}", path.display()), e))?;
-    if !meta.is_file() {
-        return Err(escape(&path.display().to_string(), "not a regular file"));
+/// Open `path` for reading only if it is a regular file: a final symlink is
+/// refused by the open itself, a FIFO or device cannot block the open, and
+/// the handle's own metadata, not the path's, decides.
+fn open_regular(path: &Path, relative: &str) -> Result<File, ScenarioError> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
     }
+    let file = options.open(path).map_err(|e| open_error(relative, e))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| ScenarioError::io(format!("reading {relative:?}"), e))?;
+    if !meta.is_file() {
+        return Err(escape(relative, "neither a regular file nor a directory"));
+    }
+    Ok(file)
+}
+
+fn open_error(relative: &str, error: std::io::Error) -> ScenarioError {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return escape(relative, "symbolic link");
+    }
+    ScenarioError::io(format!("opening {relative:?}"), error)
+}
+
+/// Read a regular file of at most `limit` bytes, refusing a longer one after
+/// reading one byte past the limit and no more.
+pub(super) fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, ScenarioError> {
+    let display = path.display().to_string();
+    let file = open_regular(path, &display)?;
     let mut bytes = Vec::new();
-    File::open(path)
-        .and_then(|f| f.take(limit + 1).read_to_end(&mut bytes))
-        .map_err(|e| ScenarioError::io(format!("reading {}", path.display()), e))?;
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| ScenarioError::io(format!("reading {display}"), e))?;
     if bytes.len() as u64 > limit {
-        return Err(ScenarioError::OutputLimit {
+        return Err(ScenarioError::Limit {
+            tree: "a read file",
             limit,
             unit: "bytes",
         });

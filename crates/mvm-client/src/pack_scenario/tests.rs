@@ -447,10 +447,7 @@ fn collection_enforces_the_byte_and_file_limits() {
         write(workspace.path());
         let dest = TempDir::new().unwrap();
         let error = collect_outputs(workspace.path(), &scenario, dest.path()).unwrap_err();
-        assert!(
-            matches!(error, ScenarioError::OutputLimit { .. }),
-            "{error}"
-        );
+        assert!(matches!(error, ScenarioError::Limit { .. }), "{error}");
     }
 }
 
@@ -495,4 +492,199 @@ fn opening_a_layout_validates_the_document_and_requires_private_when_read() {
         ScenarioLayout::open(root.path()).unwrap_err(),
         ScenarioError::Document(_)
     ));
+}
+
+/// A scenario collecting `out` under the given byte and entry limits.
+fn bounded_scenario(bytes: u64, files: u32) -> PackScenario {
+    let mut value = document();
+    value["limits"] = serde_json::json!({
+        "wall_clock_secs": 60, "max_output_bytes": bytes, "max_output_files": files
+    });
+    value["checks"] = serde_json::json!([
+        {"kind": "file_exists", "name": "wrote", "path": "out/a"}
+    ]);
+    serde_json::from_value(value).unwrap()
+}
+
+fn collect_error(scenario: &PackScenario, plant: impl FnOnce(&Path)) -> (ScenarioError, TempDir) {
+    let workspace = TempDir::new().unwrap();
+    fs::create_dir(workspace.path().join("out")).unwrap();
+    plant(workspace.path());
+    let dest = TempDir::new().unwrap();
+    let error = collect_outputs(workspace.path(), scenario, dest.path()).unwrap_err();
+    (error, dest)
+}
+
+fn copied_bytes(root: &Path) -> u64 {
+    walk(root)
+        .map(|path| fs::symlink_metadata(path).unwrap().len())
+        .sum()
+}
+
+#[test]
+fn an_oversized_file_is_refused_after_reading_one_byte_past_the_limit() {
+    let scenario = bounded_scenario(1024, 8);
+    let (error, dest) = collect_error(&scenario, |ws| {
+        fs::write(ws.join("out/a"), vec![b'x'; 8 * 1024 * 1024]).unwrap();
+    });
+    assert!(
+        matches!(error, ScenarioError::Limit { unit: "bytes", .. }),
+        "{error}"
+    );
+    // Nothing beyond the limit reached the copy.
+    assert!(copied_bytes(dest.path()) <= 1024);
+}
+
+#[test]
+fn empty_directories_count_against_the_entry_limit() {
+    let scenario = bounded_scenario(1024, 16);
+    let (error, _dest) = collect_error(&scenario, |ws| {
+        for index in 0..100 {
+            fs::create_dir(ws.join(format!("out/d{index}"))).unwrap();
+        }
+    });
+    assert!(
+        matches!(
+            error,
+            ScenarioError::Limit {
+                unit: "files and directories",
+                limit: 16,
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_tree_nested_past_the_depth_limit_is_refused() {
+    let scenario = bounded_scenario(1024, 65_536);
+    let (error, _dest) = collect_error(&scenario, |ws| {
+        let mut dir = ws.join("out");
+        for _ in 0..(MAX_TREE_DEPTH + 4) {
+            dir.push("d");
+        }
+        fs::create_dir_all(dir).unwrap();
+    });
+    assert!(
+        matches!(
+            error,
+            ScenarioError::Limit {
+                unit: "levels of nesting",
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn staging_walks_the_public_tree_under_the_same_bounds() {
+    let (root, layout, scenario) = layout(document());
+    let mut deep = root.path().join("public/seed");
+    for _ in 0..(MAX_TREE_DEPTH + 4) {
+        deep.push("d");
+    }
+    fs::create_dir_all(deep).unwrap();
+    let workspace = TempDir::new().unwrap();
+    let error = stage_workspace(&layout.public_dir(), &scenario, workspace.path()).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ScenarioError::Limit {
+                tree: "staged files",
+                ..
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[cfg(unix)]
+fn mkfifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_output_is_refused_without_blocking() {
+    let scenario = bounded_scenario(1024, 8);
+    let (error, _dest) = collect_error(&scenario, |ws| {
+        mkfifo(&ws.join("out/a"));
+    });
+    assert!(matches!(error, ScenarioError::PathEscape { .. }), "{error}");
+}
+
+#[cfg(unix)]
+#[test]
+fn opening_a_symlink_or_fifo_directly_is_refused() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("target"), "HOST-ONLY").unwrap();
+    std::os::unix::fs::symlink(dir.path().join("target"), dir.path().join("link")).unwrap();
+    let error = super::fs::read_bounded(&dir.path().join("link"), 1024).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ScenarioError::PathEscape {
+                reason: "symbolic link",
+                ..
+            }
+        ),
+        "{error}"
+    );
+    mkfifo(&dir.path().join("fifo"));
+    let error = super::fs::read_bounded(&dir.path().join("fifo"), 1024).unwrap_err();
+    assert!(matches!(error, ScenarioError::PathEscape { .. }), "{error}");
+}
+
+#[test]
+fn command_checks_share_one_wall_clock_and_reasons_are_clipped() {
+    struct SlowRunner {
+        started: u32,
+    }
+    impl ScenarioRunner for SlowRunner {
+        fn run_workload(&mut self, run: WorkloadRun<'_>) -> Result<RunExit, ScenarioError> {
+            answer(run.workspace, "42");
+            Ok(RunExit::Exited(0))
+        }
+        fn run_verifier(&mut self, _run: VerifierRun<'_>) -> Result<RunExit, ScenarioError> {
+            self.started += 1;
+            std::thread::sleep(Duration::from_millis(1100));
+            Err(ScenarioError::Runner("x".repeat(64 * 1024)))
+        }
+    }
+    let mut value = document();
+    value["limits"]["wall_clock_secs"] = serde_json::json!(1);
+    value["checks"] = serde_json::json!(
+        (0..5)
+            .map(|i| serde_json::json!({
+                "kind": "command", "name": format!("c{i}"), "argv": ["grade"], "exit_code": 0
+            }))
+            .collect::<Vec<_>>()
+    );
+    let (_root, layout, scenario) = layout(value);
+    let scratch = TempDir::new().unwrap();
+    let mut runner = SlowRunner { started: 0 };
+    let report = run_scenario(
+        &layout,
+        &scenario,
+        BUNDLE,
+        &mut runner,
+        &options(&scratch, 1),
+    )
+    .unwrap();
+    // The first verifier spends the whole shared clock; no other one starts.
+    assert_eq!(runner.started, 1);
+    let run = &report.runs[0];
+    assert_eq!(run.checks.len(), 5);
+    for check in &run.checks {
+        let CheckOutcome::Failed(reason) = &check.outcome else {
+            panic!("{check:?}");
+        };
+        assert!(reason.len() <= MAX_REASON_BYTES + 3, "{}", reason.len());
+    }
 }

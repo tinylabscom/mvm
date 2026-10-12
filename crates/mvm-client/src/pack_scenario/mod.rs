@@ -19,8 +19,11 @@
 //! Every path is walked component by component with `symlink_metadata`: a
 //! symlink anywhere under `public/` or under a collected output is refused
 //! rather than followed, so neither staging nor collection can read outside
-//! its tree. A refused collection fails that run; it does not stop the
-//! remaining runs.
+//! its tree. Both are bounded while they read: bytes, entries (directories
+//! included) and nesting depth, so an oversized tree is refused without being
+//! read past its bound. A refused collection fails that run; it does not stop
+//! the remaining runs. Every command check of one run shares a single wall
+//! clock, so the number of checks cannot multiply grading time.
 
 mod fs;
 mod grade;
@@ -28,8 +31,8 @@ mod grade;
 #[cfg(test)]
 mod tests;
 
-pub use fs::{Collected, collect_outputs, stage_workspace};
-pub use grade::{CheckOutcome, CheckResult, grade_collected};
+pub use fs::{Collected, MAX_TREE_DEPTH, collect_outputs, stage_workspace};
+pub use grade::{CheckOutcome, CheckResult, MAX_REASON_BYTES, grade_collected};
 
 use mvm_contract::pack_scenario::{PackScenario, ScenarioCheck};
 use std::path::{Path, PathBuf};
@@ -53,8 +56,12 @@ pub enum ScenarioError {
     Document(String),
     #[error("{path:?} escapes its tree: {reason}")]
     PathEscape { path: String, reason: &'static str },
-    #[error("collected outputs exceed the scenario's limit of {limit} {unit}")]
-    OutputLimit { limit: u64, unit: &'static str },
+    #[error("{tree} exceed the limit of {limit} {unit}")]
+    Limit {
+        tree: &'static str,
+        limit: u64,
+        unit: &'static str,
+    },
     #[error("the workspace for a fresh run must be an existing empty directory: {}", .0.display())]
     WorkspaceNotFresh(PathBuf),
     #[error("{context}: {source}")]
@@ -157,6 +164,7 @@ pub struct VerifierRun<'a> {
     pub outputs: &'a Path,
     pub private: &'a Path,
     pub argv: &'a [String],
+    /// What is left of the wall clock every verifier of this run shares.
     pub wall_clock: Duration,
 }
 
@@ -308,7 +316,11 @@ fn one_run<R: ScenarioRunner>(
     // The workload's workspace is gone before any verifier starts.
     std::fs::remove_dir_all(&workspace)
         .map_err(|e| ScenarioError::io("removing the workload workspace", e))?;
+    let grading = Deadline::start(wall_clock);
     report.checks = grade_collected(scenario, &collected, &layout.private_dir(), |argv| {
+        let Some(wall_clock) = grading.remaining() else {
+            return Ok(RunExit::TimedOut);
+        };
         bounded(wall_clock, || {
             runner.run_verifier(VerifierRun {
                 bundle_sha256,
@@ -320,6 +332,29 @@ fn one_run<R: ScenarioRunner>(
         })
     });
     Ok(report)
+}
+
+/// One wall clock shared by every verifier of a run.
+struct Deadline {
+    started: Instant,
+    limit: Duration,
+}
+
+impl Deadline {
+    fn start(limit: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            limit,
+        }
+    }
+
+    /// What is left, or `None` once it has run out: a verifier is not
+    /// started with nothing left.
+    fn remaining(&self) -> Option<Duration> {
+        self.limit
+            .checked_sub(self.started.elapsed())
+            .filter(|left| !left.is_zero())
+    }
 }
 
 /// Run `f`, reporting a timeout when it returns after `limit` whatever it

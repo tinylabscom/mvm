@@ -501,8 +501,12 @@ A check may only read a path the scenario collects, and every path is relative
 and free of `..`. The host refuses to run a scenario against any archive but
 the one it names, including a rebuild of the same version. Each run starts
 from a workspace created empty for that run and deleted before the next.
-Collection does not follow symbolic links and stops at the byte and file
-limits, failing that run rather than truncating. `private/` is never staged
+Staging and collection never follow a symbolic link or open a FIFO or device,
+and are bounded while they read: collection stops at the byte limit and at
+`max_output_files` entries (directories count), staging at the schema's
+ceilings, and both at 32 levels of nesting, failing that run rather than
+truncating. Every command check of a run shares one wall clock, and a failure
+reason is cut to 1 KiB. `private/` is never staged
 into the workload's instance, and a verifier starts only after that instance
 is gone. Reports name what differed, never the expected value.
 
