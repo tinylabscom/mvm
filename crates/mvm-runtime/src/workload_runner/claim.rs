@@ -239,10 +239,18 @@ impl<'a> ClaimGuards<'a> {
             && inputs.ingress.is_empty()
             && inputs.tools.is_empty()
         {
+            let identity_drive = self.spawner.prepare_identity(&request)?;
+            // No endpoint, but still a VM-lifetime collector: telemetry does
+            // not depend on whether the workload has egress to mediate.
+            let telemetry = self.spawner.start_telemetry_without_endpoint(&request);
             return Ok(EndpointHandle {
                 egress_uds: None,
-                identity_drive: self.spawner.prepare_identity(&request)?,
-                guard: EndpointGuard::defused(),
+                identity_drive,
+                guard: if telemetry {
+                    EndpointGuard::new(&vm.0)
+                } else {
+                    EndpointGuard::defused()
+                },
             });
         }
         // No protocol choice is made here any more. Whether a workload carries

@@ -60,6 +60,12 @@ pub trait NetworkEndpointSpawner: Send + Sync {
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint>;
     /// Provision authentication without starting an endpoint or granting egress.
     fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>>;
+    /// For a boot with no endpoint, start its VM-lifetime telemetry collector
+    /// on its own and record whether the boot is provisioned for it. Never
+    /// fails a launch: a collector that cannot start costs telemetry only.
+    fn start_telemetry_without_endpoint(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> bool {
+        false
+    }
 }
 
 /// The production `NetworkEndpointSpawner`: spawns the real `mvm-network-endpoint`
@@ -104,6 +110,43 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, false)
             .context("clearing telemetry provisioning for a boot without an endpoint")?;
         prepare_observation_identity(req, &anchor_path)
+    }
+
+    fn start_telemetry_without_endpoint(&self, req: &NetworkEndpointSpawnRequest<'_>) -> bool {
+        if !telemetry_for_boot(
+            mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
+            req.identity,
+        ) {
+            return false;
+        }
+        let started = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
+            req.vm_name,
+            req.state_dir,
+            req.redaction,
+        )
+        .inspect_err(|error| {
+            tracing::warn!(
+                vm = req.vm_name,
+                error = format!("{error:#}"),
+                "telemetry collector did not start; booting without it"
+            );
+        })
+        .is_ok();
+        match mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(
+            req.state_dir,
+            started,
+        ) {
+            Ok(()) => started,
+            Err(error) => {
+                tracing::warn!(
+                    vm = req.vm_name,
+                    error = %error,
+                    "recording telemetry provisioning failed; booting without it"
+                );
+                mvm_vmm::host::network_endpoint_spawn::reap_telemetry_collector(req.state_dir);
+                false
+            }
+        }
     }
 
     fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {

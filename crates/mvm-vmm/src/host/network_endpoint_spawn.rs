@@ -23,7 +23,7 @@ use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
 mod stderr_log;
-use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
+use stderr_log::{endpoint_stderr_log_path, open_collector_stderr_log, open_endpoint_stderr_log};
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
@@ -1045,6 +1045,117 @@ pub fn endpoint_config_for_identity(
     })
 }
 
+/// The collector's inputs for the VM at `state_dir`, without its records key.
+fn telemetry_section(state_dir: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "state_dir": state_dir,
+        "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
+            state_dir,
+            mvm_core::protocol::telemetry::TELEMETRY_PORT,
+        ),
+        "signer_sock": state_dir.join(super::broker_services_spawn::AUDIT_SIGNER_SOCK),
+        "host_anchor_path": mvm_core::config::mvm_keys_dir()
+            .join(super::broker_services_spawn::HOST_SIGNER_PUB),
+        "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
+    })
+}
+
+/// Provision this VM's records key and hand it to the collector config: the
+/// endpoint is confined away from the host key directory, so it is handed the
+/// data key itself over its private stdin pipe. On disk the key exists only
+/// wrapped.
+fn attach_records_key(section: &mut serde_json::Value, state_dir: &Path) -> Result<()> {
+    use base64::Engine as _;
+    let key = super::telemetry_provisioning::provision_records_key(
+        state_dir,
+        &mvm_core::config::mvm_keys_dir(),
+    )
+    .map_err(|e| anyhow!("provisioning the telemetry records key: {e}"))?;
+    section["records_key_b64"] =
+        serde_json::json!(base64::engine::general_purpose::STANDARD.encode(key.expose_bytes()));
+    Ok(())
+}
+
+/// Where the collector-only process's pid is recorded, beside the VM.
+pub const TELEMETRY_COLLECTOR_PID_FILE: &str = "telemetry-collector.pid";
+
+/// Start the VM-lifetime telemetry collector for a VM that has no network
+/// endpoint to embed it in: the endpoint binary in collector-only mode, under
+/// a keeper that ends it with the VM.
+///
+/// Never waits on the collector. It reports no handshake, the guest's
+/// listener waits to be dialed, and the collector's status file says whether
+/// it came up — so starting it costs a launch one process spawn and nothing
+/// that scales with the guest.
+pub fn spawn_telemetry_collector(
+    vm_name: &str,
+    state_dir: &Path,
+    redaction: &mvm_core::policy::RedactionPolicy,
+) -> Result<()> {
+    use std::io::Write;
+    let mut telemetry = telemetry_section(state_dir);
+    attach_records_key(&mut telemetry, state_dir)?;
+    let cfg = serde_json::json!({
+        "telemetry_only": {
+            "instance_id": vm_name,
+            "redaction": serde_json::to_value(redaction)
+                .expect("RedactionPolicy serializes to JSON"),
+            "telemetry": telemetry,
+        }
+    });
+
+    let bin = resolve_network_endpoint_path()?;
+    let log_file = open_collector_stderr_log(state_dir)?;
+    let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
+    select_lifetime(&mut cmd, EndpointLifetime::Vm, state_dir);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(log_file);
+    // Detach into its own session so it survives this `mvmctl` process.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            // SAFETY: post-fork, pre-exec; setsid has no preconditions.
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("spawn telemetry collector ({}): {e}", bin.display()))?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("telemetry collector stdin was not piped"))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(cfg.to_string().as_bytes())
+                .map_err(|e| anyhow!("pipe the collector config: {e}"))
+        });
+    if let Err(error) = written {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+    std::fs::write(
+        state_dir.join(TELEMETRY_COLLECTOR_PID_FILE),
+        child.id().to_string(),
+    )
+    .map_err(|e| anyhow!("record the telemetry collector pid: {e}"))?;
+    Ok(())
+}
+
+/// Stop a collector-only process this VM started, if one is running.
+pub fn reap_telemetry_collector(state_dir: &Path) {
+    let pid_file = state_dir.join(TELEMETRY_COLLECTOR_PID_FILE);
+    if let Some(pid) = read_pid(&pid_file)
+        && pid_alive(pid)
+    {
+        kill(pid, libc::SIGTERM);
+    }
+    let _ = std::fs::remove_file(pid_file);
+}
+
 /// Build the EndpointConfig JSON the endpoint reads on stdin. Pure (no spawn)
 /// so the wire form — including the claim-10 policy + egress mode — is unit-testable.
 fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_json::Value {
@@ -1081,19 +1192,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
-        cfg["telemetry"] = serde_json::json!({
-            "state_dir": params.state_dir,
-            "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
-                params.state_dir,
-                mvm_core::protocol::telemetry::TELEMETRY_PORT,
-            ),
-            "signer_sock": params.state_dir.join(
-                super::broker_services_spawn::AUDIT_SIGNER_SOCK,
-            ),
-            "host_anchor_path": mvm_core::config::mvm_keys_dir()
-                .join(super::broker_services_spawn::HOST_SIGNER_PUB),
-            "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
-        });
+        cfg["telemetry"] = telemetry_section(params.state_dir);
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1201,17 +1300,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     params.session_marker = Some(session_marker);
     let mut cfg = build_endpoint_config_json(&params);
     if params.telemetry {
-        use base64::Engine as _;
-        // The endpoint is confined away from the host key directory, so it is
-        // handed the records data key itself, over the same private stdin pipe
-        // as the rest of its config. On disk the key exists only wrapped.
-        let key = super::telemetry_provisioning::provision_records_key(
-            params.state_dir,
-            &mvm_core::config::mvm_keys_dir(),
-        )
-        .map_err(|e| anyhow!("provisioning the telemetry records key: {e}"))?;
-        cfg["telemetry"]["records_key_b64"] =
-            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(key.expose_bytes()));
+        attach_records_key(&mut cfg["telemetry"], params.state_dir)?;
     }
     let SubstitutionSpawnParams {
         telemetry: _,
@@ -1468,6 +1557,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
     forget_secret_fingerprints(vm_name);
+    reap_telemetry_collector(state_dir);
     // A later boot under the same name must not inherit this endpoint's guest
     // telemetry assertion.
     let _ = super::telemetry_provisioning::record_boot_provisioning(state_dir, false);

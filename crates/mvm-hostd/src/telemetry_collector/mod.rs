@@ -839,6 +839,60 @@ fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
     }
 }
 
+/// How long one dial of a Firecracker vsock mux may take, handshake included.
+/// The worker retries on its own backoff, so this bounds one attempt only.
+const MUX_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// Dial the guest's telemetry listener. A VMM that bridges host-dialed ports
+/// (HVF, libkrun) exposes it as a per-port socket; Firecracker does not, and
+/// is reached through its vsock mux with the `CONNECT <port>` handshake.
+fn dial_guest_telemetry(
+    per_port: &std::path::Path,
+    firecracker_mux: &std::path::Path,
+) -> std::io::Result<std::os::unix::net::UnixStream> {
+    match std::os::unix::net::UnixStream::connect(per_port) {
+        Ok(stream) => Ok(stream),
+        Err(_) if firecracker_mux.exists() => mvm_agentd::vsock::connect_to_port_once(
+            &firecracker_mux.to_string_lossy(),
+            mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            MUX_CONNECT_TIMEOUT_SECS,
+        )
+        .map_err(|error| std::io::Error::other(format!("{error:#}"))),
+        Err(error) => Err(error),
+    }
+}
+
+/// What a collector-only process reads on stdin: the collector's own inputs
+/// plus what scrubbing needs, for a VM that has no network endpoint to embed
+/// the collector in. Wrapped as `{"telemetry_only": …}` so the endpoint
+/// binary can tell it from a full endpoint config before parsing either.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryOnlyConfig {
+    /// The VM this collector serves.
+    pub instance_id: String,
+    /// The launch's redaction policy, for the curated seam.
+    pub redaction: mvm_core::policy::RedactionPolicy,
+    /// The collector's inputs.
+    pub telemetry: TelemetryEmbedConfig,
+}
+
+/// The stdin wrapper key that selects collector-only mode.
+pub const TELEMETRY_ONLY_KEY: &str = "telemetry_only";
+
+impl TelemetryOnlyConfig {
+    /// `Some` when `raw` is a collector-only config; `None` when it is
+    /// anything else (a full endpoint config). A malformed collector-only
+    /// config is an error, never a fallback to the other mode.
+    pub fn parse(raw: &[u8]) -> anyhow::Result<Option<Self>> {
+        let value: serde_json::Value = serde_json::from_slice(raw)?;
+        let Some(inner) = value.get(TELEMETRY_ONLY_KEY) else {
+            return Ok(None);
+        };
+        Ok(Some(serde_json::from_value(inner.clone())?))
+    }
+}
+
 /// The embedded collector's inputs, carried inside the endpoint's stdin
 /// config. `deny_unknown_fields` so a section from a newer spawner fails
 /// closed rather than half-applying.
@@ -973,7 +1027,10 @@ pub fn start_embedded(
     );
 
     let telemetry_sock = config.telemetry_sock.clone();
-    let connector = move || std::os::unix::net::UnixStream::connect(&telemetry_sock);
+    let firecracker_mux = PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
+        &config.state_dir.to_string_lossy(),
+    ));
+    let connector = move || dial_guest_telemetry(&telemetry_sock, &firecracker_mux);
 
     let signer_sock = config.signer_sock.clone();
     let signer = move |hello: &mvm_core::security::SessionHello,
