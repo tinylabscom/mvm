@@ -1348,21 +1348,52 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
         "one backend's failure must not hide the other's transcript"
     );
     let upload = smoke
-        .find("uses: actions/upload-artifact@")
+        .find("- name: Upload the transcript")
         .expect("the smoke must upload its transcript");
     assert!(
-        smoke[..upload].contains("if: always()"),
+        smoke[upload..].contains("if: always()")
+            && smoke[upload..].contains("uses: actions/upload-artifact@"),
         "the transcript matters most when the smoke fails"
+    );
+
+    let installed_boot = job_block(&workflow, "published-installed-boot");
+    assert!(
+        installed_boot.contains("needs: [verify-release, first-run-smoke]")
+            && installed_boot.contains("github.event_name == 'push'")
+            && installed_boot.contains("startsWith(github.ref, 'refs/tags/')")
+            && installed_boot.contains("scripts/published-installed-boot.py aggregate")
+            && installed_boot.contains("pattern: installed-boot-lane-*"),
+        "authoritative installed boot evidence requires both successful published lanes"
+    );
+    assert!(
+        installed_boot.contains("uses: actions/attest-build-provenance@")
+            && installed_boot.contains(
+                "subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json"
+            )
+            && installed_boot.contains("steps.boot-attestation.outputs.bundle-path")
+            && installed_boot.contains("installed-boot.json.bundle")
+            && installed_boot.contains("name: published-installed-boot-v1")
+            && installed_boot.contains("if-no-files-found: error"),
+        "the aggregate report must be attested and uploaded under its stable consumer contract"
+    );
+    assert!(
+        smoke.contains("scripts/published-installed-boot.py lane")
+            && smoke.contains("target: x86_64-unknown-linux-gnu")
+            && smoke.contains("target: aarch64-apple-darwin")
+            && smoke.contains("name: installed-boot-lane-${{ matrix.target }}")
+            && smoke
+                .contains("github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')"),
+        "tag lanes emit installed-byte evidence; standalone dispatch remains diagnostic"
     );
 
     let promote = job_block(&workflow, "promote-release");
     assert!(
         promote.contains(
-            "    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]\n"
-        ) && promote.contains("needs.first-run-smoke.result == 'success'")
+            "    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
+        ) && promote.contains("needs.published-installed-boot.result == 'success'")
             && promote.contains("needs.published-package-smoke.result == 'success'")
             && promote.contains("needs.recipe-install-smoke.result == 'success'"),
-        "promotion must require first-run and published-package installation witnesses"
+        "promotion must require the attested installed-boot and package installation witnesses"
     );
     assert!(
         promote.contains("if [[ \"${TAG_NAME#v}\" == *-* ]]; then"),
