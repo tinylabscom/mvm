@@ -526,29 +526,18 @@ impl RegistryPackPublisherPolicy {
         namespace: &str,
         now: DateTime<Utc>,
     ) -> Result<KeylessTrust, RegistryPackVerificationError> {
-        if namespace == "mvm" {
-            return self
-                .publishers
-                .iter()
-                .find(|publisher| publisher.namespace == "mvm")
-                .filter(|publisher| {
-                    publisher.issuer == OFFICIAL_PACK_SIGNING_ISSUER
-                        && publisher.accepted_identities == [OFFICIAL_PACK_SIGNING_IDENTITY]
-                })
-                .map(RegistryPackPublisher::keyless_trust)
-                .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
-                    namespace: namespace.to_string(),
-                });
-        }
-        let mut trust = self
-            .publishers
-            .iter()
-            .find(|publisher| publisher.namespace == namespace)
-            .or_else(|| {
-                self.publishers
-                    .iter()
-                    .find(|publisher| publisher.namespace == "*")
+        let exact = self.publishers.iter().find(|p| p.namespace == namespace);
+        // `mvm` is reserved: no wildcard covers it, and only the exact
+        // official release identity may sign it.
+        let publisher = if namespace == "mvm" {
+            exact.filter(|p| {
+                p.issuer == OFFICIAL_PACK_SIGNING_ISSUER
+                    && p.accepted_identities == [OFFICIAL_PACK_SIGNING_IDENTITY]
             })
+        } else {
+            exact.or_else(|| self.publishers.iter().find(|p| p.namespace == "*"))
+        };
+        let mut trust = publisher
             .map(RegistryPackPublisher::keyless_trust)
             .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
                 namespace: namespace.to_string(),
@@ -591,28 +580,17 @@ pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubuser
 /// assign a different signer.
 /// Legacy `agent` and `runtime` identities expire at the stated cutoff.
 pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
-    let mut publishers: Vec<_> = ["agent", "runtime"]
+    let publishers = ["agent", "runtime", "mvm"]
         .into_iter()
         .map(|namespace| {
-            RegistryPackPublisher::new(
-                namespace,
-                OFFICIAL_PACK_SIGNING_ISSUER,
-                vec![
-                    OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
-                    LEGACY_PACK_SIGNING_IDENTITY.to_string(),
-                ],
-            )
-            .expect("the built-in publisher policy is built from valid constants")
+            let mut identities = vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()];
+            if namespace != "mvm" {
+                identities.push(LEGACY_PACK_SIGNING_IDENTITY.to_string());
+            }
+            RegistryPackPublisher::new(namespace, OFFICIAL_PACK_SIGNING_ISSUER, identities)
+                .expect("the built-in publisher policy is built from valid constants")
         })
         .collect();
-    publishers.push(
-        RegistryPackPublisher::new(
-            "mvm",
-            OFFICIAL_PACK_SIGNING_ISSUER,
-            vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
-        )
-        .expect("the built-in MVM publisher has a valid identity"),
-    );
     let mut policy = RegistryPackPublisherPolicy::new(publishers)
         .expect("the built-in publisher policy has unique namespaces");
     policy.legacy_identity_expires_at = Some(

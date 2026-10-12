@@ -192,7 +192,7 @@ pub(crate) fn verify_registry_pack_revocations_for_validity(
     previous: Option<&RegistryPackRevocationCheckpoint>,
     validity: RegistryPackRevocationValidity,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
-    verify_registry_pack_revocations_with_validity(
+    authenticate_revocation_document(
         document_bytes,
         signature_bundle,
         release_trust,
@@ -260,7 +260,7 @@ pub(crate) fn verify_registry_pack_revocations_with<F>(
 where
     F: FnOnce(&[u8], &[u8], &KeylessTrust) -> Result<(), String>,
 {
-    verify_registry_pack_revocations_with_validity(
+    authenticate_revocation_document(
         document_bytes,
         signature_bundle,
         release_trust,
@@ -271,8 +271,10 @@ where
     )
 }
 
+/// Bound, authenticate, parse, and validate one revocation document. The
+/// signature is checked before any JSON is read.
 #[cfg(any(feature = "manifest-verify", test))]
-pub(crate) fn verify_registry_pack_revocations_with_validity<F>(
+pub(crate) fn authenticate_revocation_document<F>(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
@@ -628,7 +630,7 @@ mod tests {
         feed.not_after = feed.issued_at + chrono::Duration::days(30);
         let bytes = serde_json::to_vec(&feed).expect("serialize");
         let verify = |policy| {
-            verify_registry_pack_revocations_with_validity(
+            authenticate_revocation_document(
                 &bytes,
                 b"signature",
                 &trust(),
@@ -646,7 +648,7 @@ mod tests {
         feed.not_after += chrono::Duration::seconds(1);
         let overlong = serde_json::to_vec(&feed).expect("serialize");
         assert_eq!(
-            verify_registry_pack_revocations_with_validity(
+            authenticate_revocation_document(
                 &overlong,
                 b"signature",
                 &trust(),
@@ -666,7 +668,7 @@ mod tests {
         feed.not_after = feed.issued_at + chrono::Duration::days(30);
         let bytes = serde_json::to_vec(&feed).expect("serialize");
         assert_eq!(
-            verify_registry_pack_revocations_with_validity(
+            authenticate_revocation_document(
                 &bytes,
                 b"signature",
                 &trust(),

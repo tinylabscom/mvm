@@ -1868,7 +1868,7 @@ capacity and fail rather than silently cold-booting. Named launches and shapes
 with extra volumes (including directory mounts) or allowed egress retain their
 cold path, including when the pool size is zero.
 
-Pack inspection reports `official_status: "official"` only for a fully verified
+Pack inspection reports `official_status: "established"` only for a fully verified
 `mvm/` pack whose signer matches the reserved MVM publisher identity and whose
 independently signed MVM revocation feed is fresh. Other packs report
 `"not_established"`; an operator-configured feed cannot confer official status.
