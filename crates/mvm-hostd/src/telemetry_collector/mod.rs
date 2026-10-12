@@ -852,12 +852,20 @@ fn dial_guest_telemetry(
 ) -> std::io::Result<std::os::unix::net::UnixStream> {
     match std::os::unix::net::UnixStream::connect(per_port) {
         Ok(stream) => Ok(stream),
-        Err(_) if firecracker_mux.exists() => mvm_agentd::vsock::connect_to_port_once(
-            &firecracker_mux.to_string_lossy(),
-            mvm_core::protocol::telemetry::TELEMETRY_PORT,
-            MUX_CONNECT_TIMEOUT_SECS,
-        )
-        .map_err(|error| std::io::Error::other(format!("{error:#}"))),
+        Err(_) if firecracker_mux.exists() => {
+            let stream = mvm_agentd::vsock::connect_to_port_once(
+                &firecracker_mux.to_string_lossy(),
+                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+                MUX_CONNECT_TIMEOUT_SECS,
+            )
+            .map_err(|error| std::io::Error::other(format!("{error:#}")))?;
+            // The handshake's timeouts bounded the dial. A telemetry session
+            // is long and often quiet; left in place they would end it, and
+            // re-announce it, every few idle seconds.
+            stream.set_read_timeout(None)?;
+            stream.set_write_timeout(None)?;
+            Ok(stream)
+        }
         Err(error) => Err(error),
     }
 }
