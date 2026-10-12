@@ -21,8 +21,10 @@ name: Claim witness freshness
 
 on:
   schedule:
-    # Offset well clear of Security (04:17) and the kernel watch (05:37) so a
-    # slow nightly is never mistaken for a missing one.
+    # Offset from Security (04:17) and the kernel watch (05:37). Security's
+    # nightly often runs past this hour; the gate then judges the last
+    # completed scheduled run, so a nightly still in flight is not read as a
+    # missing or failed one.
     - cron: "23 9 * * *"
   workflow_dispatch: {}
   # Changes to the gate or to a watched schedule get checked on the PR that

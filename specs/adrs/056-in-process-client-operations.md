@@ -43,8 +43,9 @@ The prohibition is semantic, not a search for one spelling:
   implement these operations.
 - No replacement process wrapper, FFI escape hatch, callback, lower-level
   library, helper executable, or SDK transport that merely hides the spawn.
-- No invoking tools such as `git`, `curl`, `tar`, `cosign`, `codesign`, or `ps`
-  in place of a library or native API.
+- No invoking tools such as `git`, `curl`, `tar`, `cosign`, or `ps` in place of
+  a library or native API. The macOS system `codesign` tool is the one
+  exception; see the amendment below.
 - No moving the same utility invocation into a guest, service, or remote
   command runner to evade this requirement.
 - No subprocess test fixtures for these operations. Use in-process fixtures,
@@ -63,19 +64,23 @@ Where the current implementation requires such a subprocess, the operation
 needs architectural replacement rather than a mechanical move or a renamed
 spawn function.
 
-### macOS signing happens before process load
+### Amendment (2026-10-12): the system `codesign` tool is permitted
 
-Installation and explicit preparation sign executable artifacts in-process
-before they are used. Inspection must establish both operating-system signature
-validity and the required boolean entitlements for every architecture, not the
-presence of a key in XML text.
+macOS ad-hoc signing and entitlement inspection keep invoking the system `codesign`.
+It is a platform tool that ships with the operating system, like the kernel
+interfaces the rest of the host layer calls, not a third-party executable or
+dependency, and its behaviour is the platform's own definition of a valid
+signature.
 
-A running process cannot acquire launch-time entitlements by rewriting its
-executable. Runtime self-signing followed by re-exec is therefore not a valid
-repair path. Check the loaded process's entitlement state, report a preparation
-or restart requirement honestly when necessary, and never implement that restart
-with another spawn/exec mechanism. Pre-signing is not an exception to the
-host-helper or launcher prohibition above.
+An in-process replacement was implemented on the `apple-codesign` crate and
+rejected: even without default features it brings an HTTP client and a second
+TLS stack into `mvmctl`'s default macOS closure, which grew from within its
+307-crate budget to 454 crates, with about 25 crates newly resolving at two
+major versions. That cost outweighs removing a subprocess whose executable the
+OS itself provides.
+
+The exception covers `codesign` alone, reached through the existing signing
+seam in `mvm-vmm`. It does not extend to any other tool.
 
 ## Migration and acceptance
 
@@ -87,7 +92,7 @@ A missing in-process capability is unfinished work. Do not silently retain a
 shell-out, make it an opt-in fallback, skip its tests, or claim parity by
 replacing a working operation with an unconditional refusal. Any proposed
 change to supported behavior requires a separate explicit product decision.
-No exception is granted by this ADR.
+No exception beyond the `codesign` amendment above is granted by this ADR.
 
 Validation must cover:
 

@@ -16,6 +16,7 @@ use mvm_sdk::runtime::{RecordedOp, RuntimeRecording};
 use std::collections::BTreeMap;
 
 /// One location in a recording carrying raw secret-shaped material.
+// allow(secret-debug): carries only the location and matched rule names, never the secret bytes.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SecretFinding {
     /// Human-pointable location, e.g. `create env[AWS_ACCESS_KEY_ID]`,

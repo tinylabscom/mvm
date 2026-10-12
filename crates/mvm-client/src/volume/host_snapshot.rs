@@ -538,7 +538,7 @@ mod tests {
         let target = home.path().join("new.ext4");
         std::fs::write(&staged, b"new image").unwrap();
         let registry = VolumeMountRegistry::path_for("vm-1");
-        std::fs::create_dir_all(&registry).unwrap();
+        mvm_core::config::create_private_dir(&registry).unwrap();
         let marker = registry.join("existing");
         std::fs::write(&marker, b"registry untouched").unwrap();
         let result = publish_new_snapshot(&staged, &target, || {

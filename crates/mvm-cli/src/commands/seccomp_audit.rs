@@ -32,7 +32,7 @@ use super::Cli;
 #[derive(ClapArgs, Debug, Clone)]
 #[command(name = "seccomp-audit")]
 pub(in crate::commands) struct Args {
-    /// Seccomp tier to audit against (essential, minimal, standard, network, unrestricted).
+    /// Seccomp tier to audit against (essential, minimal, standard, vsock, network, unrestricted).
     #[arg(value_parser = parse_tier)]
     tier: String,
 
@@ -423,7 +423,9 @@ fn next_tier(tier: &SeccompTier) -> &'static str {
     match tier {
         SeccompTier::Essential => "minimal",
         SeccompTier::Minimal => "standard",
-        SeccompTier::Standard => "network",
+        // `vsock` is the GPU-endpoint tier admission picks; a workload that
+        // outgrows `standard` on its own needs `network`.
+        SeccompTier::Standard | SeccompTier::Vsock => "network",
         SeccompTier::Network | SeccompTier::Unrestricted => "unrestricted",
     }
 }
@@ -464,6 +466,7 @@ mod tests {
         assert_eq!(next_tier(&SeccompTier::Essential), "minimal");
         assert_eq!(next_tier(&SeccompTier::Minimal), "standard");
         assert_eq!(next_tier(&SeccompTier::Standard), "network");
+        assert_eq!(next_tier(&SeccompTier::Vsock), "network");
         assert_eq!(next_tier(&SeccompTier::Network), "unrestricted");
         assert_eq!(next_tier(&SeccompTier::Unrestricted), "unrestricted");
     }

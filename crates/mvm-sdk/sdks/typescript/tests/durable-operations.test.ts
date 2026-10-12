@@ -29,7 +29,7 @@ const cases = [
     request: execute({ name: "vm", class: "fs_quick", tag: null }) },
   { operation: () => checkpoints.restore("c", { intent: "execute", tenant: "t" }), method: "checkpoints.restore",
     request: execute({ id: "c", tenant: "t" }) },
-  { operation: () => checkpoints.fork("c", { intent: "execute", tenant: "t", boot: false }), method: "checkpoints.fork",
+  { operation: () => checkpoints.forkCheckpoint("c", { intent: "execute", tenant: "t", boot: false }), method: "checkpoints.fork",
     request: execute({ id: "c", tenant: "t", boot: false, new_id: null, hypervisor: "", cpus: null, memory: null }) },
   { operation: () => replay.runSession("s", { tenant: "t", timeoutSecs: 30 }), method: "replay.run_session",
     request: { selection: { session_id: "s", from: null, as_name: null }, tenant: "t", timeout_secs: 30, dry_run: true } },

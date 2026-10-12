@@ -135,9 +135,10 @@ fn dead_pids_get_their_dirs_swept() {
         42,
     );
     std::fs::write(vm.join("payload"), vec![0u8; 1024]).unwrap();
+    let socket = vm.join("vsock-5253.sock");
     std::fs::write(
         vm.join("builder-egress-runtime.json"),
-        br#"{"state":"bound","socket_path":"/tmp/vsock-5253.sock"}"#,
+        serde_json::json!({"state": "bound", "socket_path": socket}).to_string(),
     )
     .unwrap();
     let snapshot = fixture(Default::default(), Vec::new());

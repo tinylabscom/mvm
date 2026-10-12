@@ -1,6 +1,5 @@
 use mvm_build::builder_backend_select::{
-    BuilderBackendChoice, BuilderFactoryOptions, resolve_choice,
-    try_resolve_builder_backend_with_options,
+    BuilderBackendChoice, BuilderFactoryOptions, resolve_choice, try_resolve_builder_backend_for,
 };
 use mvm_build::builder_vm::{BuilderShellJob, BuilderShellResult, BuilderVm, BuilderVmError};
 
@@ -18,24 +17,17 @@ pub enum ShellJobError {
     Builder(#[from] BuilderVmError),
 }
 
-/// Validate and execute a shell job using the authoritative registered factory.
-/// No fallback changes an explicitly selected execution boundary.
+/// Validate and execute a shell job using the authoritative registered factory,
+/// with explicit factory presentation settings. No fallback changes an
+/// explicitly selected execution boundary.
 pub fn run_shell_job(
-    job: &BuilderShellJob,
-    backend: Option<BuilderBackendChoice>,
-) -> Result<BuilderShellResult, ShellJobError> {
-    run_shell_job_with_options(job, backend, BuilderFactoryOptions::default())
-}
-
-/// Run a shell job with explicit factory presentation settings.
-pub fn run_shell_job_with_options(
     job: &BuilderShellJob,
     backend: Option<BuilderBackendChoice>,
     options: BuilderFactoryOptions,
 ) -> Result<BuilderShellResult, ShellJobError> {
     run_with_factory(job, resolve_choice(backend), |choice| {
         crate::host_runtime::initialize();
-        try_resolve_builder_backend_with_options(choice, options)
+        try_resolve_builder_backend_for(choice, options)
     })
 }
 

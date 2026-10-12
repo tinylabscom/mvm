@@ -21,7 +21,10 @@ fn registering_makes_hvf_and_firecracker_constructible_in_any_process() {
             "{} starts unregistered",
             choice.name()
         );
-        let refusal = match try_resolve_builder_backend_for(choice) {
+        let refusal = match try_resolve_builder_backend_for(
+            choice,
+            mvm_build::builder_backend_select::BuilderFactoryOptions::default(),
+        ) {
             Ok(_) => panic!("{} resolved before registration", choice.name()),
             Err(err) => err.to_string(),
         };

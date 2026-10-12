@@ -22,7 +22,7 @@ pub use persistent::{
 };
 pub use recording::{SecretFinding, scan_recording_for_secrets};
 pub use secrets::RecordingSecretScanner;
-pub use shell_job::{ShellJobError, run_shell_job, run_shell_job_on, run_shell_job_with_options};
+pub use shell_job::{ShellJobError, run_shell_job, run_shell_job_on};
 pub use validation::{
     FlakeValidationError, FlakeValidationReport, FlakeValidationRequest, validate_flake,
     validate_flake_on,

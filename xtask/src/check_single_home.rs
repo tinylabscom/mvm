@@ -104,6 +104,21 @@ const EXEMPTIONS: &[(&str, &[Rule], &str)] = &[
          redirects at itself",
     ),
     (
+        "crates/mvm-client/src/mounts.rs",
+        &[Rule::HomeRead],
+        "tilde-expansion of user volume specs; $HOME locates the user's path, not an mvm base dir",
+    ),
+    (
+        "crates/mvm-client/src/output_audit/destination.rs",
+        &[Rule::HomeRead],
+        "tilde-expansion of output directories + non-mvm credential-store deny roots (~/.ssh, ~/.gnupg, ~/.aws)",
+    ),
+    (
+        "crates/mvm-client/src/output_audit/security_tests.rs",
+        &[Rule::HomeRead],
+        "asserts the credential-store deny roots resolve under the user's $HOME; derives no mvm path",
+    ),
+    (
         "crates/mvm-build/src/embed_toolchain.rs",
         &[Rule::HomeRead],
         "host toolchain discovery (~/.cargo/bin/rustup, mise python installs) lives in the real $HOME",

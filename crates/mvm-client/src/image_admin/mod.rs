@@ -78,16 +78,10 @@ impl TransferProgress {
     }
 }
 
-/// Acquire and publish an image. A stdin source requires a caller-owned
-/// reader; the service never accesses process stdin or terminal state.
+/// Acquire and publish an image, reporting transfer counters through
+/// `progress`. A stdin source requires a caller-owned reader; the service
+/// never accesses process stdin or terminal state.
 pub fn prepare_image(
-    request: &PrepareImageRequest,
-    stdin: Option<&mut dyn Read>,
-) -> Result<PreparationReport> {
-    prepare_image_with_progress(request, stdin, &TransferProgress::default())
-}
-
-pub fn prepare_image_with_progress(
     request: &PrepareImageRequest,
     stdin: Option<&mut dyn Read>,
     progress: &TransferProgress,
@@ -210,6 +204,7 @@ mod tests {
                     prod: true,
                 },
                 None,
+                &TransferProgress::default(),
             )
             .unwrap_err();
             assert!(error.to_string().contains("local sources are dev-only"));
@@ -221,6 +216,7 @@ mod tests {
                 prod: false,
             },
             None,
+            &TransferProgress::default(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("requires an archive reader"));

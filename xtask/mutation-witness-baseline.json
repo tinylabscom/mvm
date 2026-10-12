@@ -104,33 +104,6 @@
       ]
     },
     {
-      "path": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "package": "mvm-cli",
-      "claims": [
-        14,
-        21
-      ]
-    },
-    {
-      "path": "crates/mvm-cli/src/commands/shared/parse.rs",
-      "package": "mvm-cli",
-      "claims": [
-        1
-      ]
-    },
-    {
-      "path": "crates/mvm-cli/src/commands/vm/console.rs",
-      "package": "mvm-cli",
-      "claims": [
-        15
-      ],
-      "scope": {
-        "examine_re": "enforce_accessible_gate",
-        "why": "This file is on claim 15's surface only because the claim's witness `enforce_accessible_gate` - the host gate that refuses `mvmctl console` on a sealed image - is declared in it. The witness is fully caught. The surrounding 789 lines are the dev-mode interactive console client: sizing a terminal, building an argv, pumping a PTY. None of it asserts anything about a sealed VM's reachability. Measured 2026-08-01: 78 of 92 mutants survive, none in the witnessed function. Scoped to the code the witness guards so the claim's result means what it says.",
-        "excluded_tracked_by": "#2021"
-      }
-    },
-    {
       "path": "crates/mvm-cli/src/update.rs",
       "package": "mvm-cli",
       "claims": [
@@ -152,10 +125,32 @@
       ]
     },
     {
+      "path": "crates/mvm-client/src/console.rs",
+      "package": "mvm-client",
+      "claims": [
+        15
+      ]
+    },
+    {
+      "path": "crates/mvm-client/src/image_admin/pull_core.rs",
+      "package": "mvm-client",
+      "claims": [
+        14,
+        21
+      ]
+    },
+    {
       "path": "crates/mvm-client/src/launch/grants_report.rs",
       "package": "mvm-client",
       "claims": [
         18
+      ]
+    },
+    {
+      "path": "crates/mvm-client/src/mounts.rs",
+      "package": "mvm-client",
+      "claims": [
+        1
       ]
     },
     {

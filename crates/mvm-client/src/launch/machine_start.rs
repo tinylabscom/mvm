@@ -615,6 +615,7 @@ mod tests {
                 prod: false,
             },
             None,
+            &crate::image_admin::TransferProgress::default(),
         )
         .unwrap();
         std::fs::remove_dir_all(source).unwrap();
@@ -891,7 +892,7 @@ mod tests {
     /// for `owner`, under the default library profile.
     fn register_writable_managed_volume(home: &crate::volume::test_support::TestVolumeHome) {
         use crate::volume::VolumeService as _;
-        home.create_block("state", 16);
+        home.create_block("state", crate::volume::test_support::TEST_VOLUME_MIB);
         let volumes = crate::volume::test_support::service();
         volumes.unlock_volume("state").expect("unlock");
         let request = crate::volume::AttachmentRequest::builder("web", "state")

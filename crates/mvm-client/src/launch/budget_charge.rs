@@ -60,6 +60,7 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),

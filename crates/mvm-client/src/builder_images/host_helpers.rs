@@ -508,10 +508,9 @@ fn sign_candidates(candidates: &[Candidate]) -> Result<()> {
         );
         for report in reports {
             ensure!(
-                report.entitlements_present && report.error.is_none(),
-                "candidate signing failed for {:?}: {:?}",
-                report.path,
-                report.error
+                report.entitlements_present,
+                "candidate signing did not establish the required entitlements for {:?}",
+                report.path
             );
         }
     }

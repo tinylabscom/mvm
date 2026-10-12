@@ -672,9 +672,12 @@ fn materialize_ext4_in_builder_vm(
         // `Hvf` onto `LibkrunBuilderVm` — which quietly ran an HVF host's shell
         // jobs on libkrun, and is exactly the coupling the builder path is
         // meant not to have.
-        crate::builder_backend_select::try_resolve_builder_backend_for(choice)?
-            .run_shell_script(&shell_job)
-            .map(|_| ())
+        crate::builder_backend_select::try_resolve_builder_backend_for(
+            choice,
+            crate::builder_backend_select::BuilderFactoryOptions::default(),
+        )?
+        .run_shell_script(&shell_job)
+        .map(|_| ())
     })?;
     Ok(())
 }

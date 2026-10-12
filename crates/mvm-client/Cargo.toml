@@ -19,7 +19,9 @@ repository.workspace = true
 substrate_server_category = "per-VM approval endpoint broker (host-local Unix socket)"
 
 [features]
-default = []
+# Embedders must verify signed runtime and image artifacts by default, not
+# discover a missing verifier only when they first launch a machine.
+default = ["manifest-verify"]
 # Build as the release channel: the runtime overlay defaults to the published
 # artifact instead of a source-checkout build. Forwarded from mvm-cli's
 # feature of the same name.
@@ -42,7 +44,8 @@ test-support = ["mvm-runtime/test-support"]
 clap = ["dep:clap"]
 # Enable the in-process Sigstore verifier for both instruction signatures and
 # acquired release artifacts. Embedders must not rely on the CLI enabling the
-# builder's verifier through workspace feature unification.
+# builder's verifier through workspace feature unification. Explicit
+# no-default-features builds report signatures as uncheckable, never verified.
 manifest-verify = ["mvm-core/manifest-verify", "mvm-build/manifest-verify"]
 # Derive schemas for authored policy and instruction trust policy, and build
 # their emitters. Off by default so no shipped closure carries schemars;
@@ -92,7 +95,9 @@ tempfile = { workspace = true }
 async-trait = { workspace = true }
 # Transcript capture IDs retain the existing UUID wire representation.
 uuid = { workspace = true }
-# Signal constants only; process inspection and signaling use safe VMM helpers.
+# Signal constants; process inspection and signaling use safe VMM helpers.
+# Pack scenario collection also opens workload-written files with O_NOFOLLOW
+# and O_NONBLOCK, so a path swapped for a symlink or a FIFO is refused.
 libc = { workspace = true }
 # Verified audit reader surface: ed25519 for the trusted verifying key in
 # the reader's constructor; the shared chrono/serde/serde_json/thiserror

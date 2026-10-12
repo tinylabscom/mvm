@@ -27,6 +27,13 @@ pub enum SeccompTier {
     /// ~140 syscalls: adds file manipulation, fs ops. Default for most workloads.
     #[default]
     Standard,
+    /// `standard` plus `AF_VSOCK` stream sockets: `socket` is granted only
+    /// for that family (see [`SeccompTier::argument_scoped_syscalls`]), with
+    /// `connect` and the `sendto`/`recvfrom` pair a stream read and write
+    /// lower to. No other address family can be opened, so the only peers a
+    /// process can reach are the vsock ports the VMM exposes. For a launch
+    /// that needs its GPU endpoint and nothing else.
+    Vsock,
     /// ~160 syscalls: adds sockets, connect, bind, sendmsg. For networked agents.
     Network,
     /// All syscalls allowed. Dev/debug mode, no restrictions.
@@ -39,12 +46,15 @@ impl SeccompTier {
         Self::Essential,
         Self::Minimal,
         Self::Standard,
+        Self::Vsock,
         Self::Network,
         Self::Unrestricted,
     ];
 
-    /// Return the full list of allowed syscall names for this tier.
-    /// Each tier is cumulative — it includes all syscalls from lower tiers.
+    /// Return the full list of syscall names this tier allows whatever their
+    /// arguments. Each tier is cumulative — it includes all syscalls from
+    /// lower tiers. A syscall a tier allows only for some argument values is
+    /// not here; it is in [`Self::argument_scoped_syscalls`].
     pub fn syscalls(&self) -> Vec<&'static str> {
         match self {
             Self::Essential => essential_syscalls().to_vec(),
@@ -59,6 +69,13 @@ impl SeccompTier {
                 s.extend_from_slice(standard_extra());
                 s
             }
+            Self::Vsock => {
+                let mut s = essential_syscalls().to_vec();
+                s.extend_from_slice(minimal_extra());
+                s.extend_from_slice(standard_extra());
+                s.extend_from_slice(vsock_extra());
+                s
+            }
             Self::Network => {
                 let mut s = essential_syscalls().to_vec();
                 s.extend_from_slice(minimal_extra());
@@ -67,6 +84,25 @@ impl SeccompTier {
                 s
             }
             Self::Unrestricted => vec![], // empty = allow all
+        }
+    }
+
+    /// Syscalls this tier allows only when one argument takes a listed value,
+    /// on top of [`Self::syscalls`]. A name here is never also in
+    /// [`Self::syscalls`] for the same tier, since an unconditional grant
+    /// would make the scope meaningless.
+    pub fn argument_scoped_syscalls(&self) -> &'static [ArgumentScopedSyscall] {
+        match self {
+            Self::Vsock => &[ArgumentScopedSyscall {
+                name: "socket",
+                arg_index: 0,
+                allowed: &[AF_VSOCK],
+            }],
+            Self::Essential
+            | Self::Minimal
+            | Self::Standard
+            | Self::Network
+            | Self::Unrestricted => &[],
         }
     }
 
@@ -97,6 +133,7 @@ impl From<crate::plan::PlanSeccompTier> for SeccompTier {
             Plan::Essential => Self::Essential,
             Plan::Minimal => Self::Minimal,
             Plan::Standard => Self::Standard,
+            Plan::Vsock => Self::Vsock,
             Plan::Network => Self::Network,
             Plan::Unrestricted => Self::Unrestricted,
         }
@@ -111,10 +148,11 @@ impl FromStr for SeccompTier {
             "essential" => Ok(Self::Essential),
             "minimal" => Ok(Self::Minimal),
             "standard" => Ok(Self::Standard),
+            "vsock" => Ok(Self::Vsock),
             "network" => Ok(Self::Network),
             "unrestricted" => Ok(Self::Unrestricted),
             _ => anyhow::bail!(
-                "unknown seccomp tier {:?} (expected: essential, minimal, standard, network, unrestricted)",
+                "unknown seccomp tier {:?} (expected: essential, minimal, standard, vsock, network, unrestricted)",
                 s
             ),
         }
@@ -127,10 +165,24 @@ impl fmt::Display for SeccompTier {
             Self::Essential => write!(f, "essential"),
             Self::Minimal => write!(f, "minimal"),
             Self::Standard => write!(f, "standard"),
+            Self::Vsock => write!(f, "vsock"),
             Self::Network => write!(f, "network"),
             Self::Unrestricted => write!(f, "unrestricted"),
         }
     }
+}
+
+/// Linux's `AF_VSOCK` address family number, the same on every architecture.
+pub const AF_VSOCK: u64 = 40;
+
+/// A syscall a tier allows only when the argument at `arg_index` equals one of
+/// `allowed`. The comparison is on the argument's low 32 bits, which is the
+/// width of every `int` argument this is used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArgumentScopedSyscall {
+    pub name: &'static str,
+    pub arg_index: u8,
+    pub allowed: &'static [u64],
 }
 
 /// Action taken when a syscall is not in the allowed list.
@@ -149,6 +201,10 @@ pub enum SeccompAction {
 
 /// JSON manifest describing a seccomp filter, written to the config drive
 /// for the guest init to apply via `seccomp(2)` or `prctl(PR_SET_SECCOMP)`.
+///
+/// It carries only the unconditional allowlist: a tier's argument-scoped
+/// syscalls are absent, so a filter built from the manifest alone denies them
+/// outright rather than allowing them unscoped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeccompManifest {
     pub tier: SeccompTier,
@@ -435,6 +491,15 @@ fn standard_extra() -> &'static [&'static str] {
     ]
 }
 
+/// `vsock` tier extras on top of `standard`, beside the `AF_VSOCK`-scoped
+/// `socket`. None of these can create a descriptor: they act on one the
+/// process already holds, and the only sockets it can open are vsock ones.
+/// `sendto` and `recvfrom` are listed because glibc lowers `send` and `recv`
+/// to them, and Rust's `UnixStream::read` calls `recv`.
+fn vsock_extra() -> &'static [&'static str] {
+    &["connect", "sendto", "recvfrom"]
+}
+
 /// Tier 4 extras: sockets and networking.
 fn network_extra() -> &'static [&'static str] {
     &[
@@ -469,6 +534,7 @@ mod tests {
             PlanSeccompTier::Essential,
             PlanSeccompTier::Minimal,
             PlanSeccompTier::Standard,
+            PlanSeccompTier::Vsock,
             PlanSeccompTier::Network,
             PlanSeccompTier::Unrestricted,
         ] {
@@ -496,7 +562,8 @@ mod tests {
     fn tier_ordering() {
         assert!(SeccompTier::Essential < SeccompTier::Minimal);
         assert!(SeccompTier::Minimal < SeccompTier::Standard);
-        assert!(SeccompTier::Standard < SeccompTier::Network);
+        assert!(SeccompTier::Standard < SeccompTier::Vsock);
+        assert!(SeccompTier::Vsock < SeccompTier::Network);
         assert!(SeccompTier::Network < SeccompTier::Unrestricted);
     }
 
@@ -505,6 +572,7 @@ mod tests {
         let essential = SeccompTier::Essential.syscalls();
         let minimal = SeccompTier::Minimal.syscalls();
         let standard = SeccompTier::Standard.syscalls();
+        let vsock = SeccompTier::Vsock.syscalls();
         let network = SeccompTier::Network.syscalls();
 
         // Each tier should be a strict superset of the previous
@@ -526,11 +594,19 @@ mod tests {
 
         for sc in &standard {
             assert!(
-                network.contains(sc),
-                "network should include standard syscall {sc}"
+                vsock.contains(sc),
+                "vsock should include standard syscall {sc}"
             );
         }
-        assert!(network.len() > standard.len());
+        assert!(vsock.len() > standard.len());
+
+        for sc in &vsock {
+            assert!(
+                network.contains(sc),
+                "network should include vsock syscall {sc}"
+            );
+        }
+        assert!(network.len() > vsock.len());
     }
 
     #[test]
@@ -598,6 +674,62 @@ mod tests {
         assert!(standard.contains(&"socketpair"));
         for name in ["socket", "connect", "bind", "listen"] {
             assert!(!standard.contains(&name), "standard must not grant {name}");
+        }
+    }
+
+    /// A GPU-granted launch reaches its host endpoint over vsock and nothing
+    /// else, so the `vsock` tier grants `socket` only for `AF_VSOCK`, plus the
+    /// calls that use the connected stream. Nothing that creates a descriptor
+    /// any other way, or that serves or carries descriptors, comes with it.
+    #[test]
+    fn vsock_grants_socket_only_for_af_vsock() {
+        let vsock = SeccompTier::Vsock;
+        assert!(
+            !vsock.syscalls().contains(&"socket"),
+            "socket must be scoped by family, never granted outright"
+        );
+        assert_eq!(
+            vsock.argument_scoped_syscalls(),
+            &[ArgumentScopedSyscall {
+                name: "socket",
+                arg_index: 0,
+                allowed: &[AF_VSOCK],
+            }]
+        );
+        for name in ["connect", "sendto", "recvfrom"] {
+            assert!(vsock.syscalls().contains(&name), "vsock must grant {name}");
+        }
+        for name in [
+            "bind", "listen", "accept", "accept4", "sendmsg", "recvmsg", "sendmmsg", "recvmmsg",
+        ] {
+            assert!(
+                !vsock.syscalls().contains(&name),
+                "vsock must not grant {name}"
+            );
+        }
+        let manifest = vsock.to_manifest().expect("vsock enforces a filter");
+        assert!(!manifest.allowed_syscalls.contains(&"socket".to_string()));
+    }
+
+    /// Only `vsock` scopes a syscall by argument. Every other tier either
+    /// grants `socket` outright (`network`), refuses it (the tiers below), or
+    /// installs no filter (`unrestricted`).
+    #[test]
+    fn only_the_vsock_tier_scopes_a_syscall_by_argument() {
+        for tier in SeccompTier::ALL {
+            let scoped = tier.argument_scoped_syscalls();
+            assert_eq!(
+                !scoped.is_empty(),
+                *tier == SeccompTier::Vsock,
+                "{tier} has scoped syscalls {scoped:?}"
+            );
+            for entry in scoped {
+                assert!(
+                    !tier.syscalls().contains(&entry.name),
+                    "{tier} grants {} both outright and scoped",
+                    entry.name
+                );
+            }
         }
     }
 

@@ -98,6 +98,7 @@ pub fn build_image_manifest(
             prod: matches!(mode, BuildMode::Prod),
         },
         None,
+        &crate::image_admin::TransferProgress::default(),
     )?;
     let kernel = crate::builder_images::default_microvm::prepare_workload_kernel()
         .context("preparing the workload kernel for an image-backed build")?;

@@ -112,6 +112,9 @@ impl LaunchMode {
 pub struct RunPhaseMarks {
     /// The path that produced this launch.
     pub launch_mode: LaunchMode,
+    /// The command was invoked: what a caller waits from, and where the
+    /// startup ceiling is measured from.
+    pub invoked: Instant,
     /// Runner entry, before any artifact resolution.
     pub start: Instant,
     /// Kernel/rootfs artifacts resolved (template load or prebuilt pair).
@@ -154,6 +157,13 @@ pub struct RunPhaseTimings {
     pub command_ms: f64,
     pub teardown_ms: f64,
     pub total_ms: f64,
+    /// Command invocation to the guest agent answering: the span the startup
+    /// ceiling holds a warm launch strictly below. Unlike the dispatch window
+    /// it includes everything the host does before the claim — argument
+    /// parsing, image resolution and admission. `None` on a sample written
+    /// before it was recorded.
+    #[serde(default)]
+    pub startup_ms: Option<f64>,
 }
 
 /// Mutable timing marks owned by the boot selector while it decides whether a
@@ -389,6 +399,7 @@ impl RunPhaseMarks {
             command_ms: ms(self.vsock_ready, self.command_done),
             teardown_ms: ms(self.command_done, self.torn_down),
             total_ms: ms(self.start, self.torn_down),
+            startup_ms: Some(ms(self.invoked, self.vsock_ready)),
         }
     }
 }
@@ -530,11 +541,13 @@ impl RunPhaseTimings {
         self.backend_start_ms + self.vsock_wait_ms
     }
 
-    /// Whether this run's dispatch window cleared the strict warm-start
-    /// [`WARM_START_MAX_MS`] ceiling. A result at exactly 300ms misses the
-    /// sub-300ms requirement.
+    /// Whether this run cleared the strict warm-start [`WARM_START_MAX_MS`]
+    /// ceiling: its dispatch window, and its startup from invocation when that
+    /// was recorded. A result at exactly 300ms misses the sub-300ms
+    /// requirement.
     pub fn within_warm_start_slo(&self) -> bool {
         within_warm_start_slo_ms(self.dispatch_window_ms())
+            && self.startup_ms.is_none_or(within_warm_start_slo_ms)
     }
 
     /// Render the warm SLO only for a warm claim. Cold launches are diagnostic
@@ -632,7 +645,8 @@ impl RunPhaseTimings {
             "[mvm] phase-timing: resolve={:.1}ms drives={:.1}ms admit={:.1}ms \
              pool_wait_ms={:.1} claim_ms={:.1} backend_start={:.1}ms \
              vsock_wait={:.1}ms warm_window_ms={:.1} command={:.1}ms \
-             teardown={:.1}ms total={:.1}ms launch_mode={} dispatch_window={:.1}ms warm_slo={}",
+             teardown={:.1}ms total={:.1}ms launch_mode={} dispatch_window={:.1}ms \
+             startup={} warm_slo={}",
             self.resolve_ms,
             self.drives_ms,
             self.admit_ms,
@@ -646,6 +660,8 @@ impl RunPhaseTimings {
             self.total_ms,
             self.launch_mode.as_str(),
             self.dispatch_window_ms(),
+            self.startup_ms
+                .map_or_else(|| "na".to_string(), |ms| format!("{ms:.1}ms")),
             self.warm_slo_status(),
         )
     }
@@ -726,6 +742,7 @@ mod tests {
     fn ordered_marks(t0: Instant) -> RunPhaseMarks {
         RunPhaseMarks {
             launch_mode: LaunchMode::Warm,
+            invoked: t0,
             start: t0,
             image_resolved: t0 + Duration::from_millis(5),
             drives_ready: t0 + Duration::from_millis(12),
@@ -753,6 +770,9 @@ mod tests {
         approx(t.command_ms, 10.0);
         approx(t.teardown_ms, 15.0);
         approx(t.total_ms, 175.0);
+        // Invocation is the run's start here, so startup is every span up to
+        // the agent answering.
+        approx(t.startup_ms.expect("recorded from marks"), 150.0);
         // The phases partition the run: their sum is the total.
         approx(
             t.resolve_ms
@@ -785,6 +805,7 @@ mod tests {
         let t0 = Instant::now();
         let marks = RunPhaseMarks {
             launch_mode: LaunchMode::Cold,
+            invoked: t0,
             start: t0,
             image_resolved: t0 + Duration::from_millis(5),
             drives_ready: t0 + Duration::from_millis(12),
@@ -816,10 +837,11 @@ mod tests {
             command_ms: 10.0,
             teardown_ms: 15.0,
             total_ms: 175.0,
+            startup_ms: None,
         };
         assert_eq!(
             t.render(),
-            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms pool_wait_ms=5.0 claim_ms=95.0 backend_start=100.0ms vsock_wait=30.0ms warm_window_ms=130.0 command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms warm_slo=ok"
+            "[mvm] phase-timing: resolve=5.0ms drives=7.0ms admit=8.0ms pool_wait_ms=5.0 claim_ms=95.0 backend_start=100.0ms vsock_wait=30.0ms warm_window_ms=130.0 command=10.0ms teardown=15.0ms total=175.0ms launch_mode=warm dispatch_window=130.0ms startup=na warm_slo=ok"
         );
     }
 
@@ -838,6 +860,7 @@ mod tests {
             command_ms: 10.0,
             teardown_ms: 15.0,
             total_ms: 175.0,
+            startup_ms: None,
         };
         let report =
             RunPhaseTimingReport::new(phases, LaunchSubTimings::default(), Vec::new(), Vec::new());
@@ -869,6 +892,7 @@ mod tests {
             command_ms: 0.0,
             teardown_ms: 0.0,
             total_ms: backend_start_ms + vsock_wait_ms,
+            startup_ms: None,
         }
     }
 
@@ -900,7 +924,7 @@ mod tests {
         cold.launch_mode = LaunchMode::Cold;
         assert!(
             cold.render()
-                .ends_with("launch_mode=cold dispatch_window=2280.0ms warm_slo=na")
+                .ends_with("launch_mode=cold dispatch_window=2280.0ms startup=na warm_slo=na")
         );
     }
 
@@ -1085,6 +1109,7 @@ mod tests {
             command_ms: 52.0,
             teardown_ms: 91.4,
             total_ms: 287.2,
+            startup_ms: None,
         };
         let sub = LaunchSubTimings {
             artifact_verify_ms: Some(0.2),
@@ -1321,7 +1346,7 @@ mod tests {
         assert!(
             phases
                 .render()
-                .ends_with("launch_mode=cold dispatch_window=74.3ms warm_slo=na")
+                .ends_with("launch_mode=cold dispatch_window=74.3ms startup=na warm_slo=na")
         );
     }
 }

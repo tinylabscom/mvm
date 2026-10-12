@@ -32,6 +32,8 @@ pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
 mod run_mode;
+
+use mvm_client::mounts::parse_transient_mounts;
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
@@ -662,6 +664,8 @@ pub(in crate::commands) fn run_secure_started(
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
+    // The start config arms the GPU endpoint from this same flag.
+    let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
@@ -708,6 +712,7 @@ pub(in crate::commands) fn run_secure_started(
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
                 .with_materialized_mounts(&instruction_mounts),
@@ -897,8 +902,6 @@ pub(in crate::commands) fn run_secure_started(
         },
     )
 }
-
-use mvm_client::mounts::parse_transient_mounts;
 
 /// The boot-time admission hook plus the plumbing needed to chain-audit the
 /// run after it resolves: the cell the hook fills with the `AdmissionContext`
@@ -2349,6 +2352,7 @@ mod tests {
                         command_ms: 6.0,
                         teardown_ms: 7.0,
                         total_ms: 28.0,
+                        startup_ms: None,
                     },
                     crate::commands::vm::launch_sample::LaunchSubTimings::default(),
                     Vec::new(),

@@ -16,7 +16,7 @@ pub use mvm_bundler::{
 };
 
 mod export;
-pub use export::{ExportPosture, ExportReport, ExportRequest, export, export_with_signer};
+pub use export::{ExportPosture, ExportReport, ExportRequest, export, export_signed_by};
 
 /// Signs bundles as this host: the Ed25519 key under the mvm home's `keys/`,
 /// published as `host:<hostname>`.

@@ -24,7 +24,7 @@ export function restore(id: string, opts: Execute & { tenant: string }): Report 
   return call(CHECKPOINTS_RESTORE, { intent: opts.intent, request: { id, tenant: opts.tenant } });
 }
 /** A vm_full fork boots even with boot=false. Secret rebinding is not exposed. */
-export function fork(id: string, opts: Execute & {
+export function forkCheckpoint(id: string, opts: Execute & {
   tenant: string; boot: boolean; newId?: string; hypervisor?: string; cpus?: number; memory?: string;
 }): Report {
   return call(CHECKPOINTS_FORK, { intent: opts.intent, request: {

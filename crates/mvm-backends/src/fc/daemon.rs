@@ -310,7 +310,7 @@ fn wait_for_api_socket(socket: &std::path::Path, timeout: std::time::Duration) -
                 socket.display()
             );
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
 }

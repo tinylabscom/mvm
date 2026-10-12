@@ -727,9 +727,12 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
         // `Hvf` onto `LibkrunBuilderVm` — which quietly ran an HVF host's shell
         // jobs on libkrun, and is exactly the coupling the builder path is
         // meant not to have.
-        crate::builder_backend_select::try_resolve_builder_backend_for(choice)?
-            .run_shell_script(&shell_job)
-            .map(|_| ())
+        crate::builder_backend_select::try_resolve_builder_backend_for(
+            choice,
+            crate::builder_backend_select::BuilderFactoryOptions::default(),
+        )?
+        .run_shell_script(&shell_job)
+        .map(|_| ())
     })?;
     Ok(())
 }

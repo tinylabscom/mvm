@@ -368,16 +368,7 @@ pub fn declared_capabilities_for(
 pub fn try_resolve_builder_backend(
     flag: Option<BuilderBackendChoice>,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
-    try_resolve_builder_backend_for(resolve_choice(flag))
-}
-
-/// As [`try_resolve_builder_backend`] but for an already-resolved
-/// choice. The shell-job call sites take the choice the fallback loop handed
-/// them, so they cannot re-resolve.
-pub fn try_resolve_builder_backend_for(
-    choice: BuilderBackendChoice,
-) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
-    try_resolve_builder_backend_with_options(choice, BuilderFactoryOptions::default())
+    try_resolve_builder_backend_for(resolve_choice(flag), BuilderFactoryOptions::default())
 }
 
 /// Optional presentation settings for builder construction. Existing callers
@@ -389,8 +380,10 @@ pub struct BuilderFactoryOptions {
     pub verbose: bool,
 }
 
-/// Construct the selected builder with explicit console presentation options.
-pub fn try_resolve_builder_backend_with_options(
+/// As [`try_resolve_builder_backend`] but for an already-resolved choice,
+/// with explicit console presentation options. The shell-job call sites take
+/// the choice the fallback loop handed them, so they cannot re-resolve.
+pub fn try_resolve_builder_backend_for(
     choice: BuilderBackendChoice,
     options: BuilderFactoryOptions,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
@@ -1514,12 +1507,18 @@ mod tests {
             _ => None,
         }));
 
-        try_resolve_builder_backend_for(BuilderBackendChoice::Hvf)
-            .expect("registered ctor constructs a builder");
+        try_resolve_builder_backend_for(
+            BuilderBackendChoice::Hvf,
+            BuilderFactoryOptions::default(),
+        )
+        .expect("registered ctor constructs a builder");
 
         // A declined choice refuses by name. It must not fall back to libkrun,
         // which is what would put a Homebrew dependency under a Linux host.
-        let refused = try_resolve_builder_backend_for(BuilderBackendChoice::Firecracker);
+        let refused = try_resolve_builder_backend_for(
+            BuilderBackendChoice::Firecracker,
+            BuilderFactoryOptions::default(),
+        );
         let Err(err) = refused else {
             panic!("an unregistered driver-backed builder must not resolve");
         };

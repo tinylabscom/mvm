@@ -1343,6 +1343,7 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
                 prod: false,
             },
             None,
+            &super::super::TransferProgress::default(),
         )
         .unwrap();
         assert!(prepared.local);

@@ -182,6 +182,7 @@ fn boot_forked_child(
     )?;
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
+        gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),
         network_mode: parent_network_mode(&request.id, store),

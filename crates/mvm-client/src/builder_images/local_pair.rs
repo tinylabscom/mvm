@@ -72,9 +72,13 @@ pub fn ensure_pair_built(
         &mut |job| {
             let choice =
                 pair_shell_backend(mvm_build::builder_backend_select::resolve_choice(None))?;
-            crate::builder::run_shell_job(job, Some(choice))
-                .map(|_| ())
-                .map_err(|error| format!("{error:#}"))
+            crate::builder::run_shell_job(
+                job,
+                Some(choice),
+                mvm_build::builder_backend_select::BuilderFactoryOptions::default(),
+            )
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}"))
         },
     )
     .with_context(|| format!("building {target_label} from the local image checkout"))?;

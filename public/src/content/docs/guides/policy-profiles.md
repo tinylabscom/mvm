@@ -169,7 +169,11 @@ surface gets `standard`, which allows ordinary file, process and signal calls
 and refuses `socket`. A run that admits egress (`--allow-host`, a peer route),
 an ingress mapping, or a host service gets `network`, which adds sockets: the
 workload reaches admitted egress through a loopback proxy and resolver, and
-answers ingress on a socket of its own.
+answers ingress on a socket of its own. A `--gpu` run that admits none of
+those gets `vsock`: `standard` plus `AF_VSOCK` stream sockets, so the GPU
+shims can reach the host GPU endpoint, while `socket` for any other address
+family is still refused. A `--gpu` run that also needs `network` gets
+`network`, which allows vsock sockets too.
 
 The tier is signed into the plan's admission profile and recorded in its
 audit labels, and the guest agent installs it, with `no_new_privs`, in every

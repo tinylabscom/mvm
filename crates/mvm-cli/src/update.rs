@@ -618,11 +618,8 @@ fn sign_installed_binaries(
 
     let failed: Vec<String> = signer()
         .iter()
-        .filter(|report| !report.entitlements_present || report.error.is_some())
-        .map(|report| match &report.error {
-            Some(error) => format!("{}: {error}", report.path.display()),
-            None => report.path.display().to_string(),
-        })
+        .filter(|report| !report.entitlements_present)
+        .map(|report| report.path.display().to_string())
         .collect();
     if failed.is_empty() {
         Ok(())
@@ -1285,7 +1282,6 @@ mod tests {
             path: path.into(),
             applied: true,
             entitlements_present,
-            error: None,
         };
         sign_installed_binaries(true, || vec![report("mvmctl", true)])
             .expect("a signed macOS install is accepted");
@@ -1297,10 +1293,6 @@ mod tests {
         .to_string();
         assert!(error.contains("mvm-hvf-supervisor"), "{error}");
         assert!(!error.contains("mvmctl"), "{error}");
-
-        let mut failed = report("mvmctl", true);
-        failed.error = Some("native verification refused".into());
-        assert!(sign_installed_binaries(true, || vec![failed]).is_err());
     }
 
     // --- signature verification ---

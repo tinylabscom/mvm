@@ -542,6 +542,7 @@ mod tests {
             PlanSeccompTier::Essential,
             PlanSeccompTier::Minimal,
             PlanSeccompTier::Standard,
+            PlanSeccompTier::Vsock,
             PlanSeccompTier::Network,
             PlanSeccompTier::Unrestricted,
         ] {

@@ -85,9 +85,6 @@ impl Signer for HostSigner {
             .into_iter()
             .next()
             .ok_or_else(|| "signing provider returned no result".to_owned())?;
-        if let Some(error) = report.error {
-            return Err(error);
-        }
         if report.entitlements_present {
             Ok(report.applied)
         } else {

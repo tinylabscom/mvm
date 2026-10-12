@@ -350,7 +350,7 @@ fn bundle_export_is_signed_and_carries_provenance_and_resources() {
             } else {
                 std::os::unix::fs::symlink(target, &partial).unwrap();
             }
-            let report = bundle::export_with_signer(&request, &signer).unwrap();
+            let report = bundle::export_signed_by(&request, Some(&signer)).unwrap();
             assert_eq!(report.path, request.out);
             assert!(std::fs::read(target).unwrap() == before);
             let bytes = std::fs::read(&report.path).unwrap();
@@ -358,7 +358,7 @@ fn bundle_export_is_signed_and_carries_provenance_and_resources() {
             std::fs::remove_file(&partial).unwrap();
         }
     }
-    let report = bundle::export_with_signer(&request, &signer).unwrap();
+    let report = bundle::export_signed_by(&request, Some(&signer)).unwrap();
     assert_eq!(report.path, request.out);
     let bytes = std::fs::read(&report.path).unwrap();
     let verified = read_and_verify_bundle(&bytes, &OneKey(signer.verifying_key())).unwrap();
@@ -373,10 +373,10 @@ fn bundle_export_is_signed_and_carries_provenance_and_resources() {
     );
     assert_eq!(report.key_id, signer.key_id().0);
     std::fs::remove_file(&request.out).unwrap();
-    let error = bundle::export_with_signer(&request, &RefusingSigner(&signer)).unwrap_err();
+    let error = bundle::export_signed_by(&request, Some(&RefusingSigner(&signer))).unwrap_err();
     assert!(format!("{error:#}").contains("signing refused"));
     assert!(!request.out.exists());
     std::fs::write(rev.join("rootfs.verity"), "half pair").unwrap();
-    assert!(bundle::export_with_signer(&request, &signer).is_err());
+    assert!(bundle::export_signed_by(&request, Some(&signer)).is_err());
     assert!(!request.out.exists());
 }

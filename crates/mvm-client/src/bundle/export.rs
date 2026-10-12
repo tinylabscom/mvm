@@ -58,17 +58,11 @@ pub struct ExportReport {
 /// Export under the host signer. Signing failure never falls back to unsigned
 /// output, and neither request nor report carries private key material.
 pub fn export(request: &ExportRequest) -> Result<ExportReport> {
-    export_inner(request, None)
+    export_signed_by(request, None)
 }
 
-pub fn export_with_signer(
-    request: &ExportRequest,
-    signer: &dyn BundleSigner,
-) -> Result<ExportReport> {
-    export_inner(request, Some(signer))
-}
-
-fn export_inner(
+/// Export under `signer`, or under the host signer when none is given.
+pub fn export_signed_by(
     request: &ExportRequest,
     signer: Option<&dyn BundleSigner>,
 ) -> Result<ExportReport> {

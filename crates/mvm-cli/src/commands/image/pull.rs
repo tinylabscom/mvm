@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::Result;
-use mvm_client::image_admin::{PrepareImageRequest, TransferProgress, prepare_image_with_progress};
+use mvm_client::image_admin::{PrepareImageRequest, TransferProgress, prepare_image};
 
 use crate::ui;
 
@@ -21,7 +21,7 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()
     });
     let stdin = std::io::stdin();
     let mut input = stdin.lock();
-    let report = prepare_image_with_progress(
+    let report = prepare_image(
         &PrepareImageRequest {
             cache_root: cache_root.to_owned(),
             reference,

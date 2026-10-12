@@ -776,7 +776,9 @@ fn watch_launcher(
         if Instant::now() >= deadline {
             return Ok(LaunchWatch::TimedOut);
         }
-        std::thread::sleep(crate::poll_backoff::poll_delay(attempt));
+        // Fine cadence: the launch is blocked on this, and a probe is one
+        // read of the process table.
+        std::thread::sleep(crate::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
 }

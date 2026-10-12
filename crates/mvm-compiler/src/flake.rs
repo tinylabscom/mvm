@@ -55,8 +55,13 @@ pub(crate) fn render_flake_nix_at_url(
       # resolves `<working_dir>/node_modules` natively: no boot-time install,
       # no runtime network, no separate volume mount. A bare package.json
       # with no lockfile falls through to the plain copy (nothing to pin).
+      # A command workload opts in by declaring npm dependencies; a Node
+      # function workload always does.
+      declaresNpm =
+        ((launch.dependencies or {{ }}).kind or "") == "node"
+        && ((launch.dependencies or {{ }}).tool or "") == "npm";
       nodeHasLock =
-        (launch.entrypoint.language or "") == "node"
+        ((launch.entrypoint.language or "") == "node" || declaresNpm)
         && builtins.pathExists ./src/package.json
         && builtins.pathExists ./src/package-lock.json;
       mkAppPkg = pkgs:
@@ -339,6 +344,16 @@ mod tests {
     fn flake_has_lf_line_endings() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(!s.contains('\r'));
+    }
+
+    #[test]
+    fn declared_npm_dependencies_opt_a_command_workload_into_the_npm_build() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(
+            s.contains(r#"((launch.dependencies or { }).kind or "") == "node""#),
+            "a command workload's declared npm lockfile selects the npm build"
+        );
+        assert!(s.contains(r#"((launch.entrypoint.language or "") == "node" || declaresNpm)"#));
     }
 
     #[test]

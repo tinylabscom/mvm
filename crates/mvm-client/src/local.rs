@@ -14,6 +14,7 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+mod backend_select;
 mod capture_recovery;
 pub(crate) mod oci;
 mod state;
@@ -27,6 +28,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+pub use backend_select::{auto_selected_backend_name, selectable_backend_for_hypervisor};
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
@@ -76,26 +78,6 @@ pub struct LocalBackend {
 #[must_use]
 pub fn default_vcpus() -> u32 {
     2
-}
-
-/// Name of the workload backend selected by the canonical host ladder.
-///
-/// Keeps callers on the client facade instead of coupling them to the runtime
-/// backend enum merely to resolve the standard platform default.
-#[must_use]
-pub fn auto_selected_backend_name() -> String {
-    AnyBackend::auto_select().name().to_string()
-}
-
-/// Select the backend for an explicit `--hypervisor` name, refusing a
-/// selector this build cannot serve.
-///
-/// Frontends hold the returned handle only to pass it back to the client and
-/// to the CLI's own presentation helpers; backend construction and validation
-/// stay behind the client.
-pub fn selectable_backend_for_hypervisor(name: &str) -> anyhow::Result<AnyBackend> {
-    AnyBackend::require_hypervisor_selectable(name)?;
-    Ok(AnyBackend::from_hypervisor(name))
 }
 
 impl LocalBackend {

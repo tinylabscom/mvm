@@ -1,8 +1,8 @@
 # Image administration boundary
 
-`prepare_image(&PrepareImageRequest, Option<&mut dyn Read>)` explicitly acquires
-and publishes registry, archive, stdin, or local-directory inputs.
-`prepare_image_with_progress` additionally exposes typed transfer counters;
+`prepare_image(&PrepareImageRequest, Option<&mut dyn Read>, &TransferProgress)`
+explicitly acquires and publishes registry, archive, stdin, or local-directory
+inputs, and exposes typed transfer counters through the progress handle;
 frontends format and display them.
 
 `resolve_prepared_image(&ResolveImageRequest)` never acquires or repairs an
@@ -26,7 +26,7 @@ verified policy.
 
 The CLI pull adapter still performs the existing best-effort orphan-helper
 sweep. Direct client preparation needs the helper-domain owner's configured-home
-sweep API wired into `prepare_image_with_progress` before runtime preparation or
+sweep API wired into `prepare_image` before runtime preparation or
 materialization. Preserve non-fatal sweep failures and once-before-spawn
 behavior. Do not put this sweep on `resolve_prepared_image`: cache-only launches
 must not pay for process discovery or spawn helpers.

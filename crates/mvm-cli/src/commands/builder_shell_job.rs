@@ -66,7 +66,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     admit_source_builder_image(choice, || {
         crate::commands::env::builder_vm::bootstrap_tool_builder_vm_image()
     })?;
-    let result = mvm_client::builder::run_shell_job_with_options(
+    let result = mvm_client::builder::run_shell_job(
         &job,
         Some(choice),
         BuilderFactoryOptions {

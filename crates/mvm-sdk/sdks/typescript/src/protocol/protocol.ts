@@ -386,7 +386,7 @@ path: string
  * 
  * The syscall lists cover x86_64 and aarch64 Linux. A name that does not exist on the target arch is skipped when the filter is built, so a tier may name both a legacy syscall and its `*at` replacement; both are needed for the capability to survive on both arches. Tier membership is defined by [`SeccompTier::syscalls`], which returns the full set of allowed syscall names for that tier.
  */
-export type SeccompTier = ("essential" | "minimal" | "standard" | "network" | "unrestricted")
+export type SeccompTier = ("essential" | "minimal" | "standard" | "vsock" | "network" | "unrestricted")
 /**
  * One input event bound for the guest display.
  */

@@ -1,29 +1,32 @@
 //! Snapshotting a pack's source, locking it, and compiling it frozen.
 
+use super::app_tree::assemble;
 use super::lock::{LockInputs, derive_lock, stale_fields};
-use super::lower::lower;
-use super::{PackError, PackInput};
+use super::lower::{APP_TREE, lower};
+use super::{LOCK_FILE, PackError, PackInput};
+use crate::deps::validate_lockfiles;
 use crate::orchestrator::compile_pinned;
 use crate::source::copy_source;
 use mvm_contract::ir::Workload;
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::PackSource;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve `input` against its current source tree and return the lock a
 /// frozen build would accept.
 pub fn lock_pack(input: &PackInput<'_>) -> Result<PackLock, PackError> {
     let staging = staging_dir()?;
-    let (_, lock) = resolve(input, staging.path())?;
-    Ok(lock)
+    let resolved = resolve(input, staging.path())?;
+    Ok(resolved.lock)
 }
 
 /// Compile `input` into `out` only if `locked` still describes it exactly.
 ///
-/// Lowering, source containment and every lock field are checked before the
-/// compiler runs, and the compiler reads the verified snapshot rather than the
-/// live tree, so an edit made after the check cannot reach the artifact.
-/// Nothing is written to `out` when any check fails.
+/// Lowering, source containment, copy materialization, the dependency
+/// lockfile's pins and every lock field are checked before the compiler runs,
+/// and the compiler reads the verified snapshot rather than the live tree, so
+/// an edit made after the check cannot reach the artifact. Nothing is written
+/// to `out` when any check fails.
 pub fn compile_frozen(
     input: &PackInput<'_>,
     locked: &PackLock,
@@ -31,29 +34,66 @@ pub fn compile_frozen(
 ) -> Result<(), PackError> {
     locked.validate()?;
     let staging = staging_dir()?;
-    let (workload, expected) = resolve(input, staging.path())?;
-    let fields = stale_fields(&expected, locked);
+    let resolved = resolve(input, staging.path())?;
+    let fields = stale_fields(&resolved.lock, locked);
     if !fields.is_empty() {
         return Err(PackError::StaleLock { fields });
     }
-    compile_pinned(&workload, out, staging.path(), input.revision).map_err(PackError::Compile)
+    compile_pinned(
+        &resolved.workload,
+        out,
+        &resolved.manifest_dir,
+        input.revision,
+    )
+    .map_err(PackError::Compile)
 }
 
-/// Lower the spec, snapshot its source under `staging`, and derive the lock.
-/// The snapshot sits at the same relative path the lowered workload names, so
-/// `staging` serves as the compiler's manifest directory.
-fn resolve(input: &PackInput<'_>, staging: &Path) -> Result<(Workload, PackLock), PackError> {
+/// A spec resolved against one snapshot of its source.
+struct Resolved {
+    workload: Workload,
+    lock: PackLock,
+    /// Where the lowered workload's source path resolves: the snapshot, or the
+    /// tree assembled from copy operations.
+    manifest_dir: PathBuf,
+}
+
+/// Lower the spec, snapshot its source under `staging`, assemble the
+/// application tree when the spec copies, check the dependency lockfile, and
+/// derive the lock. The snapshot sits at the same relative path the spec
+/// names, so its tree digest is independent of what the copies select.
+fn resolve(input: &PackInput<'_>, staging: &Path) -> Result<Resolved, PackError> {
     let workload = lower(input.spec)?;
     let PackSource::Local { path } = &input.spec.source;
     let root = contained_source_root(input.spec_dir, path)?;
-    let plan = copy_source(&root, &staging.join(path), &[], &[]).map_err(PackError::Source)?;
+    let snapshot_dir = staging.join("snapshot");
+    std::fs::create_dir_all(&snapshot_dir).map_err(PackError::Staging)?;
+    let snapshot = snapshot_dir.join(path);
+    let plan =
+        copy_source(&root, &snapshot, &[], &[LOCK_FILE.to_string()]).map_err(PackError::Source)?;
+    let manifest_dir = if input.spec.copy.is_empty() {
+        snapshot_dir
+    } else {
+        let app_dir = staging.join("app");
+        assemble(
+            input.spec,
+            workload.apps[0].dependencies.as_ref(),
+            &snapshot,
+            &app_dir.join(APP_TREE),
+        )?;
+        app_dir
+    };
+    validate_lockfiles(&workload, &manifest_dir).map_err(PackError::Lockfile)?;
     let lock = derive_lock(&LockInputs {
         spec: input.spec,
         workload: &workload,
         source_tree_sha256: &plan.tree_hash,
         revision: input.revision,
     })?;
-    Ok((workload, lock))
+    Ok(Resolved {
+        workload,
+        lock,
+        manifest_dir,
+    })
 }
 
 /// Resolve the source root and refuse one that leaves the spec directory
@@ -98,8 +138,11 @@ fn staging_dir() -> Result<tempfile::TempDir, PackError> {
 mod tests {
     use super::*;
     use crate::mvm_pin::PinnedMvmRevision;
+    use crate::pack::APP_TREE;
     use crate::pack::LockField;
     use crate::pack::test_support::{revision, spec};
+    use mvm_contract::ir::NodeTool;
+    use mvm_contract::pack_spec::{CopyOperation, DependencyFiles, PackSpec};
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use tempfile::TempDir;
@@ -189,6 +232,180 @@ mod tests {
         let workload: serde_json::Value =
             serde_json::from_slice(&fs::read(artifact.join("workload.json")).unwrap()).unwrap();
         assert_eq!(workload["apps"][0]["source"]["path"], ".");
+    }
+
+    fn compile_spec(spec: &PackSpec, dir: &Path, out: &Path) -> Result<PackLock, PackError> {
+        let input = PackInput {
+            spec,
+            spec_dir: dir,
+            revision: &revision(),
+        };
+        let locked = lock_pack(&input)?;
+        compile_frozen(&input, &locked, out)?;
+        Ok(locked)
+    }
+
+    fn copying(copies: &[(&str, &str)]) -> PackSpec {
+        let mut spec = spec();
+        spec.copy = copies
+            .iter()
+            .map(|(source, destination)| CopyOperation {
+                source: (*source).into(),
+                destination: (*destination).into(),
+            })
+            .collect();
+        spec
+    }
+
+    #[test]
+    fn copies_select_the_application_tree() {
+        let dir = source_tree();
+        let spec = copying(&[("hello.txt", "/app/hello.txt"), ("bin", "/app/bin")]);
+        let out = TempDir::new().unwrap();
+        let artifact = out.path().join("artifact");
+        let locked = compile_spec(&spec, dir.path(), &artifact).unwrap();
+        assert_eq!(
+            fs::read_to_string(artifact.join("src/hello.txt")).unwrap(),
+            "hi\n"
+        );
+        assert!(artifact.join("src/bin/run").is_file());
+        let workload: serde_json::Value =
+            serde_json::from_slice(&fs::read(artifact.join("workload.json")).unwrap()).unwrap();
+        assert_eq!(workload["apps"][0]["source"]["path"], APP_TREE);
+        assert_eq!(launch_ir_hash(&artifact), locked.workload_sha256);
+    }
+
+    #[test]
+    fn uncopied_source_edits_still_stale_the_lock() {
+        let dir = source_tree();
+        fs::write(dir.path().join("notes.txt"), "a").unwrap();
+        let spec = copying(&[("hello.txt", "/app/hello.txt")]);
+        let input = PackInput {
+            spec: &spec,
+            spec_dir: dir.path(),
+            revision: &revision(),
+        };
+        let locked = lock_pack(&input).unwrap();
+        fs::write(dir.path().join("notes.txt"), "b").unwrap();
+        let out = TempDir::new().unwrap();
+        assert_eq!(
+            stale(compile_frozen(&input, &locked, &out.path().join("a"))),
+            vec![LockField::Source]
+        );
+    }
+
+    #[test]
+    fn a_copy_outside_the_application_tree_is_refused_before_snapshot() {
+        let dir = source_tree();
+        let spec = copying(&[("hello.txt", "/etc/hello.txt")]);
+        let result = lock_pack(&PackInput {
+            spec: &spec,
+            spec_dir: dir.path(),
+            revision: &revision(),
+        });
+        assert!(matches!(result, Err(PackError::CopyOutsideApp { .. })));
+    }
+
+    fn npm_spec() -> PackSpec {
+        let mut spec = spec();
+        spec.dependencies = vec![DependencyFiles::Node {
+            tool: NodeTool::Npm,
+            manifest: "package.json".into(),
+            lockfile: "package-lock.json".into(),
+        }];
+        spec
+    }
+
+    fn write_npm(dir: &Path, integrity: bool) {
+        fs::write(
+            dir.join("package.json"),
+            r#"{"name":"a","version":"1.0.0"}"#,
+        )
+        .unwrap();
+        let entry = if integrity {
+            r#""integrity": "sha512-AAAA""#
+        } else {
+            r#""license": "MIT""#
+        };
+        fs::write(
+            dir.join("package-lock.json"),
+            format!(
+                r#"{{"lockfileVersion": 3, "packages": {{"": {{"name": "a"}}, "node_modules/left-pad": {{"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", {entry}}}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_pinned_npm_lockfile_lowers_to_node_dependencies() {
+        let dir = source_tree();
+        write_npm(dir.path(), true);
+        let out = TempDir::new().unwrap();
+        let artifact = out.path().join("artifact");
+        compile_spec(&npm_spec(), dir.path(), &artifact).unwrap();
+        let launch: serde_json::Value =
+            serde_json::from_slice(&fs::read(artifact.join("launch.json")).unwrap()).unwrap();
+        assert_eq!(launch["dependencies"]["kind"], "node");
+        assert_eq!(launch["dependencies"]["tool"], "npm");
+        assert!(artifact.join("src/package-lock.json").is_file());
+    }
+
+    #[test]
+    fn npm_files_follow_copies_into_the_application_tree() {
+        let dir = source_tree();
+        write_npm(dir.path(), true);
+        let mut spec = npm_spec();
+        spec.copy = copying(&[("hello.txt", "/app/hello.txt")]).copy;
+        let out = TempDir::new().unwrap();
+        let artifact = out.path().join("artifact");
+        compile_spec(&spec, dir.path(), &artifact).unwrap();
+        assert!(artifact.join("src/package.json").is_file());
+        assert!(artifact.join("src/package-lock.json").is_file());
+        assert!(!artifact.join("src/bin").exists());
+    }
+
+    #[test]
+    fn an_unpinned_npm_lockfile_is_refused() {
+        let dir = source_tree();
+        write_npm(dir.path(), false);
+        let result = lock_pack(&PackInput {
+            spec: &npm_spec(),
+            spec_dir: dir.path(),
+            revision: &revision(),
+        });
+        assert!(matches!(result, Err(PackError::Lockfile(_))));
+    }
+
+    #[test]
+    fn a_missing_npm_lockfile_is_refused() {
+        let dir = source_tree();
+        let result = lock_pack(&PackInput {
+            spec: &npm_spec(),
+            spec_dir: dir.path(),
+            revision: &revision(),
+        });
+        assert!(matches!(result, Err(PackError::Lockfile(_))));
+    }
+
+    fn launch_ir_hash(artifact: &Path) -> String {
+        let launch: serde_json::Value =
+            serde_json::from_slice(&fs::read(artifact.join("launch.json")).unwrap()).unwrap();
+        launch["ir_hash"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_lock_written_at_the_source_root_does_not_stale_itself() {
+        let dir = source_tree();
+        let locked = lock_for(dir.path());
+        fs::write(
+            dir.path().join(LOCK_FILE),
+            serde_json::to_vec(&locked).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lock_for(dir.path()), locked);
+        let out = TempDir::new().unwrap();
+        compile_with(dir.path(), &locked, &out.path().join("a")).unwrap();
+        assert!(!out.path().join("a/src").join(LOCK_FILE).exists());
     }
 
     #[test]

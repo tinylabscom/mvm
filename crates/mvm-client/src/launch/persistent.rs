@@ -301,6 +301,9 @@ pub fn start_persistent_oci_machine(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    // What the backend will arm, so the admitted tier opens
+                    // the GPU endpoint's vsock socket exactly when there is one.
+                    gpu: config.gpu,
                     instructions: crate::admission::InstructionSources::for_workload(workload_dir)
                         .with_mount_roots(&[])
                         .with_materialized_mounts(&instruction_mounts),
@@ -488,6 +491,7 @@ mod persistent_oci_boot_tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),
