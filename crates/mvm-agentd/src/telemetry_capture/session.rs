@@ -16,10 +16,10 @@
 //!
 //! - The handshake runs under one overall deadline. A host that connects and
 //!   then says nothing is dropped, not waited on.
-//! - Each sealed frame is written under its own deadline, enforced both by
-//!   the socket's send timeout (no single write call blocks past it) and by
-//!   a wall-clock check between calls (a host that reads a byte at a time
-//!   cannot stretch one frame indefinitely). A stalled host fails the
+//! - Each sealed frame is written under its own deadline. Writes never block
+//!   in the kernel: each writes what fits, then waits for room only for the
+//!   time left, so a host that reads a byte at a time cannot stretch one
+//!   frame past its deadline on any platform. A stalled host fails the
 //!   session; the record in flight is counted as a transport loss.
 //! - A turn sends at most [`RECORDS_PER_TURN`] records, so under a
 //!   continuous flood the loop still reaches its stop check and its loss
@@ -89,6 +89,13 @@ pub trait TimedStream: Read + Write {
     /// either cannot be served with bounded waits, and the session refuses
     /// it rather than serving it unbounded.
     fn set_timeouts(&mut self, read: Duration, write: Duration) -> io::Result<()>;
+
+    /// Write what fits now without waiting: `WouldBlock` when nothing does.
+    fn write_now(&mut self, buf: &[u8]) -> io::Result<usize>;
+
+    /// Wait at most `timeout` for room to write. `Ok` on room or timeout
+    /// alike; the caller's deadline decides which it was.
+    fn wait_writable(&mut self, timeout: Duration) -> io::Result<()>;
 }
 
 impl<T: Read + Write + AsRawFd> TimedStream for T {
@@ -97,14 +104,55 @@ impl<T: Read + Write + AsRawFd> TimedStream for T {
         set_socket_timeout(fd, libc::SO_RCVTIMEO, read)?;
         set_socket_timeout(fd, libc::SO_SNDTIMEO, write)
     }
+
+    fn write_now(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Non-blocking for this one call. `MSG_DONTWAIT` would be simpler,
+        // but macOS ignores it on Unix-domain streams and blocks anyway.
+        let fd = self.as_raw_fd();
+        // SAFETY: `fd` is borrowed from a live stream for the duration of
+        // these calls; F_GETFL/F_SETFL take and return plain flag words.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: as above.
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let written = self.write(buf);
+        // SAFETY: as above; restores the flags read before the write.
+        let restored = unsafe { libc::fcntl(fd, libc::F_SETFL, flags) };
+        if restored < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        written
+    }
+
+    fn wait_writable(&mut self, timeout: Duration) -> io::Result<()> {
+        let millis = libc::c_int::try_from(timeout.as_millis().max(1)).unwrap_or(libc::c_int::MAX);
+        let mut fds = [libc::pollfd {
+            fd: self.as_raw_fd(),
+            events: libc::POLLOUT,
+            revents: 0,
+        }];
+        // SAFETY: one live pollfd, its length passed alongside.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, millis) };
+        if rc < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn set_socket_timeout(fd: i32, option: libc::c_int, timeout: Duration) -> io::Result<()> {
     // A zero timeval means "no timeout" to the kernel; never pass one.
     let timeout = timeout.max(Duration::from_millis(1));
     let value = libc::timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
-        tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        tv_sec: timeout.as_secs() as _,
+        tv_usec: timeout.subsec_micros() as _,
     };
     // SAFETY: `fd` is borrowed from a live stream for the duration of the
     // call; the timeval is a local of exactly the size passed.
@@ -158,10 +206,23 @@ impl<S: Read> Read for Deadline<'_, S> {
     }
 }
 
-impl<S: Write> Write for Deadline<'_, S> {
+impl<S: TimedStream> Write for Deadline<'_, S> {
+    /// Never a blocking write: the kernel's send timeout restarts on every
+    /// wakeup on some platforms, so a host draining a byte at a time could
+    /// hold one blocking call open indefinitely. Instead, write what fits
+    /// now, and wait for room only for the time left before the deadline.
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.check()?;
-        self.inner.write(buf)
+        loop {
+            self.check()?;
+            match self.inner.write_now(buf) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let left = self.until.saturating_duration_since(Instant::now());
+                    self.inner.wait_writable(left)?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                other => return other,
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -261,7 +322,7 @@ pub fn serve_capture_session<S: TimedStream>(
 /// Send up to [`RECORDS_PER_TURN`] queued records, each under its own write
 /// deadline. Returns how many were sent; fewer than the cap means the queue
 /// ran empty.
-fn drain_turn<S: Write>(
+fn drain_turn<S: TimedStream>(
     stream: &mut S,
     sender: &mut TelemetrySender,
     capture: &CaptureState,
@@ -306,7 +367,7 @@ fn probe_peer<S: Read>(stream: &mut S) -> PeerProbe {
 /// Send one Loss record per loss family that grew since the last summary,
 /// on the direct path. The snapshot advances only for what was sent, so a
 /// failed send re-reports the same delta on the next session.
-fn summarize_losses<S: Write>(
+fn summarize_losses<S: TimedStream>(
     stream: &mut S,
     sender: &mut TelemetrySender,
     capture: &CaptureState,

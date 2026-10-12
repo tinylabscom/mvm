@@ -414,8 +414,9 @@ flip their named unit regressions only.
       Loss accounting and the reserved summary path landed with the capture
       core and session (#3828, #4049). The capture session now bounds every
       wait: the handshake runs under one overall deadline, each sealed frame
-      is written under a deadline enforced by the socket send timeout and a
-      wall-clock check between write calls, and a turn sends at most 64
+      is written under a deadline with non-blocking writes that wait for room
+      only for the time left (a kernel send timeout alone restarts per wakeup
+      on macOS), and a turn sends at most 64
       records before the loop checks stop and summarizes losses, with
       summaries on a one-second clock rather than a turn count. Regressions
       in `telemetry_capture::session`: a capped turn leaves the rest queued;
