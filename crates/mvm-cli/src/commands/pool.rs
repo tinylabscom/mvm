@@ -34,7 +34,7 @@ use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContex
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::vm::checkpoint::SignedChainAnchor;
+use super::vm::checkpoint::{ClaimChainAnchor, SignedChainAnchor};
 use super::vm::host_signer;
 use mvm_contract::builder::BuilderError;
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
@@ -854,18 +854,27 @@ where
     };
     let checkpoints = CheckpointStore::open();
     let snapshots = FsSnapshotStore::new(mvm_core::config::snapshots_dir())?;
-    let anchor = if backend.as_vm_backend().supports_resident_handoff() {
-        SignedChainAnchor::empty()
-    } else {
-        SignedChainAnchor::load()?
-    };
+    // A resident handoff's signed snapshot manifest is its publication
+    // witness. Every other claim checks the parent's creation entry in the
+    // signed audit chain, authenticated in place rather than by re-walking the
+    // whole history on every launch.
+    let resident_anchor;
+    let claim_anchor;
+    let anchor: &dyn mvm_runtime::checkpoint::CheckpointChainAnchor =
+        if backend.as_vm_backend().supports_resident_handoff() {
+            resident_anchor = SignedChainAnchor::empty();
+            &resident_anchor
+        } else {
+            claim_anchor = ClaimChainAnchor::for_checkpoint(&parent_checkpoint)?;
+            &claim_anchor
+        };
     let registry_path = mvm_runtime::vm::name_registry::registry_path();
     let grant_issuer = HostChildGrantIssuer;
     let ctx = ClaimContext {
         pool,
         checkpoints: &checkpoints,
         snapshots: &snapshots,
-        anchor: &anchor,
+        anchor,
         parent_checkpoint: &parent_checkpoint,
         registry_path: &registry_path,
         grant_issuer: Some(&grant_issuer),

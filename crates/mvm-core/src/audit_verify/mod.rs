@@ -1,5 +1,6 @@
 //! Read-only host audit verification. No signer, key custody or runtime.
 pub mod file;
+pub mod live;
 pub mod segment;
 pub mod set;
 
