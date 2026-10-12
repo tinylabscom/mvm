@@ -65,6 +65,41 @@ impl Ext4Tree {
         })?;
         Ok(Self { fs })
     }
+
+    /// Read a bounded regular file, refusing symlinks in every path component.
+    /// The image is immutable while read, so the checked inode path cannot
+    /// change between the metadata checks and the read.
+    pub fn read_regular_file_no_symlinks(
+        &self,
+        path: &str,
+        limit: u64,
+    ) -> Result<Vec<u8>, TreeDiffError> {
+        validate_relative_path(path.as_bytes()).map_err(|refusal| TreeDiffError::Refused {
+            path: path.to_string(),
+            reason: format!("{refusal:?}"),
+        })?;
+        let mut ancestor = String::new();
+        let mut components = path.split('/').peekable();
+        while let Some(component) = components.next() {
+            if !ancestor.is_empty() {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            let expected = if components.peek().is_some() {
+                FileType::Directory
+            } else {
+                FileType::Regular
+            };
+            let metadata = self.inode(&ancestor, expected)?;
+            if expected == FileType::Regular && metadata.len() > limit {
+                return Err(TreeDiffError::Refused {
+                    path: path.to_string(),
+                    reason: format!("file exceeds the {limit}-byte read limit"),
+                });
+            }
+        }
+        self.read_prefix(path, limit)
+    }
 }
 
 fn unreadable(path: &str, error: Ext4Error) -> TreeDiffError {

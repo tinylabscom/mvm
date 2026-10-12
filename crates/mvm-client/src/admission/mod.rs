@@ -792,6 +792,20 @@ pub fn admit_plan_for_boot_configured_ingress(
         ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
         "admit: sign+verify"
     );
+    // The plan was synthesized just now and nothing has been recorded for it
+    // yet, so this is the one moment its session's first possible segment is
+    // known without reading the chain. Sealing it later reads only that far.
+    if let Some(dir) = p
+        .audit_dir
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| mvm_hostd::audit::emitter::default_audit_dir().ok())
+    {
+        mvm_hostd::audit::session::note_new_session(
+            &dir,
+            &admitted.plan().tenant.0,
+            &admitted.plan_id().0,
+        );
+    }
     tracing::info!(
         plan_id = %admitted.plan_id().0,
         signer_id = %admitted.signer_id(),

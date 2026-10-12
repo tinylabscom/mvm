@@ -40,6 +40,8 @@ pub enum LocalSetError {
         .source.stage()
     )]
     Refused { dir: PathBuf, source: ImageSetError },
+    #[error("local base-image contract in {}: {reason}", .dir.display())]
+    BaseImageContract { dir: PathBuf, reason: String },
 }
 
 impl LocalSetError {
@@ -75,7 +77,7 @@ impl LocalImageCheckout {
         self.reverify()?;
         Ok(LocalCheckouts {
             images: self.identity().clone(),
-            mvm: open_mvm_checkout(mvm_checkout)?.1,
+            mvm: Some(open_mvm_checkout(mvm_checkout)?.1),
         })
     }
 
@@ -92,8 +94,24 @@ impl LocalImageCheckout {
         &self,
         request: &LocalSetRequest<'_>,
     ) -> Result<LocalImageSet, LocalSetError> {
-        let current = self.current_checkouts(request.mvm_checkout)?;
+        self.reverify()?;
         let manifest_bytes = read_manifest(request.set_dir)?;
+        let manifest: mvm_core::image_set::ImageSetManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|error| LocalSetError::Refused {
+                dir: request.set_dir.to_path_buf(),
+                source: ImageSetError::UnparseableManifest {
+                    reason: error.to_string(),
+                },
+            })?;
+        let current = if manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION {
+            LocalCheckouts {
+                images: self.identity().clone(),
+                mvm: None,
+            }
+        } else {
+            self.current_checkouts(request.mvm_checkout)?
+        };
+        let host = crate::stage0_kernel::current_image_set_protocol_support();
         let verification = LocalImageSetVerification::new(
             &manifest_bytes,
             request.set_dir,
@@ -102,10 +120,39 @@ impl LocalImageCheckout {
         )
         .require_roles(request.roles)
         .with_mvm_checkout_rule(request.mvm_rule);
-        verify_local_image_set(&verification).map_err(|source| LocalSetError::Refused {
-            dir: request.set_dir.to_path_buf(),
-            source,
-        })
+        let verification =
+            if manifest.schema_version == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION {
+                verification.with_host_protocols(&host)
+            } else {
+                verification
+            };
+        let set =
+            verify_local_image_set(&verification).map_err(|source| LocalSetError::Refused {
+                dir: request.set_dir.to_path_buf(),
+                source,
+            })?;
+        for artifact in &set.artifacts {
+            if matches!(artifact.role, ImageSetRole::WorkloadRootfs(_))
+                && set.manifest.members.iter().any(|member| {
+                    member.role == artifact.role
+                        && member.target == artifact.target
+                        && member.artifacts.iter().any(|declared| {
+                            declared.name == artifact.name
+                                && declared.format == mvm_core::image_set::ArtifactFormat::Ext4
+                        })
+                })
+            {
+                crate::published_image_set::verify_base_image_contract(
+                    &artifact.path,
+                    &set.manifest.compatibility,
+                )
+                .map_err(|error| LocalSetError::BaseImageContract {
+                    dir: request.set_dir.to_path_buf(),
+                    reason: format!("{error:#}"),
+                })?;
+            }
+        }
+        Ok(set)
     }
 }
 

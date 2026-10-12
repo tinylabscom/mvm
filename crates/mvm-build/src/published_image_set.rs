@@ -19,7 +19,11 @@ use thiserror::Error;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod fixture;
+mod local_proof;
 mod member_cache;
+pub use local_proof::{
+    local_workload_proof_path, retain_local_workload_proof, verify_local_workload_proof,
+};
 
 pub use member_cache::{
     IMAGE_SET_MEMBER_CACHE_DIR, MemberVersion, SetMemberCache, SetMemberCacheError,
@@ -123,6 +127,8 @@ pub enum ImageSetMemberError {
         expected: String,
         actual: String,
     },
+    #[error("base-image contract refused for {name}: {reason}")]
+    BaseImageContract { name: String, reason: String },
     #[error("io error on {path}: {source}")]
     Io {
         path: String,
@@ -157,6 +163,9 @@ impl PublishedImageSet {
             download,
         } = source;
         let lock = &train.image_set;
+        let host = crate::stage0_kernel::current_image_set_protocol_support();
+        mvm_core::image_set::check_declared_protocol_compatibility(&train.compatibility, &host)
+            .context("refuse an image lock incompatible with this host before acquisition")?;
         let staged = tempfile::NamedTempFile::new().context("create image-set manifest staging")?;
         let manifest_url = format!("{base_url}/{}", lock.manifest_asset);
         download(&manifest_url, staged.path())
@@ -189,7 +198,6 @@ impl PublishedImageSet {
         check_against_lock(&manifest, &actual, lock).context("match signed image set to lock")?;
         require_complete(&manifest, &ImageSetRequirement::current_train())
             .context("refuse a partial image-set release")?;
-        let host = crate::stage0_kernel::current_image_set_protocol_support();
         check_protocol_compatibility(&manifest, &host)
             .context("refuse an image set incompatible with this host")?;
         if !manifest.compatibility.same_contract(&train.compatibility) {
@@ -255,7 +263,7 @@ impl PublishedImageSet {
         // this base carries it as a second member per role/target with
         // `build_mode: dev`, and the dev slot selects it explicitly, never
         // through this fetch.
-        let artifacts: Vec<MemberArtifact> = self
+        let members: Vec<_> = self
             .manifest
             .members
             .iter()
@@ -264,43 +272,50 @@ impl PublishedImageSet {
                     && roles.contains(&member.role)
                     && member.target == target
             })
-            .flat_map(|member| member.artifacts.iter().cloned())
             .collect();
-        if artifacts.len() != 4 {
+        let artifact_count: usize = members.iter().map(|member| member.artifacts.len()).sum();
+        if artifact_count != 4 {
             bail!(
                 "signed image set declares {} default-workload artifacts for {arch}, expected 4",
-                artifacts.len()
+                artifact_count
             );
         }
-        for artifact in &artifacts {
-            let name = artifact.name.as_str();
-            let destination = if name.contains("vmlinux") {
-                dir.join("vmlinux")
-            } else if name.ends_with(".ext4") {
-                dir.join("rootfs.ext4")
-            } else if name.ends_with(".verity") {
-                dir.join("rootfs.verity")
-            } else if name.ends_with(".roothash") {
-                dir.join("rootfs.roothash")
-            } else {
-                bail!("signed default-workload member contains unexpected artifact {name}");
-            };
-            self.fetch_artifact(artifact, &destination)?;
+        for member in members {
+            for artifact in &member.artifacts {
+                let name = artifact.name.as_str();
+                let destination = if self.manifest.schema_version
+                    == mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION
+                {
+                    dir.join(
+                        installed_workload_artifact_name(member.role, artifact)?
+                            .context("production workload contains unexpected advisory metadata")?,
+                    )
+                } else if name.contains("vmlinux") {
+                    dir.join("vmlinux")
+                } else if name.ends_with(".ext4") {
+                    dir.join("rootfs.ext4")
+                } else if name.ends_with(".verity") {
+                    dir.join("rootfs.verity")
+                } else if name.ends_with(".roothash") {
+                    dir.join("rootfs.roothash")
+                } else {
+                    bail!("signed default-workload member contains unexpected artifact {name}");
+                };
+                self.fetch_artifact(artifact, &destination)?;
+            }
         }
 
-        // The guest agent is this CLI's own, attached from its guest runtime,
-        // so the protocol it speaks is the one compiled in here.
-        let protocol_version = u8::try_from(mvm_agentd::vsock::PROTOCOL_VERSION)
-            .context("the guest-agent protocol does not fit the runtime sidecar")?;
+        // A base image provides no evidence about the separately attached runtime.
+        let (protocol_version, init_system, agent_binary) = (0, "cli-initramfs", "");
         crate::builder_vm::GuestSidecar {
             name: "mvm-default-microvm".to_string(),
             accessible: false,
             sealed: true,
             entrypoint_kind: "command".to_string(),
             entrypoint_argv: Vec::new(),
-            init_system: "busybox".to_string(),
+            init_system: init_system.to_string(),
             expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
+            agent_binary: agent_binary.to_string(),
             rootless_entrypoint: true,
             hypervisor: "firecracker".to_string(),
             overlay_aware: true,
@@ -309,7 +324,11 @@ impl PublishedImageSet {
             source: String::new(),
             built_at: String::new(),
             protocol_version,
-            generator_rev: self.manifest.mvm_source_commit.as_str().to_string(),
+            generator_rev: self
+                .manifest
+                .mvm_source_commit
+                .as_ref()
+                .map_or_else(String::new, |commit| commit.as_str().to_string()),
             libc: Default::default(),
         }
         .write_to_dir(dir)
@@ -366,7 +385,12 @@ impl PublishedImageSet {
         let rootfs_artifact = rootfs
             .artifacts
             .iter()
-            .find(|artifact| artifact.name.as_str().ends_with(".ext4"))
+            .find(|artifact| {
+                artifact.format == mvm_core::image_set::ArtifactFormat::Ext4
+                    || (self.manifest.schema_version
+                        == mvm_core::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION
+                        && artifact.name.as_str().ends_with(".ext4"))
+            })
             .ok_or_else(|| ImageSetMemberError::NoArtifact {
                 release_tag: self.release_tag.clone(),
                 role: rootfs.role,
@@ -467,6 +491,152 @@ impl PublishedImageSet {
                 actual,
             });
         }
+        if self.manifest.members.iter().any(|member| {
+            matches!(member.role, ImageSetRole::WorkloadRootfs(_))
+                && member.artifacts.contains(artifact)
+                && artifact.format == mvm_core::image_set::ArtifactFormat::Ext4
+        }) && let Err(error) = verify_base_image_contract(dest, &self.manifest.compatibility)
+        {
+            let _ = std::fs::remove_file(dest);
+            return Err(ImageSetMemberError::BaseImageContract {
+                name: artifact.name.to_string(),
+                reason: format!("{error:#}"),
+            });
+        }
         Ok(())
     }
+}
+
+/// Check the root marker against the authenticated Linux-base declaration.
+/// Legacy sets predate this marker; their retired guest range is not runtime evidence.
+/// Reads the ext4 directly: no mount, extraction or guest symlink resolution.
+pub fn verify_base_image_contract(
+    image: &Path,
+    compatibility: &mvm_core::image_set::ImageSetCompatibility,
+) -> Result<()> {
+    let Some(version) = compatibility.base_image_contract else {
+        return Ok(());
+    };
+    if version != mvm_core::image_set::BaseImageContract::LINUX_LAYER {
+        bail!("unsupported base-image contract {version}");
+    }
+    let tree = mvm_fs::tree_diff::Ext4Tree::open(image)
+        .context("open authenticated base root filesystem")?;
+    let marker = tree
+        .read_regular_file_no_symlinks(
+            mvm_core::image_set::BASE_IMAGE_CONTRACT_MARKER.trim_start_matches('/'),
+            16,
+        )
+        .context("read base-image contract marker without symlinks")?;
+    if marker != format!("{version}\n").as_bytes() {
+        bail!("base-image contract marker does not match authenticated declaration {version}");
+    }
+    Ok(())
+}
+
+/// Recheck an installed workload against the pinned authenticated root without
+/// acquiring anything. Historical caches retain their legacy boot behavior.
+pub fn verify_cached_default_workload(
+    directory: &Path,
+    arch: GuestArch,
+    build_mode: Option<MemberBuildMode>,
+) -> Result<()> {
+    let train = mvm_core::image_set::image_train_lock();
+    if train.compatibility.base_image_contract.is_none() {
+        return Ok(());
+    }
+    let host = crate::stage0_kernel::current_image_set_protocol_support();
+    mvm_core::image_set::check_declared_protocol_compatibility(&train.compatibility, &host)?;
+    let root = mvm_core::image_set::read_cached_image_set_root(
+        &mvm_core::image_set::image_set_root_proof_cache(),
+        &train.image_set,
+        &host,
+        None,
+    )?;
+    if !root
+        .manifest()
+        .compatibility
+        .same_contract(&train.compatibility)
+    {
+        bail!("cached authenticated image-set compatibility does not match images.lock");
+    }
+    verify_installed_workload_files(
+        root.manifest(),
+        directory,
+        arch,
+        WorkloadImageProfile::DefaultTenant,
+        build_mode,
+    )
+}
+
+fn installed_workload_artifact_name(
+    role: ImageSetRole,
+    artifact: &MemberArtifact,
+) -> Result<Option<&'static str>> {
+    use mvm_core::image_set::ArtifactFormat;
+    if matches!(role, ImageSetRole::WorkloadKernel(_)) {
+        anyhow::ensure!(
+            matches!(artifact.format, ArtifactFormat::Kernel(_)),
+            "workload kernel is not a kernel artifact"
+        );
+        return Ok(Some("vmlinux"));
+    }
+    anyhow::ensure!(
+        matches!(role, ImageSetRole::WorkloadRootfs(_)),
+        "selected artifact is not a workload root"
+    );
+    match artifact.format {
+        ArtifactFormat::Ext4 => Ok(Some("rootfs.ext4")),
+        ArtifactFormat::VerityHashTree => Ok(Some("rootfs.verity")),
+        ArtifactFormat::VerityRootHash => Ok(Some("rootfs.roothash")),
+        ArtifactFormat::Json | ArtifactFormat::Text => Ok(None),
+        ArtifactFormat::Kernel(_) | ArtifactFormat::TarGz => {
+            bail!("unexpected workload root artifact format")
+        }
+    }
+}
+
+fn verify_installed_workload_files(
+    manifest: &ImageSetManifest,
+    directory: &Path,
+    arch: GuestArch,
+    profile: WorkloadImageProfile,
+    build_mode: Option<MemberBuildMode>,
+) -> Result<()> {
+    let mut kernel_seen = false;
+    let mut root_seen = false;
+    for member in manifest.members.iter().filter(|member| {
+        member.target == MemberTarget::Arch(arch) && member.build_mode == build_mode
+            && matches!(member.role, ImageSetRole::WorkloadKernel(p) | ImageSetRole::WorkloadRootfs(p) if p == profile)
+    }) {
+        for artifact in &member.artifacts {
+            let Some(installed) = installed_workload_artifact_name(member.role, artifact)? else {
+                // Acquisition stamps advisory metadata; rewritten fields
+                // are not authenticated boot bytes.
+                continue;
+            };
+            if installed == "vmlinux" {
+                anyhow::ensure!(!kernel_seen, "selected workload declares more than one kernel artifact");
+                kernel_seen = true;
+            } else if installed == "rootfs.ext4" {
+                anyhow::ensure!(!root_seen, "selected workload declares more than one root filesystem");
+                root_seen = true;
+            }
+            let path = directory.join(installed);
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() || metadata.len() != artifact.size {
+                bail!("installed workload artifact {installed} is not the declared regular file");
+            }
+            // Plain digest sidecars are mutable and cannot authorize bytes.
+            // Until an integrity-bound receipt exists, warm hits hash directly.
+            let actual = mvm_core::crypto::image_verify::sha256_file(&path)?;
+            if actual != artifact.sha256.as_str() {
+                bail!("installed workload artifact {installed} differs from its authenticated digest");
+            }
+        }
+    }
+    if !kernel_seen || !root_seen {
+        bail!("image set has no complete {profile} workload for {arch} and {build_mode:?}");
+    }
+    verify_base_image_contract(&directory.join("rootfs.ext4"), &manifest.compatibility)
 }

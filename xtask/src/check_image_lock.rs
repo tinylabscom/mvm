@@ -25,10 +25,8 @@
 //! image-source-ref`, the commit that produced the locked set. A checkout of
 //! `main`, or of no ref at all, is a finding: v0.18.0's release failed after
 //! it was tagged because the image repository's `main` gained a manifest field
-//! this tree did not parse yet. A workflow whose purpose is to test the two
-//! `main`s together is listed as a canary, and must not be reachable from a
-//! pull request, the merge queue, a push or another workflow — so it can go
-//! red without blocking anything.
+//! this tree did not parse yet. There is no floating-ref canary exception:
+//! the image producer no longer copies runtime source from this repository.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -57,20 +55,6 @@ const WORKFLOW_DIR: &str = ".github/workflows";
 /// The command whose output every source checkout of the image repository
 /// must take its ref from.
 const SOURCE_REF_RESOLVER: &str = "xtask -- image-source-ref";
-
-/// Workflows that check the image repository out at its `main` on purpose:
-/// they exist to find out, before a pin advances, whether the two `main`s
-/// still work together. Each must stay off every gating path.
-const CANARY_WORKFLOWS: [&str; 1] = [".github/workflows/image-pair.yml"];
-
-/// Triggers that make a workflow's result block a merge or a release.
-const GATING_TRIGGERS: [&str; 5] = [
-    "pull_request",
-    "pull_request_target",
-    "merge_group",
-    "push",
-    "workflow_call",
-];
 
 /// How one `image-set/v…` mention behaves.
 #[derive(Debug, PartialEq, Eq)]
@@ -222,7 +206,7 @@ fn findings_in(file: &str, text: &str, locked: &str) -> Vec<Finding> {
 }
 
 /// Every source checkout of `images_repository` in one workflow that does not
-/// take its ref from the lock, and every gating trigger on a canary.
+/// take its ref from the lock.
 fn checkout_findings(file: &str, text: &str, images_repository: &str) -> Vec<Finding> {
     let lines: Vec<&str> = text.lines().collect();
     let finding = |line: usize, detail: String| Finding {
@@ -230,23 +214,6 @@ fn checkout_findings(file: &str, text: &str, images_repository: &str) -> Vec<Fin
         line: line + 1,
         detail,
     };
-    if CANARY_WORKFLOWS.contains(&file) {
-        return triggers(&lines)
-            .into_iter()
-            .filter(|(_, trigger)| GATING_TRIGGERS.contains(&trigger.as_str()))
-            .map(|(line, trigger)| {
-                finding(
-                    line,
-                    format!(
-                        "is a canary that checks out {images_repository} at a ref the lock does \
-                         not pin, so it must not run on `{trigger}`: a canary on a gating path \
-                         lets the other repository's `main` block this one"
-                    ),
-                )
-            })
-            .collect();
-    }
-
     let mut findings = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if yaml_value(line, "repository") != Some(images_repository) {
@@ -337,47 +304,6 @@ fn step_bounds(lines: &[&str], index: usize) -> std::ops::Range<usize> {
         })
         .unwrap_or(lines.len());
     start..end
-}
-
-/// A workflow's triggers, each with the line it is declared on. Covers the
-/// block form (`on:` then one key per line) and the inline forms
-/// (`on: push`, `on: [push, pull_request]`).
-fn triggers(lines: &[&str]) -> Vec<(usize, String)> {
-    let Some(on) = lines
-        .iter()
-        .position(|line| line.starts_with("on:") || line.starts_with("\"on\":"))
-    else {
-        return Vec::new();
-    };
-    let inline = lines[on]
-        .split_once(':')
-        .map_or("", |(_, rest)| rest)
-        .trim();
-    if !inline.is_empty() {
-        return inline
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .split(',')
-            .map(|trigger| (on, trigger.trim().to_string()))
-            .filter(|(_, trigger)| !trigger.is_empty())
-            .collect();
-    }
-    let mut found = Vec::new();
-    for (index, line) in lines.iter().enumerate().skip(on + 1) {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if indentation(line) == 0 {
-            break;
-        }
-        if indentation(line) == 2
-            && let Some((key, _)) = trimmed.split_once(':')
-        {
-            found.push((index, key.trim().to_string()));
-        }
-    }
-    found
 }
 
 /// Classify every `image-set/v…` on one line.
@@ -604,33 +530,14 @@ mod tests {
     }
 
     #[test]
-    fn a_canary_on_schedule_and_dispatch_passes() {
+    fn a_scheduled_image_pair_checkout_has_no_floating_ref_exception() {
         let text = "on:\n  schedule:\n    - cron: \"0 0 * * *\"\n  workflow_dispatch:\n\
                     jobs:\n  pair:\n    steps:\n      - uses: actions/checkout@v6\n\
                     \x20       with:\n          repository: tinylabscom/mvm-images\n\
                     \x20         ref: main\n";
-        assert_eq!(checkout_findings(CANARY_WORKFLOWS[0], text, IMAGES), vec![]);
-    }
-
-    #[test]
-    fn a_canary_on_a_gating_trigger_fails_in_either_form() {
-        for (text, trigger) in [
-            (
-                "on:\n  schedule:\n  pull_request:\njobs: {}\n",
-                "pull_request",
-            ),
-            ("on:\n  workflow_call:\njobs: {}\n", "workflow_call"),
-            ("on: [schedule, merge_group]\njobs: {}\n", "merge_group"),
-            ("on: push\njobs: {}\n", "push"),
-        ] {
-            let findings = checkout_findings(CANARY_WORKFLOWS[0], text, IMAGES);
-            assert_eq!(findings.len(), 1, "{text:?}: {findings:?}");
-            assert!(
-                findings[0].detail.contains(trigger),
-                "{}",
-                findings[0].detail
-            );
-        }
+        let findings = checkout_findings(".github/workflows/image-pair.yml", text, IMAGES);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("main"));
     }
 
     /// The shipped tree is the gate's real subject; a green unit suite over

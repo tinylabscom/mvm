@@ -256,12 +256,22 @@ fn locate(dir: &Path, base: &str) -> Result<Vec<Located>, SegmentSetError> {
 /// an I/O error from the code that was only trying to order the set. Answering
 /// "1" for an unreadable head costs nothing, because the verifier refuses that
 /// segment moments later.
+///
+/// Reads up to the first non-empty line and no further: the live segment can
+/// run to megabytes, and it is located on every launch and every exit.
 fn active_seq(path: &Path) -> Result<u64, SegmentSetError> {
-    let content = std::fs::read_to_string(path).map_err(|e| SegmentSetError::Io(e.to_string()))?;
-    let Some(first) = content.lines().find(|l| !l.is_empty()) else {
-        return Ok(1);
+    use std::io::BufRead as _;
+    let file = std::fs::File::open(path).map_err(|e| SegmentSetError::Io(e.to_string()))?;
+    let mut lines = std::io::BufReader::new(file).lines();
+    let first = loop {
+        match lines.next() {
+            None => return Ok(1),
+            Some(Err(e)) => return Err(SegmentSetError::Io(e.to_string())),
+            Some(Ok(line)) if line.is_empty() => continue,
+            Some(Ok(line)) => break line,
+        }
     };
-    Ok(serde_json::from_str::<SignedEnvelope>(first)
+    Ok(serde_json::from_str::<SignedEnvelope>(&first)
         .ok()
         .and_then(|e| continuation_from_entry(&e.entry))
         .map_or(1, |c| c.segment))

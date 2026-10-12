@@ -419,7 +419,7 @@ fn a_builder_entry_is_served_after_an_unrelated_mvm_commit() {
     );
     git(&pair.mvm(), &["add", "-A"]);
     git(&pair.mvm(), &["commit", "-q", "-m", "an unrelated change"]);
-    assert_ne!(pair.whole_checkout(), built_from.mvm);
+    assert_ne!(Some(pair.whole_checkout()), built_from.mvm);
 
     let again = pair.builder_key();
     assert_eq!(again, key);
@@ -465,7 +465,7 @@ fn emit_kernel_set(dir: &Path, checkouts: &LocalCheckouts) {
         "set_version": "0.0.0-local",
         "issued_at": "2026-01-01T00:00:00Z",
         "producer": {"local_checkouts": checkouts},
-        "mvm_source_commit": checkouts.mvm.commit,
+        "mvm_source_commit": checkouts.mvm.as_ref().unwrap().commit,
         "compatibility": {
             "guest_agent_protocol": {"min": 2, "max": 2},
             "builder_cache_contract": 1,

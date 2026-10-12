@@ -344,6 +344,11 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
         );
     }
     if required.iter().all(|p| std::path::Path::new(p).exists()) {
+        mvm_build::published_image_set::verify_cached_default_workload(
+            std::path::Path::new(cache_dir),
+            mvm_core::arch::GuestArch::host(),
+            None,
+        )?;
         return Ok((kernel_path, rootfs_path));
     }
     // Which arm produces the image is a policy decision with an operator
@@ -429,6 +434,11 @@ pub(crate) fn dev_image_from(
         .iter()
         .all(|label| std::path::Path::new(&format!("{cache_dir}/{label}")).exists())
     {
+        mvm_build::published_image_set::verify_cached_default_workload(
+            std::path::Path::new(cache_dir),
+            mvm_core::arch::GuestArch::host(),
+            Some(mvm_core::image_set::MemberBuildMode::Dev),
+        )?;
         return Ok((kernel_path, rootfs_path));
     }
     Err(mvm_build::image_source::ImageConstructionRefused::new("the dev default image").into())
@@ -436,7 +446,7 @@ pub(crate) fn dev_image_from(
 
 /// Serve one profile-qualified workload image from the pair: install the
 /// verified set into the caller's profile-specific cache, stamp it with the
-/// pair identity, and answer an unchanged pair without a cache lookup.
+/// pair identity, and reverify an unchanged pair through its retained proof.
 ///
 /// The variant picks the checkout's attribute: `default` for the sealed
 /// image, `dev` for the writable one.
@@ -452,9 +462,9 @@ fn ensure_pair_workload_image(
         attr: FlakeAttr::new(variant.attr())
             .expect("a variant attribute is a valid flake attribute"),
     };
-    let fingerprint = super::local_pair::pair_fingerprint(&super::local_pair::derive_pair_key(
-        checkout, &target,
-    )?);
+    let key = super::local_pair::derive_pair_key(checkout, &target)?;
+    let fingerprint = super::local_pair::pair_fingerprint(&key);
+    let contract = mvm_build::image_source::contract_for(&target)?;
     let kernel_path = format!("{cache_dir}/vmlinux");
     let rootfs_path = format!("{cache_dir}/rootfs.ext4");
     if variant
@@ -464,10 +474,42 @@ fn ensure_pair_workload_image(
         && installed_pair_fingerprint(std::path::Path::new(cache_dir)).as_deref()
             == Some(fingerprint.as_str())
     {
+        let mvm_root = mvm_build::image_source::mvm_source_checkout(
+            mvm_build::artifact_acquisition::compiled_channel(),
+        )
+        .context("the paired mvm checkout is no longer on disk")?;
+        let cache = mvm_build::image_source::LocalImageCache::open_default();
+        let context = mvm_build::image_source::EntryContext {
+            images: checkout,
+            mvm_checkout: &mvm_root,
+            roles: contract.set_roles,
+        };
+        let proof_path = mvm_build::published_image_set::local_workload_proof_path(
+            std::path::Path::new(cache_dir),
+        );
+        if matches!(std::fs::symlink_metadata(&proof_path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        {
+            let mvm_build::image_source::CacheLookup::Hit(entry) = cache.lookup(&key, &context)?
+            else {
+                anyhow::bail!(
+                    "installed local workload has no current verified image-set proof; run `mvmctl bootstrap` to prepare it"
+                );
+            };
+            mvm_build::published_image_set::retain_local_workload_proof(
+                &entry,
+                std::path::Path::new(cache_dir),
+            )?;
+        }
+        mvm_build::published_image_set::verify_local_workload_proof(
+            checkout,
+            &mvm_root,
+            &key,
+            std::path::Path::new(cache_dir),
+            profile,
+        )?;
         return Ok((kernel_path, rootfs_path));
     }
 
-    let contract = mvm_build::image_source::contract_for(&target)?;
     let build = super::local_pair::ensure_pair_built(checkout, target)?;
     let fingerprint = super::local_pair::pair_fingerprint(&build.key);
     std::fs::create_dir_all(cache_dir)
@@ -504,6 +546,21 @@ fn ensure_pair_workload_image(
             source: "local-pair",
             acquired_at: mvm_core::util::time::utc_now(),
         },
+    )?;
+    mvm_build::published_image_set::retain_local_workload_proof(
+        &build.entry,
+        std::path::Path::new(cache_dir),
+    )?;
+    let mvm_root = mvm_build::image_source::mvm_source_checkout(
+        mvm_build::artifact_acquisition::compiled_channel(),
+    )
+    .context("the paired mvm checkout is no longer on disk")?;
+    mvm_build::published_image_set::verify_local_workload_proof(
+        checkout,
+        &mvm_root,
+        &build.key,
+        std::path::Path::new(cache_dir),
+        profile,
     )?;
     Ok((kernel_path, rootfs_path))
 }
@@ -582,6 +639,10 @@ mod pair_default_image_tests {
     use crate::commands::env::builder_vm::test_pair::{Pair, produced_sidecar};
     use mvm_build::image_source::ImageBuildRole;
     use mvm_core::util::test_env::TestEnv;
+
+    fn in_payload_capable_test_process(name: &str) -> bool {
+        crate::test_boot_payload::in_payload_capable_test_process(module_path!(), name)
+    }
 
     #[test]
     fn launch_kernel_resolution_refuses_an_unprepared_cache() {
@@ -673,6 +734,221 @@ mod pair_default_image_tests {
         .expect("an unchanged pair answers from the install");
         assert_eq!(kernel, again_kernel);
         assert_eq!(rootfs, again_rootfs);
+    }
+
+    #[test]
+    fn linux_pair_cache_hits_boot_only_verified_installed_bytes_and_retained_proof() {
+        if !in_payload_capable_test_process(
+            "linux_pair_cache_hits_boot_only_verified_installed_bytes_and_retained_proof",
+        ) {
+            return;
+        }
+        use crate::commands::env::builder_vm::test_pair::write;
+        for variant in [DefaultMicrovmVariant::Prod, DefaultMicrovmVariant::Dev] {
+            let mut env = TestEnv::new();
+            let pair = Pair::new();
+            env.set("MVM_HOME", pair.tmp.path().join("home"));
+            let _entry = pair.publish_linux_workload(variant.attr());
+            let cache = pair.tmp.path().join("installed");
+            let ensure = || {
+                ensure_pair_workload_image(
+                    &pair.images,
+                    &cache.display().to_string(),
+                    variant,
+                    WorkloadImageProfile::DefaultTenant,
+                )
+            };
+            let (_, root) = ensure().unwrap();
+            let proof = mvm_build::published_image_set::local_workload_proof_path(&cache);
+            assert!(proof.is_file());
+            std::fs::remove_dir_all(
+                mvm_build::image_source::LocalImageCache::open_default().root(),
+            )
+            .unwrap();
+            ensure().expect("retained proof survives backing-cache eviction");
+            let original = std::fs::read(&root).unwrap();
+            let mut altered = original.clone();
+            *altered.last_mut().unwrap() ^= 1;
+            std::fs::write(&root, altered).unwrap();
+            let path = std::path::Path::new(&root);
+            let metadata = std::fs::metadata(path).unwrap();
+            let mtime = metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::fs::write(
+                mvm_core::crypto::image_verify::sha256_cache_path(path),
+                format!(
+                    "{} {} {}\n",
+                    mvm_core::packs::Sha256Hex::from_bytes(&original).as_str(),
+                    metadata.len(),
+                    mtime
+                ),
+            )
+            .unwrap();
+            assert!(
+                ensure().is_err(),
+                "forged digest sidecar cannot waive installed bytes"
+            );
+            std::fs::write(&root, original).unwrap();
+            ensure().unwrap();
+            write(
+                &pair.images.root().join("images/default-tenant/image.nix"),
+                b"# changed source\n",
+            );
+            assert!(
+                ensure().is_err(),
+                "source drift must refuse before any build"
+            );
+        }
+    }
+
+    #[test]
+    fn retained_pair_proof_binds_full_key_digest_and_mode_after_backing_eviction() {
+        if !in_payload_capable_test_process(
+            "retained_pair_proof_binds_full_key_digest_and_mode_after_backing_eviction",
+        ) {
+            return;
+        }
+        for (source_mode, destination_mode) in [
+            (DefaultMicrovmVariant::Dev, DefaultMicrovmVariant::Prod),
+            (DefaultMicrovmVariant::Prod, DefaultMicrovmVariant::Dev),
+        ] {
+            let mut env = TestEnv::new();
+            let pair = Pair::new();
+            env.set("MVM_HOME", pair.tmp.path().join("home"));
+            pair.publish_linux_workload(source_mode.attr());
+            pair.publish_linux_workload(destination_mode.attr());
+            let source = pair.tmp.path().join("source");
+            let destination = pair.tmp.path().join("destination");
+            let ensure = |directory: &std::path::Path, mode| {
+                ensure_pair_workload_image(
+                    &pair.images,
+                    &directory.display().to_string(),
+                    mode,
+                    WorkloadImageProfile::DefaultTenant,
+                )
+            };
+            ensure(&source, source_mode).unwrap();
+            ensure(&destination, destination_mode).unwrap();
+            let source_proof = mvm_build::published_image_set::local_workload_proof_path(&source);
+            let destination_proof =
+                mvm_build::published_image_set::local_workload_proof_path(&destination);
+            let record_path = destination_proof
+                .parent()
+                .unwrap()
+                .join(mvm_build::image_source::ENTRY_RECORD_NAME);
+            let original_record = std::fs::read(&record_path).unwrap();
+            std::fs::remove_dir_all(
+                mvm_build::image_source::LocalImageCache::open_default().root(),
+            )
+            .unwrap();
+            ensure(&destination, destination_mode).unwrap();
+            for field in ["key_digest", "manifest_sha256"] {
+                let mut record: serde_json::Value =
+                    serde_json::from_slice(&original_record).unwrap();
+                record[field] = serde_json::json!("0".repeat(64));
+                std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+                assert!(
+                    ensure(&destination, destination_mode).is_err(),
+                    "{field} mismatch"
+                );
+            }
+            std::fs::remove_file(&record_path).unwrap();
+            assert!(
+                ensure(&destination, destination_mode).is_err(),
+                "lost entry record is unprepared"
+            );
+            std::fs::write(&record_path, &original_record).unwrap();
+            ensure(&destination, destination_mode).unwrap();
+
+            // Transplant original proof and actual boot bytes, while leaving
+            // the destination's stamped key and stale verity files untouched.
+            for file in std::fs::read_dir(source_proof.parent().unwrap()).unwrap() {
+                let file = file.unwrap();
+                std::fs::copy(
+                    file.path(),
+                    destination_proof.parent().unwrap().join(file.file_name()),
+                )
+                .unwrap();
+            }
+            for name in ["vmlinux", "rootfs.ext4", "rootfs.verity", "rootfs.roothash"] {
+                if source.join(name).is_file() {
+                    std::fs::copy(source.join(name), destination.join(name)).unwrap();
+                }
+            }
+            let error = ensure(&destination, destination_mode).unwrap_err();
+            assert!(format!("{error:#}").contains("different key"), "{error:#}");
+
+            // Even rebinding the mutable record cannot waive the target's
+            // required boot artifact set (prod includes verity and roothash).
+            let mut rebound: serde_json::Value = serde_json::from_slice(&original_record).unwrap();
+            rebound["manifest_sha256"] = serde_json::json!(
+                mvm_core::packs::Sha256Hex::from_bytes(&std::fs::read(&destination_proof).unwrap())
+                    .as_str()
+            );
+            std::fs::write(&record_path, serde_json::to_vec(&rebound).unwrap()).unwrap();
+            let error = ensure(&destination, destination_mode).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("exact boot artifact set"),
+                "{error:#}"
+            );
+            if destination_mode == DefaultMicrovmVariant::Prod {
+                let mut manifest: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&destination_proof).unwrap()).unwrap();
+                for member in manifest["members"].as_array_mut().unwrap() {
+                    member["build_mode"] = serde_json::json!("dev");
+                }
+                let bytes = serde_json::to_vec(&manifest).unwrap();
+                std::fs::write(&destination_proof, &bytes).unwrap();
+                rebound["manifest_sha256"] =
+                    serde_json::json!(mvm_core::packs::Sha256Hex::from_bytes(&bytes).as_str());
+                std::fs::write(&record_path, serde_json::to_vec(&rebound).unwrap()).unwrap();
+                let error = ensure(&destination, destination_mode).unwrap_err();
+                assert!(format!("{error:#}").contains("build mode"), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_pair_cache_hit_without_retained_or_backing_proof_is_unprepared() {
+        if !in_payload_capable_test_process(
+            "a_pair_cache_hit_without_retained_or_backing_proof_is_unprepared",
+        ) {
+            return;
+        }
+        let mut env = TestEnv::new();
+        let pair = Pair::new();
+        env.set("MVM_HOME", pair.tmp.path().join("home"));
+        let _entry = pair.publish_linux_workload("default");
+        let cache = pair.tmp.path().join("installed");
+        let ensure = || {
+            ensure_pair_workload_image(
+                &pair.images,
+                &cache.display().to_string(),
+                DefaultMicrovmVariant::Prod,
+                WorkloadImageProfile::DefaultTenant,
+            )
+        };
+        ensure().unwrap();
+        std::fs::remove_file(mvm_build::published_image_set::local_workload_proof_path(
+            &cache,
+        ))
+        .unwrap();
+        ensure().expect("a missing proof can be recovered from the verified original entry");
+        std::fs::remove_dir_all(mvm_build::image_source::LocalImageCache::open_default().root())
+            .unwrap();
+        std::fs::remove_file(mvm_build::published_image_set::local_workload_proof_path(
+            &cache,
+        ))
+        .unwrap();
+        let error = ensure().unwrap_err();
+        assert!(
+            error.to_string().contains("verified image-set proof"),
+            "{error}"
+        );
     }
 
     #[test]

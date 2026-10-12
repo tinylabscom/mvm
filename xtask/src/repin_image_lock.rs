@@ -456,6 +456,32 @@ mod tests {
     }
 
     #[test]
+    fn base_contract_replaces_legacy_protocol_without_rewriting_the_checked_in_lock() {
+        let mut root: serde_json::Value = serde_json::from_slice(&next_root()).unwrap();
+        root["schema_version"] = serde_json::json!(3);
+        root.as_object_mut().unwrap().remove("mvm_source_commit");
+        root["compatibility"]
+            .as_object_mut()
+            .unwrap()
+            .remove("guest_agent_protocol");
+        root["compatibility"]["base_image_contract"] = serde_json::json!(1);
+        root["compatibility"]["builder_boot_abi"] = serde_json::json!(2);
+        let bytes = serde_json::to_vec(&root).unwrap();
+        let rewritten = repin(&checked_in_lock(), &bytes).unwrap();
+        let lock = ImageTrainLock::parse(&rewritten).unwrap();
+        assert_eq!(
+            lock.compatibility.base_image_contract,
+            Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER)
+        );
+        assert!(!rewritten.contains("guest_agent_protocol"));
+        assert_eq!(repin(&rewritten, &bytes).unwrap(), rewritten);
+        let restored = repin(&rewritten, &next_root()).unwrap();
+        assert!(!restored.contains("guest_agent_protocol"));
+        let legacy = ImageTrainLock::parse(&restored).unwrap();
+        assert_eq!(legacy.compatibility.base_image_contract, None);
+    }
+
+    #[test]
     fn the_rewrite_keeps_the_lock_comments_and_legacy_entry() {
         let original = checked_in_lock();
 

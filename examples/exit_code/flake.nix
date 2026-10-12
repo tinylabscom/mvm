@@ -35,13 +35,10 @@
   # `entrypoint.command = [ "/bin/busybox" "sh" "-c" "exit 7" ]`
   #
   # The `command` form → mkGuest infers sealed/prod (dev = false),
-  # builds the agent without `interactive` (no console, no do_exec),
-  # and writes the rendered command to /etc/mvm/entrypoint (mode 0500).
-  # /init sources it, captures $?, reports, poweroffs.
-  #
-  # No `bootCommand` is set — we want PID 1 to BE the one-shot command,
-  # not an idle boot loop + per-call agent dispatch. That is exactly the
-  # non-function-service sealed path.
+  # records the non-interactive image metadata, and writes the rendered
+  # command to /etc/mvm/entrypoint (mode 0755).
+  # The host requests RunEntrypoint; the universal initramfs agent runs
+  # the one-shot command and reports its exit without replacing PID 1.
 
   inputs.mvm.url = "github:tinylabscom/mvm/main?dir=nix";
   inputs.nixpkgs.follows = "mvm/nixpkgs";
