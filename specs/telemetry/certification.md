@@ -71,6 +71,9 @@ sink, writes where a VM's collector writes, and reads back through
 - an event emitted outside any span arrives as a standalone event;
 - guest agent diagnostics and its coverage announcement arrive;
 - one machine's telemetry is not shown for another;
+- a guest that floods diagnostics with no host reading loses records
+  visibly — every emission returns at once, and the loss summary arrives with
+  the session;
 - a record carrying a secret bound to the machine is withheld, counted, and
   absent from the output;
 - a detached machine's workload stdout and stderr are readable without the

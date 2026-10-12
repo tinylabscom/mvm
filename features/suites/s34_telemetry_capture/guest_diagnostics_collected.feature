@@ -30,3 +30,11 @@ Feature: Guest agent diagnostics reach the host collector
     And the output contains "bdd clean diagnostic"
     And the output contains "secret withheld 1"
     And the output does not contain "bdd-telemetry-secret-5f2a9c71e0"
+
+  Scenario: A guest that outruns its host loses records visibly, never waits
+    Given an isolated mvm home
+    And a machine "flooded" whose guest flooded diagnostics while no host was reading
+    When I run mvmctl in the isolated mvm home with "machine telemetry flooded"
+    Then the command exits with code 0
+    And the output contains "guest lost"
+    And the output contains "bdd flood"

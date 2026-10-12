@@ -54,6 +54,13 @@ fn collect(home: &Path, machine: &str, bound_secret: bool, diagnostics: impl FnO
     collect_with(home, machine, bound_secret, diagnostics, |_| {});
 }
 
+/// The guest's capture queue, in records; the agent's own is 128.
+const QUEUE_RECORDS: usize = 64;
+/// How long the host waits for the next record before calling the session
+/// done. Past the capture session's one-second loss-summary clock, so a
+/// session that shed records always reports it before the host stops.
+const QUIET_FOR: Duration = Duration::from_millis(1500);
+
 /// [`collect`], with workload output offered to capture the way the agent's
 /// pipe readers offer it.
 fn collect_with(
@@ -63,13 +70,34 @@ fn collect_with(
     diagnostics: impl FnOnce(),
     output: impl FnOnce(&CaptureState),
 ) {
+    collect_into_queue(
+        home,
+        machine,
+        bound_secret,
+        QUEUE_RECORDS,
+        diagnostics,
+        output,
+    );
+}
+
+fn collect_into_queue(
+    home: &Path,
+    machine: &str,
+    bound_secret: bool,
+    queue_records: usize,
+    diagnostics: impl FnOnce(),
+    output: impl FnOnce(&CaptureState),
+) {
     let state_dir = mvm_core::config::vm_state_dir_at(home, machine);
     std::fs::create_dir_all(&state_dir).unwrap();
     record_boot_provisioning(&state_dir, true).unwrap();
     let key = provision_records_key(&state_dir, &mvm_core::config::mvm_keys_dir_at(home)).unwrap();
 
     let capture = Arc::new(
-        CaptureState::new(Arc::new(Outbox::new(64, 64 * MAX_RECORD_BYTES).unwrap())).unwrap(),
+        CaptureState::new(Arc::new(
+            Outbox::new(queue_records, queue_records * MAX_RECORD_BYTES).unwrap(),
+        ))
+        .unwrap(),
     );
     tracing::subscriber::with_default(AgentSubscriber::new(Arc::clone(&capture)), diagnostics);
     output(&capture);
@@ -114,8 +142,7 @@ fn collect_with(
         CappedJsonlSink::create(&state_dir.join(TELEMETRY_RECORDS_FILE), 1 << 20, key).unwrap(),
         Arc::clone(&losses),
     );
-    host.set_read_timeout(Some(Duration::from_millis(500)))
-        .unwrap();
+    host.set_read_timeout(Some(QUIET_FOR)).unwrap();
     while let Ok(record) = receiver.receive(&mut host) {
         if let mvm_hostd::telemetry_collector::IngestOutcome::Shed(class) = sink.try_ingest(&record)
         {
@@ -192,6 +219,30 @@ async fn detached_workload_wrote_output(world: &mut CliWorld, machine: String) {
                 offer_stdio_to(capture, StdioStream::Stdout, b"bdd-out-line\n");
                 offer_stdio_to(capture, StdioStream::Stderr, b"bdd-err-line\n");
             },
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[given(expr = "a machine {string} whose guest flooded diagnostics while no host was reading")]
+async fn guest_flooded_with_no_reader(world: &mut CliWorld, machine: String) {
+    let home = home(world);
+    tokio::task::spawn_blocking(move || {
+        // Eight queue slots and a hundred events emitted before any host
+        // session exists: every emission returns at once, and what did not
+        // fit is counted for the session to report.
+        collect_into_queue(
+            &home,
+            &machine,
+            false,
+            8,
+            || {
+                for n in 0..100 {
+                    tracing::info!(n, "bdd flood");
+                }
+            },
+            |_| {},
         );
     })
     .await

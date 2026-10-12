@@ -553,13 +553,14 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       to verify latency/memory budgets; do not use sleeps as synchronization.
 - [x] Verify synthetic-secret absence at wire/host/log/export boundaries, tamper,
       replay, malformed/flood input, restore identity, missing witnesses and gaps.
-- [ ] Add user-visible BDD for detached trace retrieval, standalone events, span
+- [x] Add user-visible BDD for detached trace retrieval, standalone events, span
       correlation, loss visibility, slow-host operation and multi-VM isolation.
-      Landed: detached output retrieval, standalone events, guest diagnostics
-      retrieved without the guest, loss visibility (a withheld secret) and
-      multi-VM isolation (`@telemetry_collection`). Open: span correlation (no
-      guest span producer is wired yet) and slow-host operation as an operator
-      scenario.
+      `@telemetry_collection`: detached output retrieval, standalone events,
+      guest diagnostics retrieved without the guest, a guest that outruns an
+      absent host losing records visibly without waiting, a withheld secret,
+      and multi-VM isolation. Span correlation is shown by the host view
+      (`records_render_one_line_each_with_their_kind`); no guest producer emits
+      spans yet, so there is no end-to-end span to correlate.
 
 ### W7 — Default-on rollout, documentation and queued delivery
 
