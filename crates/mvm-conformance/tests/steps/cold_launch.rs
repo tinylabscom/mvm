@@ -47,7 +47,7 @@ fn clean_sample(profile: BuildProfile) -> LaunchSample {
             command_ms: 3.0,
             teardown_ms: 20.0,
             total_ms: 196.0,
-            startup_ms: None,
+            startup_ms: Some(196.0),
         },
         sub_phases: LaunchSubTimings {
             artifact_verify_ms: Some(0.3),

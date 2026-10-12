@@ -570,7 +570,7 @@ fn pack_help_lists_all_subcommands() {
     );
     let help = String::from_utf8_lossy(&out.stdout);
     for verb in [
-        "ls", "rm", "system", "list", "rollback", "prune", "download", "update",
+        "ls", "rm", "system", "list", "rollback", "prune", "download", "update", "lock", "compile",
     ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
@@ -2155,6 +2155,7 @@ fn pack_registry_verbs_parse_and_show_help() {
         vec!["pack", "registry", "ls", "--help"],
         vec!["pack", "registry", "rm", "--help"],
         vec!["pack", "registry", "update", "--help"],
+        vec!["pack", "registry", "revocations", "update", "--help"],
     ] {
         let out = mvmctl_isolated(std::path::Path::new("/tmp"))
             .args(&args)
@@ -2166,6 +2167,12 @@ fn pack_registry_verbs_parse_and_show_help() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    let out = mvmctl_isolated(std::path::Path::new("/tmp"))
+        .args(["pack", "registry", "revocations", "update", "--help"])
+        .output()
+        .expect("revocation help");
+    let help = String::from_utf8(out.stdout).expect("UTF-8 help");
+    assert!(help.contains("--official"));
 }
 
 #[test]

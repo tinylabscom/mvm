@@ -77,9 +77,8 @@ pub(crate) fn start_orphan_reaper() {
 fn seed_wall_clock_from_host_epoch() {
     let cmdline = std::fs::read_to_string("/proc/cmdline")
         .unwrap_or_else(|error| fatal(&format!("read /proc/cmdline for wall clock: {error}")));
-    match mvm_agentd::restore_clock::resync_from_cmdline(&cmdline) {
-        Ok(epoch) => eprintln!("mvm-guest-agent: wall clock set from host epoch {epoch}"),
-        Err(error) => fatal(&format!("wall clock synchronization failed: {error}")),
+    if let Err(error) = mvm_agentd::restore_clock::resync_from_cmdline(&cmdline) {
+        fatal(&format!("wall clock synchronization failed: {error}"));
     }
 }
 
@@ -188,13 +187,16 @@ fn admit_workload_seccomp() -> Result<(), guest_mount::MountError> {
                 "read /proc/cmdline for the workload seccomp tier: {error}"
             ))
         })?;
-        match mvm_agentd::workload_seccomp::admit_from_cmdline(&cmdline)
+        // The admitted tier goes back to the host in the activation response,
+        // so only its absence — a workload about to run unfiltered — is worth
+        // a console line.
+        if mvm_agentd::workload_seccomp::admit_from_cmdline(&cmdline)
             .map_err(guest_mount::MountError::InvalidConfig)?
+            .is_none()
         {
-            Some(tier) => eprintln!("mvm-guest-agent: workload seccomp tier {tier}"),
-            None => eprintln!(
+            eprintln!(
                 "mvm-guest-agent: no workload seccomp tier on the cmdline; workloads run unfiltered"
-            ),
+            );
         }
     }
     Ok(())

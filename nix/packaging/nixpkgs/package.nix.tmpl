@@ -1,0 +1,60 @@
+# Generated from exact-tag signature-verified release assets.
+{ lib, stdenv, fetchurl, autoPatchelfHook }:
+let
+  version = "@@VERSION@@";
+  release = "https://github.com/tinylabscom/mvm/releases/download/v${version}";
+  hosts = {
+    x86_64-linux = { arch = "x86_64"; sha256 = "@@SHA_X86_64@@"; };
+    aarch64-linux = { arch = "aarch64"; sha256 = "@@SHA_AARCH64@@"; };
+  };
+  host = hosts.${stdenv.hostPlatform.system};
+  guestName = "mvm-guest-bins-v${version}.tar.gz";
+  guest = fetchurl {
+    url = "${release}/${guestName}";
+    sha256 = "@@SHA_GUEST@@";
+  };
+  guestChecksum = fetchurl {
+    url = "${release}/${guestName}.sha256";
+    sha256 = "@@SHA_GUEST_CHECKSUM@@";
+  };
+  guestBundle = fetchurl {
+    url = "${release}/${guestName}.bundle";
+    sha256 = "@@SHA_GUEST_BUNDLE@@";
+  };
+in
+stdenv.mkDerivation {
+  pname = "mvmctl-bin";
+  inherit version;
+  src = fetchurl {
+    url = "${release}/mvmctl-${host.arch}-unknown-linux-gnu.tar.gz";
+    inherit (host) sha256;
+  };
+  nativeBuildInputs = [ autoPatchelfHook ];
+  buildInputs = [ stdenv.cc.cc.lib ];
+  dontBuild = true;
+  dontStrip = true;
+  installPhase = ''
+    runHook preInstall
+    mkdir -p "$out/lib/mvmctl/guest-runtime" "$out/bin"
+    for bin in @@HOST_BINS@@; do
+      install -m755 "$bin" "$out/lib/mvmctl/$bin"
+      ln -s "../lib/mvmctl/$bin" "$out/bin/$bin"
+    done
+    install -m755 libmvm_hostlib.so "$out/lib/mvmctl/libmvm_hostlib.so"
+    ln -s mvmctl/libmvm_hostlib.so "$out/lib/libmvm_hostlib.so"
+    install -m644 ${guest} "$out/lib/mvmctl/guest-runtime/${guestName}"
+    install -m644 ${guestChecksum} "$out/lib/mvmctl/guest-runtime/${guestName}.sha256"
+    install -m644 ${guestBundle} "$out/lib/mvmctl/guest-runtime/${guestName}.bundle"
+    mkdir -p "$out/share/mvmctl"
+    printf 'nix\n' > "$out/share/mvmctl/package-managed"
+    runHook postInstall
+  '';
+  meta = {
+    description = "MicroVM command-line tool and complete guest runtime (release binaries)";
+    homepage = "https://github.com/tinylabscom/mvm";
+    license = lib.licenses.asl20;
+    platforms = builtins.attrNames hosts;
+    mainProgram = "mvmctl";
+    sourceProvenance = [ lib.sourceTypes.binaryNativeCode ];
+  };
+}

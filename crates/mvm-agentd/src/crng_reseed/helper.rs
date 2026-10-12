@@ -458,18 +458,15 @@ mod linux {
             crate::guest_mount::CRNG_RESEED_HELPER_UID,
             crate::guest_mount::CRNG_RESEED_HELPER_GID,
         );
-        match spawn
+        // Only the failure is worth a console line; the helper starts on
+        // every boot.
+        if let Err(error) = spawn
             .spawn()
             .and_then(|(stream, child)| install_helper(stream).map(|()| child))
         {
-            Ok(child) => eprintln!(
-                "mvm-guest-agent: CRNG reseed helper pid={} uid={}",
-                child.id(),
-                crate::guest_mount::CRNG_RESEED_HELPER_UID
-            ),
-            Err(error) => eprintln!(
+            eprintln!(
                 "mvm-guest-agent: no CRNG reseed helper ({error}); restores of this guest will be refused"
-            ),
+            );
         }
     }
 

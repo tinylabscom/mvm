@@ -5,6 +5,16 @@ use std::path::Path;
 use super::dto::CreateBlockVolumeRequest;
 use super::service::{LocalVolumeService, VolumeService, probe_from_fn};
 
+/// Capacity of the managed block volumes these tests create, in MiB.
+///
+/// The smallest whole-MiB size the ext4 layout accepts (just over 2 MiB). A
+/// managed volume is whole-file AES-256-GCM at rest, so every create, unlock,
+/// lock and snapshot encrypts or decrypts the full image, and the cipher runs
+/// unoptimised in a test build. At the 16 MiB these tests used before, the
+/// volume suite spent tens of seconds per test doing nothing but that. No test
+/// here needs more room than that.
+pub(crate) const TEST_VOLUME_MIB: u32 = 3;
+
 /// A service whose storage probe reports every path as verified encrypted.
 /// Confined to disposable test homes; it never runs host tools.
 pub(crate) fn service() -> LocalVolumeService {

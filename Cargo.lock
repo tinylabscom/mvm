@@ -3032,6 +3032,7 @@ dependencies = [
  "flate2",
  "globset",
  "hex",
+ "libc",
  "mvm-agentd",
  "mvm-build",
  "mvm-bundler",

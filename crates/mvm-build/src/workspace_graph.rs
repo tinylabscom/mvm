@@ -76,6 +76,13 @@ pub fn parse_package_name(manifest: &str) -> Option<String> {
 ///
 /// Dev-dependencies are excluded — they cannot reach a `[[bin]]`.
 pub fn parse_manifest_deps(manifest: &str) -> Vec<String> {
+    parse_manifest_deps_with_workspace(manifest, None)
+}
+
+fn parse_manifest_deps_with_workspace(
+    manifest: &str,
+    workspace_deps: Option<&toml::Value>,
+) -> Vec<String> {
     let Ok(value) = manifest.parse::<toml::Value>() else {
         return Vec::new();
     };
@@ -83,7 +90,21 @@ pub fn parse_manifest_deps(manifest: &str) -> Vec<String> {
 
     let mut collect = |table: Option<&toml::Value>| {
         if let Some(toml::Value::Table(table)) = table {
-            names.extend(table.keys().cloned());
+            for (key, dependency) in table {
+                let declaration =
+                    if dependency.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                        workspace_deps
+                            .and_then(|deps| deps.get(key))
+                            .unwrap_or(dependency)
+                    } else {
+                        dependency
+                    };
+                let name = declaration
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(key);
+                names.insert(name.to_string());
+            }
         }
     };
 
@@ -106,6 +127,13 @@ pub fn parse_manifest_deps(manifest: &str) -> Vec<String> {
 pub fn read_workspace_graph(workspace_root: &Path) -> WorkspaceGraph {
     let mut dirs = BTreeMap::new();
     let mut manifests = Vec::new();
+    let root_manifest = std::fs::read_to_string(workspace_root.join("Cargo.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Value>().ok());
+    let workspace_deps = root_manifest
+        .as_ref()
+        .and_then(|value| value.get("workspace"))
+        .and_then(|workspace| workspace.get("dependencies"));
 
     let crates_dir = workspace_root.join("crates");
     let mut candidates = Vec::new();
@@ -127,7 +155,11 @@ pub fn read_workspace_graph(workspace_root: &Path) -> WorkspaceGraph {
     let members: BTreeSet<String> = dirs.keys().cloned().collect();
     let mut edges = BTreeMap::new();
     for (name, text) in manifests {
-        let deps = parse_manifest_deps(&text)
+        let declared = workspace_deps.map_or_else(
+            || parse_manifest_deps(&text),
+            |deps| parse_manifest_deps_with_workspace(&text, Some(deps)),
+        );
+        let deps = declared
             .into_iter()
             .filter(|dep| members.contains(dep))
             .collect();

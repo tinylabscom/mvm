@@ -40,14 +40,31 @@ pub enum Cgroup2Status {
 pub fn mount_and_delegate_cgroup2(workload_uid: u32, workload_gid: u32) -> Result<Cgroup2Status> {
     #[cfg(target_os = "linux")]
     {
-        mount_cgroup2()?;
-        delegate_cgroup2(workload_uid, workload_gid)?;
-        Ok(Cgroup2Status::MountedAndDelegated)
+        mount_then_delegate(mount_cgroup2, || {
+            delegate_cgroup2(workload_uid, workload_gid)
+        })
     }
     #[cfg(not(target_os = "linux"))]
     {
         let _ = (workload_uid, workload_gid);
         Ok(Cgroup2Status::KernelLacksCgroups)
+    }
+}
+
+/// Delegate only when the mount found a hierarchy to delegate from. A kernel
+/// without cgroup2 has no `/sys/fs/cgroup`, so delegating there would fail
+/// and report the expected case as a fault.
+#[cfg(any(target_os = "linux", test))]
+fn mount_then_delegate(
+    mount: impl FnOnce() -> Result<Cgroup2Status>,
+    delegate: impl FnOnce() -> Result<()>,
+) -> Result<Cgroup2Status> {
+    match mount()? {
+        Cgroup2Status::KernelLacksCgroups => Ok(Cgroup2Status::KernelLacksCgroups),
+        Cgroup2Status::MountedAndDelegated => {
+            delegate()?;
+            Ok(Cgroup2Status::MountedAndDelegated)
+        }
     }
 }
 
@@ -59,6 +76,15 @@ fn mount_cgroup2() -> Result<Cgroup2Status> {
         // Activation can retry; a second mount would fail EBUSY for a reason
         // that is not a defect.
         return Ok(Cgroup2Status::MountedAndDelegated);
+    }
+    // Ask the kernel before touching sysfs. On a kernel built without cgroups
+    // `/sys/fs/cgroup` does not exist and sysfs refuses to create it with
+    // EPERM, so the mkdir below would report the expected case as a failure
+    // before the mount's ENODEV could classify it.
+    if let Ok(filesystems) = std::fs::read_to_string("/proc/filesystems")
+        && !kernel_registers_cgroup2(&filesystems)
+    {
+        return Ok(Cgroup2Status::KernelLacksCgroups);
     }
     ensure_dir(CGROUP2_MOUNT_POINT)?;
     match mount("cgroup2", CGROUP2_MOUNT_POINT, "cgroup2", 0, "") {
@@ -115,6 +141,18 @@ fn cgroup2_is_mounted(mounts: &str) -> bool {
     })
 }
 
+/// Whether `/proc/filesystems` lists `cgroup2`, i.e. the kernel can mount it.
+///
+/// Each line is an optional `nodev` flag and a filesystem name; the name is
+/// matched exactly so `cgroup` (v1) does not count.
+#[must_use]
+#[cfg(any(target_os = "linux", test))]
+fn kernel_registers_cgroup2(filesystems: &str) -> bool {
+    filesystems
+        .lines()
+        .any(|line| line.split_whitespace().last() == Some("cgroup2"))
+}
+
 /// Whether a cgroup2 mount failure means "this kernel has no cgroup2"
 /// (ENODEV/ENOENT) rather than a real defect. Distinguishing the two is what
 /// keeps a boot on the sealed workload kernel — which compiles cgroups out —
@@ -135,8 +173,38 @@ fn cgroup2_unsupported(error: &MountError) -> bool {
 mod tests {
     use super::{
         CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
-        MountError, cgroup2_is_mounted, cgroup2_unsupported,
+        MountError, cgroup2_is_mounted, cgroup2_unsupported, kernel_registers_cgroup2,
+        mount_then_delegate,
     };
+
+    /// A kernel without cgroup2 is not a delegation failure: the delegation
+    /// step is skipped rather than run against a hierarchy that is not there.
+    #[test]
+    fn a_kernel_without_cgroup2_is_not_delegated() {
+        let mut delegated = false;
+        let status = mount_then_delegate(
+            || Ok(Cgroup2Status::KernelLacksCgroups),
+            || {
+                delegated = true;
+                Ok(())
+            },
+        )
+        .expect("the expected case is not an error");
+        assert_eq!(status, Cgroup2Status::KernelLacksCgroups);
+        assert!(!delegated, "nothing to delegate from");
+
+        let mut delegated = false;
+        let status = mount_then_delegate(
+            || Ok(Cgroup2Status::MountedAndDelegated),
+            || {
+                delegated = true;
+                Ok(())
+            },
+        )
+        .expect("mounted");
+        assert_eq!(status, Cgroup2Status::MountedAndDelegated);
+        assert!(delegated);
+    }
 
     #[test]
     fn cgroup2_mount_detection_reads_proc_mounts() {
@@ -149,6 +217,24 @@ cgroup2 /sys/fs/cgroup cgroup2 rw,nosuid,nodev,noexec,relatime 0 0
         assert!(!cgroup2_is_mounted("cgroup2 /mnt/other cgroup2 rw 0 0\n"));
         assert!(!cgroup2_is_mounted("tmpfs /sys/fs/cgroup tmpfs rw 0 0\n"));
         assert!(!cgroup2_is_mounted(""));
+    }
+
+    /// The sealed workload kernel compiles cgroups out. Its
+    /// `/proc/filesystems` has no `cgroup2` line, which is how provisioning
+    /// tells the expected case from a defect without first failing a mkdir in
+    /// sysfs.
+    #[test]
+    fn cgroup2_support_is_read_from_proc_filesystems() {
+        let with = "nodev\tsysfs\nnodev\tproc\nnodev\tcgroup\nnodev\tcgroup2\n\text4\n";
+        let without = "nodev\tsysfs\nnodev\tproc\nnodev\tdevtmpfs\n\text4\n";
+        let v1_only = "nodev\tcgroup\n";
+        assert!(kernel_registers_cgroup2(with));
+        assert!(!kernel_registers_cgroup2(without));
+        assert!(
+            !kernel_registers_cgroup2(v1_only),
+            "cgroup v1 is not cgroup2"
+        );
+        assert!(!kernel_registers_cgroup2(""));
     }
 
     #[test]

@@ -261,6 +261,10 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
+    // Both write only the file they were asked for (a lock or a flake
+    // directory) and touch no host state, like `build compile`.
+    ("lock", AuditPosture::ReadOnly),
+    ("compile", AuditPosture::ReadOnly),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
