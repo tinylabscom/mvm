@@ -350,7 +350,16 @@ fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
     if unsafe { libc::flock(launch_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         bail!("another HVF launch owns this instance name");
     }
-    let evidence = [
+    if any_path_exists(hvf_runtime_evidence(state_dir))? {
+        bail!("existing HVF runtime evidence requires confirmed cleanup before reuse");
+    }
+    Ok(launch_lock)
+}
+
+/// Files a supervisor launch, or its outcome, leaves under an instance's
+/// state directory.
+fn hvf_runtime_evidence(state_dir: &Path) -> impl Iterator<Item = PathBuf> {
+    [
         stop_wire::INSTANCE_FILE,
         stop_wire::SOCKET_FILE,
         stop_wire::FINALIZED_FILE,
@@ -359,18 +368,33 @@ fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
         "supervisor-status.json",
         "workload.exit",
     ]
-    .map(|name| state_dir.join(name));
-    for path in evidence.into_iter().chain([
+    .map(|name| state_dir.join(name))
+    .into_iter()
+    .chain([
         mvm_core::config::vm_socket_dir_at(state_dir).join(stop_wire::SOCKET_FILE),
         mvm_core::config::vm_hvf_agent_socket_at(state_dir),
-    ]) {
-        match std::fs::symlink_metadata(path) {
-            Ok(_) => bail!("existing HVF runtime evidence requires confirmed cleanup before reuse"),
+    ])
+}
+
+/// Whether no HVF launch was ever attempted under `state_dir`: no launch lock
+/// and no runtime evidence. A launch takes the lock before it spawns a
+/// supervisor, and cleanup removes the directory only after a confirmed exit.
+fn hvf_instance_absent(state_dir: &Path) -> Result<bool> {
+    let lock = std::iter::once(state_dir.join("hvf-launch.lock"));
+    Ok(!any_path_exists(
+        lock.chain(hvf_runtime_evidence(state_dir)),
+    )?)
+}
+
+fn any_path_exists(paths: impl IntoIterator<Item = PathBuf>) -> Result<bool> {
+    for path in paths {
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => return Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error).context("inspect prior HVF runtime evidence"),
         }
     }
-    Ok(launch_lock)
+    Ok(false)
 }
 
 fn boot_with_handoff(
@@ -746,6 +770,11 @@ impl VmmDriver for HvfDriver {
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
         // Legacy/missing control identity is unknown, not proof of a stopped VM.
         let state_dir = vm_state_dir(&id.0);
+        // A name no HVF launch was ever attempted under is different: there is
+        // no instance to stop and no evidence to keep.
+        if hvf_instance_absent(&state_dir)? {
+            return Ok(Box::new(AbsentHvfVm { id: id.clone() }));
+        }
         Ok(Box::new(HvfRunningVm {
             pid_file: state_dir.join(PID_FILE_NAME),
             agent_socket: hvf_agent_socket(&state_dir),
@@ -1194,6 +1223,60 @@ impl VmFullControl for HvfVmFullControl {
     fn supervisor_config_path(&self) -> Result<Option<PathBuf>> {
         let path = self.state_dir.join("supervisor.json");
         Ok(path.is_file().then_some(path))
+    }
+}
+
+/// Handle for an HVF instance name no launch was attempted under, or whose last
+/// instance was confirmed stopped and cleaned up. Stopping it is a no-op;
+/// anything that needs a live guest refuses.
+struct AbsentHvfVm {
+    id: VmId,
+}
+
+impl AbsentHvfVm {
+    fn refuse(&self, action: &str) -> anyhow::Error {
+        anyhow!(
+            "cannot {action} HVF instance {}: it is not running",
+            self.id.0
+        )
+    }
+}
+
+impl RunningVm for AbsentHvfVm {
+    fn id(&self) -> &VmId {
+        &self.id
+    }
+
+    fn wait(&self) -> Result<VmExitStatus> {
+        Err(self.refuse("wait for"))
+    }
+
+    fn prepare_stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn kill(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+        Ok(None)
+    }
+
+    fn pause(&self) -> Result<()> {
+        Err(self.refuse("pause"))
+    }
+
+    fn resume(&self) -> Result<()> {
+        Err(self.refuse("resume"))
+    }
+
+    fn status(&self) -> Result<VmStatus> {
+        Ok(VmStatus::Stopped)
+    }
+
+    fn vsock_connect(&self, _guest_port: u32) -> Result<Box<dyn DuplexStream>> {
+        Err(self.refuse("connect to"))
     }
 }
 
@@ -1763,14 +1846,24 @@ mod tests {
     }
 
     #[test]
-    fn attach_missing_or_legacy_control_is_unknown_and_preserves_evidence() {
+    fn attach_absent_instance_is_stopped_but_legacy_control_is_unknown_and_preserves_evidence() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(home.path());
         let vm = "hvf-nonexistent-attach-test-vm";
-        assert!(HvfDriver::new().attach(&VmId(vm.into())).is_err());
+        let absent = HvfDriver::new().attach(&VmId(vm.into())).unwrap();
+        assert_eq!(absent.status().unwrap(), VmStatus::Stopped);
+        absent.kill().unwrap();
+        assert!(absent.wait().is_err());
         let dir = vm_state_dir(vm);
         mvm_core::config::create_private_dir(&dir).unwrap();
+        // A directory holding only launcher bookkeeping saw no HVF launch.
+        std::fs::write(dir.join("plan.json"), "{}").unwrap();
+        let unlaunched = HvfDriver::new().attach(&VmId(vm.into())).unwrap();
+        assert_eq!(unlaunched.status().unwrap(), VmStatus::Stopped);
+        std::fs::write(dir.join("hvf-launch.lock"), "").unwrap();
+        assert!(HvfDriver::new().attach(&VmId(vm.into())).is_err());
+        std::fs::remove_file(dir.join("hvf-launch.lock")).unwrap();
         std::fs::write(dir.join(PID_FILE_NAME), "4242").unwrap();
         assert!(HvfDriver::new().attach(&VmId(vm.into())).is_err());
         assert_eq!(
