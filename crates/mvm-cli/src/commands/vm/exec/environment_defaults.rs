@@ -82,7 +82,7 @@ pub(in crate::commands) fn apply_installed_bundle_defaults(
     let Some(environment) = args
         .manifest
         .as_deref()
-        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_environment)
+        .map(mvm_client::admission::bundle_environment::installed_bundle_environment)
         .transpose()?
         .flatten()
     else {
