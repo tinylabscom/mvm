@@ -932,7 +932,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-core",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-compiler"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "flate2",
  "globset",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -1185,7 +1185,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "base64",
  "bytes",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -1212,14 +1212,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64",

@@ -841,7 +841,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -892,7 +892,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-fs"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "async-trait",
  "ed25519-dalek",
@@ -927,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "base64",
  "bytes",
