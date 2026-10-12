@@ -36,6 +36,7 @@ use std::process::Command;
 /// optional, off-by-default `schema`-feature dep used only by the
 /// `emit_protocol_schema` bin at build time, and must never reach the
 /// runtime agent's default closure.
+///
 /// The OpenTelemetry family is here for a different reason: guest
 /// telemetry leaves only through the authenticated vsock telemetry session
 /// to the host collector, and an exporter in the agent would be a second,
