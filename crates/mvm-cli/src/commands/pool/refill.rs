@@ -31,6 +31,9 @@ pub struct StandbyRefill {
     pub image: Option<String>,
     pub cpus: u32,
     pub memory_mib: u32,
+    /// Whether the run booted the guest's egress client, so the standby it
+    /// leaves can serve the next run that does.
+    pub egress: bool,
 }
 
 impl StandbyRefill {
@@ -47,6 +50,9 @@ impl StandbyRefill {
         if let Some(image) = &self.image {
             args.push("--image".to_string());
             args.push(image.clone());
+        }
+        if self.egress {
+            args.push("--egress".to_string());
         }
         args
     }
@@ -140,6 +146,7 @@ fn refill_one(
         cpus: refill.cpus,
         memory_mib: refill.memory_mib,
         target,
+        egress: refill.egress,
     };
     let launch = resolve_warm_launch(&req)?;
     let want = compat_for_launch(&launch.start_config)?;
@@ -198,6 +205,7 @@ mod tests {
             image: Some("alpine".into()),
             cpus: 2,
             memory_mib: 512,
+            egress: false,
         };
         assert_eq!(
             refill.helper_args(),
@@ -212,11 +220,17 @@ mod tests {
                 "alpine"
             ]
         );
+        let egress = StandbyRefill {
+            egress: true,
+            ..refill.clone()
+        };
+        assert!(egress.helper_args().iter().any(|a| a == "--egress"));
         let default = StandbyRefill {
             image: None,
             ..refill
         };
         assert!(!default.helper_args().iter().any(|a| a == "--image"));
+        assert!(!default.helper_args().iter().any(|a| a == "--egress"));
     }
 
     #[test]

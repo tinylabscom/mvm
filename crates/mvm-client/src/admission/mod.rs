@@ -689,12 +689,7 @@ pub fn admit_plan_for_boot_configured_ingress(
     // reference name, so the caller adds the resolved bytes' hash — an
     // operator comparing identities sees which exact policy content was
     // admitted, not just its name.
-    let network_policy_digest = {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(serde_json::to_vec(&p.network_policy).expect("policy serializes"));
-        hex::encode(hasher.finalize())
-    };
+    let network_policy_digest = mvm_core::policy::network_policy::content_sha256(&p.network_policy);
 
     let seccomp_tier = mvm_core::plan::workload_seccomp_tier(
         p.seccomp_tier,

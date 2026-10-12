@@ -363,6 +363,17 @@ impl NetworkPolicy {
         }
     }
 
+    /// Hosts of the routes whose rules this policy grants interception for, in
+    /// route order. The endpoint terminates TLS for each of them, so a boot
+    /// needs an egress certificate that covers them.
+    pub fn intercepted_route_hosts(&self) -> Vec<String> {
+        self.routes()
+            .iter()
+            .filter(|route| route.intercept && route.inspects())
+            .map(|route| route.host.clone())
+            .collect()
+    }
+
     /// Attach endpoint routes, replacing any already present.
     #[must_use]
     pub fn with_routes(mut self, new_routes: Vec<crate::policy::routes::EgressRoute>) -> Self {

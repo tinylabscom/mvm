@@ -5107,6 +5107,20 @@ fn test_pool_warm_without_an_image_selects_neither_flag() {
 }
 
 #[test]
+fn test_pool_warm_parses_the_egress_flag() {
+    let egress = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
+        Commands::Pool(pool::Args {
+            action: pool::PoolAction::Warm { egress, .. },
+        }) => egress,
+        _ => panic!("Expected Pool Warm command"),
+    };
+    assert!(!egress(&["mvmctl", "pool", "warm"]));
+    assert!(egress(&[
+        "mvmctl", "pool", "warm", "--image", "alpine", "--egress"
+    ]));
+}
+
+#[test]
 fn test_pool_status_parses_json_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "pool", "status", "--json"]).unwrap();
     match cli.command {

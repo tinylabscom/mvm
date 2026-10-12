@@ -141,6 +141,7 @@ mod tests {
                 cpus: 2,
                 memory_mib: 512,
                 target: 1,
+                egress: false,
             })
             .collect();
         let mut tried = Vec::new();

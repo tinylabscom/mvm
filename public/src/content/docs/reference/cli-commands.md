@@ -1931,8 +1931,17 @@ mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
 A launch with no matching standby cold-boots rather than failing. Named launches
-and shapes with extra volumes (including directory mounts) or allowed egress
-always take the cold path. `MVM_RESIDENCY=cold` turns implicit standbys off.
+and shapes with extra volumes (including directory mounts) always take the cold
+path. `MVM_RESIDENCY=cold` turns implicit standbys off.
+
+A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
+with `pool warm --egress`, or the one an earlier egress-allowing run left
+behind. That standby's guest starts its egress client but holds no policy and
+no destinations; the claim spawns the child's own endpoint under the policy its
+signed plan recorded, and refuses any other. A launch whose endpoint must
+terminate TLS for its own destinations (a bound secret or an intercepted route)
+keeps its cold path, because a shared standby cannot hold a certificate minted
+for them.
 
 Pack inspection reports `official_status: "established"` only for a fully verified
 `mvm/` pack whose signer matches the reserved MVM publisher identity and whose

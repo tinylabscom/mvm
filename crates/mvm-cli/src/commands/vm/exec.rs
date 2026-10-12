@@ -1101,6 +1101,7 @@ fn build_exec_request(
         hypervisor: args.hypervisor.as_deref(),
         cpus: args.cpus,
         memory_mib,
+        egress: network_policy.admits_outbound(),
     });
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,

@@ -542,6 +542,7 @@ mod tests {
             image: Some("alpine".into()),
             cpus: 2,
             memory_mib: 512,
+            egress: false,
         };
         // A claim replaces what it took; a launch that found none prepares one.
         assert_eq!(standby_to_leave(Some(&refill), None), Some(&refill));

@@ -960,10 +960,17 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 /// read-only image tree and a restored child inherits that device model, so the
 /// compatibility key distinguishes it from a block-backed parent.
 ///
-/// Egress-allowing launches stay on the explicitly measured cold path until
-/// `pool warm` can request an egress-enabled parent. The compatibility key
-/// already partitions on that bit, but the current CLI warm command only
-/// creates deny-all parents.
+/// - **launches whose endpoint terminates TLS** — a plan that binds a secret,
+///   or a policy that grants a route interception, needs an egress certificate
+///   minted for that launch's own destinations and handed to the guest at boot.
+///   A restored child trusts only the certificate its parent was handed, and a
+///   parent boots before any launch names a destination.
+///
+/// An egress-allowing launch is keyed rather than excluded. Its parent boots
+/// the guest's egress client and nothing else: no endpoint, no policy and no
+/// destinations. The claim spawns the child's own endpoint under the policy
+/// its signed plan recorded, so a parent shared across claims carries no
+/// launch's allow-list to the next one.
 ///
 /// Materialized directory grants are included in the volume check. The current
 /// factory-parent path has no late attachment operation for their image, so
@@ -971,7 +978,7 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
     cfg.bundle_boot_assets.is_none()
         && cfg.volumes.is_empty()
-        && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
+        && !mvm_vmm::host::egress_shared::launch_terminates_egress_tls(cfg)
 }
 
 /// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby
@@ -1727,15 +1734,12 @@ mod tests {
         }
     }
 
-    /// Until `pool warm` can request an egress-enabled parent, egress launches
-    /// stay visibly cold rather than requiring a standby no command can create.
+    /// An egress-allowing launch is served by a parent that booted the egress
+    /// client, so it claims like any eligible shape instead of keeping a cold
+    /// path; without standbys it boots cold for that reason, not for its shape.
     #[test]
-    fn an_egress_allowing_launch_is_not_yet_warm_eligible() {
+    fn an_egress_allowing_launch_is_warm_eligible() {
         use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
-
-        let baseline = eligible_cfg();
-        assert!(warm_eligible_launch(&baseline));
-        let b = AnyBackend::from_hypervisor("libkrun");
 
         for (why, policy) in [
             (
@@ -1748,11 +1752,70 @@ mod tests {
             let mut cfg = eligible_cfg();
             cfg.network_policy = policy;
             assert!(
-                cfg.network_policy.allows_egress(),
-                "{why} must actually allow egress, or this proves nothing"
+                mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg),
+                "{why} must boot the egress client, or this proves nothing"
             );
+            assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
+            assert_eq!(claim_gate(&cfg, false), Ok(()), "{why}");
+            cfg.warm_pool_size = 0;
+            assert_eq!(
+                claim_gate(&cfg, false),
+                Err(ColdStartReason::StandbysDisabled),
+                "{why} boots cold for want of standbys, not for its shape"
+            );
+        }
+    }
+
+    /// A launch whose endpoint terminates TLS needs a certificate minted for
+    /// its own destinations, which no shared parent can hold, so it keeps its
+    /// cold path rather than claiming a parent whose guest trusts none.
+    #[test]
+    fn a_launch_whose_endpoint_terminates_tls_keeps_its_cold_path() {
+        use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::plan::{SecretBinding, SecretSource};
+
+        let b = AnyBackend::from_hypervisor("libkrun");
+        let mut with_secret = eligible_cfg();
+        with_secret.network_policy =
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .secrets(vec![SecretBinding {
+                name: "API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "test-key".into(),
+                },
+                destinations: Vec::new(),
+                approval_required: false,
+            }])
+            .build();
+        with_secret.plan_json = Some(serde_json::to_string(&plan).unwrap());
+
+        let mut intercepting = eligible_cfg();
+        intercepting.network_policy =
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]).with_routes(
+                vec![EgressRoute {
+                    id: "api".into(),
+                    host: "api.example.com".into(),
+                    port: 443,
+                    rules: vec![EndpointRule {
+                        id: None,
+                        method: Some("GET".into()),
+                        path: "/**".into(),
+                        outcome: RouteOutcome::Allow,
+                    }],
+                    otherwise: RouteOutcome::Deny,
+                    intercept: true,
+                }],
+            );
+
+        for (why, cfg) in [
+            ("a bound secret", with_secret),
+            ("an intercepted route", intercepting),
+        ] {
             assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
             for size in [0, 2] {
+                let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
                 assert_eq!(
                     claim_gate(&cfg, false),
@@ -1762,9 +1825,21 @@ mod tests {
             }
             assert_eq!(
                 try_warm_claim(&b, &cfg, false).unwrap(),
-                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
+                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape),
+                "{why} must cold-boot rather than claim"
             );
         }
+    }
+
+    #[test]
+    fn a_warm_request_resolves_egress_enablement_only() {
+        let deny = warm_network_policy(false);
+        let egress = warm_network_policy(true);
+        assert!(!deny.admits_outbound());
+        assert!(egress.admits_outbound());
+        let mut cfg = eligible_cfg();
+        cfg.network_policy = egress;
+        assert!(mvm_vmm::host::egress_shared::effective_vsock_egress(&cfg));
     }
 
     /// The compat key's egress half is the shared derivation, never a second
@@ -2545,6 +2620,12 @@ pub(in crate::commands) enum PoolAction {
         /// `--memory` (default: the configured `default_memory_mib`).
         #[arg(long)]
         memory: Option<String>,
+        /// Warm parents whose guest starts its egress client, for launches that
+        /// allow egress (`--allow-host`, `--net`). A parent holds no policy and
+        /// no destinations: each claim installs its own plan's policy in its
+        /// own endpoint.
+        #[arg(long)]
+        egress: bool,
     },
     /// Show the standby pool — recorded standbys and their idle/claimed state.
     Status {
@@ -2565,6 +2646,9 @@ pub(in crate::commands) enum PoolAction {
         /// The run's memory, in MiB.
         #[arg(long)]
         memory_mib: u32,
+        /// Whether the run booted the guest's egress client.
+        #[arg(long)]
+        egress: bool,
     },
 }
 
@@ -2576,22 +2660,39 @@ pub(in crate::commands) struct WarmRequest {
     pub(in crate::commands) cpus: u32,
     pub(in crate::commands) memory_mib: u32,
     pub(in crate::commands) target: u32,
+    /// Whether the parents boot the guest's egress client.
+    pub(in crate::commands) egress: bool,
 }
 
 impl WarmRequest {
     /// One standby of `image` at the configured default sizing — the shape a
-    /// `machine run` that passes no `--cpus` or `--memory` claims.
+    /// `machine run` that passes no `--cpus`, `--memory` or egress grant claims.
     pub(in crate::commands) fn one_at_default_sizing(image: Option<&str>, cfg: &MvmConfig) -> Self {
         Self {
             image: image.map(str::to_string),
             cpus: cfg.default_cpus,
             memory_mib: cfg.default_memory_mib,
             target: 1,
+            egress: false,
         }
     }
 
     fn label(&self) -> &str {
         self.image.as_deref().unwrap_or("the default image")
+    }
+}
+
+/// The policy a warm request resolves its launch shape under.
+///
+/// Only the enablement half reaches the parent: the compat key records whether
+/// the guest boots an egress client, and the parent's own config re-derives a
+/// policy from that bit and boots no endpoint. No destination named here is
+/// ever enforced for anyone.
+fn warm_network_policy(egress: bool) -> mvm_core::network_policy::NetworkPolicy {
+    if egress {
+        mvm_core::network_policy::NetworkPolicy::unrestricted()
+    } else {
+        mvm_core::network_policy::NetworkPolicy::default()
     }
 }
 
@@ -2614,10 +2715,9 @@ impl WarmRequest {
 fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch> {
     let image = super::vm::exec::resolve_launch_image_source(req.image.as_deref(), false, None)
         .context("resolving the image the warm parents boot")?;
-    // Deny-all is the default a `machine run` resolves to, and it is the half
-    // of the policy the compat key reads: `StandbyCompat::vsock_egress` records
-    // whether the guest boots an egress client, never a destination.
-    let network_policy = mvm_core::network_policy::NetworkPolicy::default();
+    // `StandbyCompat::vsock_egress` records whether the guest boots an egress
+    // client, never a destination.
+    let network_policy = warm_network_policy(req.egress);
     let shape = crate::exec::LaunchShape {
         name: None,
         image: &image,
@@ -2654,6 +2754,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             image,
             cpus,
             memory_mib,
+            egress,
         } => refill::run_refill(
             &SupervisorStandbyPool::open()?,
             cfg,
@@ -2661,6 +2762,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 image,
                 cpus,
                 memory_mib,
+                egress,
             },
         ),
         PoolAction::Warm {
@@ -2669,6 +2771,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             default_image,
             cpus,
             memory,
+            egress,
         } => {
             let memory_mib = match memory.as_deref() {
                 Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
@@ -2692,6 +2795,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                     cpus: cpus.unwrap_or(cfg.default_cpus),
                     memory_mib,
                     target: count.unwrap_or(1),
+                    egress,
                 })
                 .collect();
             warm_each(&requests, warm_request)
@@ -2754,7 +2858,7 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
     }
     crate::ui::info(
         "A run claims one of these when it matches on image, kernel, vCPUs, memory and \
-         egress enablement and is not given a --name.",
+         egress enablement (`--egress` for runs that allow egress) and is not given a --name.",
     );
     Ok(())
 }

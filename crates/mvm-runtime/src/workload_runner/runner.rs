@@ -42,8 +42,8 @@ use crate::warm_snapshot::{
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::child_grant::{ChildGrantIssuer, issue_child_grant};
 use crate::workload_runner::claim::{
-    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_plan_to_parent_digest,
-    ensure_child_grants_within_host_ceiling,
+    ClaimGuards, ClaimRefusal, EndpointSpawnInputs, bind_claim_policy_to_plan,
+    bind_plan_to_parent_digest, claim_parent_grant_bound, ensure_child_grants_within_host_ceiling,
 };
 use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent_spec};
 use mvm_vmm::host::cmdline;
@@ -524,13 +524,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // ask for more than its parent held. Placed beside the image-digest
         // bind — both bind the admitted plan to this verified parent — and
         // before the child gets an identity, a state dir, or any bytes.
-        ensure_child_grants_within_parent(plan.grants.as_ref(), parent.grants.as_ref()).map_err(
+        let parent_bound = claim_parent_grant_bound(
+            parent.grants.as_ref(),
+            handle.vsock_egress,
+            plan.grants.as_ref(),
+        );
+        ensure_child_grants_within_parent(plan.grants.as_ref(), parent_bound.as_ref()).map_err(
             |e| {
                 refuse(ClaimRefusal::GrantsExceedParent {
                     reason: e.to_string(),
                 })
             },
         )?;
+        // The policy this claim installs in the child's endpoint below must be
+        // the one the child's own signed plan recorded — never the parent's,
+        // which booted with none, and never one supplied beside the plan.
+        bind_claim_policy_to_plan(&plan.asset_identities, &claim.network_policy).map_err(refuse)?;
         // A standby parent carries no grant, so the comparison above has
         // nothing to bind a claimed child's CPU share against and would admit
         // any share at all. The host's own ceiling is what bounds it instead —
@@ -4125,6 +4134,35 @@ mod tests {
         signed_child_plan_json_with_verbs(image_sha256, None)
     }
 
+    /// Record `policy` the way admission records a resolved network policy:
+    /// as a policy asset identity carrying its content digest.
+    fn record_policy_identity(plan: &mut ExecutionPlan, policy: &NetworkPolicy) {
+        plan.asset_identities.push(
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::Policy,
+                "tenant-x:child",
+                mvm_core::policy::network_policy::content_sha256(policy),
+            )
+            .unwrap(),
+        );
+    }
+
+    /// A child plan admitted under `policy`, signed.
+    fn signed_child_plan_json_for_policy(
+        image_sha256: &str,
+        grants: Option<mvm_contract::grants::Grants>,
+        policy: &NetworkPolicy,
+    ) -> String {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("tenant-x")
+            .grants(grants)
+            .build();
+        plan.image.sha256 = image_sha256.to_string();
+        record_policy_identity(&mut plan, policy);
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
+    }
+
     fn signed_child_plan_json_with_grants(
         image_sha256: &str,
         grants: Option<mvm_contract::grants::Grants>,
@@ -4134,6 +4172,7 @@ mod tests {
             .grants(grants)
             .build();
         plan.image.sha256 = image_sha256.to_string();
+        record_policy_identity(&mut plan, &egress_allowing_policy());
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
     }
@@ -4147,6 +4186,7 @@ mod tests {
             .build();
         plan.image.sha256 = image_sha256.to_string();
         plan.agent_verbs = agent_verbs;
+        record_policy_identity(&mut plan, &egress_allowing_policy());
         let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap()
     }
@@ -4440,7 +4480,7 @@ mod tests {
         ]);
         let mut claim = admitted_child_claim(
             &src.path().join("rootfs.ext4"),
-            signed_child_plan_json(&parent_digest),
+            signed_child_plan_json_for_policy(&parent_digest, None, &policy),
         );
         claim.network_policy = policy.clone();
 
@@ -4469,6 +4509,185 @@ mod tests {
             recorded.policy, policy,
             "the child's endpoint must enforce the launch's own allow-list, not the parent's"
         );
+    }
+
+    /// Seed an audited egress-capable parent and return what a claim needs.
+    struct EgressClaimFixture {
+        _home: tempfile::TempDir,
+        _env: TestEnv,
+        store_root: tempfile::TempDir,
+        src: tempfile::TempDir,
+        checkpoints: CheckpointStore,
+        snapshots: FsSnapshotStore,
+        parent_id: CheckpointId,
+        parent_digest: String,
+        anchor: ClaimTestAnchor,
+    }
+
+    impl EgressClaimFixture {
+        fn new() -> Self {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.set("MVM_HOME", home.path());
+            let store_root = tempfile::tempdir().unwrap();
+            let src = tempfile::tempdir().unwrap();
+            let (checkpoints, snapshots, parent_id, parent_meta) =
+                seed_audited_parent(store_root.path(), src.path(), true);
+            let parent_digest = materialized_parent_rootfs_digest(&checkpoints, &parent_meta);
+            let anchor = ClaimTestAnchor::audited(&parent_meta);
+            Self {
+                _home: home,
+                _env: env,
+                store_root,
+                src,
+                checkpoints,
+                snapshots,
+                parent_id,
+                parent_digest,
+                anchor,
+            }
+        }
+
+        /// Claim an idle parent recorded with `parent_boots_egress_client`.
+        fn claim(
+            &self,
+            parent_boots_egress_client: bool,
+            claim: &StandbyClaim,
+        ) -> (
+            std::result::Result<VmId, StandbyError>,
+            Option<NetworkPolicy>,
+        ) {
+            let pool = SupervisorStandbyPool::at(self.store_root.path().join("pool"));
+            let mut handle =
+                idle_parent_handle("warm-parent", &self.store_root.path().join("control.sock"));
+            handle.vsock_egress = parent_boots_egress_client;
+            pool.record(&handle).unwrap();
+            let registry_path = self.store_root.path().join("vm-names.json");
+            let runner = WorkloadRunner::new(
+                MockDriver::default(),
+                RecordingSpawner::new("/run/ep.sock"),
+                RecordingBrokerRegistrar::new(),
+            );
+            let ctx = ClaimContext {
+                pool: &pool,
+                checkpoints: &self.checkpoints,
+                snapshots: &self.snapshots,
+                anchor: &self.anchor,
+                parent_checkpoint: &self.parent_id,
+                registry_path: &registry_path,
+                grant_issuer: None,
+            };
+            let result = runner.claim_standby(&ctx, &handle, claim);
+            let seen = runner
+                .spawner
+                .seen
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|recorded| recorded.policy.clone());
+            (result, seen)
+        }
+
+        fn rootfs(&self) -> PathBuf {
+            self.src.path().join("rootfs.ext4")
+        }
+    }
+
+    fn api_allow_list() -> NetworkPolicy {
+        use mvm_core::network_policy::HostPort;
+        NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
+    }
+
+    fn api_egress_grant() -> mvm_contract::grants::Grants {
+        use mvm_core::network_policy::HostPort;
+        mvm_contract::grants::Grants {
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![HostPort::new("api.example.com", 443)],
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The policy the claim installs must be the one the claiming plan
+    /// recorded. A different policy beside a valid plan is refused before the
+    /// child's endpoint is spawned, so no endpoint ever enforces it.
+    #[test]
+    fn a_claim_carrying_a_policy_its_plan_did_not_record_is_refused_before_any_endpoint() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture = EgressClaimFixture::new();
+        let mut claim = admitted_child_claim(
+            &fixture.rootfs(),
+            signed_child_plan_json_for_policy(&fixture.parent_digest, None, &api_allow_list()),
+        );
+        claim.network_policy = NetworkPolicy::unrestricted();
+
+        let (result, endpoint_policy) = fixture.claim(true, &claim);
+
+        let err = result.expect_err("a policy the plan did not record must refuse the claim");
+        assert!(
+            err.to_string()
+                .contains("is not the policy its admitted plan recorded"),
+            "{err}"
+        );
+        assert_eq!(
+            endpoint_policy, None,
+            "no endpoint may run a refused policy"
+        );
+    }
+
+    /// A parent booted with the egress client carries no destinations of its
+    /// own, so the claiming plan's admitted allow-list is what bounds the child
+    /// — and that same plan's policy is what its endpoint enforces.
+    #[test]
+    fn an_egress_parent_serves_a_child_under_its_own_admitted_allow_list() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture = EgressClaimFixture::new();
+        let policy = api_allow_list();
+        let mut claim = admitted_child_claim(
+            &fixture.rootfs(),
+            signed_child_plan_json_for_policy(
+                &fixture.parent_digest,
+                Some(api_egress_grant()),
+                &policy,
+            ),
+        );
+        claim.network_policy = policy.clone();
+
+        let (result, endpoint_policy) = fixture.claim(true, &claim);
+
+        result.expect("an egress parent serves an egress-granted child");
+        assert_eq!(endpoint_policy, Some(policy));
+    }
+
+    /// A parent booted without the egress client is still sealed deny-all, so
+    /// an egress-granted child is refused rather than restored into a guest
+    /// that has no client to carry its flows.
+    #[test]
+    fn a_parent_without_the_egress_client_refuses_an_egress_granted_child() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let fixture = EgressClaimFixture::new();
+        let policy = api_allow_list();
+        let mut claim = admitted_child_claim(
+            &fixture.rootfs(),
+            signed_child_plan_json_for_policy(
+                &fixture.parent_digest,
+                Some(api_egress_grant()),
+                &policy,
+            ),
+        );
+        claim.network_policy = policy;
+
+        let (result, endpoint_policy) = fixture.claim(false, &claim);
+
+        let err = result.expect_err("a deny-all parent bounds the child to no egress");
+        assert!(err.to_string().contains("api.example.com"), "{err}");
+        assert_eq!(endpoint_policy, None);
     }
 
     /// A channel set described independently of which VM owns it: each port's
