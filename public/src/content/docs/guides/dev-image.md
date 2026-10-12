@@ -135,14 +135,10 @@ For "I just want a shell," skip the flake entirely:
 
 ```sh
 mvmctl image pull alpine
-export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
-mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -it -- /bin/sh
 ```
 
-An unnamed run claims a prepared warm standby of the same image and sizing and
-refuses without one, so the standby is warmed first; add `--name shell` to boot
-cold instead. This pulls (or reuses the cached) `alpine` OCI image, boots a transient microVM, and attaches your terminal to `/bin/sh` inside it. Exiting the shell tears the VM down — the same lifecycle as any other transient `machine run`. No `flake.nix`, no `mvm.toml`, no host Nix.
+This pulls the `alpine` OCI image (or reuses the cached copy), boots a transient microVM, and attaches your terminal to `/bin/sh` inside it. Exiting the shell tears the VM down — the same lifecycle as any other transient `machine run`. No `flake.nix`, no `mvm.toml`, no host Nix.
 
 Once you have specific package or service requirements — beyond what an off-the-shelf OCI image gives you — switch to writing your own dev image per the section above.
 

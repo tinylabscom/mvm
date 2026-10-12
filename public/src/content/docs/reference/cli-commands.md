@@ -97,7 +97,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine apply <name> --dry-run` | Show what an apply would write without staging anything |
 | `mvmctl machine undo <name>` | Reverse the most recent reviewed apply and chain the undo manifest's committed Merkle root |
 | `mvmctl machine redo <name>` | Re-apply the most recently undone apply and chain the redo manifest's committed Merkle root |
-| `mvmctl machine prompt <name> [PROMPT]` | Send one prompt (or stdin) to the running machine's resident agent — the image's `/etc/mvm/entrypoint` — and print its answer. The plan must grant `agent-prompt`; each prompt is journaled under an agent session (`--session`, default the machine name), recorded encrypted, chain-audited by digest, and captured as a session-bound `vm_full` step checkpoint (`--no-step-checkpoint` skips it) |
+| `mvmctl machine prompt <name> [PROMPT]` | Send one prompt (or stdin) to the running machine's resident agent — the image's `/etc/mvm/entrypoint` — and print its answer. The plan must grant `agent-prompt`; each prompt is journaled under an agent session (`--session`, default the machine name), recorded encrypted, chain-audited by digest, and captured as a session-bound `vm_full` step checkpoint (`--no-step-checkpoint` skips it). A host with no snapshot key gets one before the first step is captured, as `bootstrap` would mint it |
 | `mvmctl machine replay <checkpoint>` | Fork a cursor-bound checkpoint into a fresh VM and re-run its encrypted machine-exec input journal, checkpointing each step |                                                                                     | Output filesystem diff as JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl machine wait <name> --for <component>`                                                                          | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>`                                                        | Tune the deadline and poll cadence. Defaults: 60s / 250ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -629,27 +629,32 @@ OCI run omits the trailing command and dispatches only the Entrypoint/Cmd sealed
 into the image; Nix-built production guests may also use
 `mvmctl machine run --entrypoint` (no shell).
 
-An unnamed transient run is served from a prepared warm standby, never a cold
-boot: it claims a VM already booted with the same image, vCPUs and memory, which
-is how startup stays inside its 300 ms budget, and it refuses rather than
-silently cold-booting when no standby matches. On Linux the default residency is
-`parked`, which holds no standbys, so set `MVM_RESIDENCY=warm` and prepare one
-for the image you will run — or give the run a `--name`, which boots it cold:
+No setup is needed before a run. An unnamed run claims a standby VM already
+booted from the same image with the same vCPUs and memory when one is ready, and
+cold-boots otherwise. A cold boot is declared on stderr and recorded in the audit
+log as `plan.start_mode`; a claimed standby is held to the 300 ms startup
+ceiling, and a standby that exists but cannot be claimed fails the run with the
+refusal rather than falling back to a cold boot. Each such run
+leaves one standby of its image prepared afterwards, refilled after every claim,
+so the first run of an image is cold and the runs after it are warm. Standbys
+stay within the `standby_memory_mib` cap and are released after 20 idle minutes, after
+which the next run is cold again. `mvmctl pool warm --image <image>` prepares
+one ahead of time, so even the first run is warm, and `MVM_RESIDENCY=cold` turns
+implicit standbys off:
 
 ```sh
-export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
-mvmctl pool warm                         # a standby of the bundled default image
-mvmctl run -- uname -a                   # claims it
-mvmctl run --name scratch -- uname -a    # named: boots cold, no standby needed
+mvmctl run -- uname -a                   # first run: cold boot, leaves a standby
+mvmctl run -- uname -a                   # claims the standby
+mvmctl pool warm --image alpine          # optional: pre-warm an OCI image
 ```
 
-Runs that share a host directory, attach a disk (`--mount`, `--volume`,
-`--output`), allow egress, or boot a signed bundle are never served from the
-pool and always boot cold, named or not.
+A named run, and a run that shares a host directory, attaches a disk
+(`--mount`, `--volume`, `--output`), allows egress, or boots a signed bundle, is
+never served from a standby and always boots cold.
 
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl run -- <cmd>...`                                            | Claim a prepared standby of the bundled default image (see above), run `<cmd>`, exit                                                                                                                                                                                                                                                                                                  |
+| `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
 | `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
@@ -875,9 +880,7 @@ that stops this way leaves the same host state a `machine stop` does: its
 helper processes are stopped and no pid file is left behind.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
-run but does not make it persistent; it does take the run off the warm pool, so
-a named run boots cold while an unnamed one must claim a prepared standby (see
-[One-shot Run](#one-shot-run-transient-runner)). `-d`/`--detach`, `--up-json`, or the
+run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
 `--volume` host shares work on every run mode. The syntax is
 `HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
@@ -1091,22 +1094,16 @@ live remounting inside a running VM:
 
 ### `machine run` lifecycles in practice
 
-A transient run is the default — it boots, runs the command, and tears the VM
-down. Unnamed, it claims a prepared warm standby of the same image and sizing
-and refuses when none is ready (see [One-shot Run](#one-shot-run-transient-runner)),
-so prepare one first:
+A transient run is the default and needs no flags — it boots, runs the command,
+and tears the VM down:
 
 ```bash
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -- echo hi      # prints "hi", VM gone
 ```
 
 A bare `machine run --image alpine -- /bin/sh` is **non-interactive**: it streams
 the command's output but forwards no terminal. For a live shell or any command
-that needs a TTY, add `-it` and pass the foreground argv explicitly. An `-it` run
-claims a standby the same way, so warm `<dev-image>` first or use the named form
-below:
+that needs a TTY, add `-it` and pass the foreground argv explicitly:
 
 ```bash
 mvmctl machine run -it --image <dev-image> -- /bin/sh   # exits with /bin/sh, VM gone
@@ -1123,9 +1120,8 @@ falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
 **not** add ICMP
 support: `ping` is not a valid smoke test for `--allow-host`.
 
-Naming a foreground run does not make it persistent; it gives the transient VM
-a stable identity while it is running, and because a standby cannot take on
-that identity, a named run boots cold and needs no prepared standby:
+Naming a foreground run does not make it persistent; it only gives the transient
+VM a stable identity while it is running:
 
 ```bash
 mvmctl machine run --name debug --image alpine -- echo hi
@@ -1203,7 +1199,10 @@ machine's admitted charge, would exceed the headroom. Both are unset by
 default. The total counts only machines whose supervisor process is actually
 alive, so a VM that crashed without cleanup cannot lock the host out, and it
 counts each machine's configured maximum rather than its current commitment,
-which the memory balloon moves at runtime. Separately, `default_cpu_millicores`
+which the memory balloon moves at runtime. `standby_memory_mib` caps the guest
+RAM held by idle standbys across all images (2048 MiB by default); when a new
+standby would exceed it, the oldest is released first, and standbys are also
+kept within the `host_budget_memory_mib` headroom. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths
@@ -1623,15 +1622,9 @@ cat ./results/status.txt ./results.manifest.json
 Read-only sized disk mounts require an existing ext4 image. A missing or empty
 read-only image is refused, not created or formatted.
 
-The unnamed runs below claim a standby of the bundled default image, so the
-first two lines prepare one; the template run is named because `pool warm`
-prepares OCI and default images only, and a named run boots cold.
-
 ```bash
-export MVM_RESIDENCY=warm                             # Linux defaults to parked
-mvmctl pool warm                                      # default-image standby
 mvmctl run -- uname -a                                # default image
-mvmctl run --name tpl --manifest minimal -- /bin/true # named template, cold boot
+mvmctl run --manifest minimal -- /bin/true            # named template
 mvmctl run --mount .:/work:ro -- ls /work            # snapshot current dir into an image, RO
 mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
@@ -1743,9 +1736,7 @@ When an image-taking command is invoked without `--flake` or `--manifest`,
 `mvmctl` falls back to a bundled minimal image (busybox + the guest agent).
 This applies to:
 
-- `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`;
-  unnamed, it claims a standby prepared by `mvmctl pool warm` (with
-  `MVM_RESIDENCY=warm`), and `--name` boots it cold instead
+- `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
 - `mvmctl machine run` — boots a long-running microVM with the same image
 
 The image is the bundled default — a minimal `mkGuest` rootfs shipped
@@ -1849,7 +1840,7 @@ running microVM.
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
-| `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
+| `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
 For a built-image pack, `pull` authenticates its descriptor before fetching the
@@ -1863,22 +1854,20 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-On Linux and other non-HVF hosts, the default residency remains `parked`
-(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
-policy. For a prepared, unnamed launch without extra volumes or allowed egress,
-enable claims explicitly:
+`pool warm` is optional. Unnamed runs already leave one standby of each image
+they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
+of an image is warm without it; `pool warm` makes the first one warm too, or
+holds more than one standby of an image:
 
 ```bash
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
-mvmctl machine run --image alpine -- /bin/true
+mvmctl image pull alpine
+mvmctl pool warm --image alpine          # optional pre-warm
+mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
-Remove any explicit `warm_pool_size=0` configuration override: an explicit
-size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
-capacity and fail rather than silently cold-booting. Named launches and shapes
-with extra volumes (including directory mounts) or allowed egress retain their
-cold path, including when the pool size is zero.
+A launch with no matching standby cold-boots rather than failing. Named launches
+and shapes with extra volumes (including directory mounts) or allowed egress
+always take the cold path. `MVM_RESIDENCY=cold` turns implicit standbys off.
 
 Pack inspection reports `official_status: "established"` only for a fully verified
 `mvm/` pack whose signer matches the reserved MVM publisher identity and whose

@@ -675,16 +675,17 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
 /// On `restore_fork`:
 /// 1. Renames `memory.bin` → `mem.bin` inside `child_dir` so the snapshot
 ///    loader finds Firecracker's canonical memory filename.
-/// 2. Reads the parent's device anchors and bind-mounts the child's copies over
-///    those paths in a private mount namespace, so the snapshot bitcode resolves
-///    to the child's files without editing `vmstate.bin`.
-/// 3. Starts a fresh Firecracker and loads the cloned snapshot. The fork
-///    caller delivers the real generation token and optional grant over vsock
-///    after `restore_fork` returns.
+/// 2. Reads the parent's device anchors and points the load at the child's own
+///    devices: the vsock socket through the load's override, every drive the
+///    parent owned through `PATCH /drives` while the vCPUs are still paused
+///    ([`super::ForkDevices`]). Nothing needs a mount namespace or privilege.
+/// 3. The fork caller delivers the real generation token and optional grant
+///    over vsock after `restore_fork` returns.
 pub struct FcForkRestorer;
 
 impl FcForkRestorer {
-    /// Prepare a forked child and return its paused Firecracker API handle.
+    /// The API handle a forked child's load runs through, pointed at the
+    /// child's own devices.
     fn prepare_fork_load(
         &self,
         child_vm_name: &str,
@@ -705,9 +706,6 @@ impl FcForkRestorer {
             })?;
         }
 
-        // Remap the absolute parent paths baked into vmstate.bin to the child's
-        // copies inside a private mount namespace, so the snapshot loads the
-        // child's devices without editing Firecracker bitcode.
         let anchors_path = child_dir.join("device-anchors.json");
         let anchors: mvm_core::checkpoint::DeviceAnchors =
             serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
@@ -725,40 +723,17 @@ impl FcForkRestorer {
         let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
             .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
         super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
-        let mut mappings = Vec::new();
-        mappings.push((anchors.rootfs, child_dir.join("rootfs.ext4")));
-        if let Some(parent) = anchors.rootfs_verity {
-            mappings.push((parent, child_dir.join("rootfs.verity")));
-        }
-        // The snapshot encodes absolute paths under the parent's VM state dir
-        // (vsock UDS, config drive, secrets drive). Remap the whole parent dir
-        // onto the child's state dir in a private mount namespace so every
-        // parent-prefixed path resolves to the child's copy without editing
-        // Firecracker bitcode. A file-level remap of the vsock UDS alone fails
-        // because the child socket does not exist until Firecracker creates it
-        // during snapshot load.
-        let parent_vm_dir = anchors
-            .vsock
-            .parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow::anyhow!("FC fork anchors.vsock has no VM-dir parent"))?;
-        mappings.push((
-            parent_vm_dir.to_path_buf(),
-            std::path::PathBuf::from(&child_vm_dir),
-        ));
+        let devices = super::ForkDevices::from_anchors(
+            &anchors,
+            child_dir,
+            std::path::Path::new(&child_vm_dir),
+        )?;
         std::fs::create_dir_all(child_dir.join("runtime")).ok();
-        super::remap_paths_for_fork(&mappings)
-            .context("remapping parent device paths for FC fork")?;
 
-        // The namespace is already active, so preserve the mounted child vsock
-        // path while Firecracker loads the cloned VM state. The CLI delivers
-        // the real generation token and optional grant after the guest agent
-        // becomes reachable.
-        //
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
         // before the child executes anything. The claim resumes it only after
         // fresh host channels have been wired.
-        Ok(child_io(child_vm_name, child_dir, cpu_grant))
+        Ok(child_io(child_vm_name, child_dir, cpu_grant).forking_onto(devices))
     }
 
     /// Load and guard a forked child without resuming it. Pool refill uses this

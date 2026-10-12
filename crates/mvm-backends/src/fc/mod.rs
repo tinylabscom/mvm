@@ -1,5 +1,5 @@
 //! Firecracker-specific host mechanics: the API client, the VMM process
-//! lifecycle, and the fork mount namespace.
+//! lifecycle, and the devices a forked child is pointed at.
 //!
 //! Implementation detail of the Firecracker backend. Items are `pub` only
 //! where something outside this crate genuinely names them.
@@ -8,7 +8,7 @@ pub mod capabilities;
 pub mod control;
 pub mod daemon;
 pub mod fc_api;
-pub mod fork_namespace;
+pub mod fork_devices;
 pub mod guards;
 pub mod host;
 pub mod io;
@@ -21,7 +21,7 @@ pub use capabilities::*;
 pub use control::*;
 pub use daemon::*;
 pub use fc_api::*;
-pub use fork_namespace::*;
+pub use fork_devices::*;
 pub use guards::*;
 pub use host::*;
 pub use io::*;
@@ -99,11 +99,10 @@ pub fn firecracker_vsock_uds_path(dir: &str) -> String {
 /// Refuse a VM whose Firecracker sockets were moved out of its state dir,
 /// for a path that records them relative to that dir.
 ///
-/// A fork remaps the parent's state dir onto the child's inside a private
-/// mount namespace, and finds that dir as the vsock socket's grandparent. With
-/// the sockets relocated those are two different directories, so the remap
-/// would carry the vsock and leave the config and secrets drives pointing at
-/// the parent's copies. Refusing is the only safe answer there.
+/// A fork finds the parent's state dir as the vsock socket's grandparent and
+/// points every drive under it at the child's copy. With the sockets relocated
+/// those are two different directories, so the config and secrets drives would
+/// be left pointing at the parent's copies. Refusing is the only safe answer there.
 pub fn ensure_fc_sockets_in_state_dir(dir: &str, what: &str) -> Result<()> {
     let socket_dir = fc_socket_dir(dir);
     if socket_dir != Path::new(dir) {

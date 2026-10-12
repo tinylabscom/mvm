@@ -7,6 +7,10 @@ use std::time::Duration;
 
 pub const MVM_RESIDENCY_ENV: &str = "MVM_RESIDENCY";
 
+/// How long an unclaimed standby is held before it is released, for a policy
+/// that names no idle timeout of its own.
+pub const STANDBY_IDLE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
 /// Which residency a policy expresses — the typed discriminant behind the three
 /// constructors, so callers branch on intent rather than the display label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +41,8 @@ impl ResidencyPolicy {
             kind: ResidencyKind::Warm,
         }
     }
-    /// Hold nothing warm; resume from a parked snapshot on demand.
+    /// Prepare nothing ahead of demand; an image a run has booted keeps one
+    /// standby (see [`standby_target`](Self::standby_target)).
     pub fn parked() -> Self {
         Self {
             warm_target: 0,
@@ -46,7 +51,7 @@ impl ResidencyPolicy {
             kind: ResidencyKind::Parked,
         }
     }
-    /// Hold nothing warm and keep no snapshot; cold-boot on demand.
+    /// Hold nothing warm and keep no standby; every run cold-boots.
     pub fn cold() -> Self {
         Self {
             warm_target: 0,
@@ -58,6 +63,21 @@ impl ResidencyPolicy {
 
     pub fn warm_target(&self) -> u32 {
         self.warm_target
+    }
+    /// How many standbys of an image an unnamed run leaves ready after it
+    /// boots that image. Every policy but `Cold` keeps at least one, so a run
+    /// of an image already run on this host is a warm claim; parked and
+    /// always-warm differ only in how many they hold beyond that. `Cold` is
+    /// the explicit opt-out and keeps none.
+    pub fn standby_target(&self) -> u32 {
+        match self.kind {
+            ResidencyKind::Cold => 0,
+            ResidencyKind::Warm | ResidencyKind::Parked => self.warm_target.max(1),
+        }
+    }
+    /// How long a standby may sit unclaimed before it is released.
+    pub fn standby_idle_timeout(&self) -> Duration {
+        self.idle_timeout.unwrap_or(STANDBY_IDLE_TIMEOUT)
     }
     pub fn idle_timeout(&self) -> Option<Duration> {
         self.idle_timeout
@@ -138,11 +158,11 @@ fn host_default_for(is_hvf_default_tier: bool) -> ResidencyPolicy {
 }
 
 /// The warm-pool size to use: an explicit request wins; otherwise the resolved
-/// residency policy's warm target.
+/// residency policy's standby target.
 pub fn effective_warm_pool_size(explicit: Option<u32>) -> u32 {
     match explicit {
         Some(n) => n,
-        None => resolve_residency().0.warm_target(),
+        None => resolve_residency().0.standby_target(),
     }
 }
 
@@ -229,7 +249,26 @@ mod tests {
     fn none_warm_pool_size_falls_back_to_resolved_policy() {
         assert_eq!(
             effective_warm_pool_size(None),
-            resolve_residency().0.warm_target()
+            resolve_residency().0.standby_target()
+        );
+    }
+
+    #[test]
+    fn every_policy_but_cold_keeps_a_standby_of_a_run_image() {
+        assert_eq!(ResidencyPolicy::always_warm().standby_target(), 1);
+        assert_eq!(ResidencyPolicy::parked().standby_target(), 1);
+        assert_eq!(ResidencyPolicy::cold().standby_target(), 0);
+    }
+
+    #[test]
+    fn a_policy_without_an_idle_timeout_releases_standbys_after_the_default() {
+        assert_eq!(
+            ResidencyPolicy::parked().standby_idle_timeout(),
+            STANDBY_IDLE_TIMEOUT
+        );
+        assert_eq!(
+            ResidencyPolicy::always_warm().standby_idle_timeout(),
+            Duration::from_secs(20 * 60)
         );
     }
 
