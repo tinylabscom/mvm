@@ -1,4 +1,5 @@
-//! Shared legacy release-fixture support, compiled only for tests/test-support.
+//! Release checksum-manifest addressing and verification-outcome metrics shared by
+//! self-update and artifact verification.
 use anyhow::{Context, Result};
 
 pub struct ChecksumManifest<'a> {

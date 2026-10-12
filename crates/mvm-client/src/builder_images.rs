@@ -19,8 +19,6 @@ mod stage0_artifact;
 /// the existing `test-support` feature, never through source-path inclusion.
 pub mod test_pair;
 
-#[cfg(any(test, feature = "test-support"))]
-#[doc(hidden)]
 pub mod verification;
 
 // Informational diagnostics do not determine acquisition policy.

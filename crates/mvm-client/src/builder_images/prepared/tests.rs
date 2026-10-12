@@ -260,6 +260,12 @@ fn selected_pair_cold_runtime_requires_explicit_bootstrap() {
     pair.env.isolate_mvm_home(pair.tmp.path());
     pair.env
         .set("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:1");
+    // Pin the acquisition mode: the hint names the bootstrap for the mode in
+    // force, and a test binary's compiled channel must not decide it.
+    pair.env.set(
+        crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+        "build",
+    );
     let mut resolve = resolve_pair;
     let mut source = crate::launch::runtime_source::PairArtifactSource {
         checkout: &pair.images,
@@ -274,6 +280,8 @@ fn selected_pair_cold_runtime_requires_explicit_bootstrap() {
     )
     .unwrap_err()
     .to_string();
+    // A cold runtime is preparation work, never built implicitly from the
+    // selected checkout.
     assert!(
         error.contains("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap"),
         "{error}"
@@ -288,7 +296,8 @@ fn sibling_and_bundled_kernel_do_not_consult_pair_fallback() {
     write(&sibling, b"kernel");
     for (path, backend) in [
         (sibling.to_str().unwrap(), "hvf"),
-        ("/missing/vmlinux", "libkrun"),
+        // qemu resolves its own cached fallback in its driver.
+        ("/missing/vmlinux", "qemu"),
     ] {
         assert_eq!(
             resolve_workload_kernel_with(path, backend, || anyhow::bail!("must not select"))

@@ -1853,12 +1853,18 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
     fn local_sources_are_ingested_only_when_acquisition_allows_it() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        // Stdin is the caller's to supply: this path never reads process
+        // stdin, so an explicit stdin pull is refused before any ingest and
+        // names the entry point that takes a reader.
         for (reference, ingest_refusal) in [
             (
                 "oci-archive:/nonexistent/image.tar",
                 "local OCI archives are dev-only",
             ),
-            ("-", "stdin OCI archives are dev-only"),
+            (
+                "-",
+                "stdin image acquisition requires prepare_image with a supplied archive reader",
+            ),
         ] {
             let pull = resolve_run_image_with(
                 tmp.path(),

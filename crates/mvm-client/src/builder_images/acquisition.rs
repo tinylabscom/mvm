@@ -113,7 +113,9 @@ mod tests {
             mvm_build::kernel_fetch::resolve_kernel(cache.path(), &arch, "workload", false),
             mvm_build::kernel_fetch::KernelResolution::Cached(_)
         ));
-        std::fs::write(&dest, b"tampered kernel fixture").unwrap();
+        // A different length: the digest cache is keyed on size and mtime, and
+        // a same-size rewrite inside one timestamp tick would read as unchanged.
+        std::fs::write(&dest, b"tampered kernel fixture, longer").unwrap();
         assert!(!matches!(
             mvm_build::kernel_fetch::resolve_kernel(cache.path(), &arch, "workload", false),
             mvm_build::kernel_fetch::KernelResolution::Cached(_)

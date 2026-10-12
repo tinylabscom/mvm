@@ -214,6 +214,7 @@ pub enum CheckpointKeyDomainParseError {
 /// [`CheckpointProtection::Unprotected`]: legacy content is never reclassified
 /// as protected, and is never opened through the sealed path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointProtection {
     /// Plaintext chunk objects and whole files: the legacy layout, written

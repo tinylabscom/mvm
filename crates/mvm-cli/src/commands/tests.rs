@@ -1781,7 +1781,15 @@ fn test_parse_volume_spec_dir_share() {
 /// be attached `rw`, because two runs naming one image would both write it.
 #[test]
 fn a_materialized_disk_volume_hands_back_a_lock_the_caller_can_hold() {
+    // The client verifies the host's real storage; a CI runner's disk is not
+    // encrypted, so this takes the audited development override.
     let dir = tempfile::tempdir().unwrap();
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(dir.path().join("mvm"));
+    env.set(
+        mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV,
+        "1",
+    );
     let image = dir.path().join("data.img");
     let volume = mvm_core::vm_backend::VmVolume {
         host: image.display().to_string(),

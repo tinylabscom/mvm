@@ -85,6 +85,12 @@ export type CheckpointKeyDomain = string
  */
 export type CheckpointDigest = string
 /**
+ * How a checkpoint's content is stored at rest.
+ * 
+ * Part of the load-bearing digest, so a sealed record cannot be relabelled unprotected (or the reverse) without failing lineage verification. A record that predates the field carries none on the wire and reads back as [`CheckpointProtection::Unprotected`]: legacy content is never reclassified as protected, and is never opened through the sealed path.
+ */
+export type CheckpointProtection = ("unprotected" | "sealed_v1")
+/**
  * The approval-ledger head a [`SessionBinding`] was admitted under.
  * 
  * Shares the `sha256:<64-hex>` wire shape with [`CheckpointDigest`] — both are heads of a hash chain — but an approval-ledger head is deliberately not a `CheckpointDigest`. `CheckpointDigest`'s own doc explains why the shape is shared with no conversion: so the boundary between unrelated hash-chain heads is a type-system property, not a string check. Without this newtype, `approval_head: CheckpointDigest` would let an approval head be assigned wherever a checkpoint content-address is expected (or the reverse) with the compiler saying nothing — and because `SessionBinding` sits inside `CheckpointMeta`'s digest input, whichever encoding shipped first would freeze into every sealed record's `meta_digest`.
@@ -811,6 +817,10 @@ machine_input_cursor?: (number | null)
  */
 meta_digest: CheckpointDigest
 parent?: (CheckpointDigest | null)
+/**
+ * How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected.
+ */
+protection?: CheckpointProtection
 runtime_overlay_version?: (string | null)
 /**
  * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
@@ -1014,6 +1024,10 @@ machine_input_cursor?: (number | null)
  */
 meta_digest: CheckpointDigest
 parent?: (CheckpointDigest | null)
+/**
+ * How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected.
+ */
+protection?: CheckpointProtection
 runtime_overlay_version?: (string | null)
 /**
  * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
@@ -1077,6 +1091,10 @@ machine_input_cursor?: (number | null)
  */
 meta_digest: CheckpointDigest
 parent?: (CheckpointDigest | null)
+/**
+ * How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected.
+ */
+protection?: CheckpointProtection
 runtime_overlay_version?: (string | null)
 /**
  * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.
@@ -1127,6 +1145,10 @@ machine_input_cursor?: (number | null)
  */
 meta_digest: CheckpointDigest
 parent?: (CheckpointDigest | null)
+/**
+ * How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected.
+ */
+protection?: CheckpointProtection
 runtime_overlay_version?: (string | null)
 /**
  * The durable agent session this checkpoint is a resume point for, when it has one. Load-bearing so a resume cannot be redirected to a different session or replayed at an earlier journal position: the digest covers this field and the signed chain covers the digest.

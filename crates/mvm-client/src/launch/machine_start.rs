@@ -252,7 +252,11 @@ pub fn start_machine_spec(
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
     validate_registry_pack_source(spec)?;
-    let network_policy = preflight_machine_spec(spec, params.hypervisor, spec.image.is_some())?;
+    // The backend-capability half of the preflight belongs to the frontend's
+    // receipt, which names the backend the operator chose; the start itself
+    // derives the enforced policy from the same spec.
+    validate_init_profile(&spec.profile, &spec.init)?;
+    let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let boot = resolve_boot_source(spec, host)?;

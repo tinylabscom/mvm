@@ -505,7 +505,12 @@ fn expired_pack_sweep_preserves_fresh_pack_and_status_describes_both() {
             &key,
         )
         .files(["kernel"])
-        .output_hashes(PackOutputHashes::default())
+        // A builder pack must name its builder image and kernel outputs.
+        .output_hashes(PackOutputHashes {
+            kernel_hash: Some(hash.clone()),
+            builder_image_hash: Some(hash.clone()),
+            ..Default::default()
+        })
         .build()
         .unwrap();
         let root = home

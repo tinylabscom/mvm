@@ -32,6 +32,19 @@ impl IsolatedMachineState {
             _tmp: tmp,
         }
     }
+
+    /// As [`Self::new`], for a test that leases a writable managed volume
+    /// through the client's launch preparation. That path checks the host's
+    /// real storage, which a CI runner's disk does not satisfy, so the test
+    /// takes the audited development override instead.
+    fn with_unverified_volume_storage() -> Self {
+        let mut state = Self::new();
+        state._env.set(
+            mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV,
+            "1",
+        );
+        state
+    }
 }
 
 fn parse(argv: &[&str]) -> Result<MachineAction, clap::Error> {
@@ -4239,7 +4252,7 @@ fn register_writable_state_volume(machine: &str) {
 fn machine_start_leases_a_writable_registered_volume_under_the_spec_profile() {
     use mvm_client::launch::machine_start::StartHost as _;
 
-    let _state = IsolatedMachineState::new();
+    let _state = IsolatedMachineState::with_unverified_volume_storage();
     register_writable_state_volume("web");
     for profile in ["standard", "dev", "permissive"] {
         let mut spec = spec_fixture("web");

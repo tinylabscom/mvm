@@ -1223,8 +1223,10 @@ mod output_spec_tests {
     fn a_destination_inside_a_protected_root_is_found() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("HOME", home.path());
+        // `isolate_mvm_home` points HOME at the mvm root too; the credential
+        // roots under test hang off the user's HOME, so set it afterwards.
         env.isolate_mvm_home(home.path().join("mvm"));
+        env.set("HOME", home.path());
         let destination = home.path().join(".ssh");
         let error = resolve_output_destination(&destination.to_string_lossy()).unwrap_err();
         assert!(

@@ -1290,6 +1290,14 @@
             }
           ]
         },
+        "protection": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointProtection"
+            }
+          ],
+          "description": "How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected."
+        },
         "runtime_overlay_version": {
           "type": [
             "string",
@@ -1337,6 +1345,25 @@
         "vm_name"
       ],
       "type": "object"
+    },
+    "CheckpointProtection": {
+      "description": "How a checkpoint's content is stored at rest.\n\nPart of the load-bearing digest, so a sealed record cannot be relabelled unprotected (or the reverse) without failing lineage verification. A record that predates the field carries none on the wire and reads back as [`CheckpointProtection::Unprotected`]: legacy content is never reclassified as protected, and is never opened through the sealed path.",
+      "oneOf": [
+        {
+          "description": "Plaintext chunk objects and whole files: the legacy layout, written only when a store was explicitly opened without key custody.",
+          "enum": [
+            "unprotected"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Every content blob is a sealed index naming sealed chunk objects, in the authenticated checkpoint-object envelope, under the record's key domain.",
+          "enum": [
+            "sealed_v1"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "CheckpointsCaptureReply": {
       "additionalProperties": false,
@@ -1410,6 +1437,14 @@
               "type": "null"
             }
           ]
+        },
+        "protection": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointProtection"
+            }
+          ],
+          "description": "How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected."
         },
         "runtime_overlay_version": {
           "type": [
@@ -1691,6 +1726,14 @@
             }
           ]
         },
+        "protection": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CheckpointProtection"
+            }
+          ],
+          "description": "How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected."
+        },
         "runtime_overlay_version": {
           "type": [
             "string",
@@ -1826,6 +1869,14 @@
                 "type": "null"
               }
             ]
+          },
+          "protection": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/CheckpointProtection"
+              }
+            ],
+            "description": "How the content is stored at rest. Omitted on the wire when unprotected, so a record sealed before the field existed keeps its digest and still reads as unprotected."
           },
           "runtime_overlay_version": {
             "type": [

@@ -192,6 +192,17 @@ CheckpointId = str
 CheckpointKeyDomain = str
 
 
+class CheckpointProtection1(Enum):
+    unprotected = 'unprotected'
+
+
+class CheckpointProtection2(Enum):
+    sealed_v1 = 'sealed_v1'
+
+
+CheckpointProtection = Union[CheckpointProtection1, CheckpointProtection2]
+
+
 @dataclass
 class CheckpointsDiffRequest:
     a: str
@@ -2900,6 +2911,7 @@ class CheckpointMeta:
     key_domain: Optional[CheckpointKeyDomain] = None
     machine_input_cursor: Optional[int] = None
     parent: Optional[CheckpointDigest] = None
+    protection: Optional[CheckpointProtection] = None
     runtime_overlay_version: Optional[str] = None
     session: Optional[SessionBinding] = None
     snapshot_id: Optional[str] = None
@@ -2920,6 +2932,7 @@ class CheckpointsCaptureReply:
     key_domain: Optional[CheckpointKeyDomain] = None
     machine_input_cursor: Optional[int] = None
     parent: Optional[CheckpointDigest] = None
+    protection: Optional[CheckpointProtection] = None
     runtime_overlay_version: Optional[str] = None
     session: Optional[SessionBinding] = None
     snapshot_id: Optional[str] = None
@@ -2950,6 +2963,7 @@ class CheckpointsInfoReply:
     key_domain: Optional[CheckpointKeyDomain] = None
     machine_input_cursor: Optional[int] = None
     parent: Optional[CheckpointDigest] = None
+    protection: Optional[CheckpointProtection] = None
     runtime_overlay_version: Optional[str] = None
     session: Optional[SessionBinding] = None
     snapshot_id: Optional[str] = None
@@ -2970,6 +2984,7 @@ class CheckpointsListReplyItem:
     key_domain: Optional[CheckpointKeyDomain] = None
     machine_input_cursor: Optional[int] = None
     parent: Optional[CheckpointDigest] = None
+    protection: Optional[CheckpointProtection] = None
     runtime_overlay_version: Optional[str] = None
     session: Optional[SessionBinding] = None
     snapshot_id: Optional[str] = None
