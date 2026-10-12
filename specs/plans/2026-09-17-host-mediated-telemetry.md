@@ -468,12 +468,40 @@ snapshot. Witnesses: `a_stalled_writer_costs_counted_records_never_a_waiting_rec
 `a_sibling_vms_registered_guest_cannot_feed_this_vms_collector` and
 `a_stalled_vms_collector_does_not_slow_another_vms_collector`.
 
-- [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
+Every boot gets a collector (2026-10-12). A first run on real Firecracker found
+that no ordinary launch had ever collected anything: a VM with no egress,
+ingress, secrets or tools has no network endpoint to embed the collector in;
+Firecracker exposes no per-port socket for host-dialed ports, so the collector
+had nothing to dial; and the collector authenticated through a per-VM audit
+signer that only broker services start, so every session failed. Now a VM
+without an endpoint gets the endpoint binary in collector-only mode (no secrets,
+no listeners, its own Landlock + seccomp spec, a keeper that ends it with the
+VM), started beside the boot rather than ahead of it; the collector dials
+Firecracker through its vsock mux; it authenticates through the tenant's
+resident signer helper; records are sealed at rest under a per-VM key wrapped
+by the host transcript KEK; every field passes the stream plane's curated
+redaction seam, and a bound secret split across stdio chunks is withheld.
+Standby parents assert telemetry, so a warm-claimed child is collected, its
+collector started only after the claim succeeds. Live witnesses: Firecracker
+(KVM reference host) and HVF (macOS 26 Apple Silicon), collector-only and
+endpoint-embedded, each reaching `collecting` with a sealed records file and
+the collector exiting on `machine stop`. A warm-claimed child's collection is
+unit-tested; neither host met the 300 ms warm ceiling with or without
+telemetry during the run, so it has no live witness yet.
+
+- [x] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
-- [ ] Bound host resource usage and make saturation non-waiting for ingress and
+- [x] Bound host resource usage and make saturation non-waiting for ingress and
       unrelated control operations. Isolate slow terminal/follower/disk writes.
-- [ ] Verify detached, cold, warm, restore and restart behavior; disk-full and
+- [x] Verify detached, cold, warm, restore and restart behavior; disk-full and
       collector-loss recovery; cross-tenant/forged-identity refusal and fairness.
+      Detached and cold: live on both backends. Warm/restore: unit witnesses
+      (`telemetry_follows_the_boot_that_asserted_it`,
+      `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`).
+      Restart: the records key is reused, so a restarted VM's earlier records
+      stay readable (`the_records_key_is_minted_once_wrapped_and_reused`).
+      Disk-full, forged identity and fairness: the sink and collector witnesses
+      above.
 
 ### W5 — Complete host views and optional export
 
