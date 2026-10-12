@@ -120,48 +120,63 @@ impl LossCounters {
 }
 
 /// How long a stdio chunk may be held back waiting for the rest of its stream
-/// before it is passed on anyway. Bounds the latency the straddle check adds;
-/// a secret whose pieces arrive further apart than this is missed, exactly as
-/// the stream plane's idle release misses one split across a silence.
+/// before it is passed on anyway. Bounds the latency the straddle check adds.
+/// Releasing a chunk never forgets its bytes: the stream's scan context keeps
+/// them, so a secret completed after the hold still withholds the chunk that
+/// completes it. What the hold buys is that the *first* part of the secret is
+/// not written either when the rest follows within it.
 pub const STDIO_HOLD: Duration = Duration::from_millis(500);
 
-/// Stdio streams with chunks held back at once. A guest has a handful of
-/// producers; past this the stream held longest is released early rather
-/// than the set grown.
+/// Stdio streams with records held back at once. A guest has a handful of
+/// producers; past this the stream held longest is released early (its scan
+/// context stays).
 const MAX_HELD_STREAMS: usize = 8;
 
-/// The chunks of one stdio stream not yet passed on, oldest first.
+/// Stdio streams whose scan context is remembered. Past this the stream idle
+/// longest loses its context: a guest would need more stdio producers than
+/// this, each active between the two halves of one secret, to split a secret
+/// across a forgotten boundary.
+const MAX_STREAM_CONTEXTS: usize = 64;
+
+/// One stdio stream as the scrubber sees it.
 ///
-/// Together they always cover at least the scanner's carry — the most bytes
-/// of a bound secret that can sit before a chunk boundary — unless the stream
-/// has not produced that much yet. So the next chunk is always scanned joined
-/// to every byte a straddling secret could have started in, however small the
-/// chunks the guest writes.
-struct HeldStream {
+/// `context` is the last `carry` bytes the stream produced — passed on,
+/// still held or withheld alike — so every chunk is scanned joined to every
+/// byte a straddling secret could have started in, however small the chunks
+/// and however long the gaps between them. It is updated on every chunk and
+/// never cleared by a release, a timeout or the end of a session: no state
+/// the sink can reach scans a chunk with less context than the stream had.
+///
+/// `chunks` are the records not yet passed on, oldest first. A chunk is held
+/// until the stream has produced at least `carry` bytes after it.
+struct StreamState {
     key: (u32, StdioStream),
+    context: Vec<u8>,
     chunks: VecDeque<(TelemetryRecord, Instant)>,
-    bytes: usize,
+    held_bytes: usize,
+    last_seen: Instant,
 }
 
-impl HeldStream {
-    fn oldest(&self) -> Option<Instant> {
+impl StreamState {
+    fn new(key: (u32, StdioStream), now: Instant) -> Self {
+        Self {
+            key,
+            context: Vec::new(),
+            chunks: VecDeque::new(),
+            held_bytes: 0,
+            last_seen: now,
+        }
+    }
+
+    fn oldest_held(&self) -> Option<Instant> {
         self.chunks.front().map(|(_, since)| *since)
     }
 
-    /// The last `carry` bytes held, in stream order.
-    fn tail(&self, carry: usize) -> Vec<u8> {
-        let mut tail = Vec::with_capacity(carry.min(self.bytes));
-        for (record, _) in self.chunks.iter().rev() {
-            let bytes = stdio_bytes(record);
-            let want = carry - tail.len();
-            let take = bytes.len().min(want);
-            // Prepend: walking newest to oldest.
-            tail.splice(0..0, bytes[bytes.len() - take..].iter().copied());
-            if tail.len() == carry {
-                break;
-            }
-        }
-        tail
+    /// Fold `bytes` into the context, keeping its last `carry` bytes.
+    fn remember(&mut self, bytes: &[u8], carry: usize) {
+        self.context.extend_from_slice(bytes);
+        let excess = self.context.len().saturating_sub(carry);
+        self.context.drain(..excess);
     }
 }
 
@@ -178,20 +193,24 @@ impl HeldStream {
 ///
 /// Stdio is the one source that arrives chopped: a secret printed across
 /// chunk boundaries is whole in no chunk. So, only on a VM with bound
-/// secrets, each stream's chunks are held until the stream has produced at
-/// least the scanner's carry beyond them, or until [`STDIO_HOLD`] passes, or
-/// until the session ends. A match across held chunks withholds all of them.
+/// secrets, every chunk is scanned joined to its stream's remembered tail,
+/// and each stream's chunks are held until the stream has produced at least
+/// the scanner's carry beyond them, or until [`STDIO_HOLD`] passes, or until
+/// the session ends. A match withholds the completing chunk and every chunk
+/// still held; a bound secret never reaches the inner sink whole.
 ///
 /// Then every text and byte field goes through the same
 /// [`StreamRedaction`] the stream plane uses, so a guest's telemetry is
-/// redacted to the same rules as its transcript. A field the seam cannot
-/// vouch for, or cannot hold once masked, withholds the record.
+/// redacted to the same rules as its transcript. Every failure is closed: a
+/// field the seam cannot vouch for, or cannot hold once masked, withholds the
+/// record, and the shed is counted. Nothing here has an "off" state: the
+/// scanner and the seam are fixed at construction for the sink's life.
 pub struct ScrubbingSink<S> {
     scanner: Option<SecretScanner>,
     redaction: StreamRedaction,
     inner: S,
     losses: Arc<LossCounters>,
-    held: Vec<HeldStream>,
+    streams: Vec<StreamState>,
 }
 
 impl<S: RecordSink> ScrubbingSink<S> {
@@ -212,7 +231,7 @@ impl<S: RecordSink> ScrubbingSink<S> {
             redaction,
             inner,
             losses,
-            held: Vec::new(),
+            streams: Vec::new(),
         }
     }
 
@@ -245,32 +264,50 @@ impl<S: RecordSink> ScrubbingSink<S> {
         }
     }
 
-    fn release_stream(&mut self, stream: HeldStream) {
-        for (record, _) in stream.chunks {
+    /// Pass on every chunk `streams[at]` holds. Its context stays.
+    fn release_chunks(&mut self, at: usize) {
+        let chunks = std::mem::take(&mut self.streams[at].chunks);
+        self.streams[at].held_bytes = 0;
+        for (record, _) in chunks {
             self.forward(&record);
         }
     }
 
-    fn withhold_stream(&mut self, stream: HeldStream) {
-        for _ in stream.chunks {
-            self.losses.record(LossClass::SecretWithheld);
+    fn release_expired(&mut self, now: Instant) {
+        for at in 0..self.streams.len() {
+            let expired = self.streams[at]
+                .oldest_held()
+                .is_some_and(|since| now.duration_since(since) >= STDIO_HOLD);
+            if expired {
+                self.release_chunks(at);
+            }
         }
     }
 
-    fn release_expired(&mut self, now: Instant) {
-        while let Some(at) = self.held.iter().position(|stream| {
-            stream
-                .oldest()
-                .is_some_and(|since| now.duration_since(since) >= STDIO_HOLD)
-        }) {
-            let stream = self.held.remove(at);
-            self.release_stream(stream);
+    /// The index of `key`'s state, created (and the idle-longest context
+    /// evicted, its held chunks passed on first) when it is new.
+    fn stream_index(&mut self, key: (u32, StdioStream), now: Instant) -> usize {
+        if let Some(at) = self.streams.iter().position(|s| s.key == key) {
+            return at;
         }
+        if self.streams.len() >= MAX_STREAM_CONTEXTS
+            && let Some(at) = self
+                .streams
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, s)| s.last_seen)
+                .map(|(at, _)| at)
+        {
+            self.release_chunks(at);
+            self.streams.swap_remove(at);
+        }
+        self.streams.push(StreamState::new(key, now));
+        self.streams.len() - 1
     }
 
     /// Decide a stdio chunk that passed the whole-field scan: scan it joined
-    /// to the held tail of its stream, then hold it in turn and release
-    /// whatever the stream no longer needs to keep.
+    /// to its stream's context, then hold it and pass on whatever the stream
+    /// no longer needs to keep.
     fn ingest_stdio(
         &mut self,
         record: &TelemetryRecord,
@@ -283,51 +320,58 @@ impl<S: RecordSink> ScrubbingSink<S> {
         if carry == 0 || bytes.is_empty() {
             return self.pass_on(record);
         }
-        let mut stream = match self.held.iter().position(|held| held.key == key) {
-            Some(at) => self.held.remove(at),
-            None => HeldStream {
-                key,
-                chunks: VecDeque::new(),
-                bytes: 0,
-            },
-        };
-        let mut joined = stream.tail(carry);
+        let now = Instant::now();
+        let at = self.stream_index(key, now);
+        let stream = &mut self.streams[at];
+        stream.last_seen = now;
+        let mut joined = Vec::with_capacity(stream.context.len() + bytes.len());
+        joined.extend_from_slice(&stream.context);
         joined.extend_from_slice(bytes);
+        // The context advances whatever the verdict: a withheld chunk's bytes
+        // still precede the next chunk in the stream the guest wrote.
+        stream.remember(bytes, carry);
         let straddles = self
             .scanner
             .as_ref()
             .is_some_and(|scanner| scanner.contains_bound_secret(&joined));
         if straddles {
-            self.withhold_stream(stream);
+            let stream = &mut self.streams[at];
+            let withheld = std::mem::take(&mut stream.chunks);
+            stream.held_bytes = 0;
+            for _ in withheld {
+                self.losses.record(LossClass::SecretWithheld);
+            }
             return IngestOutcome::Shed(LossClass::SecretWithheld);
         }
-        stream.chunks.push_back((record.clone(), Instant::now()));
-        stream.bytes += bytes.len();
-        // Keep only what a secret straddling into the next chunk could start
-        // in: the oldest chunk goes once the rest still cover the carry.
+        let stream = &mut self.streams[at];
+        stream.chunks.push_back((record.clone(), now));
+        stream.held_bytes += bytes.len();
+        // The oldest chunk goes once the chunks after it cover the carry.
+        let mut released = Vec::new();
         while let Some((front, _)) = stream.chunks.front() {
             let front_len = stdio_bytes(front).len();
-            if stream.bytes - front_len < carry {
+            if stream.held_bytes - front_len < carry {
                 break;
             }
             let (front, _) = stream.chunks.pop_front().expect("front exists");
-            stream.bytes -= front_len;
-            self.forward(&front);
+            stream.held_bytes -= front_len;
+            released.push(front);
         }
-        if self.held.len() >= MAX_HELD_STREAMS {
-            let longest = self
-                .held
+        for record in released {
+            self.forward(&record);
+        }
+        let holding = self.streams.iter().filter(|s| !s.chunks.is_empty()).count();
+        if holding > MAX_HELD_STREAMS
+            && let Some(longest) = self
+                .streams
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, held)| held.oldest())
-                .map(|(at, _)| at);
-            if let Some(at) = longest {
-                let released = self.held.remove(at);
-                self.release_stream(released);
-            }
-        }
-        if !stream.chunks.is_empty() {
-            self.held.push(stream);
+                .filter(|(other, _)| *other != at)
+                .filter_map(|(other, s)| s.oldest_held().map(|since| (other, since)))
+                .min_by_key(|(_, since)| *since)
+                .map(|(other, _)| other)
+        {
+            self.release_chunks(longest);
         }
         IngestOutcome::Ingested
     }
@@ -355,8 +399,8 @@ impl<S: RecordSink> RecordSink for ScrubbingSink<S> {
     }
 
     fn release_held(&mut self) {
-        for stream in std::mem::take(&mut self.held) {
-            self.release_stream(stream);
+        for at in 0..self.streams.len() {
+            self.release_chunks(at);
         }
         self.inner.release_held();
     }
@@ -925,6 +969,121 @@ mod tests {
         );
         sink.release_held();
         assert!(kept_sequences(&kept).is_empty());
+    }
+
+    /// The whole secret never reached `kept`, in any concatenation of what
+    /// it holds.
+    fn never_whole(kept: &Keep) -> bool {
+        let mut all = Vec::new();
+        for record in kept.0.lock().unwrap().iter() {
+            for_each_payload_field(record, |bytes| all.extend_from_slice(bytes));
+        }
+        !all.windows(SECRET.len()).any(|w| w == SECRET.as_bytes())
+    }
+
+    #[test]
+    fn a_secret_completed_after_the_hold_expired_still_withholds_its_completion() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
+        let (head, tail) = SECRET.as_bytes().split_at(SECRET.len() / 2);
+        sink.try_ingest(&stdout(1, head));
+        // The guest pauses past the hold: the first half is passed on.
+        sink.release_expired(Instant::now() + STDIO_HOLD);
+        assert_eq!(kept_sequences(&kept), vec![1]);
+        assert_eq!(
+            sink.try_ingest(&stdout(2, tail)),
+            IngestOutcome::Shed(LossClass::SecretWithheld),
+            "the release kept the stream's context"
+        );
+        sink.release_held();
+        assert!(never_whole(&kept));
+    }
+
+    #[test]
+    fn a_session_boundary_does_not_reset_the_scan_context() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
+        let (head, tail) = SECRET.as_bytes().split_at(SECRET.len() / 2);
+        sink.try_ingest(&stdout(1, head));
+        // The session ends (a reconnect, a restore) and a new one begins.
+        sink.release_held();
+        assert_eq!(
+            sink.try_ingest(&stdout(2, tail)),
+            IngestOutcome::Shed(LossClass::SecretWithheld)
+        );
+        sink.release_held();
+        assert!(never_whole(&kept));
+    }
+
+    #[test]
+    fn crowding_out_held_streams_does_not_cost_any_stream_its_context() {
+        let kept = Keep::default();
+        let mut sink = ScrubbingSink::new(fingerprints(), seam(), kept.clone(), Arc::default());
+        let (head, tail) = SECRET.as_bytes().split_at(SECRET.len() / 2);
+        let producers = MAX_HELD_STREAMS as u32 * 2;
+        let chunk = |producer: u32, sequence: u64, bytes: &[u8]| {
+            TelemetryRecord::builder()
+                .epoch(ProducerEpoch::new([5; 16]).unwrap())
+                .producer(producer)
+                .sequence(sequence)
+                .source(SourceKind::GuestAgent)
+                .body(RecordBody::Stdio {
+                    stream: StdioStream::Stdout,
+                    bytes: BoundedList::new(bytes.to_vec()).unwrap(),
+                })
+                .build()
+                .unwrap()
+        };
+        for producer in 1..=producers {
+            sink.try_ingest(&chunk(producer, 1, head));
+        }
+        for producer in 1..=producers {
+            assert_eq!(
+                sink.try_ingest(&chunk(producer, 2, tail)),
+                IngestOutcome::Shed(LossClass::SecretWithheld),
+                "producer {producer}"
+            );
+        }
+        sink.release_held();
+        assert!(never_whole(&kept));
+    }
+
+    #[test]
+    fn a_field_the_seam_refuses_withholds_the_record() {
+        let record = records_carrying("anything").remove(1);
+        assert!(redact_body(record.body(), &mut |_| None).is_none());
+    }
+
+    #[test]
+    fn a_masked_field_that_outgrows_its_bound_withholds_the_record() {
+        let record = records_carrying("anything").remove(0);
+        let mut grow = |input: &[u8]| Some([input, &[b'x'; 4096]].concat());
+        assert!(redact_body(record.body(), &mut grow).is_none());
+    }
+
+    #[test]
+    fn a_dead_writer_sheds_every_later_record_rather_than_writing_it_elsewhere() {
+        struct Dies;
+        impl RecordSink for Dies {
+            fn try_ingest(&mut self, _record: &TelemetryRecord) -> IngestOutcome {
+                panic!("the writer died");
+            }
+        }
+        let losses = Arc::new(LossCounters::default());
+        let mut queue = QueuedSink::spawn("dies", 1, Dies, Arc::clone(&losses)).unwrap();
+        let _ = queue.try_ingest(&coverage(1));
+        // Wait for the writer to take the record and die.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while queue.writer.as_ref().is_some_and(|w| !w.is_finished()) {
+            assert!(Instant::now() < deadline, "writer did not exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for sequence in 2..5 {
+            assert_eq!(
+                queue.try_ingest(&coverage(sequence)),
+                IngestOutcome::Shed(LossClass::QueueFull)
+            );
+        }
     }
 
     #[test]
