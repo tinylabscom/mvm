@@ -436,6 +436,34 @@ pub fn verify_runtime_for_launch(
     verify_runtime_for_launch_at(config, minimum_protocol, None)
 }
 
+/// Release-only preflight over the actual selected launch bytes. The returned
+/// owner authenticates the archive, not execution or ownership of the selected
+/// payloads. Launch must still bind the same configuration through its normal
+/// lifecycle, which snapshots and retains those bytes before backend effects.
+pub fn verify_release_runtime_for_launch(
+    config: &VmStartConfig,
+    minimum_protocol: u32,
+) -> Result<VerifiedRuntimeManifest> {
+    if config.unsigned_runtime_development
+        || config.source_runtime_archive_sha256.is_some()
+        || config.legacy_bundle_runtime.is_some()
+        || config.legacy_portable_runtime.is_some()
+        || config.bundle_boot_assets.is_some()
+    {
+        bail!("CLI release runtime cannot include source, developer, or legacy provenance");
+    }
+    if config.runtime_release_proof.is_none() {
+        bail!("CLI release runtime proof is required");
+    }
+    let Some(VerifiedLaunchRuntime::Release(release)) =
+        verify_runtime_for_launch(config, minimum_protocol)?
+    else {
+        bail!("selected runtime is not a CLI release");
+    };
+    release.verify_selected_artifacts(&runtime_selection(config, minimum_protocol)?)?;
+    Ok(release)
+}
+
 fn verify_runtime_for_launch_at(
     config: &VmStartConfig,
     minimum_protocol: u32,
@@ -685,6 +713,41 @@ impl RuntimeLifecycleLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_only_preflight_rejects_missing_or_developer_provenance() {
+        for config in [
+            VmStartConfig::default(),
+            VmStartConfig {
+                runtime_overlay_version: Some("1.2.3".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                verify_release_runtime_for_launch(&config, 2)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("CLI release runtime proof is required")
+            );
+        }
+        for config in [
+            VmStartConfig {
+                unsigned_runtime_development: true,
+                ..Default::default()
+            },
+            VmStartConfig {
+                source_runtime_archive_sha256: Some("a".repeat(64)),
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                verify_release_runtime_for_launch(&config, 2)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("cannot include source, developer, or legacy provenance")
+            );
+        }
+    }
 
     #[test]
     fn source_binding_pins_checked_archive_and_refuses_changed_selection() {
