@@ -136,6 +136,54 @@ startup.
 | `mvmctl env update --skip-verify`                 | Skip the archive's own signature check; the signed checksum manifest is still verified and still binds the archive                                                                                                                                            |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
 
+### Offline selected runtime verification
+
+`mvmctl env verify-runtime --config launch.json --version 1.2.3 --arch x86_64 --json`
+authenticates a CLI release runtime and checks the selected overlay, verity and
+initramfs bytes against the declaration in that same signed archive. This is a
+release-only diagnostic: success is not a boot capability, retained file
+ownership, or proof that a guest executed the runtime.
+
+`--config` reads runtime-selection fields from launch configuration JSON, not a
+separate binding file or a public serialization contract for `VmStartConfig`.
+It requires `runtime_release_proof` (with `archive`, `checksum`,
+`signature_bundle`, `archive_sha256`, `version` and `arch`),
+`runtime_overlay_version`, `runtime_overlay_path`,
+`runtime_overlay_verity_path`, `runtime_overlay_roothash` and `initrd_path`.
+Unrelated machine settings are ignored. Paths are read as supplied (relative
+paths are relative to the command's working directory). Version strings must
+match exactly; `v1.2.3` is not normalized to `1.2.3`. `--arch` accepts only
+`x86_64` or `aarch64` and need not match the host.
+
+The command rejects `unsigned_runtime_development: true`, a non-null
+`source_runtime_archive_sha256`, and any non-null `bundle_boot_assets`,
+`legacy_bundle_runtime` or `legacy_portable_runtime`. Missing or partial artifact
+selections, invalid signatures, mismatched hashes, roots or incompatible
+protocol declarations fail with a nonzero exit status and no JSON success
+report. Normal developer Source launch is unchanged.
+
+`--json` is required. On success stdout contains one object with this stable
+schema; errors are diagnostics on stderr:
+
+| Field | Type and meaning |
+| --- | --- |
+| `schema_version` | Integer, `1` |
+| `expected_version` | String, exact verified `--version` |
+| `expected_arch` | String, verified `x86_64` or `aarch64` |
+| `provenance` | String, `cli-release` |
+| `archive_sha256` | Lowercase hexadecimal SHA-256 of the authenticated archive |
+| `checked_overlay_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected overlay bytes |
+| `checked_overlay_verity_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected verity bytes |
+| `checked_initramfs_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected initramfs bytes |
+| `checked_overlay_roothash` | Authenticated overlay root matched against the selected root |
+| `protocol_version` | Integer, authenticated runtime protocol version |
+| `min_supported_protocol_version` | Integer, authenticated minimum supported protocol version |
+
+Verification performs no downloads, cache lookup, installation or builds, and
+does not fall back to mutable artifact sidecar metadata. Selected artifact bytes
+are checked without creating a selected-runtime snapshot; files can change after
+the diagnostic returns, so launch must independently verify and own its inputs.
+
 ## Building
 
 `mvmctl build compile app.py --mvm-revision 4e65b221744885e536ec91a3f2948cdc508dcb49`

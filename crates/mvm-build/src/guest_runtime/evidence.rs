@@ -17,6 +17,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct VerifiedRuntimeManifest {
     archive: tempfile::NamedTempFile,
+    checksum: Vec<u8>,
+    signature: Vec<u8>,
+    checksum_signature: Option<Vec<u8>>,
+    version: String,
     digest: String,
     manifest: GuestBinsManifest,
     arch: GuestArch,
@@ -33,6 +37,54 @@ impl VerifiedRuntimeManifest {
 
     pub fn archive_sha256(&self) -> &str {
         &self.digest
+    }
+
+    /// Retain only the evidence bytes consumed by the successful verifier.
+    pub fn retain_release_proof_in(
+        &self,
+        proof: &RuntimeReleaseProof,
+        generation: &Path,
+    ) -> Result<RuntimeReleaseProof, GuestRuntimeError> {
+        if proof.archive_sha256 != self.digest
+            || proof.arch != self.arch
+            || proof.version != self.version
+        {
+            return Err(GuestRuntimeError::Cache(
+                "runtime proof identity changed".into(),
+            ));
+        }
+        let mut retained = proof.clone();
+        retained.archive = generation.join("archive");
+        retained.checksum = generation.join("checksum");
+        retained.signature_bundle = generation.join("archive.signature");
+        snapshot_file(self.archive.path(), &retained.archive, &self.digest)?;
+        for (path, bytes) in [
+            (&retained.checksum, self.checksum.as_slice()),
+            (&retained.signature_bundle, self.signature.as_slice()),
+        ] {
+            write_evidence(path, bytes)?;
+        }
+        if let Some(bytes) = &self.checksum_signature {
+            write_evidence(&checksum_bundle_path(&retained.checksum), bytes)?;
+        }
+        Ok(retained)
+    }
+
+    /// Authenticate selected bytes without creating a snapshot or cache entry.
+    pub fn verify_selected_artifacts(
+        &self,
+        selection: &RuntimeArtifactSelection<'_>,
+    ) -> Result<(), GuestRuntimeError> {
+        let declaration = self.declaration(selection.arch)?;
+        validate_selection(declaration, selection)?;
+        for (path, expected) in [
+            (selection.overlay, &declaration.overlay_sha256),
+            (selection.overlay_verity, &declaration.overlay_verity_sha256),
+            (selection.initramfs, &declaration.initramfs_sha256),
+        ] {
+            hash_artifact(path, expected, &mut std::io::sink())?;
+        }
+        Ok(())
     }
 
     pub fn declaration(&self, arch: GuestArch) -> Result<&RuntimeAssembly, GuestRuntimeError> {
@@ -105,16 +157,7 @@ pub(super) fn snapshot_declared_artifacts(
             }
         }
     }
-    declaration.validate(selection.arch)?;
-    if declaration.protocol_version < selection.minimum_protocol
-        || declaration.min_supported_protocol_version > selection.host_protocol
-        || selection.overlay_roothash != declaration.overlay_roothash
-    {
-        return Err(GuestRuntimeError::Cache(
-            "selected runtime protocol or overlay root does not match its checked declaration"
-                .into(),
-        ));
-    }
+    validate_selection(declaration, selection)?;
     let mut builder = tempfile::Builder::new();
     builder.prefix("runtime-");
     let directory = match private_parent {
@@ -149,6 +192,23 @@ pub(super) fn snapshot_declared_artifacts(
         archive_sha256: digest.to_owned(),
         declaration: declaration.clone(),
     })
+}
+
+fn validate_selection(
+    declaration: &RuntimeAssembly,
+    selection: &RuntimeArtifactSelection<'_>,
+) -> Result<(), GuestRuntimeError> {
+    declaration.validate(selection.arch)?;
+    if declaration.protocol_version < selection.minimum_protocol
+        || declaration.min_supported_protocol_version > selection.host_protocol
+        || selection.overlay_roothash != declaration.overlay_roothash
+    {
+        return Err(GuestRuntimeError::Cache(
+            "selected runtime protocol or overlay root does not match its checked declaration"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Selected boot artifacts, not cache labels or claimed verification flags.
@@ -303,9 +363,13 @@ pub(super) fn verify_release_archive(
     // Legacy offline packages carry only the archive signature, which already
     // authenticates its bytes. A present standalone checksum signature must
     // still verify; portable acquisition separately requires that fourth file.
-    if checksum_bundle_present(&checksum_bundle)? {
-        verify_checksum_signature(&checksum_bytes, &checksum_bundle, version)?;
-    }
+    let checksum_signature = if checksum_bundle_present(&checksum_bundle)? {
+        let signature = std::fs::read(&checksum_bundle)?;
+        verify_checksum_signature_bytes(&checksum_bytes, &signature, version)?;
+        Some(signature)
+    } else {
+        None
+    };
     let checksums = mvm_fs::overlay::parse_checksums_manifest(
         std::str::from_utf8(&checksum_bytes)
             .map_err(|error| GuestRuntimeError::Cache(error.to_string()))?,
@@ -315,9 +379,10 @@ pub(super) fn verify_release_archive(
             "guest runtime checksum missing or mismatched for {asset}"
         )));
     }
+    let signature = std::fs::read(bundle)?;
     crate::release_signature::verify_release_archive_bytes(
         &bytes,
-        &std::fs::read(bundle)?,
+        &signature,
         &asset,
         &mvm_core::release_trust::accepted_release_identities(version),
         mvm_core::release_trust::RELEASE_OIDC_ISSUER,
@@ -329,6 +394,10 @@ pub(super) fn verify_release_archive(
     super::validate_release_guest_runtime_manifest(&manifest, version)?;
     Ok(VerifiedRuntimeManifest {
         archive: snapshot,
+        checksum: checksum_bytes,
+        signature,
+        checksum_signature,
+        version: version.to_owned(),
         digest,
         manifest,
         arch,
@@ -357,9 +426,17 @@ pub(super) fn verify_checksum_signature(
     bundle: &Path,
     version: &str,
 ) -> Result<(), GuestRuntimeError> {
+    verify_checksum_signature_bytes(checksum_bytes, &std::fs::read(bundle)?, version)
+}
+
+fn verify_checksum_signature_bytes(
+    checksum_bytes: &[u8],
+    bundle: &[u8],
+    version: &str,
+) -> Result<(), GuestRuntimeError> {
     crate::release_signature::verify_release_archive_bytes(
         checksum_bytes,
-        &std::fs::read(bundle)?,
+        bundle,
         &format!(
             "{}.sha256",
             crate::guest_bins::guest_bins_archive_name(version)
@@ -375,6 +452,45 @@ fn snapshot_file(
     destination: &Path,
     expected: &str,
 ) -> Result<(), GuestRuntimeError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut output = options.open(destination)?;
+    hash_artifact(source, expected, &mut output)?;
+    output.flush()?;
+    let mut permissions = output.metadata()?.permissions();
+    permissions.set_readonly(true);
+    output.set_permissions(permissions)?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn write_evidence(path: &Path, bytes: &[u8]) -> Result<(), GuestRuntimeError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o400);
+    }
+    let mut output = options.open(path)?;
+    output.write_all(bytes)?;
+    let mut permissions = output.metadata()?.permissions();
+    permissions.set_readonly(true);
+    output.set_permissions(permissions)?;
+    output.sync_all()?;
+    Ok(())
+}
+
+fn hash_artifact(
+    source: &Path,
+    expected: &str,
+    output: &mut impl Write,
+) -> Result<(), GuestRuntimeError> {
     let mut input_options = std::fs::OpenOptions::new();
     input_options.read(true);
     #[cfg(unix)]
@@ -388,14 +504,6 @@ fn snapshot_file(
             "runtime artifact is not a regular file".into(),
         ));
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut output = options.open(destination)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     let mut total = 0_u64;
@@ -419,9 +527,6 @@ fn snapshot_file(
             "runtime artifact differs from signed assembly".into(),
         ));
     }
-    let mut permissions = output.metadata()?.permissions();
-    permissions.set_readonly(true);
-    output.set_permissions(permissions)?;
     Ok(())
 }
 
@@ -494,6 +599,10 @@ mod tests {
         };
         let verified = VerifiedRuntimeManifest {
             archive: tempfile::NamedTempFile::new().unwrap(),
+            checksum: Vec::new(),
+            signature: Vec::new(),
+            checksum_signature: None,
+            version: "fixture".into(),
             digest: "d".repeat(64),
             arch: GuestArch::X86_64,
             manifest: GuestBinsManifest {
@@ -522,6 +631,42 @@ mod tests {
             minimum_protocol: 2,
             host_protocol: 2,
         }
+    }
+
+    #[test]
+    fn selected_artifact_verification_is_snapshot_free_and_checks_every_byte() {
+        let (dir, verified) = fixture();
+        let paths = ["overlay", "verity", "initramfs"].map(|name| dir.path().join(name));
+        let root = "a".repeat(64);
+        verified
+            .verify_selected_artifacts(&selection(&paths, &root))
+            .unwrap();
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        for path in &paths {
+            let original = std::fs::read(path).unwrap();
+            std::fs::write(path, b"substituted").unwrap();
+            assert!(
+                verified
+                    .verify_selected_artifacts(&selection(&paths, &root))
+                    .is_err()
+            );
+            std::fs::write(path, original).unwrap();
+        }
+        let wrong_root = "b".repeat(64);
+        assert!(
+            verified
+                .verify_selected_artifacts(&selection(&paths, &wrong_root))
+                .is_err()
+        );
+        let mut selected = selection(&paths, &root);
+        selected.minimum_protocol = 3;
+        assert!(verified.verify_selected_artifacts(&selected).is_err());
+        selected.minimum_protocol = 2;
+        selected.host_protocol = 1;
+        assert!(verified.verify_selected_artifacts(&selected).is_err());
+        selected.host_protocol = 2;
+        selected.arch = GuestArch::Aarch64;
+        assert!(verified.verify_selected_artifacts(&selected).is_err());
     }
 
     #[test]

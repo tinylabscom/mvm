@@ -12,6 +12,7 @@ use std::path::Path;
 /// are read from the authenticated archive, not mutable extracted sidecars.
 #[derive(Debug)]
 pub struct VerifiedLegacyBundleRuntime {
+    archive: Vec<u8>,
     initrd: Option<Vec<u8>>,
     rootfs_sha256: String,
 }
@@ -27,35 +28,40 @@ impl VerifiedLegacyBundleRuntime {
         parent: &Path,
     ) -> Result<VmStartConfig> {
         let mut bound = config.clone();
-        let Some(bytes) = &self.initrd else {
-            return Ok(bound);
-        };
         let generation = tempfile::Builder::new()
             .prefix("legacy-runtime-")
             .tempdir_in(parent)?;
         mvm_core::private_fs::set_mode(generation.path(), 0o700)?;
-        let path = generation.path().join("initrd");
-        mvm_core::util::atomic_io::write_private_new(&path, bytes)?;
-        mvm_core::private_fs::set_mode(&path, 0o400)?;
-        mvm_core::util::atomic_io::sync_file(&path)?;
+        let archive = generation.path().join("bundle.mvmpkg");
+        mvm_core::util::atomic_io::write_private_new(&archive, &self.archive)?;
+        mvm_core::private_fs::set_mode(&archive, 0o400)?;
+        mvm_core::util::atomic_io::sync_file(&archive)?;
+        bound
+            .legacy_bundle_runtime
+            .as_mut()
+            .context("legacy bundle proof missing")?
+            .archive = archive;
+        if let Some(bytes) = &self.initrd {
+            let path = generation.path().join("initrd");
+            mvm_core::util::atomic_io::write_private_new(&path, bytes)?;
+            mvm_core::private_fs::set_mode(&path, 0o400)?;
+            mvm_core::util::atomic_io::sync_file(&path)?;
+            bound.initrd_path = Some(path.display().to_string());
+        }
         mvm_core::util::atomic_io::sync_dir(generation.path())?;
         // As with external runtime generations, retain even if spawn fails:
         // the backend may already have opened this file before returning.
         let _retained = generation.keep();
         mvm_core::util::atomic_io::sync_dir(parent)?;
-        bound.initrd_path = Some(path.display().to_string());
         Ok(bound)
     }
 }
 
-struct ArchiveResolver<'a>(&'a Path);
+struct ArchiveResolver<'a>(&'a [u8]);
 
 impl BundleResolver for ArchiveResolver<'_> {
-    fn resolve(&self, bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError> {
-        std::fs::read(self.0).map_err(|error| BundleResolveError::Io {
-            bundle_sha256: bundle_sha256.to_string(),
-            reason: error.to_string(),
-        })
+    fn resolve(&self, _bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError> {
+        Ok(self.0.to_vec())
     }
 }
 
@@ -84,7 +90,8 @@ pub(crate) fn verify_retained(
         .as_ref()
         .context("legacy initrd requires authenticated bundle provenance")?;
     let trust = FsTrustStore::default_path()?;
-    let verified = verify_plan_bundle(&proof.pin, &ArchiveResolver(&proof.archive), &trust)
+    let archive = std::fs::read(&proof.archive)?;
+    let verified = verify_plan_bundle(&proof.pin, &ArchiveResolver(&archive), &trust)
         .context("verifying legacy runtime bundle")?;
     ensure!(
         verified.boot_assets.is_none(),
@@ -128,6 +135,7 @@ pub(crate) fn verify_retained(
         "authenticated image does not declare a compatible baked guest runtime"
     );
     Ok(VerifiedLegacyBundleRuntime {
+        archive,
         initrd,
         rootfs_sha256,
     })
@@ -281,6 +289,13 @@ mod tests {
         let config = fixture(home.path(), false);
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
         let bound = lease.bind(&config).unwrap();
+        let retained_archive = &bound.legacy_bundle_runtime.as_ref().unwrap().archive;
+        assert_ne!(
+            retained_archive,
+            &config.legacy_bundle_runtime.as_ref().unwrap().archive
+        );
+        std::fs::remove_file(&config.legacy_bundle_runtime.as_ref().unwrap().archive).unwrap();
+        std::fs::remove_file(config.initrd_path.as_ref().unwrap()).unwrap();
         mvm_vmm::host::runtime_meta::record_from_start_config(
             &bound.name,
             mvm_core::vm_backend::StartMode::Detached,
@@ -438,6 +453,37 @@ mod tests {
         )
         .unwrap();
         assert!(crate::checkpoint::verify_checkpoint_runtime(&store, &meta).is_err());
+    }
+
+    #[test]
+    fn retained_signed_archive_uses_verified_bytes_and_refuses_tampering() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let config = fixture(home.path(), false);
+        let verified = verify(&config, MIN_GUEST_RPC_PROTOCOL_VERSION).unwrap();
+        let original_archive = &config.legacy_bundle_runtime.as_ref().unwrap().archive;
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        let bound = lease.bind(&config).unwrap();
+        let generation = bound
+            .legacy_bundle_runtime
+            .as_ref()
+            .unwrap()
+            .archive
+            .parent()
+            .unwrap();
+        std::fs::write(original_archive, b"substituted after authentication").unwrap();
+        let second = verified
+            .snapshot_in(&config, generation.parent().unwrap())
+            .unwrap();
+        std::fs::remove_file(original_archive).unwrap();
+        std::fs::remove_file(config.initrd_path.as_ref().unwrap()).unwrap();
+        crate::runtime_evidence::verify_retained_legacy_runtime(&second).unwrap();
+        let archive = &bound.legacy_bundle_runtime.as_ref().unwrap().archive;
+        mvm_core::private_fs::set_mode(archive, 0o600).unwrap();
+        std::fs::write(archive, b"retained tamper").unwrap();
+        mvm_core::private_fs::set_mode(archive, 0o400).unwrap();
+        assert!(crate::runtime_evidence::verify_retained_legacy_runtime(&bound).is_err());
     }
 
     #[test]

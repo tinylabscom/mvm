@@ -222,8 +222,23 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
 pub(crate) fn verify_retained_legacy_runtime(
     config: &VmStartConfig,
 ) -> Result<crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime> {
+    let proof = config
+        .legacy_bundle_runtime
+        .as_ref()
+        .context("legacy bundle proof missing")?;
+    let generation = proof
+        .archive
+        .parent()
+        .context("legacy generation missing")?;
+    validate_legacy_generation(&generation.join("initrd"))?;
+    validate_retained_file(&proof.archive, &generation.join("bundle.mvmpkg"))?;
     if let Some(path) = config.initrd_path.as_deref() {
+        anyhow::ensure!(
+            Path::new(path) == generation.join("initrd"),
+            "legacy artifacts mix generations"
+        );
         validate_legacy_generation(Path::new(path))?;
+        validate_retained_file(Path::new(path), &generation.join("initrd"))?;
     }
     crate::legacy_bundle_runtime::verify_retained(config, MIN_GUEST_RPC_PROTOCOL_VERSION)
 }
@@ -340,6 +355,14 @@ fn validate_legacy_generation(path: &Path) -> Result<()> {
         }
         check_owner(&metadata)?;
     }
+    Ok(())
+}
+
+fn validate_retained_file(path: &Path, expected: &Path) -> Result<()> {
+    anyhow::ensure!(
+        path == expected,
+        "runtime evidence must belong to its retained generation"
+    );
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || mvm_core::private_fs::mode_bits(path, &metadata)? != 0o400
     {
@@ -384,6 +407,21 @@ fn validate_generation_paths(binding: &CliRuntimeLaunchBinding) -> Result<PathBu
             bail!("runtime generation ancestry is not a private non-symlink directory");
         }
         check_owner(&metadata)?;
+    }
+    if let Some(proof) = binding.release_proof() {
+        for (path, name) in [
+            (&proof.archive, "archive"),
+            (&proof.checksum, "checksum"),
+            (&proof.signature_bundle, "archive.signature"),
+        ] {
+            validate_retained_file(path, &generation.join(name))?;
+        }
+        let signature = mvm_build::guest_runtime::evidence::checksum_bundle_path(&proof.checksum);
+        match std::fs::symlink_metadata(&signature) {
+            Ok(_) => validate_retained_file(&signature, &generation.join("checksum.bundle"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(root)
 }
@@ -561,6 +599,17 @@ impl RuntimeLifecycleLease {
         let selection = runtime_selection(config, minimum_protocol)?;
         let artifacts = verified.snapshot_artifacts_in(&selection, &self.directory)?;
         let mut bound = config.clone();
+        if let VerifiedLaunchRuntime::Release(release) = &verified {
+            bound.runtime_release_proof = Some(
+                release.retain_release_proof_in(
+                    config
+                        .runtime_release_proof
+                        .as_ref()
+                        .context("release proof missing")?,
+                    artifacts.directory_path(),
+                )?,
+            );
+        }
         bound.unsigned_runtime_development = !verified.is_release();
         bound.source_runtime_archive_sha256 = match &verified {
             VerifiedLaunchRuntime::Source(source) => Some(source.archive_sha256().to_owned()),
@@ -733,12 +782,17 @@ mod tests {
         let lease = RuntimeLifecycleLease::acquire("retained-test").unwrap();
         let generation = lease.directory.join("runtime-one");
         private_directory(&generation).unwrap();
+        for name in ["archive", "checksum", "archive.signature"] {
+            let path = generation.join(name);
+            write_private_new(&path, b"not authenticated evidence").unwrap();
+            mvm_core::private_fs::set_mode(&path, 0o400).unwrap();
+        }
         let binding = CliRuntimeLaunchBinding {
             provenance: RuntimeBindingProvenance::Release {
                 proof: mvm_core::protocol::runtime_release::RuntimeReleaseProof {
-                    archive: "/missing/archive".into(),
-                    checksum: "/missing/checksum".into(),
-                    signature_bundle: "/missing/signature".into(),
+                    archive: generation.join("archive"),
+                    checksum: generation.join("checksum"),
+                    signature_bundle: generation.join("archive.signature"),
                     archive_sha256: "a".repeat(64),
                     version: "1.2.3".into(),
                     arch: GuestArch::host(),
@@ -750,6 +804,19 @@ mod tests {
             overlay_roothash: "a".repeat(64),
         };
         validate_generation_paths(&binding).unwrap();
+        for selected in ["archive", "checksum", "signature"] {
+            let mut external = binding.clone();
+            let RuntimeBindingProvenance::Release { proof } = &mut external.provenance else {
+                unreachable!();
+            };
+            match selected {
+                "archive" => proof.archive = home.path().join("ambient-archive"),
+                "checksum" => proof.checksum = home.path().join("ambient-checksum"),
+                "signature" => proof.signature_bundle = home.path().join("ambient-signature"),
+                _ => unreachable!(),
+            }
+            assert!(validate_generation_paths(&external).is_err());
+        }
         // A valid-looking path never grants authority to unverified bytes.
         assert!(
             verify_runtime_binding(&RuntimeLaunchBinding::CliAssembly(binding.clone())).is_err()
