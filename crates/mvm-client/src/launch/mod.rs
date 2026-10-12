@@ -232,27 +232,37 @@ pub(crate) fn seal_transient_end(
     } else {
         mvm_hostd::audit::session::SealReason::Failed
     };
-    let sealed = emitter
-        .emit_exit_record(
+    // The exit record, the seal and the closing root reach the disk in one
+    // flush, as admission's records do. Nothing acts on any of them before
+    // this returns, so syncing each on its own bought no ordering; it bought
+    // one serial fsync per record on a path the caller waits on. A flush that
+    // fails is a seal that failed, and is recorded as one.
+    let closed = emitter.batched(|| {
+        emitter.emit_exit_record(
             plan,
             ExitRecord {
                 exit_code: end.exit_code,
                 backend: end.backend,
                 usage,
             },
-        )
-        .and_then(|()| emitter.seal_session(plan, reason));
-    if let Err(e) = sealed {
-        let e = crate::local::backend_err(format!("{e:#}"));
-        record_unsealed_end(
-            Some((emitter, plan)),
-            UnsealedEnd::new(end.vm_name, UnsealedReason::SealFailed).error(&e),
-        );
-        return Err(e);
-    }
-    // The session is sealed from here: a root that fails to publish weakens a
-    // later consistency check but leaves the seal in place.
-    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
+        )?;
+        emitter.seal_session(plan, reason)?;
+        // The session is sealed from here: a root that fails to publish
+        // weakens a later consistency check but leaves the seal in place.
+        Ok(emitter.publish_root(&plan.tenant.0).map(drop))
+    });
+    let published = match closed {
+        Ok(published) => published,
+        Err(e) => {
+            let e = crate::local::backend_err(format!("{e:#}"));
+            record_unsealed_end(
+                Some((emitter, plan)),
+                UnsealedEnd::new(end.vm_name, UnsealedReason::SealFailed).error(&e),
+            );
+            return Err(e);
+        }
+    };
+    if let Err(e) = published {
         tracing::warn!(
             error = %format!("{e:#}"),
             machine = end.vm_name,
@@ -263,6 +273,59 @@ pub(crate) fn seal_transient_end(
     }
     mvm_hostd::audit::witness::flush_configured(emitter.audit_dir(), &plan.tenant.0);
     Ok(())
+}
+
+/// The records that close a waited-for run, written best-effort: the workload
+/// already ran, so a failure here is reported rather than failing the exit
+/// report.
+struct ClosingRecords<'a> {
+    plan: &'a ExecutionPlan,
+    machine: &'a str,
+    memory_limit_exceeded: Option<&'a mvm_core::spawn_scope::MemoryLimitExceeded>,
+    exit: ExitRecord<'a>,
+}
+
+impl ClosingRecords<'_> {
+    /// Write them, and say whether the closing root was published.
+    fn record(&self, emitter: &AuditEmitter) -> bool {
+        let (plan, name) = (self.plan, self.machine);
+        if let Some(exceeded) = self.memory_limit_exceeded
+            && let Err(e) = emitter.emit_memory_limit_exceeded(plan, exceeded)
+        {
+            tracing::warn!(
+                error = %e,
+                machine = name,
+                "audit emit_memory_limit_exceeded failed (non-fatal)"
+            );
+        }
+        if let Err(e) = emitter.emit_exit_record(plan, self.exit) {
+            tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+        }
+        // Seal before the closing root, so the root covers the seal.
+        if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Exited) {
+            record_unsealed_end(
+                Some((emitter, plan)),
+                UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
+            );
+        }
+        // The closing bracket of the run. Admission published the opening
+        // one, so a verifier can prove the log only grew across the whole
+        // execution rather than changing underneath it. Best-effort for the
+        // same reason as at admission: a workload that already ran must not
+        // fail its exit report over a weakened later check.
+        match emitter.publish_root(&plan.tenant.0) {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    machine = name,
+                    "could not publish an audit root at exit; the log stays intact but a later \
+                     consistency check has one fewer point to verify against"
+                );
+                false
+            }
+        }
+    }
 }
 
 /// Seal the session of a persistent machine that was just stopped, then publish
@@ -1351,49 +1414,26 @@ impl LocalBackend {
         let memory_limit_exceeded =
             mvm_core::spawn_scope::ScopeProbe::default().memory_limit_exceeded(&state_dir);
         if let Some(emitter) = build_audit_emitter() {
-            if let Some(exceeded) = &memory_limit_exceeded
-                && let Err(e) = emitter.emit_memory_limit_exceeded(&outcome.plan, exceeded)
-            {
-                tracing::warn!(
-                    error = %e,
-                    machine = name,
-                    "audit emit_memory_limit_exceeded failed (non-fatal)"
-                );
-            }
-            if let Err(e) = emitter.emit_exit_record(
-                &outcome.plan,
-                ExitRecord {
+            // One flush for the run's closing records; see `seal_transient_end`.
+            let closing = ClosingRecords {
+                plan: &outcome.plan,
+                machine: name,
+                memory_limit_exceeded: memory_limit_exceeded.as_ref(),
+                exit: ExitRecord {
                     exit_code,
                     backend: &outcome.machine.backend,
                     usage,
                 },
-            ) {
-                tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
-            }
-            // Seal before the closing root, so the root covers the seal.
-            if let Err(e) =
-                emitter.seal_session(&outcome.plan, mvm_hostd::audit::session::SealReason::Exited)
-            {
-                record_unsealed_end(
-                    Some((&emitter, &outcome.plan)),
-                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
-                );
-            }
-            // The closing bracket of the run. Admission published the opening
-            // one, so a verifier can prove the log only grew across the whole
-            // execution rather than changing underneath it. Best-effort for
-            // the same reason as at admission: a workload that already ran
-            // must not fail its exit report over a weakened later check.
-            match emitter.publish_root(&outcome.plan.tenant.0) {
-                Ok(_) => mvm_hostd::audit::witness::flush_configured(
+            };
+            match emitter.batched(|| Ok(closing.record(&emitter))) {
+                Ok(true) => mvm_hostd::audit::witness::flush_configured(
                     emitter.audit_dir(),
                     &outcome.plan.tenant.0,
                 ),
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    machine = name,
-                    "could not publish an audit root at exit; the log stays intact but a later \
-                     consistency check has one fewer point to verify against"
+                Ok(false) => {}
+                Err(e) => record_unsealed_end(
+                    Some((&emitter, &outcome.plan)),
+                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
                 ),
             }
         }
