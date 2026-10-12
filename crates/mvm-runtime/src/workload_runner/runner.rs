@@ -628,6 +628,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // the overlay contract, then the child's own 0700 substitution endpoint
         // keyed on its fresh id (never a sibling's; the factory parent has none).
         let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        // Recorded before the fork, as a cold boot records before it boots, so
+        // a step checkpoint of the claimed child resolves its own rootfs and
+        // the device paths its restored VMM names. A resident handoff keeps the
+        // parent's live machine and has no materialized copy of its own to
+        // describe; its record stays with the parent's.
+        if !resident_handoff {
+            record_claimed_child_runtime_meta(&child, &child_cfg, &child_dir)?;
+        }
         let guards = ClaimGuards::new(&self.spawner);
         // Gate the image the claim was admitted for, not the clone the child
         // boots: the sidecar describes how the image was built and is not part
@@ -1425,6 +1433,31 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> 
     cfg.plan_json = Some(claim.plan_json.clone());
     cfg.bundle_json = claim.bundle_json.clone();
     cfg
+}
+
+/// Write a saved-state claimed child's runtime metadata: the record a cold boot
+/// writes from its start config, plus the device anchors its materialized
+/// checkpoint carries, which its restored VMM keeps naming.
+fn record_claimed_child_runtime_meta(
+    child: &VmId,
+    child_cfg: &VmStartConfig,
+    child_dir: &Path,
+) -> std::result::Result<(), StandbyError> {
+    let record = || -> Result<()> {
+        let anchors = crate::base::runtime_meta::read_restored_device_anchors(child_dir)?;
+        crate::base::runtime_meta::record_restored_from_start_config(
+            &child.0,
+            StartMode::Detached,
+            child_cfg,
+            anchors,
+        )
+    };
+    record().map_err(|e| {
+        StandbyError::ClaimFailed(format!(
+            "recording claimed child '{}' runtime metadata: {e:#}",
+            child.0
+        ))
+    })
 }
 
 /// Resolve the launch source recorded for a resident standby parent. The live
@@ -4350,6 +4383,16 @@ mod tests {
         };
 
         let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
+
+        // The child records the runtime metadata a cold boot records, naming
+        // its own materialized rootfs, so a step checkpoint of it resolves.
+        let meta = crate::base::runtime_meta::read(&child.0)
+            .expect("read child runtime metadata")
+            .expect("a claimed child records its runtime metadata");
+        assert_eq!(
+            meta.rootfs_path.map(PathBuf::from),
+            Some(vm_state_dir(&child.0).join("rootfs.ext4"))
+        );
 
         // Fresh identity: the child differs from the parent and gets a fresh name.
         assert_ne!(child.0, handle.id, "child VmId must differ from the parent");

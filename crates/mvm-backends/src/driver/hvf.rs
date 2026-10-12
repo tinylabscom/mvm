@@ -1956,6 +1956,7 @@ mod tests {
             rootfs_path: Some(rootfs.display().to_string()),
             runtime_overlay_version: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         mvm_vmm::host::runtime_meta::write("anchor-vm", &meta).unwrap();
 
