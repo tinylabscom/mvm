@@ -120,14 +120,38 @@ jobs:
         with:
           tool: nextest
 
+      # On a hosted runner the isolated state lives on a tmpfs mounted at the
+      # same path. /tmp there is the VM's network-attached OS disk, and the
+      # suite fsyncs a great deal: on the self-hosted box's disk a workspace run
+      # spends three times the test time it spends on tmpfs. The tmpfs is kept
+      # only if it holds what the tests probe for: a `user.*` xattr and a
+      # setuid bit. Several tests skip their assertion when the filesystem
+      # drops either, so a tmpfs without them would quietly test less; the
+      # state then stays on disk. The self-hosted box is shared with other
+      # work and keeps its disk.
       - name: Isolate test state
         env:
           SHARD: ${{ inputs.shard }}
+          RUNNER_KIND: ${{ inputs.runner_kind }}
         run: |
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]
           base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
           mkdir -m 700 -- "$base"
+          if [ "$RUNNER_KIND" = github ]; then
+            sudo mount -t tmpfs -o "size=6g,mode=700,uid=$(id -u),gid=$(id -g)" mvm-test-state "$base"
+            probe="$base/probe"
+            touch -- "$probe"
+            if python3 -c 'import os, sys; os.setxattr(sys.argv[1], "user.mvm.probe", b"1")' "$probe" \
+              && chmod 4755 -- "$probe" && [ "$(stat -c %a -- "$probe")" = 4755 ]; then
+              rm -f -- "$probe"
+              echo "Isolated test state is on tmpfs."
+            else
+              rm -f -- "$probe"
+              sudo umount -- "$base"
+              echo "::notice::tmpfs here drops user xattrs or setuid bits; isolated test state stays on disk."
+            fi
+          fi
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
           {
             printf 'RUNNER_ORIGINAL_HOME=%s\n' "$HOME"
@@ -235,5 +259,11 @@ jobs:
           fi
           if [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]; then
             export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          fi
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          # A hosted runner's state is a tmpfs at the base; the cleanup cannot
+          # remove a mount point, and the contents go with the mount.
+          if [[ "$SHARD" =~ ^[1-9]$ ]] && mountpoint -q -- "$base"; then
+            sudo umount --lazy -- "$base"
           fi
           bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
