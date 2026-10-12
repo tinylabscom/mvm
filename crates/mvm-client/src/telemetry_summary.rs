@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn open_span_tracking_is_bounded() {
         let mut summary = TelemetrySummary::default();
-        for n in 0..(MAX_TRACKED_OPEN_SPANS as u64 + 3) {
+        for n in 1..=(MAX_TRACKED_OPEN_SPANS as u64 + 3) {
             let byte = u8::try_from(n % 250).unwrap() + 1;
             summary.observe(&open(n, byte, None));
         }

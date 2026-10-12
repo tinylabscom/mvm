@@ -462,6 +462,7 @@ mod tests {
                 shed,
                 snapshot_age_ms,
                 records_bytes: served_bytes,
+                ..
             } = reader.status().unwrap()
             else {
                 panic!("{label}: provisioned");

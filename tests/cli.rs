@@ -2581,3 +2581,14 @@ fn image_revocations_fail_closed_without_an_applied_signed_list() {
         "a refused list must not advance the checkpoint"
     );
 }
+
+/// `machine telemetry` reads what the host collected, so its help names the
+/// follow and JSON modes and the record cap.
+#[test]
+fn machine_telemetry_help_names_follow_json_and_tail() {
+    let help = help_text(&["machine", "telemetry", "--help"]);
+    for flag in ["--follow", "--json", "--tail"] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    assert!(help.contains("Name of the machine"), "{help}");
+}
