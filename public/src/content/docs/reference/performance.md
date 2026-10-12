@@ -35,7 +35,7 @@ scale with a disk.
 
 <!-- generated:launch-budgets:begin -->
 
-A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, and the warm-claim lane every measured claim to be strictly under 300 ms, even below the publication sample floor.
+A lane result is publishable only when it carries at least 20 measured samples taken after exactly 2 discarded warm-ups, under report schema version 7. A report that misses any of those is refused rather than published with a caveat. Prepared-cold lanes additionally require every measured dispatch to be strictly under 200 ms, and the warm-claim lane every measured claim to be strictly under 300 ms, both on its dispatch window and from the moment the command was invoked (`startup=` on the phase-timing line), even below the publication sample floor. `mvmctl` holds each warm launch to the same ceiling itself: one that has not reached the guest strictly under 300 ms after invocation is refused before its workload is sent.
 
 | Lane | What it measures | p50 | p95 | p99 | Every boot |
 | --- | --- | --- | --- | --- | --- |

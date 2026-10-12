@@ -57,8 +57,9 @@ fetches and unpacks an OCI image. `pool warm` boots a standby VM, and
 claim one: with no standby of the same image and sizing it refuses rather than
 cold-booting, while a run given `--name` always boots cold. A `machine run
 --image` launch reads only the local cache and never downloads anything. A run
-that claims a standby must be ready in under 300 ms, or `mvmctl` reports the
-launch as failed.
+that claims a standby must reach the guest in under 300 ms: a launch already
+over that when its command is about to be sent is refused there, names its
+slowest phase, and runs nothing.
 
 The VM is torn down when the command exits. Networking is off unless you allow
 it:
