@@ -173,11 +173,12 @@ fn legacy_path_calls_after_confinement(dir: &Path) -> ! {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt as _;
 
+    let spec = endpoint_spec(dir);
     let audit = dir.join("audit");
     let from = audit.join("segment.jsonl");
     let to = audit.join("segment.seg-000001.jsonl");
     std::fs::write(&from, "{}\n").expect("write the audit segment");
-    mvm_hostd::jailer::confine_self(&endpoint_spec(dir)).expect("confine");
+    mvm_hostd::jailer::confine_self(&spec).expect("confine");
 
     let from_c = CString::new(from.as_os_str().as_bytes()).expect("path");
     let to_c = CString::new(to.as_os_str().as_bytes()).expect("path");
