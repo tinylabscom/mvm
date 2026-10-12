@@ -10,7 +10,7 @@ const UNCACHED_SOURCE_RUNTIME_FINGERPRINT: &str = "source-runtime-cache-missing"
 
 /// Discard a cached universal initramfs whose recorded source fingerprint no
 /// longer matches the checkout it would be attached from. Returns true when a
-/// stale artifact was evicted; rejects a corrupt source-runtime cache.
+/// stale artifact was evicted; rejects a source pointer that is not a digest.
 ///
 /// A source checkout rebuilds its guest binaries when they change, but the
 /// initramfs cache is keyed only on `(version, arch)` — so without this it
@@ -28,15 +28,17 @@ fn evict_stale_universal_initramfs(
     let Some(shared_cache_root) = cache_root.parent() else {
         return Ok(false);
     };
-    let fingerprint = match mvm_build::guest_runtime::cached_source_guest_runtime(
+    // Provenance only: the cached initramfs is kept when it was built from
+    // the runtime this tree records, and nothing is read from that runtime
+    // here, so its archive is not opened. Verifying it on every launch cost
+    // a contributor build more than a third of the warm-launch budget.
+    let fingerprint = mvm_build::guest_runtime::source_guest_runtime_digest(
         shared_cache_root,
         version,
         arch,
         &workspace_root,
-    )? {
-        Some(runtime) => runtime.digest,
-        None => UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string(),
-    };
+    )?
+    .unwrap_or_else(|| UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string());
     Ok(mvm_build::initramfs::evict_if_source_changed(
         cache_root,
         version,
@@ -136,17 +138,21 @@ pub fn attach_universal_initramfs_if_cached(
         return Ok(());
     }
     attach_universal_initramfs_with_resolver(start_config, |_env, cache_root, version, arch| {
-        if let Ok(artifact) = mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
-            .resolve(&arch.to_string())
-        {
-            return Ok(artifact);
-        }
-        mvm_build::initramfs::resolve_image_set_initramfs(
-            cache_root,
-            &mvm_build::published_image_set::SetMemberCache::locked(),
-            arch,
-        )
+        resolve_cached_initramfs(cache_root, version, arch)
     })
+}
+
+/// The initramfs a launch attaches, from the cache alone: the version-keyed
+/// one this CLI assembled from its own guest runtime. There is no other copy
+/// to fall back to; a miss names the command that assembles it.
+fn resolve_cached_initramfs(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<mvm_fs::initramfs::InitramfsArtifact, mvm_build::initramfs::InitramfsBuildError> {
+    mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
+        .resolve(&arch.to_string())
+        .map_err(mvm_build::initramfs::InitramfsBuildError::from)
 }
 
 fn attach_universal_initramfs_with_resolver(
@@ -201,7 +207,8 @@ fn attach_universal_initramfs_with_resolver(
                     "the universal initramfs {version} for {arch} could not be resolved, and \
                      this workload cannot boot without it: it is what mounts the guest runtime \
                      overlay at /mvm/runtime, which carries the guest agent and the egress \
-                     client. Run `mvmctl doctor` to see the artifact state"
+                     client. Run `mvmctl bootstrap` to assemble it from this CLI's guest \
+                     runtime, or `mvmctl doctor` to see the artifact state"
                 )));
             }
             tracing::debug!(error = %e, "universal initramfs not attached");
@@ -457,6 +464,70 @@ mod tests {
     /// untouched. `seed_warm_universal_initramfs` makes the difference
     /// observable: a resolver that ran would find the warm artifact and attach
     /// it.
+    /// The image set carries no guest runtime, so a launch never attaches an
+    /// initramfs an older CLI installed from it: with only that copy on disk,
+    /// the resolve misses, whether or not this version adopted a release
+    /// guest runtime.
+    #[test]
+    fn a_launch_never_attaches_the_image_sets_initramfs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let initramfs_cache = cache.join("initramfs");
+        let arch = GuestArch::host();
+        let version = env!("CARGO_PKG_VERSION");
+        let set = mvm_build::published_image_set::SetMemberCache::locked();
+        let staged = tmp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        let payload = b"cpio-payload";
+        let image = {
+            use std::io::Write as _;
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            gz.write_all(payload).unwrap();
+            gz.finish().unwrap()
+        };
+        std::fs::write(staged.join(mvm_fs::initramfs::INITRAMFS_IMAGE_FILE), &image).unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_HASH_FILE),
+            format!(
+                "{}\n",
+                mvm_core::packs::Sha256Hex::from_bytes(payload).as_str()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::INITRAMFS_SIZE_FILE),
+            format!("{}\n", image.len()),
+        )
+        .unwrap();
+        std::fs::write(
+            staged.join(mvm_fs::initramfs::VERSION_FILE),
+            format!("{version}\n"),
+        )
+        .unwrap();
+        mvm_build::initramfs::install_initramfs_into_cache(
+            &staged,
+            &set.cache_root(&initramfs_cache),
+            version,
+            arch,
+        )
+        .unwrap();
+        set.record(
+            &initramfs_cache,
+            mvm_core::plan::bundle::BOOT_ASSET_INITRAMFS_ROLE,
+            mvm_core::image_set::MemberTarget::Arch(arch),
+            &mvm_build::published_image_set::MemberVersion::parse(version).unwrap(),
+        )
+        .unwrap();
+
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("the image set's initramfs is not this CLI's");
+        let record = mvm_build::runtime_pieces::release_adoption_record(&cache, version, arch);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, format!("{}\n", "e".repeat(64))).unwrap();
+        resolve_cached_initramfs(&initramfs_cache, version, arch)
+            .expect_err("an adopted release has nothing else to attach either");
+    }
+
     #[test]
     fn a_backend_that_boots_no_kernel_never_resolves_an_initramfs() {
         for hypervisor in ["mock", "wasm"] {

@@ -355,7 +355,14 @@ fn restore_forked_child_and_read_random(
     // reseeds.
     let genid = fresh_generation_token(format!("{checkpoint}:{}", child_id));
     let identity = FcDriver::new()
-        .deliver_child_identity(child_id, genid.token, None)
+        .deliver_child_identity(
+            child_id,
+            mvm_vmm::post_restore::ChildIdentity {
+                token: genid.token,
+                grant_envelope: None,
+                seccomp_tier: None,
+            },
+        )
         .expect("the restored child must complete the authenticated identity handshake");
     assert!(
         identity.acknowledged,

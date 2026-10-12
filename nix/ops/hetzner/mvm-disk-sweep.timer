@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly sweep of stale test and runner temporary directories
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -13,21 +13,27 @@
 //! host-services sources, so an archive that rebuilt only other guest binaries
 //! keeps the sidecar it already has, still naming the archive it came from.
 //!
-//! A piece acquired from the pinned image set lives under that set's root
-//! instead and is reported as such.
+//! A release binary has no tree to build an archive from. It assembles the
+//! same pieces from the guest runtime its own release ships
+//! ([`assemble_release_runtime_pieces`]), into the same version-keyed slots,
+//! and then records that it adopted that archive
+//! ([`adopted_release_archive`]).
+//!
+//! These slots are the only place a launch looks. The image set carries no
+//! guest runtime, so a piece that is missing or no longer verifies is refused
+//! with the command that assembles it, never replaced by a copy built from
+//! another tree.
 
 use std::path::{Path, PathBuf};
 
 use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
 use mvm_fs::initramfs::InitramfsArtifact;
 use mvm_fs::overlay::{RuntimeOverlayArtifact, RuntimeOverlayLayout};
 use mvm_fs::sdk_sidecar::{SdkSidecarArtifact, SdkSidecarLayout};
 
-use crate::guest_runtime::{GuestRuntime, is_archive_digest};
+use crate::guest_runtime::{GuestRuntime, GuestRuntimeError, is_archive_digest};
 use crate::initramfs::InitramfsBuildError;
-use crate::published_image_set::{SetMemberCache, SetMemberCacheError};
 use crate::runtime_overlay::RuntimeOverlayError;
 use crate::sdk_sidecar::SdkSidecarBuildError;
 
@@ -98,24 +104,6 @@ impl RuntimePiece {
             }
         }
     }
-
-    /// The image-set member this piece is published as.
-    fn image_set_role(self) -> ImageSetRole {
-        match self {
-            RuntimePiece::RuntimeOverlay => ImageSetRole::RuntimeOverlay,
-            RuntimePiece::Initramfs => ImageSetRole::Initramfs,
-            RuntimePiece::SdkSidecar(libc) => ImageSetRole::SdkSidecar(libc),
-        }
-    }
-
-    /// The cache root this piece's resolvers, and its image-set install
-    /// records, are keyed under.
-    fn resolver_cache_root(self, cache_root: &Path) -> PathBuf {
-        match self {
-            RuntimePiece::Initramfs => initramfs_cache_root(cache_root),
-            RuntimePiece::RuntimeOverlay | RuntimePiece::SdkSidecar(_) => cache_root.to_path_buf(),
-        }
-    }
 }
 
 /// The leading twelve characters of an archive digest, as status lines show it.
@@ -137,8 +125,6 @@ pub enum PieceOriginError {
     },
     #[error("{} does not hold an archive digest", path.display())]
     InvalidRecord { path: PathBuf },
-    #[error(transparent)]
-    ImageSet(#[from] SetMemberCacheError),
 }
 
 /// Record that the piece in `dir` was assembled from the archive `digest`.
@@ -179,42 +165,29 @@ pub enum PieceOrigin {
     /// A version-keyed copy that names no archive: seeded from another cache
     /// without its record, or written before pieces recorded one.
     LocalUnrecorded,
-    /// Installed from the pinned image set, at the member's own version.
-    ImageSet { version: String },
     /// Not in the cache.
     Missing,
 }
 
-/// Where `piece` would be attached from, read from the cache alone and in the
-/// order the launch resolvers look: the version-keyed slot, then the member of
-/// the pinned image set `set`. Reads presence and records only; nothing is
-/// hashed, so this answers a diagnostic, not whether the bytes are sound.
+/// Where `piece` would be attached from, read from the cache alone: the
+/// version-keyed slot the launch resolvers read. Reads presence and records
+/// only; nothing is hashed, so this answers a diagnostic, not whether the
+/// bytes are sound.
 pub fn piece_origin(
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
     piece: RuntimePiece,
-    set: &SetMemberCache,
 ) -> Result<PieceOrigin, PieceOriginError> {
-    if piece.local_image(cache_root, version, arch).is_file() {
-        return Ok(
-            match archive_origin(&piece.local_dir(cache_root, version, arch))? {
-                Some(digest) => PieceOrigin::Archive { digest },
-                None => PieceOrigin::LocalUnrecorded,
-            },
-        );
+    if !piece.local_image(cache_root, version, arch).is_file() {
+        return Ok(PieceOrigin::Missing);
     }
-    match set.installed_version(
-        &piece.resolver_cache_root(cache_root),
-        piece.image_set_role(),
-        MemberTarget::Arch(arch),
-    ) {
-        Ok(version) => Ok(PieceOrigin::ImageSet {
-            version: version.into(),
-        }),
-        Err(SetMemberCacheError::NotInstalled { .. }) => Ok(PieceOrigin::Missing),
-        Err(error) => Err(error.into()),
-    }
+    Ok(
+        match archive_origin(&piece.local_dir(cache_root, version, arch))? {
+            Some(digest) => PieceOrigin::Archive { digest },
+            None => PieceOrigin::LocalUnrecorded,
+        },
+    )
 }
 
 /// Remove `piece`'s version-keyed copy so the next assembly rebuilds it rather
@@ -239,6 +212,12 @@ pub enum AssembleError {
     Initramfs(#[from] InitramfsBuildError),
     #[error("pack the SDK sidecar: {0}")]
     SdkSidecar(#[from] SdkSidecarBuildError),
+    #[error("install the release guest runtime: {0}")]
+    GuestRuntime(#[from] GuestRuntimeError),
+    #[error("install the OCI guest runtime from the release guest runtime: {0}")]
+    OciGuestRuntime(#[from] crate::guest_agent_build::GuestAgentBuildError),
+    #[error("record the adopted release guest runtime: {0}")]
+    Record(#[from] std::io::Error),
 }
 
 /// Every piece assembled from one guest runtime.
@@ -273,6 +252,98 @@ pub fn assemble_runtime_pieces(
         initramfs,
         sdk_sidecars,
     })
+}
+
+/// Directory, under the mvm cache root, holding one record per release
+/// version and architecture whose pieces were assembled from that release's
+/// guest runtime.
+pub const RELEASE_ADOPTION_DIR: &str = "guest-runtime/v1/releases";
+
+/// The record naming the release guest-runtime archive `version`'s pieces for
+/// `arch` were assembled from.
+pub fn release_adoption_record(cache_root: &Path, version: &str, arch: GuestArch) -> PathBuf {
+    cache_root
+        .join(RELEASE_ADOPTION_DIR)
+        .join(version)
+        .join(arch.to_string())
+}
+
+/// The digest of the release guest-runtime archive this version adopted for
+/// `arch`, if it adopted one. Reads the record alone; nothing is hashed. A
+/// record that is present but holds no digest is an error, not an absence.
+pub fn adopted_release_archive(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<Option<String>, PieceOriginError> {
+    let path = release_adoption_record(cache_root, version, arch);
+    match std::fs::read_to_string(&path) {
+        Ok(body) if is_archive_digest(body.trim()) => Ok(Some(body.trim().to_string())),
+        Ok(_) => Err(PieceOriginError::InvalidRecord { path }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(PieceOriginError::Io { path, source }),
+    }
+}
+
+/// What [`assemble_release_runtime_pieces`] produced.
+#[derive(Debug, Clone)]
+pub struct ReleaseAssembly {
+    /// The release archive's verified extraction.
+    pub runtime: GuestRuntime,
+    pub pieces: AssembledPieces,
+}
+
+/// Assemble every launch-time piece from a CLI release's own guest runtime.
+///
+/// `archive` must already be authenticated (see
+/// [`crate::guest_runtime::install_release_guest_runtime`]). The archive is
+/// installed into the digest-keyed store, every piece is assembled from it
+/// through the same assemblers a source build uses — the overlay's verity
+/// tree and roothash computed here on the host, as claim 3 requires — and
+/// the OCI guest runtime is installed from the same members. The adoption
+/// record is written last, so it never names an archive whose pieces did not
+/// all assemble.
+pub fn assemble_release_runtime_pieces(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    archive: &Path,
+) -> Result<ReleaseAssembly, AssembleError> {
+    let runtime =
+        crate::guest_runtime::install_release_guest_runtime(cache_root, archive, version, arch)?;
+    let pieces = assemble_runtime_pieces(cache_root, version, arch, &runtime)?;
+    install_oci_guest_runtime(cache_root, version, arch, &runtime)?;
+    let record = release_adoption_record(cache_root, version, arch);
+    if let Some(parent) = record.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    mvm_core::util::atomic_io::atomic_write(&record, format!("{}\n", runtime.digest).as_bytes())
+        .map_err(std::io::Error::other)?;
+    Ok(ReleaseAssembly { runtime, pieces })
+}
+
+/// Install the four binaries an OCI rootfs is given from `runtime`, under the
+/// key a launch outside an explicit source build looks them up by: the CLI's
+/// own version.
+pub fn install_oci_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    runtime: &GuestRuntime,
+) -> Result<(), crate::guest_agent_build::GuestAgentBuildError> {
+    let bin = |name: &str| runtime.root.join(arch.to_string()).join("bin").join(name);
+    crate::guest_agent_build::install_into_cache(
+        crate::guest_agent_build::GuestRuntimeBinaryPaths {
+            agent: &bin("mvm-guest-agent"),
+            netinit: &bin("mvm-guest-netinit"),
+            egress_client: &bin("mvm-egress-client"),
+            entrypoint_runner: &bin("mvm-oci-entrypoint"),
+        },
+        &cache_root.join("oci"),
+        version,
+        arch,
+    )
+    .map(|_| ())
 }
 
 /// Pack both SDK sidecar variants from `runtime`.
@@ -319,10 +390,9 @@ mod tests {
     fn a_local_piece_reports_the_archive_it_names_or_that_it_names_none() {
         let cache = tempfile::tempdir().unwrap();
         let arch = GuestArch::X86_64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
         for piece in RuntimePiece::ALL {
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::Missing,
                 "{}",
                 piece.label()
@@ -331,7 +401,7 @@ mod tests {
             std::fs::create_dir_all(image.parent().unwrap()).unwrap();
             std::fs::write(&image, b"image").unwrap();
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::LocalUnrecorded,
                 "{}",
                 piece.label()
@@ -339,7 +409,7 @@ mod tests {
             record_archive_origin(&piece.local_dir(cache.path(), "1.2.3", arch), &digest('b'))
                 .unwrap();
             assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.3", arch, piece).unwrap(),
                 PieceOrigin::Archive {
                     digest: digest('b')
                 },
@@ -348,59 +418,10 @@ mod tests {
             );
             // Another version's slot is not this one.
             assert_eq!(
-                piece_origin(cache.path(), "1.2.4", arch, piece, &set).unwrap(),
+                piece_origin(cache.path(), "1.2.4", arch, piece).unwrap(),
                 PieceOrigin::Missing
             );
         }
-    }
-
-    #[test]
-    fn an_image_set_member_is_reported_at_its_own_version() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::Aarch64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
-        for piece in RuntimePiece::ALL {
-            set.record(
-                &piece.resolver_cache_root(cache.path()),
-                piece.image_set_role(),
-                MemberTarget::Arch(arch),
-                &crate::published_image_set::MemberVersion::parse("0.9.0").unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
-                PieceOrigin::ImageSet {
-                    version: "0.9.0".to_string()
-                },
-                "{}",
-                piece.label()
-            );
-        }
-    }
-
-    #[test]
-    fn the_version_keyed_slot_wins_over_the_image_set_like_the_launch_resolvers() {
-        let cache = tempfile::tempdir().unwrap();
-        let arch = GuestArch::X86_64;
-        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"root"));
-        let piece = RuntimePiece::SdkSidecar(GuestLibc::Musl);
-        set.record(
-            cache.path(),
-            piece.image_set_role(),
-            MemberTarget::Arch(arch),
-            &crate::published_image_set::MemberVersion::parse("0.9.0").unwrap(),
-        )
-        .unwrap();
-        let image = piece.local_image(cache.path(), "1.2.3", arch);
-        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
-        std::fs::write(&image, b"image").unwrap();
-        record_archive_origin(&piece.local_dir(cache.path(), "1.2.3", arch), &digest('c')).unwrap();
-        assert_eq!(
-            piece_origin(cache.path(), "1.2.3", arch, piece, &set).unwrap(),
-            PieceOrigin::Archive {
-                digest: digest('c')
-            }
-        );
     }
 
     #[test]
@@ -423,5 +444,154 @@ mod tests {
                 piece.label()
             );
         }
+    }
+
+    /// The fresh one-clone install, end to end on the host: a release binary
+    /// whose cache has never seen an image set adopts the guest runtime the
+    /// installer placed beside it and assembles every launch-time piece from
+    /// that archive. Each piece then resolves through the same version-keyed
+    /// resolvers a launch reads, names the archive it came from, and the
+    /// image set is closed to it.
+    #[test]
+    fn a_fresh_release_install_assembles_every_piece_from_its_own_archive() {
+        use crate::guest_bins::release::{
+            ReleaseGuestRuntimeOrigin, ReleaseGuestRuntimeRequest, acquire_release_guest_runtime,
+        };
+        const VERSION: &str = "9.9.9";
+        let installed = tempfile::tempdir().unwrap();
+        let archive =
+            crate::guest_runtime::release_fixture::write_release_archive(installed.path(), VERSION);
+        let digest = {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(std::fs::read(&archive).unwrap()))
+        };
+
+        // One fresh home per architecture: a host has one.
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            let cache = tempfile::tempdir().unwrap();
+            let release = acquire_release_guest_runtime(&ReleaseGuestRuntimeRequest {
+                release_url: "file:///no-release-is-reachable",
+                version: VERSION,
+                cache_root: cache.path(),
+                installed_dirs: &[installed.path().to_path_buf()],
+            })
+            .unwrap();
+            assert_eq!(release.origin, ReleaseGuestRuntimeOrigin::Installed);
+            let assembly =
+                assemble_release_runtime_pieces(cache.path(), VERSION, arch, &release.archive)
+                    .unwrap();
+            assert_eq!(assembly.runtime.digest, digest);
+
+            // The overlay a launch resolves is the one assembled here, and its
+            // roothash is the one the host computed over its own ext4.
+            let overlay = mvm_fs::overlay::RuntimeOverlayResolver::new(
+                cache.path().to_path_buf(),
+                VERSION.to_string(),
+            )
+            .resolve(&arch.to_string())
+            .unwrap();
+            assert_eq!(overlay.roothash, assembly.pieces.runtime_overlay.roothash);
+            crate::runtime_overlay::verify_guest_runtime_overlay_verity(&overlay).unwrap();
+            mvm_fs::initramfs::InitramfsResolver::new(initramfs_cache_root(cache.path()), VERSION)
+                .resolve(&arch.to_string())
+                .unwrap();
+            for libc in SDK_SIDECAR_LIBCS {
+                mvm_fs::sdk_sidecar::SdkSidecarResolver::new(
+                    cache.path().to_path_buf(),
+                    VERSION.to_string(),
+                )
+                .resolve(&arch.to_string(), libc)
+                .unwrap();
+            }
+            assert!(
+                crate::guest_agent_build::cached_guest_binaries(
+                    &cache.path().join("oci"),
+                    VERSION,
+                    arch
+                )
+                .is_some(),
+                "the OCI guest runtime comes from the same archive"
+            );
+
+            for piece in RuntimePiece::ALL {
+                assert_eq!(
+                    piece_origin(cache.path(), VERSION, arch, piece).unwrap(),
+                    PieceOrigin::Archive {
+                        digest: digest.clone()
+                    },
+                    "{}",
+                    piece.label()
+                );
+            }
+            assert_eq!(
+                adopted_release_archive(cache.path(), VERSION, arch).unwrap(),
+                Some(digest.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn a_release_archive_that_fails_verification_assembles_nothing_and_adopts_nothing() {
+        const VERSION: &str = "9.9.9";
+        let dir = tempfile::tempdir().unwrap();
+        let archive = crate::guest_runtime::release_fixture::write_release_archive_tampering(
+            dir.path(),
+            VERSION,
+            Some("x86_64/lib/musl/libmvm_host_services.so"),
+        );
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+
+        assert!(matches!(
+            assemble_release_runtime_pieces(cache.path(), VERSION, arch, &archive),
+            Err(AssembleError::GuestRuntime(_))
+        ));
+        assert_eq!(
+            adopted_release_archive(cache.path(), VERSION, arch).unwrap(),
+            None
+        );
+        for piece in RuntimePiece::ALL {
+            assert!(
+                !piece.local_image(cache.path(), VERSION, arch).exists(),
+                "{}",
+                piece.label()
+            );
+        }
+        let other = tempfile::tempdir().unwrap();
+        assert!(
+            assemble_release_runtime_pieces(
+                other.path(),
+                VERSION,
+                arch,
+                &dir.path().join("absent")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            adopted_release_archive(other.path(), VERSION, arch).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unreadable_adoption_record_is_an_error_not_an_absence() {
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let record = release_adoption_record(cache.path(), "1.2.3", arch);
+        std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+        std::fs::write(&record, "not a digest\n").unwrap();
+        assert!(matches!(
+            adopted_release_archive(cache.path(), "1.2.3", arch),
+            Err(PieceOriginError::InvalidRecord { .. })
+        ));
+        // Another version, or the other architecture, adopted nothing.
+        assert_eq!(
+            adopted_release_archive(cache.path(), "1.2.4", arch).unwrap(),
+            None
+        );
+        assert_eq!(
+            adopted_release_archive(cache.path(), "1.2.3", GuestArch::Aarch64).unwrap(),
+            None
+        );
     }
 }

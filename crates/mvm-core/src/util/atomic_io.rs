@@ -288,6 +288,25 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     sync_parent_dir(path)
 }
 
+/// [`write_private`] for a file whose life ends with the process reading it,
+/// without waiting for stable storage.
+///
+/// Readers still see either the whole old file or the whole new one, and the
+/// new inode is 0600 before its first byte lands; only the `fsync` of the file
+/// and of its directory are skipped. That is correct exactly when a crash that
+/// could lose the bytes also ends everything that would read them, and the
+/// next reader writes a fresh copy first. A per-boot identity drive, which the
+/// VMM reads from the page cache and every boot mints anew, is the case this
+/// exists for. The two syncs cost tens of milliseconds on rotational storage
+/// and buy nothing for such a file. Anything that must survive a crash uses
+/// [`write_private`].
+pub fn write_private_ephemeral(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut tmp = temp_with_mode(path, PRIVATE_FILE_MODE)?;
+    tmp.write_all(data)?;
+    tmp.persist(path).map_err(|err| err.error)?;
+    Ok(())
+}
+
 /// Create `path` holding `data` at exactly `mode`, unless it already exists.
 ///
 /// The bytes are written and synced under a temporary name, then linked into
@@ -882,6 +901,37 @@ mod tests {
         assert_eq!(fs::read(&elsewhere).expect("read"), b"untouched");
         assert!(!fs::symlink_metadata(&path).expect("stat").is_symlink());
         assert_eq!(fs::read(&path).expect("read"), b"new");
+    }
+
+    /// The ephemeral writer skips only the syncs: a loose file still becomes a
+    /// new 0600 inode, a symlink is still replaced rather than followed, and no
+    /// temporary is left behind.
+    #[cfg(unix)]
+    #[test]
+    fn write_private_ephemeral_keeps_every_guarantee_but_durability() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("drive");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_private_ephemeral(&path, b"new").expect("write");
+
+        assert_eq!(fs::read(&path).expect("read"), b"new");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(dir_entries(dir.path()), vec!["drive"]);
+
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, b"untouched").expect("seed");
+        fs::remove_file(&path).expect("remove");
+        std::os::unix::fs::symlink(&elsewhere, &path).expect("symlink");
+
+        write_private_ephemeral(&path, b"newer").expect("write");
+
+        assert_eq!(fs::read(&elsewhere).expect("read"), b"untouched");
+        assert!(!fs::symlink_metadata(&path).expect("stat").is_symlink());
+        assert_eq!(fs::read(&path).expect("read"), b"newer");
+        assert_eq!(mode_of(&path), 0o600);
     }
 
     #[test]

@@ -110,18 +110,18 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             ],
             vec![VirtioBlk, DmVerity],
         ),
-        ImageSetRole::RuntimeOverlay => (
+        ImageSetRole::RetiredGuestRuntime(retired) => (
             None,
             vec![artifact(
-                &format!("runtime-overlay{suffix}.tar.gz"),
-                ArtifactFormat::TarGz,
-            )],
-            vec![],
-        ),
-        ImageSetRole::SdkSidecar(libc) => (
-            None,
-            vec![artifact(
-                &format!("sdk-sidecar{suffix}-{libc}.tar.gz"),
+                &match retired {
+                    RetiredGuestRuntimeRole::RuntimeOverlay => {
+                        format!("runtime-overlay{suffix}.tar.gz")
+                    }
+                    RetiredGuestRuntimeRole::SdkSidecar(libc) => {
+                        format!("sdk-sidecar{suffix}-{libc}.tar.gz")
+                    }
+                    RetiredGuestRuntimeRole::Initramfs => format!("initramfs{suffix}.tar.gz"),
+                },
                 ArtifactFormat::TarGz,
             )],
             vec![],
@@ -130,14 +130,6 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
             boot,
             vec![artifact(&format!("stage0-vmlinux{suffix}"), kernel)],
             vec![VirtioVsock],
-        ),
-        ImageSetRole::Initramfs => (
-            None,
-            vec![artifact(
-                &format!("initramfs{suffix}.tar.gz"),
-                ArtifactFormat::TarGz,
-            )],
-            vec![],
         ),
         ImageSetRole::QemuWasmSmokePack => (
             None,
@@ -177,9 +169,10 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
         }),
         mvm_source_commit: commit('b'),
         compatibility: ImageSetCompatibility {
-            guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
+            guest_agent_protocol: Some(ProtocolRange::new(2, 2).unwrap()),
             builder_cache_contract: 4,
             builder_boot_abi: None,
+            base_image_contract: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {
@@ -277,7 +270,7 @@ fn linux_direct_backend_support_is_explicit_and_non_linux_tiers_refuse() {
 
 fn host() -> HostProtocolSupport {
     HostProtocolSupport {
-        guest_agent_protocol: ProtocolRange::new(2, 3).unwrap(),
+        base_image_contract: BaseImageContractRange::SUPPORTED,
         builder_cache_contract: 4,
         builder_boot_abi: payload_capable(),
     }
@@ -647,9 +640,14 @@ mod serde_shape {
                 ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
                 r#"{"workload_rootfs":"rootless_tenant"}"#,
             ),
-            (ImageSetRole::RuntimeOverlay, r#""runtime_overlay""#),
             (
-                ImageSetRole::SdkSidecar(GuestLibc::Musl),
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::RuntimeOverlay),
+                r#""runtime_overlay""#,
+            ),
+            (
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                    GuestLibc::Musl,
+                )),
                 r#"{"sdk_sidecar":"musl"}"#,
             ),
             (
@@ -657,7 +655,10 @@ mod serde_shape {
                 r#""stage0_bootstrap_kernel""#,
             ),
             (ImageSetRole::QemuWasmSmokePack, r#""qemu_wasm_smoke_pack""#),
-            (ImageSetRole::Initramfs, r#""initramfs""#),
+            (
+                ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::Initramfs),
+                r#""initramfs""#,
+            ),
         ];
         for (role, json) in roles {
             assert_eq!(serde_json::to_string(&role).unwrap(), json);
@@ -778,48 +779,107 @@ mod structure {
         validate_structure(manifest).unwrap_err()
     }
 
-    #[test]
-    fn a_set_carrying_per_arch_initramfs_members_is_well_formed_and_complete() {
-        let manifest = manifest();
-        for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-            assert!(manifest.members.iter().any(|member| {
-                member.role == ImageSetRole::Initramfs && member.target == MemberTarget::Arch(arch)
-            }));
+    const RETIRED: [RetiredGuestRuntimeRole; 4] = [
+        RetiredGuestRuntimeRole::RuntimeOverlay,
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Glibc),
+        RetiredGuestRuntimeRole::SdkSidecar(GuestLibc::Musl),
+        RetiredGuestRuntimeRole::Initramfs,
+    ];
+
+    /// The set as image sets published before the guest runtime moved to the
+    /// CLI release lay it out: every Linux-layer member plus an overlay, both
+    /// sidecars and an initramfs per architecture.
+    fn manifest_with_retired_members() -> ImageSetManifest {
+        let mut manifest = manifest();
+        for arch in [X86, ARM] {
+            for retired in RETIRED {
+                manifest
+                    .members
+                    .push(member(ImageSetRole::RetiredGuestRuntime(retired), arch));
+            }
         }
+        manifest
+    }
+
+    /// The guest runtime ships with the CLI, so a set is complete without any
+    /// of its members, on either architecture.
+    #[test]
+    fn the_current_train_requires_no_guest_runtime_member() {
+        let manifest = manifest();
+        assert!(
+            !manifest
+                .members
+                .iter()
+                .any(|member| member.role.is_retired())
+        );
+        assert!(
+            !ImageSetRequirement::current_train()
+                .members()
+                .iter()
+                .any(|required| required.role.is_retired())
+        );
         validate_structure(&manifest).unwrap();
         require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
-        let selected = select_member(
-            &manifest,
-            ImageSetRole::Initramfs,
+    }
+
+    /// A set the image repository published before it stopped building the
+    /// guest runtime still parses, passes every structural and completeness
+    /// check, and keeps its Linux-layer selection; its guest-runtime members
+    /// are carried as retired roles in their original wire spelling.
+    #[test]
+    fn a_set_still_carrying_guest_runtime_members_is_accepted_with_them_retired() {
+        let manifest = manifest_with_retired_members();
+        let json = serde_json::to_string(&manifest).unwrap();
+        for spelling in [
+            r#""role":"runtime_overlay""#,
+            r#""role":{"sdk_sidecar":"glibc"}"#,
+            r#""role":{"sdk_sidecar":"musl"}"#,
+            r#""role":"initramfs""#,
+        ] {
+            assert!(json.contains(spelling), "{spelling} in {json}");
+        }
+        let parsed: ImageSetManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, manifest);
+        validate_structure(&parsed).unwrap();
+        require_complete(&parsed, &ImageSetRequirement::current_train()).unwrap();
+        check_protocol_compatibility(&parsed, &host()).unwrap();
+        assert_eq!(
+            parsed
+                .members
+                .iter()
+                .filter(|member| member.role.is_retired())
+                .count(),
+            2 * RETIRED.len()
+        );
+        let workload = select_workload_image(
+            &parsed,
+            WorkloadImageProfile::DefaultTenant,
             GuestArch::Aarch64,
             &backend(),
         )
         .unwrap();
-        assert_eq!(
-            selected.artifacts[0].name.as_str(),
-            "initramfs-aarch64.tar.gz"
-        );
+        assert!(!workload.kernel.role.is_retired());
+        assert!(!workload.rootfs.role.is_retired());
     }
 
-    /// The initramfs is a required member on both architectures: a set that
-    /// omits it is refused as incomplete, naming each missing member.
+    /// The SDK sidecar members of those sets publish a source fingerprint. It
+    /// still parses, so the set's signed bytes stay readable, and nothing else
+    /// about the member changes.
     #[test]
-    fn the_current_train_requires_an_initramfs_on_both_arches() {
-        let mut manifest = manifest();
-        manifest
-            .members
-            .retain(|member| member.role != ImageSetRole::Initramfs);
-        match require_complete(&manifest, &ImageSetRequirement::current_train()) {
-            Err(ImageSetError::Incomplete { missing }) => {
-                for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-                    assert!(missing.contains(&RequiredMember {
-                        role: ImageSetRole::Initramfs,
-                        target: MemberTarget::Arch(arch),
-                    }));
-                }
-            }
-            other => panic!("a set without an initramfs must be incomplete, got {other:?}"),
-        }
+    fn a_retired_sidecar_member_with_a_source_fingerprint_still_parses() {
+        let mut manifest = manifest_with_retired_members();
+        let sidecar = member_mut(
+            &mut manifest,
+            ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                GuestLibc::Glibc,
+            )),
+            ARM,
+        );
+        sidecar.source_fingerprint = Some(sha("sdk-cdylib-sources"));
+        let parsed: ImageSetManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(parsed, manifest);
+        validate_structure(&parsed).unwrap();
     }
 
     #[test]
@@ -908,12 +968,12 @@ mod structure {
     #[test]
     fn refuses_a_member_with_no_artifacts() {
         let mut manifest = manifest();
-        member_mut(&mut manifest, ImageSetRole::RuntimeOverlay, ARM)
+        member_mut(&mut manifest, ImageSetRole::Stage0BootstrapKernel, ARM)
             .artifacts
             .clear();
         assert!(matches!(
             refused(&manifest),
-            ImageSetError::MemberHasNoArtifacts { role: ImageSetRole::RuntimeOverlay, target }
+            ImageSetError::MemberHasNoArtifacts { role: ImageSetRole::Stage0BootstrapKernel, target }
                 if target == ARM
         ));
     }
@@ -1001,21 +1061,6 @@ mod structure {
     }
 
     #[test]
-    fn refuses_an_sdk_sidecar_for_an_unknown_libc() {
-        let mut manifest = manifest();
-        member_mut(
-            &mut manifest,
-            ImageSetRole::SdkSidecar(GuestLibc::Musl),
-            X86,
-        )
-        .role = ImageSetRole::SdkSidecar(GuestLibc::Unknown);
-        assert!(matches!(
-            refused(&manifest),
-            ImageSetError::UnknownSidecarLibc { target } if target == X86
-        ));
-    }
-
-    #[test]
     fn refuses_a_release_tag_naming_another_version() {
         let mut manifest = manifest();
         release_mut(&mut manifest).release_tag = ReleaseTag::new("v1.0.1").unwrap();
@@ -1066,7 +1111,7 @@ mod completeness {
     fn current_train_requires_every_role_on_both_arches_plus_the_smoke_pack() {
         let requirement = ImageSetRequirement::current_train();
         let members = requirement.members();
-        assert_eq!(members.len(), 21);
+        assert_eq!(members.len(), 13);
         for arch in [X86, ARM] {
             for profile in [
                 WorkloadImageProfile::DefaultTenant,
@@ -1087,11 +1132,7 @@ mod completeness {
                 ImageSetRole::BuilderVm,
                 ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
                 ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
-                ImageSetRole::RuntimeOverlay,
-                ImageSetRole::SdkSidecar(GuestLibc::Glibc),
-                ImageSetRole::SdkSidecar(GuestLibc::Musl),
                 ImageSetRole::Stage0BootstrapKernel,
-                ImageSetRole::Initramfs,
             ] {
                 assert!(members.contains(&RequiredMember { role, target: arch }));
             }
@@ -1164,11 +1205,14 @@ mod completeness {
     #[test]
     fn member_build_mode_and_source_fingerprint_round_trip() {
         let mut changed = manifest();
-        for m in &mut changed.members {
-            if m.role == ImageSetRole::SdkSidecar(GuestLibc::Glibc) && m.target == ARM {
-                m.source_fingerprint = Some(sha("sdk-cdylib-sources"));
-            }
-        }
+        let mut sidecar = member(
+            ImageSetRole::RetiredGuestRuntime(RetiredGuestRuntimeRole::SdkSidecar(
+                GuestLibc::Glibc,
+            )),
+            ARM,
+        );
+        sidecar.source_fingerprint = Some(sha("sdk-cdylib-sources"));
+        changed.members.push(sidecar);
         let dev_rootfs = changed
             .members
             .iter_mut()
@@ -1248,36 +1292,116 @@ mod completeness {
 mod protocol {
     use super::*;
 
-    fn with_host_range(min: u32, max: u32) -> HostProtocolSupport {
+    fn with_base_range(min: u32, max: u32) -> HostProtocolSupport {
         HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(min, max).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(min),
+                BaseImageContract::new(max),
+            )
+            .unwrap(),
             ..host()
         }
     }
 
+    /// The guest agent ships with `mvmctl`, so the range a set still records
+    /// for it decides nothing: no host range is compared with it, and a set
+    /// that no longer records one parses and is accepted.
     #[test]
-    fn accepts_an_overlapping_guest_agent_range() {
+    fn the_retired_guest_agent_range_decides_nothing() {
+        let mut manifest = manifest();
+        manifest.compatibility.guest_agent_protocol = Some(ProtocolRange::new(9, 9).unwrap());
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+
+        manifest.compatibility.guest_agent_protocol = None;
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert!(
+            json["compatibility"].get("guest_agent_protocol").is_none(),
+            "an absent range is not written back: {json}"
+        );
+        let back: ImageSetManifest = serde_json::from_value(json).unwrap();
+        check_protocol_compatibility(&back, &host()).unwrap();
+    }
+
+    /// Every set published before the declaration existed carries none. That
+    /// is read as the legacy contract 0 by name and checked like any other
+    /// value, so a host that stops booting legacy base images refuses it
+    /// rather than passing it unexamined.
+    #[test]
+    fn a_set_without_a_base_image_contract_is_checked_as_the_legacy_contract() {
         let manifest = manifest();
-        for (min, max) in [(2, 2), (1, 2), (2, 9), (1, 9)] {
-            check_protocol_compatibility(&manifest, &with_host_range(min, max)).unwrap();
-        }
+        assert_eq!(manifest.compatibility.base_image_contract, None);
+        assert_eq!(
+            manifest.compatibility.base_image_contract_or_legacy(),
+            BaseImageContract::LEGACY
+        );
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+
+        let error = check_protocol_compatibility(&manifest, &with_base_range(1, 1)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ImageSetError::BaseImageContractUnsupported { set, .. }
+                    if set == BaseImageContract::LEGACY
+            ),
+            "{error}"
+        );
     }
 
     #[test]
-    fn refuses_a_guest_agent_range_that_does_not_overlap() {
-        let manifest = manifest();
-        for (min, max) in [(1, 1), (3, 5)] {
-            let error =
-                check_protocol_compatibility(&manifest, &with_host_range(min, max)).unwrap_err();
-            assert!(
-                matches!(
-                    error,
-                    ImageSetError::GuestAgentProtocolDisjoint { set, host }
-                        if (set.min(), set.max()) == (2, 2) && (host.min(), host.max()) == (min, max)
-                ),
-                "{min}..={max}"
-            );
-        }
+    fn a_linux_layer_set_is_accepted() {
+        let mut manifest = manifest();
+        manifest.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_base_image_contract_is_refused() {
+        let mut manifest = manifest();
+        manifest.compatibility.base_image_contract = Some(BaseImageContract::new(2));
+        let error = check_protocol_compatibility(&manifest, &host()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ImageSetError::BaseImageContractUnsupported { set, .. }
+                    if set == BaseImageContract::new(2)
+            ),
+            "{error}"
+        );
+        assert_eq!(error.stage(), ImageSetStage::ProtocolCompatibility);
+        assert!(error.to_string().contains("0..=1"), "{error}");
+    }
+
+    #[test]
+    fn the_base_image_contract_round_trips_as_a_bare_integer() {
+        let mut declared = manifest();
+        declared.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        let json = serde_json::to_value(&declared.compatibility).unwrap();
+        assert_eq!(json["base_image_contract"], serde_json::json!(1));
+        let back: ImageSetCompatibility = serde_json::from_value(json).unwrap();
+        assert_eq!(back, declared.compatibility);
+        let legacy = serde_json::to_value(&manifest().compatibility).unwrap();
+        assert!(legacy.get("base_image_contract").is_none(), "{legacy}");
+    }
+
+    /// The lock and its signed root agree when they promise the same thing.
+    /// The lock no longer copies the retired guest-agent range, so that range
+    /// cannot make them disagree; every live field still can.
+    #[test]
+    fn the_same_contract_ignores_only_the_retired_guest_agent_range() {
+        let root = manifest().compatibility;
+        let mut lock = root.clone();
+        lock.guest_agent_protocol = None;
+        assert!(root.same_contract(&lock));
+
+        let mut moved = lock.clone();
+        moved.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
+        assert!(!root.same_contract(&moved));
+        let mut moved = lock.clone();
+        moved.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        assert!(!root.same_contract(&moved));
+        let mut moved = lock;
+        moved.builder_cache_contract += 1;
+        assert!(!root.same_contract(&moved));
     }
 
     /// A release published before the field existed carries none, and meant
@@ -1501,7 +1625,7 @@ mod selection {
         // take it.
         select_member(
             &manifest,
-            ImageSetRole::RuntimeOverlay,
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
             GuestArch::Aarch64,
             &backend,
         )
@@ -1824,7 +1948,7 @@ mod verification {
         let mut incomplete = manifest();
         incomplete
             .members
-            .retain(|m| m.role != ImageSetRole::RuntimeOverlay);
+            .retain(|m| m.role != ImageSetRole::Stage0BootstrapKernel);
         let set = stage(incomplete);
         verify_root_checked(&set.request(), accept_signature).unwrap();
         assert!(matches!(
@@ -1835,7 +1959,11 @@ mod verification {
             Err(ImageSetError::Incomplete { .. })
         ));
         let incompatible = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(7),
+                BaseImageContract::new(8),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: payload_capable(),
         };
@@ -1844,7 +1972,7 @@ mod verification {
                 &set.request().with_host_protocols(&incompatible),
                 accept_signature
             ),
-            Err(ImageSetError::GuestAgentProtocolDisjoint { .. })
+            Err(ImageSetError::BaseImageContractUnsupported { .. })
         ));
     }
 
@@ -2104,7 +2232,7 @@ mod verification {
         let mut manifest = manifest();
         manifest
             .members
-            .retain(|member| member.role != ImageSetRole::RuntimeOverlay);
+            .retain(|member| member.role != ImageSetRole::Stage0BootstrapKernel);
         let set = stage(manifest);
 
         verify_checked(&set.request(), accept_signature)
@@ -2125,7 +2253,11 @@ mod verification {
     fn a_set_the_host_cannot_speak_to_is_refused_only_when_protocols_are_supplied() {
         let set = staged();
         let incompatible = HostProtocolSupport {
-            guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
+            base_image_contract: BaseImageContractRange::new(
+                BaseImageContract::new(7),
+                BaseImageContract::new(8),
+            )
+            .unwrap(),
             builder_cache_contract: 4,
             builder_boot_abi: payload_capable(),
         };
@@ -2140,7 +2272,7 @@ mod verification {
         .expect_err("a set this host cannot speak to must be refused");
 
         assert!(
-            matches!(err, ImageSetError::GuestAgentProtocolDisjoint { .. }),
+            matches!(err, ImageSetError::BaseImageContractUnsupported { .. }),
             "got: {err}"
         );
         assert_eq!(err.stage(), ImageSetStage::ProtocolCompatibility);

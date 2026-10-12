@@ -102,7 +102,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_any_virtio_fs_share_before_mapping`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
+| `MVM-SEC-01` | `build` | No host-fs access from a guest beyond explicit shares | `fn:seccomp_allows_listed_denies_unlisted`, `fn:an_exec_under_the_admitted_standard_tier_cannot_open_a_socket`, `fn:a_started_process_under_the_admitted_standard_tier_cannot_open_a_socket`, `fn:an_exec_child_reports_a_seccomp_filter_and_no_new_privs`, `fn:a_warm_claimed_child_under_standard_cannot_open_a_socket`, `fn:a_warm_claimed_childs_workload_reports_a_seccomp_filter`, `fn:a_child_must_report_holding_the_admitted_seccomp_tier`, `fn:admitted_seccomp_tier_grants_sockets_only_to_a_launch_that_needs_them`, `fn:validated_conversion_enforces_mount_allow_list`, `fn:bare_mnt_is_refused_because_it_shadows_the_config_drive`, `fn:dir_share_two_part_defaults_ro`, `fn:libkrun_refuses_any_virtio_fs_share_before_mapping`, `fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched`, `ci:seccomp-functional` |
 
 ## oci_provenance
 
@@ -139,13 +139,13 @@ The three honesty levels (R2):
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
 | `MVM-SEC-07` | `some-true` | Cargo deps are audited on every PR | `ci:cargo-deny`, `ci:cargo-audit`, `ci:reproducibility` |
-| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, install, and self-update paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `ci:release-provenance`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:acquire_refuses_a_root_without_a_signature`, `fn:the_hash_skip_hatch_does_not_waive_the_root_signature`, `fn:an_archive_without_a_bundle_is_refused`, `fn:a_real_release_bundle_verifies_under_its_tag`, `fn:self_update_refuses_an_unsigned_checksum_manifest_before_parsing`, `fn:self_update_refuses_a_checksum_manifest_signed_for_another_tag`, `fn:fresh_install_trust_precedes_verifier_execution`, `fn:fresh_install_requires_tag_pinned_bundle`, `fn:fresh_install_has_no_unsigned_fallback` |
+| `MVM-SEC-20` | `build` | Every published release artifact is authenticated under the release workflow's identity, directly or through a signed checksum manifest, and the build, fetch, install, and self-update paths refuse an artifact whose required signature is missing or invalid | `ci:verify-release`, `ci:release-provenance`, `fn:accepted_identities_are_the_versioned_release_workflow`, `fn:a_missing_bundle_refuses_and_names_the_asset`, `fn:acquire_refuses_a_root_without_a_signature`, `fn:the_hash_skip_hatch_does_not_waive_the_root_signature`, `fn:an_archive_without_a_bundle_is_refused`, `fn:a_real_release_bundle_verifies_under_its_tag`, `fn:self_update_refuses_an_unsigned_checksum_manifest_before_parsing`, `fn:self_update_refuses_a_checksum_manifest_signed_for_another_tag`, `fn:fresh_install_trust_precedes_verifier_execution`, `fn:fresh_install_requires_tag_pinned_bundle`, `fn:fresh_install_has_no_unsigned_fallback`, `fn:an_unsigned_release_runtime_is_refused_and_nothing_is_cached`, `fn:a_release_runtime_that_misses_its_digest_is_refused_before_its_signature` |
 
 ## verified_boot
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem` |
+| `MVM-SEC-03` | `build` | A tampered rootfs ext4 fails to boot | `ci:verified-boot-artifacts`, `ci:check-abi-layout`, `fn:verify_and_resume_rejects_tampered_mem`, `fn:a_fresh_release_install_assembles_every_piece_from_its_own_archive` |
 
 ## workload_input
 

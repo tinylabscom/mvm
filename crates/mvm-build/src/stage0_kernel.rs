@@ -217,11 +217,7 @@ pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocol
     #[cfg(not(test))]
     let builder_boot_abi = crate::builder_boot::supported_image_abis();
     mvm_core::image_set::HostProtocolSupport {
-        guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(
-            mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
-            mvm_agentd::vsock::PROTOCOL_VERSION,
-        )
-        .expect("the compiled guest-agent protocol range must be ordered"),
+        base_image_contract: mvm_core::image_set::BaseImageContractRange::SUPPORTED,
         builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
         // Payload ABIs only when this process can hand a builder the payload;
         // an image with no builder binaries of its own is unbootable without.
@@ -562,9 +558,10 @@ mod tests {
     #[test]
     fn an_incompatible_lock_is_refused_before_the_transport_is_called() {
         let incompatible = mvm_core::image_set::ImageSetCompatibility {
-            guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(99, 100).unwrap(),
+            guest_agent_protocol: None,
             builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
             builder_boot_abi: None,
+            base_image_contract: Some(mvm_core::image_set::BaseImageContract::new(99)),
         };
         let fetcher = FakeFetcher::new(b"must not be fetched");
         let host = current_image_set_protocol_support();
@@ -577,7 +574,7 @@ mod tests {
             &incompatible,
             &host,
         )
-        .expect_err("disjoint protocols must refuse");
+        .expect_err("an unknown base-image contract must refuse");
         assert!(matches!(
             err,
             Stage0KernelError::ProtocolIncompatible { .. }
@@ -600,9 +597,10 @@ mod tests {
         let mut host = current_image_set_protocol_support();
         host.builder_boot_abi = crate::builder_boot::baked_only_abis();
         let compatibility = |abi| mvm_core::image_set::ImageSetCompatibility {
-            guest_agent_protocol: host.guest_agent_protocol,
+            guest_agent_protocol: None,
             builder_cache_contract: host.builder_cache_contract,
             builder_boot_abi: abi,
+            base_image_contract: None,
         };
         for abi in [None, Some(BuilderBootAbi::LEGACY)] {
             mvm_core::image_set::check_declared_protocol_compatibility(&compatibility(abi), &host)

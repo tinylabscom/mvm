@@ -45,6 +45,7 @@ pub mod guest_sidecar;
 /// Pure health-state reducer: fold probe results into a health state and
 /// decide restart/give-up actions. No I/O.
 pub mod health;
+pub mod host_storage_encryption;
 pub mod icmp_wire;
 /// Content-addressed image version-lineage nodes (the image analog of
 /// [`checkpoint`]). Provenance metadata, never authorization.

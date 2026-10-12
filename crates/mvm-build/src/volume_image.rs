@@ -57,16 +57,8 @@ pub(crate) fn ensure_persistent_volume_image_within(
         });
     }
 
-    if let Some(parent) = host_path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            BuilderVmError::ExtractionFailed(format!(
-                "creating volume parent dir {}: {error}",
-                parent.display()
-            ))
-        })?;
-    }
+    prepare_private_parent(host_path)?;
+    create_or_admit_private_image(host_path)?;
 
     let needs_format = match std::fs::metadata(host_path) {
         Ok(metadata) => metadata.len() == 0,
@@ -92,6 +84,89 @@ pub(crate) fn ensure_persistent_volume_image_within(
         path: host_path.to_path_buf(),
         _lock: lock,
     })
+}
+
+/// Make the image's directory ready without loosening anything the caller
+/// owns: a missing directory (and any missing ancestor) is created owner-only;
+/// an existing one is used as it is, unless other users could write into it,
+/// which would let them swap the image for one of their own.
+fn prepare_private_parent(host_path: &Path) -> Result<(), BuilderVmError> {
+    let Some(parent) = host_path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    match std::fs::metadata(parent) {
+        Ok(metadata) if !metadata.is_dir() => Err(BuilderVmError::ExtractionFailed(format!(
+            "volume parent {} is not a directory",
+            parent.display()
+        ))),
+        Ok(metadata) => {
+            let mode =
+                mvm_core::private_fs::mode_bits(parent, &metadata).map_err(io_error(parent))?;
+            if mode & 0o022 != 0 {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "refusing to create a writable disk image in {}: other users can write to \
+                     that directory (mode {mode:03o}), so they could replace the image. Use a \
+                     directory only you can write to (chmod go-w {})",
+                    parent.display(),
+                    parent.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            mvm_core::private_fs::ensure_private_dir(parent).map_err(|error| {
+                BuilderVmError::ExtractionFailed(format!(
+                    "creating volume parent dir {} privately: {error}",
+                    parent.display()
+                ))
+            })
+        }
+        Err(error) => Err(io_error(parent)(error)),
+    }
+}
+
+/// Create a missing image owner-only (0600) before any byte is written, or
+/// admit an existing one only when it is a regular file no other user can
+/// read or write. An existing image is never chmodded: it is the caller's
+/// file, and its data is what the guest is about to see.
+fn create_or_admit_private_image(host_path: &Path) -> Result<(), BuilderVmError> {
+    use mvm_core::private_fs::OpenOptionsModeExt as _;
+    match std::fs::symlink_metadata(host_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "writable disk image {} must be a regular file (not a symlink or device)",
+                    host_path.display()
+                )));
+            }
+            let mode = mvm_core::private_fs::mode_bits(host_path, &metadata)
+                .map_err(io_error(host_path))?;
+            if mode & 0o077 != 0 {
+                return Err(BuilderVmError::ExtractionFailed(format!(
+                    "refusing to attach writable disk image {}: other users can access it \
+                     (mode {mode:03o}), and the guest is about to write into it. Restrict it \
+                     with `chmod 600 {}`",
+                    host_path.display(),
+                    host_path.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open_with_mode(0o600, host_path)
+                .map_err(io_error(host_path))?;
+            // The umask can only narrow the creation mode; set it exactly.
+            mvm_core::private_fs::set_mode(host_path, 0o600).map_err(io_error(host_path))
+        }
+        Err(error) => Err(io_error(host_path)(error)),
+    }
+}
+
+fn io_error(path: &Path) -> impl Fn(std::io::Error) -> BuilderVmError + '_ {
+    move |error| BuilderVmError::ExtractionFailed(format!("{}: {error}", path.display()))
 }
 
 fn format_new_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
@@ -155,4 +230,98 @@ fn validate_ext4(host_path: &Path) -> Result<(), BuilderVmError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    use super::*;
+
+    const SIZE: u64 = 16 * 1024 * 1024;
+
+    fn mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    fn rw(path: &Path) -> Result<VolumeImageLock, BuilderVmError> {
+        ensure_persistent_volume_image_within(path, SIZE, false, LockWait::none())
+    }
+
+    #[test]
+    fn a_new_image_and_its_missing_parents_are_created_owner_only() {
+        let scratch = tempfile::tempdir().unwrap();
+        let outer = scratch.path().join("state");
+        let image = outer.join("nested").join("data.img");
+        let _lock = rw(&image).expect("created");
+        assert_eq!(mode(&image), 0o600, "image");
+        assert_eq!(mode(&outer), 0o700, "created ancestor");
+        assert_eq!(mode(image.parent().unwrap()), 0o700, "created parent");
+    }
+
+    #[test]
+    fn an_existing_parent_is_used_as_it_is_unless_others_can_write_to_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let shared = scratch.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _lock = rw(&shared.join("data.img")).expect("a 0755 parent is fine");
+        assert_eq!(
+            mode(&shared),
+            0o755,
+            "an existing directory is never chmodded"
+        );
+
+        let loose = scratch.path().join("loose");
+        std::fs::create_dir(&loose).unwrap();
+        std::fs::set_permissions(&loose, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let image = loose.join("data.img");
+        let message = rw(&image).unwrap_err().to_string();
+        assert!(message.contains("other users can write"), "{message}");
+        assert!(message.contains("chmod go-w"), "{message}");
+        assert!(!image.exists(), "nothing created in a loose directory");
+    }
+
+    #[test]
+    fn an_existing_image_others_can_access_is_refused_and_left_alone() {
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("data.img");
+        std::fs::write(&image, b"").unwrap();
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let message = rw(&image).unwrap_err().to_string();
+        assert!(message.contains("chmod 600"), "{message}");
+        assert_eq!(mode(&image), 0o644, "never chmodded");
+        assert_eq!(
+            std::fs::metadata(&image).unwrap().len(),
+            0,
+            "never formatted"
+        );
+
+        std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let _lock = rw(&image).expect("an owner-only image is admitted");
+    }
+
+    #[test]
+    fn a_symlinked_image_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let target = scratch.path().join("target.img");
+        std::fs::write(&target, b"").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = scratch.path().join("data.img");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let message = rw(&link).unwrap_err().to_string();
+        assert!(message.contains("must be a regular file"), "{message}");
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_read_only_image_is_neither_created_nor_mode_checked() {
+        let scratch = tempfile::tempdir().unwrap();
+        let image = scratch.path().join("shared.img");
+        // Read-only admission is about the guest reading an image the caller
+        // already has; nothing is created or written.
+        let _ = ensure_persistent_volume_image(&image, SIZE, true).unwrap_err();
+        assert!(!image.exists());
+    }
 }

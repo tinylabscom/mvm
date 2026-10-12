@@ -23,7 +23,7 @@ on:
         required: false
         type: string
         default: x86_64
-      # How many hash partitions the caller fans the archive out over. The
+      # How many hash partitions the caller fans the suite out over. The
       # caller's matrix and this number must agree, or tests go unrun.
       shard_count:
         required: false
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Invalid archive run ID" >&2; exit 1; }
-          # The cleanup CLI test clears /tmp on Linux while this shard runs.
+          # Kept under RUNNER_TEMP, outside the /tmp tree the tests share.
           archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           rm -rf -- "$archive_root"
           mkdir -p -- "$archive_root"
@@ -149,7 +149,16 @@ jobs:
 
       - name: Run tests
         if: inputs.archive_run_id == ''
-        run: cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2
+        env:
+          SHARD: ${{ inputs.shard }}
+          SHARD_COUNT: ${{ inputs.shard_count || '2' }}
+        run: |
+          set -euo pipefail
+          [[ "$SHARD" =~ ^[1-9]$ && "$SHARD_COUNT" =~ ^[1-9]$ && "$SHARD" -le "$SHARD_COUNT" ]] || {
+            echo "Invalid shard $SHARD of $SHARD_COUNT" >&2
+            exit 1
+          }
+          cargo nextest run --workspace --all-targets --partition "hash:${SHARD}/${SHARD_COUNT}"
 
       - name: Run addon/egress helper tests
         if: inputs.archive_run_id == '' && inputs.shard == '1'
@@ -209,28 +218,22 @@ jobs:
               exit "$status"
             }
 
-      - name: Remove archived workspace
-        if: always() && inputs.archive_run_id != ''
-        env:
-          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
-        run: |
-          set -euo pipefail
-          [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
-
+      # Last step, always: kill by PID whatever this job started (a VMM
+      # launched through `sudo setsid` outlives the job's process tree), then
+      # remove the isolated HOME/MVM_HOME/TMPDIR, the extracted archive and
+      # the test state. tests/github_actions_self_hosted_runner.rs requires
+      # this step on every job that can run on the KVM pool.
       - name: Clean isolated state
         if: always()
         env:
           SHARD: ${{ inputs.shard }}
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
             printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
           fi
-          if [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[1-9]$ ]]; then
-            base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
-            if [ -d "$base" ] && [ ! -L "$base" ]; then
-              chmod -R u+rwX -- "$base"
-              rm -rf -- "$base"
-            fi
-            fi
+          if [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]]; then
+            export ARCHIVE_ROOT="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          fi
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"

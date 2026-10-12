@@ -1,8 +1,8 @@
 //! `mvmctl build runtime-overlay build` — explicitly populate the read-only
-//! runtime-overlay cache without booting a VM: assembled on the host from this
-//! checkout's guest-runtime archive at this CLI's version, or the member of
-//! the image set this build pins. A selected image checkout has no say: the
-//! overlay is guest runtime, not a Linux-layer image.
+//! runtime-overlay cache without booting a VM: assembled on the host from a
+//! guest runtime — this checkout's, or the published one of this CLI's
+//! version. The image set carries no overlay, and a selected image checkout
+//! has no say: the overlay is guest runtime, not a Linux-layer image.
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -10,7 +10,7 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use crate::ui;
 use mvm_client::launch::runtime_overlay::{
     RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
+    runtime_overlay_source_checkout_root,
 };
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
@@ -31,9 +31,10 @@ enum Cmd {
 
 #[derive(ClapArgs, Debug, Clone)]
 struct BuildArgs {
-    /// Where the overlay comes from. `build` assembles it from the source
-    /// checkout, `download` fetches the published artifact, and `auto`
-    /// follows the same resolver ordinary required-overlay boots use.
+    /// Which guest runtime the overlay is assembled from. `build` assembles
+    /// it from the source checkout; `auto` does the same in a source checkout
+    /// and otherwise assembles it from the published guest runtime of this
+    /// version — on a release binary, the one its own release ships.
     #[arg(long, value_enum, default_value_t = Source::Auto)]
     source: Source,
 
@@ -43,12 +44,11 @@ struct BuildArgs {
 
     /// Override the expected overlay version of a source build. Defaults to
     /// this `mvmctl` build's version, which is what ordinary source-built
-    /// boots require. A download installs the pinned image set's member,
-    /// whose version is the member's own.
+    /// boots require. A published guest runtime is locked to this version.
     #[arg(long)]
     version: Option<String>,
 
-    /// Rebuild or re-download even when the matching cache entry already exists.
+    /// Reassemble even when the matching cache entry already exists.
     #[arg(long)]
     force: bool,
 }
@@ -57,7 +57,6 @@ struct BuildArgs {
 enum Source {
     Auto,
     Build,
-    Download,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -76,92 +75,104 @@ fn run_build(args: BuildArgs) -> Result<()> {
         None => GuestArch::host(),
     };
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let mode = requested_acquire_mode(args.source);
-    let resolver =
-        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.clone());
-    if !args.force {
-        match mode {
-            RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-                let artifact = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-                    &cache_root,
-                    &version,
-                    arch,
-                )?;
-                announce_built_overlay(&artifact, false);
-                return Ok(());
-            }
-            RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-                if let Ok(artifact) =
-                    mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch)
-                {
-                    announce_cached_overlay(&artifact);
-                    return Ok(());
-                }
-            }
+    match requested_acquire_mode(
+        args.source,
+        runtime_overlay_source_checkout_root().is_some(),
+    ) {
+        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
+            assemble_from_published(&cache_root, &version, arch, args.force)
+        }
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+            assemble_from_source(&cache_root, &version, arch, args.force)
         }
     }
+}
 
-    if args.force && mode == RuntimeOverlayAcquireMode::BuildFromSourceCheckout {
+/// Assemble the overlay from this checkout's guest runtime.
+fn assemble_from_source(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    force: bool,
+) -> Result<()> {
+    if !force {
+        let artifact = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+            cache_root, version, arch,
+        )?;
+        announce_built_overlay(&artifact, false);
+        return Ok(());
+    }
+    mvm_build::runtime_pieces::discard_local_piece(
+        cache_root,
+        version,
+        arch,
+        mvm_build::runtime_pieces::RuntimePiece::RuntimeOverlay,
+    )
+    .context("discarding the cached runtime overlay")?;
+    let source_checkout_root = runtime_overlay_source_checkout_root().ok_or_else(|| {
+        anyhow::anyhow!(
+            "--source build assembles the overlay from guest binaries cargo builds in an mvm \
+             source checkout, and this binary has none; run it from a contributor build or set \
+             {} to an mvm checkout",
+            mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
+        )
+    })?;
+    ui::info(
+        "Assembling the version-matched runtime overlay from this checkout's guest runtime...",
+    );
+    let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+        cache_root,
+        expected_version: version,
+        arch,
+        source_checkout_root: &source_checkout_root,
+    })?;
+    announce_built_overlay(&artifact, force);
+    Ok(())
+}
+
+/// Assemble the overlay from the published guest runtime of this CLI's
+/// version — on a release binary, the one its own release ships. The runtime
+/// is version-locked to the binary, so another `--version` is refused.
+fn assemble_from_published(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: GuestArch,
+    force: bool,
+) -> Result<()> {
+    let own = env!("CARGO_PKG_VERSION");
+    anyhow::ensure!(
+        version == own,
+        "the published guest runtime this binary uses is mvmctl {own}'s; it cannot assemble a \
+         runtime overlay for {version}"
+    );
+    let runtime = crate::release_guest_runtime::installed_for_running_binary(cache_root, arch)?;
+    if force {
         mvm_build::runtime_pieces::discard_local_piece(
-            &cache_root,
-            &version,
+            cache_root,
+            version,
             arch,
             mvm_build::runtime_pieces::RuntimePiece::RuntimeOverlay,
         )
         .context("discarding the cached runtime overlay")?;
     }
-    let source_checkout_root = match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            Some(runtime_overlay_source_checkout_root().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--source build assembles the overlay from guest binaries cargo builds in an \
-                     mvm source checkout, and this binary has none; run it from a contributor \
-                     build, set {} to an mvm checkout, or use --source download",
-                    mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
-                )
-            })?)
-        }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
-    };
-
-    match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            ui::info(
-                "Assembling the version-matched runtime overlay from this checkout's guest runtime...",
-            );
-        }
-        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            ui::info(
-                "Downloading the runtime overlay from the pinned image set into the local cache...",
-            );
-        }
-    }
-
-    let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-        cache_root: &cache_root,
-        expected_version: &version,
-        arch,
-        source_checkout_root: source_checkout_root.as_deref(),
-    })?;
-    announce_built_overlay(&artifact, args.force);
+    ui::info("Assembling the runtime overlay from the published guest runtime...");
+    let artifact = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+        cache_root, version, arch, &runtime,
+    )
+    .context("assembling the runtime overlay from the published guest runtime")?;
+    announce_built_overlay(&artifact, force);
     Ok(())
 }
 
-fn requested_acquire_mode(source: Source) -> RuntimeOverlayAcquireMode {
-    match source {
-        Source::Auto => runtime_overlay_acquire_mode(),
-        Source::Build => RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
-        Source::Download => RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+/// `auto` assembles from a checkout when there is one, as bootstrap does for
+/// a source build, and from the published guest runtime otherwise.
+fn requested_acquire_mode(source: Source, checkout: bool) -> RuntimeOverlayAcquireMode {
+    match (source, checkout) {
+        (Source::Build, _) | (Source::Auto, true) => {
+            RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+        }
+        (Source::Auto, false) => RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
     }
-}
-
-fn announce_cached_overlay(artifact: &mvm_fs::overlay::RuntimeOverlayArtifact) {
-    ui::success(&format!(
-        "Runtime overlay {} for {} already cached at {}",
-        artifact.version,
-        artifact.arch,
-        artifact.overlay_ext4.display()
-    ));
 }
 
 fn announce_built_overlay(artifact: &mvm_fs::overlay::RuntimeOverlayArtifact, forced: bool) {
@@ -189,7 +200,7 @@ mod tests {
             "runtime-overlay",
             "build",
             "--source",
-            "download",
+            "build",
             "--arch",
             "aarch64",
             "--version",
@@ -206,14 +217,43 @@ mod tests {
         }
     }
 
+    /// The image set carries no overlay, so there is nothing to download.
     #[test]
-    fn requested_acquire_mode_honors_explicit_source() {
+    fn source_download_is_no_longer_accepted() {
+        let err = Cli::try_parse_from([
+            "mvmctl",
+            "build",
+            "runtime-overlay",
+            "build",
+            "--source",
+            "download",
+        ])
+        .expect_err("--source download names a retired image-set member");
+        assert!(err.to_string().contains("download"), "{err}");
+    }
+
+    #[test]
+    fn a_published_runtime_refuses_an_overlay_for_another_version() {
+        let cache = tempfile::tempdir().unwrap();
+        let error = assemble_from_published(cache.path(), "0.0.0-other", GuestArch::host(), false)
+            .expect_err("the published runtime is version-locked");
+        assert!(error.to_string().contains("0.0.0-other"), "{error}");
+    }
+
+    #[test]
+    fn requested_acquire_mode_honors_explicit_source_and_the_checkout() {
+        for checkout in [true, false] {
+            assert_eq!(
+                requested_acquire_mode(Source::Build, checkout),
+                RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+            );
+        }
         assert_eq!(
-            requested_acquire_mode(Source::Build),
+            requested_acquire_mode(Source::Auto, true),
             RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         );
         assert_eq!(
-            requested_acquire_mode(Source::Download),
+            requested_acquire_mode(Source::Auto, false),
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact
         );
     }

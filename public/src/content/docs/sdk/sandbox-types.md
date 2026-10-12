@@ -40,9 +40,13 @@ Security properties:
 
 ## Code sandbox
 
-Use one-shot execution when state should not persist:
+Use one-shot execution when state should not persist. An unnamed run claims a prepared warm standby of the image it boots — here the
+`python:3.12-alpine` image a `python` command infers — and refuses rather than
+cold-booting without one, so the standby is warmed first; `--name` boots cold.
 
 ```sh
+export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
+mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
 mvmctl run --timeout 10 -- python -c 'print(2 + 2)'
 ```
 

@@ -7,12 +7,14 @@ Feature: Transient sandbox boot
 
   @live
   Scenario: machine run boots a transient sandbox from an OCI image
+    Given the image "alpine" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-oci-boot --image alpine --timeout 120 -- /bin/echo mvm-bdd-oci-hello"
     Then the command exits with code 0
     And the output contains "mvm-bdd-oci-hello"
 
   @live
   Scenario: a named machine observes that name as its guest hostname
+    Given the image "alpine" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-guest-hostname --image alpine --timeout 120 -- /bin/hostname"
     Then the command exits with code 0
     And the output contains "bdd-guest-hostname"
@@ -21,6 +23,7 @@ Feature: Transient sandbox boot
   # carried from the universal initramfs across the root pivot.
   @live
   Scenario: a sealed OCI workload has writable scratch space
+    Given the image "alpine" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-oci-scratch --image alpine --timeout 120 -- mktemp /tmp/mvm-bdd.XXXXXX"
     Then the command exits with code 0
     And the output contains "/tmp/mvm-bdd."
@@ -55,6 +58,7 @@ Feature: Transient sandbox boot
   # policy denial. This is that regression, as a scenario.
   @live @tls_tunnel_client
   Scenario: a workload reaches an admitted host over the mediated egress path
+    Given the image "curlimages/curl:8.21.0" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
@@ -62,6 +66,7 @@ Feature: Transient sandbox boot
   # An unqualified allow entry covers the protocol-default HTTPS port.
   @live
   Scenario: machine run reaches an admitted host with an unqualified HTTPS grant
+    Given the image "curlimages/curl:8.21.0" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https-unqualified --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
@@ -69,12 +74,14 @@ Feature: Transient sandbox boot
   # Explicitly naming port 443 exercises the endpoint-qualified policy shape.
   @live
   Scenario: machine run reaches an admitted host with a port-qualified HTTPS grant
+    Given the image "curlimages/curl:8.21.0" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-egress-https-qualified --image curlimages/curl:8.21.0 --allow-host example.com:443 --timeout 180 -- curl -fsSL https://example.com"
     Then the command exits with code 0
     And the output contains "Example Domain"
 
   @live @tls_tunnel_client
   Scenario: a persistent command reports blocked egress before returning its exit status
+    Given the image "curlimages/curl:8.21.0" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-command-denial --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://blocked.example"
     Then the command exits with code 22
     And the error output contains "egress blocked: blocked.example:443"
@@ -83,6 +90,7 @@ Feature: Transient sandbox boot
   @live
   Scenario: machine run removes the transient VM state directory on guest exit
     Given an isolated mvm home
+    And the image "alpine" is prepared in the live home
     When I run mvmctl in an isolated live home with "machine run --name bdd-transient-cleanup --image alpine --timeout 120 -- /bin/echo mvm-bdd-cleanup-marker"
     Then the command exits with code 0
     And the output contains "mvm-bdd-cleanup-marker"

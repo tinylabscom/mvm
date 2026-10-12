@@ -825,6 +825,11 @@ fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
         script.contains("ready (installed beside mvmctl)"),
         "the smoke must require bootstrap to adopt the staged runtime"
     );
+    assert!(
+        script.contains("assembled from release guest runtime $runtime_name")
+            && script.contains("release archive $runtime_name"),
+        "the smoke must require the launch pieces to come from the staged runtime"
+    );
 }
 
 #[test]
@@ -1789,6 +1794,34 @@ fn remote_image_contract_checks_follow_the_locked_version() {
     assert!(downloader.contains("locked-image-tag.sh\" compatibility builder_cache_contract"));
     assert!(downloader.contains(".compatibility.builder_cache_contract == $contract"));
     assert!(pin_update.contains(".compatibility.builder_cache_contract == 5"));
+}
+
+/// The shell consumers of the signed root check the base-image contract with
+/// the same window `mvmctl` boots, reading an absent declaration as the legacy
+/// contract 0, and none of them consults the retired guest-agent range.
+#[test]
+fn remote_base_image_contract_checks_follow_the_cli_window() {
+    let supported = mvmctl::core::image_set::BaseImageContractRange::SUPPORTED;
+    assert_eq!(
+        supported.min(),
+        mvmctl::core::image_set::BaseImageContract::LEGACY
+    );
+    let check = format!(
+        "(.compatibility.base_image_contract // 0) <= {}",
+        supported.max()
+    );
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/workflows/update-image-pin.yml",
+        "scripts/download-qemu-wasm-smoke-pack.sh",
+    ] {
+        let text = fs::read_to_string(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        assert!(text.contains(&check), "{path} must check `{check}`");
+        assert!(
+            !text.contains("guest_agent_protocol"),
+            "{path} must not consult the retired guest-agent range"
+        );
+    }
 }
 
 #[test]

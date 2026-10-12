@@ -2250,16 +2250,24 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let pack = root.path().join("pack");
         std::fs::create_dir(&pack).unwrap();
-        let outside = root.path().join("outside");
+        // The target lives outside the payload root. Inside it, it would be an
+        // undeclared regular file, and which of the two refusals comes first
+        // would depend on the filesystem's directory order.
+        let elsewhere = tempfile::tempdir().unwrap();
+        let outside = elsewhere.path().join("outside");
         std::fs::write(&outside, b"profile").unwrap();
         symlink(&outside, pack.join("profile.toml")).unwrap();
         let verified = verified_payload();
 
         let error = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
-        assert!(matches!(
-            error,
-            RegistryPackVerificationError::NonRegularPayloadPath { .. }
-        ));
+        assert!(
+            matches!(
+                &error,
+                RegistryPackVerificationError::NonRegularPayloadPath { path }
+                    if path == "pack/profile.toml"
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

@@ -1,10 +1,12 @@
-//! Execute the `Test` aggregate's real shell against a synthetic scope matrix.
+//! Execute the `Test` aggregate's real shell against synthetic lane results.
 //!
-//! CI is scope-reduced: the `scope` job classifies changed paths, lanes skip
-//! when out of scope, and this aggregate asserts each lane's result *matches*
-//! its scope. Pull requests run the relevant proof, including Nix for changes
-//! that affect it. Merge groups reuse that proof and run only the
-//! fail-closed scope check against the synthetic commit.
+//! CI has two tiers. A pull request runs the fast gate — formatting, clippy
+//! over the core build and the feature combinations, the policy gates, a
+//! compile of every workspace test target and the sharded x86_64 suite. The
+//! merge queue runs the full matrix: the same fast-gate lanes plus every slow
+//! lane, against the integrated commit. Within each tier the `scope` job still
+//! classifies changed paths, lanes skip when out of scope, and this aggregate
+//! asserts each lane's result *matches* what its tier and scope require.
 //!
 //! That is not hypothetical. A lane that lost its job-level `if:` once
 //! reported `success` on every run, while the aggregate still required
@@ -64,7 +66,33 @@ fn aggregate_script() -> String {
     step_script("Require every validation lane to pass", "NIX_RESULT")
 }
 
+/// Fast-gate lanes: they run on a pull request and again in the queue, and
+/// follow the `code` scope on both.
+const GATE_LANES: [&str; 4] = [
+    "CORE_RESULT",
+    "FEATURE_CLIPPY_RESULT",
+    "WINDOWS_RESULT",
+    "WORKSPACE_RESULT",
+];
+
+/// Full-matrix lanes: skipped on every pull request, and following the
+/// `code` scope in the merge queue and on a manual dispatch.
+const FULL_LANES: [&str; 11] = [
+    "FEATURES_RESULT",
+    "FEATURES_SUPPORT_RESULT",
+    "FEATURES_EMBED_RESULT",
+    "WORKSPACE_EXTRAS_RESULT",
+    "WORKSPACE_AARCH64_BUILD_RESULT",
+    "WORKSPACE_AARCH64_RESULT",
+    "LINUX_RESULT",
+    "RELEASE_WITNESS_RESULT",
+    "MUSL_CONFINEMENT_RESULT",
+    "EBPF_RESULT",
+    "BOOT_RESULT",
+];
+
 /// One `needs.*.result` / scope combination fed to the aggregate.
+#[derive(Clone)]
 struct Verdict {
     event_name: &'static str,
     scope_result: &'static str,
@@ -72,94 +100,101 @@ struct Verdict {
     /// The documentation-corpus scope. It brings only the BDD lane into scope.
     docs: &'static str,
     nix_scope: &'static str,
+    runners_result: &'static str,
+    /// Where the runner picker sent the x86_64 workspace suite.
+    workspace_runner: &'static str,
     policy: &'static str,
-    lanes: &'static str,
-    /// Kept separate from `lanes` even though it now shares their scope, so
-    /// "the BDD lane skipped while in scope" stays expressible on its own.
+    gate: &'static str,
+    /// The hosted suite's archive build, which the self-hosted path skips.
+    archive: &'static str,
+    full: &'static str,
     bdd: &'static str,
-    boot: &'static str,
     nix: &'static str,
+    /// Per-lane results that override the tier defaults above.
+    overrides: Vec<(&'static str, &'static str)>,
 }
 
 impl Verdict {
-    /// An everything-in-scope, everything-green run.
-    fn in_scope() -> Self {
+    /// A code change on a pull request: the fast gate runs and passes, and
+    /// every full-matrix lane skips.
+    fn pr_in_scope() -> Self {
         Self {
             event_name: "pull_request",
             scope_result: "success",
             code: "true",
             docs: "false",
             nix_scope: "true",
+            runners_result: "success",
+            workspace_runner: "github",
             policy: "success",
-            lanes: "success",
-            bdd: "success",
-            boot: "success",
-            nix: "success",
-        }
-    }
-
-    /// A run touching nothing any lane reads — a plan, a site asset: every
-    /// scoped lane skips.
-    fn out_of_scope() -> Self {
-        Self {
-            event_name: "pull_request",
-            scope_result: "success",
-            code: "false",
-            docs: "false",
-            nix_scope: "false",
-            policy: "success",
-            lanes: "skipped",
+            gate: "success",
+            archive: "success",
+            full: "skipped",
             bdd: "skipped",
-            boot: "skipped",
             nix: "skipped",
+            overrides: Vec::new(),
         }
     }
 
-    /// The cumulative merge-group head reuses the successful PR proof.
+    /// A pull request touching nothing any lane reads — a plan, a site asset:
+    /// only the unscoped policy lane runs.
+    fn pr_out_of_scope() -> Self {
+        Self {
+            code: "false",
+            nix_scope: "false",
+            gate: "skipped",
+            archive: "skipped",
+            ..Self::pr_in_scope()
+        }
+    }
+
+    /// The same code change at the head of a merge group: everything runs.
     fn queue_in_scope() -> Self {
         Self {
             event_name: "merge_group",
-            policy: "skipped",
-            lanes: "skipped",
-            bdd: "skipped",
-            boot: "skipped",
-            nix: "skipped",
-            ..Self::in_scope()
+            full: "success",
+            bdd: "success",
+            nix: "success",
+            ..Self::pr_in_scope()
         }
     }
 
-    /// A docs-only merge group has the same lightweight queue shape.
+    /// An out-of-scope merge group: still only the policy lane.
     fn queue_out_of_scope() -> Self {
         Self {
             event_name: "merge_group",
-            policy: "skipped",
-            nix: "skipped",
-            ..Self::out_of_scope()
+            ..Self::pr_out_of_scope()
         }
     }
 
-    /// A change confined to the documentation corpus: the BDD lane runs its
-    /// documentation scenarios, and every other scoped lane skips.
-    fn docs_only() -> Self {
+    /// A pull request confined to the documentation corpus. BDD is the only
+    /// lane the corpus brings into scope, and BDD is full-matrix, so the PR
+    /// runs nothing beyond the policy lane.
+    fn pr_docs_only() -> Self {
         Self {
             docs: "true",
-            bdd: "success",
-            ..Self::out_of_scope()
+            ..Self::pr_out_of_scope()
         }
     }
 
-    /// The same change at the head of a merge group, which reuses the PR's
-    /// BDD result rather than running the lane again.
+    /// That change in the queue, where the documentation scenarios run.
     fn queue_docs_only() -> Self {
         Self {
             docs: "true",
+            bdd: "success",
             ..Self::queue_out_of_scope()
         }
     }
 
+    fn with(mut self, lane: &'static str, result: &'static str) -> Self {
+        self.overrides.push((lane, result));
+        self
+    }
+
     /// `true` when the aggregate admits this combination.
     fn accepts(&self) -> bool {
-        let mut child = Command::new("bash")
+        let mut command = Command::new("bash");
+        command
             .arg("-c")
             .arg(aggregate_script())
             .env("EVENT_NAME", self.event_name)
@@ -167,29 +202,22 @@ impl Verdict {
             .env("SCOPE_CODE", self.code)
             .env("SCOPE_DOCS", self.docs)
             .env("SCOPE_NIX", self.nix_scope)
-            .env("CORE_RESULT", self.lanes)
+            .env("RUNNERS_RESULT", self.runners_result)
+            .env("WORKSPACE_RUNNER", self.workspace_runner)
             .env("POLICY_RESULT", self.policy)
-            .env("FEATURES_RESULT", self.lanes)
-            .env("FEATURES_SUPPORT_RESULT", self.lanes)
-            .env("FEATURES_EMBED_RESULT", self.lanes)
-            .env("WINDOWS_RESULT", self.lanes)
-            // The workspace suite's build, shards and once-only suites are three
-            // jobs with one scope; each must be read back on its own.
-            .env("WORKSPACE_BUILD_RESULT", self.lanes)
-            .env("WORKSPACE_RESULT", self.lanes)
-            .env("WORKSPACE_EXTRAS_RESULT", self.lanes)
-            // The aarch64 workspace build and its shards carry the same `code`
-            // scope as the other lanes in the loop, so they move with them
-            // rather than getting their own field.
-            .env("WORKSPACE_AARCH64_BUILD_RESULT", self.lanes)
-            .env("WORKSPACE_AARCH64_RESULT", self.lanes)
-            .env("LINUX_RESULT", self.lanes)
-            .env("RELEASE_WITNESS_RESULT", self.lanes)
-            .env("MUSL_CONFINEMENT_RESULT", self.lanes)
-            .env("EBPF_RESULT", self.lanes)
+            .env("WORKSPACE_BUILD_RESULT", self.archive)
             .env("BDD_RESULT", self.bdd)
-            .env("BOOT_RESULT", self.boot)
-            .env("NIX_RESULT", self.nix)
+            .env("NIX_RESULT", self.nix);
+        for lane in GATE_LANES {
+            command.env(lane, self.gate);
+        }
+        for lane in FULL_LANES {
+            command.env(lane, self.full);
+        }
+        for (lane, result) in &self.overrides {
+            command.env(lane, result);
+        }
+        let mut child = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -206,82 +234,253 @@ impl Verdict {
 #[test]
 fn a_fully_out_of_scope_run_is_admitted() {
     assert!(
-        Verdict::out_of_scope().accepts(),
+        Verdict::pr_out_of_scope().accepts(),
         "a PR touching no code and no bdd path must pass the aggregate"
     );
+    assert!(Verdict::queue_out_of_scope().accepts());
 }
 
 #[test]
-fn a_fully_in_scope_green_run_is_admitted() {
-    assert!(Verdict::in_scope().accepts());
+fn a_fully_in_scope_green_run_is_admitted_on_every_event() {
+    assert!(Verdict::pr_in_scope().accepts());
     assert!(Verdict::queue_in_scope().accepts());
-    assert!(Verdict::queue_out_of_scope().accepts());
+    assert!(
+        Verdict {
+            event_name: "workflow_dispatch",
+            ..Verdict::queue_in_scope()
+        }
+        .accepts(),
+        "a manual dispatch runs the full matrix, like the queue"
+    );
     assert!(
         Verdict {
             nix_scope: "false",
             nix: "skipped",
-            ..Verdict::in_scope()
-        }
-        .accepts()
-    );
-}
-
-/// A documentation-only change has to pay for the suite that reads the
-/// documentation, and only for that: on the PR the BDD lane runs and
-/// everything else skips, and the merge group reuses that result. The
-/// required `Test` verdict is green on both events.
-#[test]
-fn a_docs_only_run_requires_the_bdd_lane_and_nothing_else() {
-    assert!(Verdict::docs_only().accepts());
-    assert!(Verdict::queue_docs_only().accepts());
-    // Code and docs together is just a code run; `docs` adds nothing to it.
-    assert!(
-        Verdict {
-            docs: "true",
-            ..Verdict::in_scope()
-        }
-        .accepts()
-    );
-    assert!(
-        Verdict {
-            docs: "true",
             ..Verdict::queue_in_scope()
         }
         .accepts()
     );
 }
 
-/// The failure the docs scope exists for, plus the ways it could be widened
-/// into a rubber stamp.
+/// The pull-request tier is the fast gate and nothing else. An expensive lane
+/// that runs on a PR is a lane whose `if:` lost its event condition, and it
+/// puts the hour-long matrix back in front of every review.
 #[test]
-fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
-    let cases: [(&str, Verdict); 4] = [
+fn every_full_matrix_lane_is_refused_on_a_pull_request() {
+    for lane in FULL_LANES {
+        assert!(
+            !Verdict::pr_in_scope().with(lane, "success").accepts(),
+            "{lane} must not run on a pull request"
+        );
+    }
+    for (what, verdict) in [
         (
-            "a docs-only change whose BDD lane skipped",
+            "BDD",
             Verdict {
-                bdd: "skipped",
-                ..Verdict::docs_only()
+                bdd: "success",
+                ..Verdict::pr_in_scope()
             },
         ),
         (
-            "a docs-only merge group that ran the BDD lane again",
+            "Nix",
             Verdict {
-                bdd: "success",
+                nix: "success",
+                ..Verdict::pr_in_scope()
+            },
+        ),
+    ] {
+        assert!(!verdict.accepts(), "{what} must not run on a pull request");
+    }
+}
+
+/// The merge queue is the full matrix. Any lane that skipped there merged a
+/// change its tier never tested.
+#[test]
+fn every_lane_must_run_in_the_merge_queue() {
+    for lane in GATE_LANES.into_iter().chain(FULL_LANES) {
+        assert!(
+            !Verdict::queue_in_scope().with(lane, "skipped").accepts(),
+            "{lane} must run in the merge queue"
+        );
+    }
+    for (what, verdict) in [
+        (
+            "the workspace archive build",
+            Verdict {
+                archive: "skipped",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "BDD",
+            Verdict {
+                bdd: "skipped",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "Nix",
+            Verdict {
+                nix: "skipped",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "the policy lane",
+            Verdict {
+                policy: "skipped",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+    ] {
+        assert!(!verdict.accepts(), "{what} must run in the merge queue");
+    }
+}
+
+/// The fast gate is what keeps deterministic failures out of a batched group:
+/// formatting and clippy, the feature-combination clippy, the policy gates,
+/// the workspace test compile and the unit suite. Each must run on a PR.
+#[test]
+fn every_fast_gate_lane_must_run_on_a_pull_request() {
+    for lane in GATE_LANES {
+        assert!(
+            !Verdict::pr_in_scope().with(lane, "skipped").accepts(),
+            "{lane} must run on a pull request"
+        );
+        assert!(
+            !Verdict::pr_in_scope().with(lane, "failure").accepts(),
+            "a failing {lane} must refuse the pull request"
+        );
+    }
+    assert!(
+        !Verdict {
+            archive: "skipped",
+            ..Verdict::pr_in_scope()
+        }
+        .accepts(),
+        "the hosted suite must compile its archive on a pull request"
+    );
+    assert!(
+        !Verdict {
+            policy: "skipped",
+            ..Verdict::pr_out_of_scope()
+        }
+        .accepts(),
+        "the policy lane runs on every pull request, in scope or not"
+    );
+}
+
+/// The self-hosted path builds and runs the suite in one shard, so the hosted
+/// archive build skips. That is the only lane the picker may move, and only
+/// to one of the two runners it can answer.
+#[test]
+fn the_runner_picker_moves_only_the_archive_build() {
+    for base in [Verdict::pr_in_scope(), Verdict::queue_in_scope()] {
+        assert!(
+            Verdict {
+                workspace_runner: "hetzner",
+                archive: "skipped",
+                ..base.clone()
+            }
+            .accepts(),
+            "a self-hosted suite needs no archive"
+        );
+        assert!(
+            !Verdict {
+                workspace_runner: "hetzner",
+                ..base.clone()
+            }
+            .accepts(),
+            "an archive built for a self-hosted suite is a lane that ignored the picker"
+        );
+        assert!(
+            !Verdict {
+                workspace_runner: "hetzner",
+                archive: "skipped",
+                gate: "skipped",
+                ..base.clone()
+            }
+            .accepts(),
+            "the self-hosted suite itself must still run"
+        );
+        for runner in ["", "self-hosted", "m1"] {
+            assert!(
+                !Verdict {
+                    workspace_runner: runner,
+                    ..base.clone()
+                }
+                .accepts(),
+                "workspace runner {runner:?} is not one the picker answers"
+            );
+        }
+        assert!(
+            !Verdict {
+                runners_result: "failure",
+                ..base.clone()
+            }
+            .accepts(),
+            "the picker never fails, so a failure is refused rather than read"
+        );
+    }
+    assert!(
+        Verdict {
+            workspace_runner: "hetzner",
+            ..Verdict::pr_out_of_scope()
+        }
+        .accepts(),
+        "an out-of-scope run skips the suite wherever it would have run"
+    );
+}
+
+/// A documentation-only change pays for the suite that reads the
+/// documentation, and only for that, in the queue.
+#[test]
+fn a_docs_only_run_requires_the_bdd_lane_in_the_queue_and_nothing_else() {
+    assert!(Verdict::pr_docs_only().accepts());
+    assert!(Verdict::queue_docs_only().accepts());
+    // Code and docs together is just a code run; `docs` adds nothing to it.
+    for base in [Verdict::pr_in_scope(), Verdict::queue_in_scope()] {
+        assert!(
+            Verdict {
+                docs: "true",
+                ..base
+            }
+            .accepts()
+        );
+    }
+}
+
+/// The failure the docs scope exists for, plus the ways it could be widened
+/// into a rubber stamp.
+#[test]
+fn a_docs_only_run_is_refused_when_its_lane_does_not_match() {
+    let cases: [(&str, Verdict); 4] = [
+        (
+            "a docs-only merge group whose BDD lane skipped",
+            Verdict {
+                bdd: "skipped",
                 ..Verdict::queue_docs_only()
             },
         ),
         (
-            "a docs-only change whose BDD lane failed",
+            "a docs-only pull request that ran the BDD lane",
             Verdict {
-                bdd: "failure",
-                ..Verdict::docs_only()
+                bdd: "success",
+                ..Verdict::pr_docs_only()
             },
         ),
         (
-            "a docs-only change that ran the compile and test lanes",
+            "a docs-only merge group whose BDD lane failed",
             Verdict {
-                lanes: "success",
-                ..Verdict::docs_only()
+                bdd: "failure",
+                ..Verdict::queue_docs_only()
+            },
+        ),
+        (
+            "a docs-only merge group that ran the compile and test lanes",
+            Verdict {
+                full: "success",
+                ..Verdict::queue_docs_only()
             },
         ),
     ];
@@ -291,96 +490,92 @@ fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
 }
 
 /// The gate must not have been widened into a rubber stamp. Each of these is a
-/// real failure that has to keep being caught, in whichever scope it can occur.
+/// real failure that has to keep being caught, in whichever tier it can occur.
 #[test]
-fn a_genuine_failure_is_still_refused_in_either_scope() {
+fn a_genuine_failure_is_still_refused_in_either_tier() {
     let cases: [(&str, Verdict); 12] = [
         (
-            // New with the suite moving onto the `code` scope: BDD is matched
-            // by the same arithmetic as every other lane, so a run on a
-            // docs-only PR is as wrong as a skip on a code one. Under the old
-            // `bdd`-keyed branch this combination was legal.
             "a bdd lane that ran while out of scope",
             Verdict {
                 bdd: "success",
-                ..Verdict::out_of_scope()
+                ..Verdict::queue_out_of_scope()
             },
         ),
         (
-            "a failing test lane",
+            "a failing fast-gate lane on a pull request",
             Verdict {
-                lanes: "failure",
-                ..Verdict::in_scope()
+                gate: "failure",
+                ..Verdict::pr_in_scope()
             },
         ),
         (
-            "a test lane that skipped while in scope",
+            "a failing fast-gate lane in the queue",
             Verdict {
-                lanes: "skipped",
-                ..Verdict::in_scope()
+                gate: "failure",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a failing full-matrix lane in the queue",
+            Verdict {
+                full: "failure",
+                ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a full-matrix lane that ran while out of scope",
+            Verdict {
+                full: "success",
+                ..Verdict::queue_out_of_scope()
             },
         ),
         (
             "a bdd lane that skipped while in scope",
             Verdict {
                 bdd: "skipped",
-                ..Verdict::in_scope()
+                ..Verdict::queue_in_scope()
             },
         ),
         (
             "the scope job itself failing",
             Verdict {
                 scope_result: "failure",
-                ..Verdict::in_scope()
+                ..Verdict::pr_in_scope()
             },
         ),
         (
             "a failing policy lane",
             Verdict {
                 policy: "failure",
-                ..Verdict::in_scope()
+                ..Verdict::pr_in_scope()
             },
         ),
         (
             "a Nix job that ran for an unrelated diff",
             Verdict {
                 nix_scope: "false",
-                ..Verdict::in_scope()
+                ..Verdict::queue_in_scope()
             },
         ),
         (
             "an invalid Nix scope",
             Verdict {
                 nix_scope: "",
-                ..Verdict::in_scope()
-            },
-        ),
-        (
-            "a failing published-image boot ceiling",
-            Verdict {
-                boot: "failure",
-                ..Verdict::in_scope()
-            },
-        ),
-        (
-            "a published-image boot that ran while out of scope",
-            Verdict {
-                boot: "success",
-                ..Verdict::out_of_scope()
+                ..Verdict::queue_in_scope()
             },
         ),
         (
             "a failing Nix witness",
             Verdict {
                 nix: "failure",
-                ..Verdict::in_scope()
+                ..Verdict::queue_in_scope()
             },
         ),
         (
-            "a Nix witness that skipped before queue admission",
+            "an event the workflow does not declare",
             Verdict {
-                nix: "skipped",
-                ..Verdict::in_scope()
+                event_name: "push",
+                ..Verdict::queue_in_scope()
             },
         ),
     ];
@@ -415,7 +610,7 @@ fn an_unparseable_scope_is_refused() {
     assert!(
         !Verdict {
             code: "",
-            ..Verdict::in_scope()
+            ..Verdict::pr_in_scope()
         }
         .accepts(),
         "an empty code scope must not be treated as a valid classification"
@@ -424,7 +619,7 @@ fn an_unparseable_scope_is_refused() {
         assert!(
             !Verdict {
                 docs,
-                ..Verdict::docs_only()
+                ..Verdict::queue_docs_only()
             }
             .accepts(),
             "docs scope {docs:?} must not be treated as a valid classification"

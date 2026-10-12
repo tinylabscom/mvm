@@ -110,7 +110,8 @@ also applies to `machine run --image`:
 MVM_KERNEL_SOURCE=download just kernel::workload
 
 # The same policy applies to the first image-backed run.
-MVM_KERNEL_SOURCE=download mvmctl machine run --image python:3.12 -- python -V
+# Named, so it boots cold rather than claiming a prepared warm standby.
+MVM_KERNEL_SOURCE=download mvmctl machine run --name kcheck --image python:3.12 -- python -V
 ```
 
 `MVM_KERNEL_SOURCE=auto` downloads when the matching release asset exists and

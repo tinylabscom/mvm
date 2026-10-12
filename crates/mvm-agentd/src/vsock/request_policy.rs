@@ -335,6 +335,7 @@ mod tests {
                 hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
+                seccomp_tier: None,
             },
             GuestRequest::FsDiff,
             GuestRequest::SyncFilesystems,
@@ -663,6 +664,7 @@ mod tests {
                 hostname: None,
                 host_epoch_secs: None,
                 grant_envelope: None,
+                seccomp_tier: None,
             },
             GuestRequest::UpdateIdleTimeout { secs: 600 },
             GuestRequest::MountVolume {

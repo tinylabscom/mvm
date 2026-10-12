@@ -9,12 +9,16 @@ important rule is that user code runs in the guest, not in the host process.
 ## One-shot interpreter
 
 ```sh
+export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
+mvmctl pool warm --image python:3.12-alpine   # the image `--runtime python` boots
 mvmctl machine run --runtime python --timeout 10 -- python - <<'PY'
 print("hello from inside the sandbox")
 PY
 ```
 
 Use this shape for stateless calls where every invocation should start clean.
+An unnamed run claims a prepared warm standby of the image it boots and refuses
+rather than cold-booting without one, which is why the standby is warmed first.
 Piped stdin reaches the guest only on a transient `mvmctl machine run`; the
 top-level `mvmctl run` does not forward it, so the guest would read EOF.
 

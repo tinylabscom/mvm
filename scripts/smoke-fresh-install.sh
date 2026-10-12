@@ -40,8 +40,13 @@
 # MVM_SMOKE_GUEST_RUNTIME adds the release's unpublished guest runtime to that
 # archive: it is staged in guest-runtime/ beside the unpacked mvmctl, where the
 # installer puts the published one, and `mvmctl bootstrap` must adopt it there
-# rather than look for it in a release that does not exist yet. That pairs the
-# CLI with the guest runtime it will ship with before either is published.
+# rather than look for it in a release that does not exist yet, and assemble
+# the runtime overlay, the initramfs and both SDK sidecars from it. After the
+# boots, `mvmctl doctor` must name that archive as where the pieces came from
+# and name no image set: once a release binary adopts its runtime, a launch
+# refuses the image set's copies, so boots that printed their tokens ran on the
+# pieces assembled from the archive. That pairs the CLI with the guest runtime
+# it will ship with before either is published.
 #
 # The environment is rebuilt from nothing (`env -i`): no MVM_* knob, cache
 # directory or tool the developer's shell happens to carry can make a broken
@@ -66,6 +71,9 @@
 #                                  egress-boot budget; default 300
 #   MVM_SMOKE_KEEP                 set to 1 to keep the throwaway HOME
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
+#
+#   MVM_SMOKE_DOCTOR_BUDGET_SECS   `mvmctl doctor` budget, guest-runtime mode
+#                                  only; default 300
 #
 # Exit status: 0 when all four boots printed their tokens in budget and the
 # second fetched nothing again, 1 when any of that failed, 2 on a usage error.
@@ -102,13 +110,14 @@ RUN_BUDGET="${MVM_SMOKE_RUN_BUDGET_SECS:-600}"
 SECOND_RUN_BUDGET="${MVM_SMOKE_SECOND_RUN_BUDGET_SECS:-300}"
 SDK_RUN_BUDGET="${MVM_SMOKE_SDK_RUN_BUDGET_SECS:-300}"
 EGRESS_RUN_BUDGET="${MVM_SMOKE_EGRESS_RUN_BUDGET_SECS:-300}"
+DOCTOR_BUDGET="${MVM_SMOKE_DOCTOR_BUDGET_SECS:-300}"
 IMAGE="alpine"
 # The image and host the documented egress examples use; alpine's busybox
 # wget cannot be relied on to speak HTTPS through the guest's proxy.
 EGRESS_IMAGE="curlimages/curl:8.21.0"
 EGRESS_HOST="example.com"
 
-for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET" "$EGRESS_RUN_BUDGET"; do
+for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET" "$EGRESS_RUN_BUDGET" "$DOCTOR_BUDGET"; do
   case "$budget" in
     ''|*[!0-9]*|0) echo "time budgets must be positive whole seconds, got: $budget" >&2; exit 2 ;;
   esac
@@ -340,6 +349,9 @@ if [ -n "$GUEST_RUNTIME" ]; then
   grep -q "Guest runtime $runtime_name ready (installed beside mvmctl)" "$ROOT/install.out" "$ROOT/install.err" \
     || fail "bootstrap did not adopt the unpublished guest runtime $runtime_name staged beside mvmctl"
   log "guest runtime: $runtime_name adopted from beside mvmctl"
+  grep -q "assembled from release guest runtime $runtime_name" "$ROOT/install.out" "$ROOT/install.err" \
+    || fail "bootstrap did not assemble the runtime overlay, initramfs and SDK sidecars from the guest runtime $runtime_name"
+  log "guest runtime: launch pieces assembled from $runtime_name"
 fi
 
 # Keep what the guests and their supervisors said before the throwaway HOME
@@ -460,6 +472,26 @@ section "egress boot (mvmctl machine run --image $EGRESS_IMAGE --allow-host $EGR
 boot_and_expect "egress boot" "$EGRESS_RUN_BUDGET" "$TOKEN4" run-egress \
   mvmctl machine run --image "$EGRESS_IMAGE" --allow-host "$EGRESS_HOST" -- sh -c "$EGRESS_SCRIPT"
 EGRESS_RUN_ELAPSED="$STEP_ELAPSED"
+
+# The boots above could only attach what the cache held. With the release's
+# guest runtime adopted, that is the pieces assembled from it and nothing from
+# the image set, and doctor reads which archive each piece names.
+if [ -n "$GUEST_RUNTIME" ]; then
+  section "guest runtime the boots used (mvmctl doctor)"
+  if bounded "$DOCTOR_BUDGET" "$ROOT/doctor.out" "$ROOT/doctor.err" mvmctl doctor; then
+    doctor_status=0
+  else
+    doctor_status=$?
+  fi
+  [ "$doctor_status" -ne 124 ] || fail "mvmctl doctor did not finish within ${DOCTOR_BUDGET}s"
+  runtime_line="$(grep -F "release archive $runtime_name" "$ROOT/doctor.out" "$ROOT/doctor.err" | head -n 1 || true)"
+  log "${runtime_line:-(no doctor line names release archive $runtime_name)}"
+  [ -n "$runtime_line" ] \
+    || fail "mvmctl doctor does not name the release guest runtime $runtime_name as the archive the launch pieces came from"
+  case "$runtime_line" in
+    *"image set"*) fail "mvmctl doctor reports a launch piece from the image set instead of $runtime_name: $runtime_line" ;;
+  esac
+fi
 
 section "timings"
 log "install:        ${INSTALL_ELAPSED}s of ${INSTALL_BUDGET}s"

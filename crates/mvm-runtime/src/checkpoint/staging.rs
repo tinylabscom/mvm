@@ -352,6 +352,21 @@ pub(super) fn abandoned_entries(staging_root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Prefix of the private directory under the store root a `vm_full` restore
+/// opens its blobs into. It lives only as long as the restore call.
+pub(super) const RESTORE_MATERIALIZATION_PREFIX: &str = ".restore-";
+
+/// Remove restore materializations under `store_root` whose owning process
+/// died before removing them. Returns how many it removed.
+pub(super) fn reclaim_abandoned_restores(store_root: &Path) -> usize {
+    crate::private_staging::reclaim_abandoned(store_root, RESTORE_MATERIALIZATION_PREFIX).len()
+}
+
+/// The restore materializations [`reclaim_abandoned_restores`] would remove.
+pub(super) fn abandoned_restores(store_root: &Path) -> usize {
+    crate::private_staging::abandoned(store_root, RESTORE_MATERIALIZATION_PREFIX).len()
+}
+
 /// Every regular file and nested directory under `dir`. Directories are
 /// deepest-first so every entry is durable before the directory that names it.
 fn content_tree_entries(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {

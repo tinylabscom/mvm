@@ -126,6 +126,13 @@ meaning is fixed once released:
   builder uid 902 exists; the persistent store lives on `/dev/vdb`; the root
   is ext4 on `/dev/vda`. Changing any of these is a new ABI number, never a
   reinterpretation of an old one.
+- *What no ABI promises:* the guest agent's uid. The payload's init reads
+  the image's own `/etc/passwd` and runs the agent under 901 (`mvm-worker`,
+  mkGuest's fixed identity) when the image names it, or under 990 on an
+  image built before that identity set was fixed, which names 990 and not
+  901. The published ABI 1 image is the second kind, and an ABI 2 image can
+  be either, so the image's account rows decide rather than its number. The egress client runs as 989 (`mvm-egress`) on every image, and
+  the FlowMux signing key is handed to that uid before the client starts.
 - *What the host guarantees:* every builder boot carries the payload of the
   running `mvmctl`, whatever the image's ABI; the payload is assembled per
   boot into the booting VM's own state directory, never a shared cache; the

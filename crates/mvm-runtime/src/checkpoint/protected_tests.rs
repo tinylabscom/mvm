@@ -715,6 +715,12 @@ impl VmFullRestore for SeenRestore {
             std::fs::read(config_src.expect("the launch config is staged")).unwrap(),
             [MARKER, b"config"].concat()
         );
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let staging = rootfs_src.parent().unwrap();
+            let mode = std::fs::metadata(staging).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "plaintext is opened only into private staging");
+        }
         *self.seen.borrow_mut() = Some((
             std::fs::read(rootfs_src).unwrap(),
             std::fs::read(memory).unwrap(),

@@ -6,16 +6,13 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use mvm_contract::guest_libc::GuestLibc;
-
-use super::BuilderBootAbiRange;
-use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
     IMAGE_SET_SCHEMA_VERSION, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRole, LocalCheckouts, MemberTarget, ReleaseProducer,
     WorkloadImageProfile,
 };
+use super::{BaseImageContractRange, BuilderBootAbiRange};
 use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::Sha256Hex;
@@ -72,7 +69,6 @@ fn check_members(members: &[ImageSetMember]) -> Result<(), ImageSetError> {
 
 fn check_member(member: &ImageSetMember) -> Result<(), ImageSetError> {
     check_target_for_role(member)?;
-    check_sidecar_libc(member)?;
     check_build_mode(member)?;
     check_artifacts(member)?;
     check_boot_protocol_presence(member)
@@ -105,18 +101,6 @@ fn check_target_for_role(member: &ImageSetMember) -> Result<(), ImageSetError> {
             role: member.role,
             target: member.target,
         })
-    }
-}
-
-/// `GuestLibc::Unknown` is a detection outcome, not a variant anyone can build
-/// a sidecar for, so a member claiming it is refused.
-fn check_sidecar_libc(member: &ImageSetMember) -> Result<(), ImageSetError> {
-    if member.role == ImageSetRole::SdkSidecar(GuestLibc::Unknown) {
-        Err(ImageSetError::UnknownSidecarLibc {
-            target: member.target,
-        })
-    } else {
-        Ok(())
     }
 }
 
@@ -291,18 +275,16 @@ pub struct ImageSetRequirement {
     members: Vec<RequiredMember>,
 }
 
-/// Every role published once per guest architecture.
-const ARCH_BOUND_ROLES: [ImageSetRole; 10] = [
+/// Every role published once per guest architecture. The guest runtime is not
+/// among them: it ships with the CLI, and a set that still carries it is
+/// accepted with those members ignored.
+const ARCH_BOUND_ROLES: [ImageSetRole; 6] = [
     ImageSetRole::BuilderVm,
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::RootlessTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::RootlessTenant),
-    ImageSetRole::RuntimeOverlay,
-    ImageSetRole::SdkSidecar(GuestLibc::Glibc),
-    ImageSetRole::SdkSidecar(GuestLibc::Musl),
     ImageSetRole::Stage0BootstrapKernel,
-    ImageSetRole::Initramfs,
 ];
 
 impl ImageSetRequirement {
@@ -362,7 +344,8 @@ pub fn require_complete(
 /// The protocol versions this host speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostProtocolSupport {
-    pub guest_agent_protocol: ProtocolRange,
+    /// The base-image contracts this host's guest runtime boots.
+    pub base_image_contract: BaseImageContractRange,
     pub builder_cache_contract: u32,
     /// The builder boot ABIs this host can boot: through the legacy ABI only
     /// when it has no boot payload to hand a builder, through the payload ABI
@@ -387,13 +370,11 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    if !declared
-        .guest_agent_protocol
-        .overlaps(host.guest_agent_protocol)
-    {
-        return Err(ImageSetError::GuestAgentProtocolDisjoint {
-            set: declared.guest_agent_protocol,
-            host: host.guest_agent_protocol,
+    let base = declared.base_image_contract_or_legacy();
+    if !host.base_image_contract.contains(base) {
+        return Err(ImageSetError::BaseImageContractUnsupported {
+            set: base,
+            host: host.base_image_contract,
         });
     }
     if declared.builder_cache_contract != host.builder_cache_contract {

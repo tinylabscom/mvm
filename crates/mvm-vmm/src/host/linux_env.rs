@@ -302,13 +302,20 @@ impl LinuxEnv for DevVmEnv {
 /// boundaries today; WSL2 nested KVM and a Hyper-V managed Linux builder are
 /// future backend work.
 pub fn create_linux_env() -> Box<dyn LinuxEnv> {
-    let plat = platform::current();
-
-    if plat.is_hvf_default_tier() {
-        return Box::new(DevVmEnv::new(DEV_VM_NAME));
+    if default_env_runs_on_host() {
+        return Box::new(NativeEnv);
     }
+    Box::new(DevVmEnv::new(DEV_VM_NAME))
+}
 
-    Box::new(NativeEnv)
+/// Whether [`default_env`] runs scripts on this host rather than inside a VM.
+///
+/// True wherever [`create_linux_env`] picks [`NativeEnv`]: native Linux and
+/// macOS 13-25. A `run_in_vm` script there is an ordinary host shell command,
+/// so anything that would only be safe inside a disposable VM — sweeping
+/// `/tmp`, collecting a Nix store, clearing profiles — must not be sent to it.
+pub fn default_env_runs_on_host() -> bool {
+    !platform::current().is_hvf_default_tier()
 }
 
 /// Whether a `run_in_vm`-style guest op can reach a real Linux execution

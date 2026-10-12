@@ -4211,7 +4211,10 @@ fn start_resolver_recreates_with_force() {
 /// is applied until the machine starts.
 fn register_writable_state_volume(machine: &str) {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
@@ -4273,7 +4276,10 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
 
     let _state = IsolatedMachineState::new();
-    let volumes = LocalVolumeService::new();
+    let volumes =
+        LocalVolumeService::with_host_encryption_probe(mvm_client::volume::probe_from_fn(|_| {
+            Ok(())
+        }));
     volumes
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")

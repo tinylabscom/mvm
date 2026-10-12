@@ -30,10 +30,13 @@ The artifact is content-addressed and cached alongside `initramfs.hash`,
 `initramfs.size`, and `VERSION`: a local build at
 `<MVM_HOME>/cache/initramfs/<version>/<arch>/`, and the member of the pinned
 image set at `<MVM_HOME>/cache/initramfs/image-set/<root-sha256>/<member-version>/<arch>/`,
-keyed by the signed root rather than the CLI version. On a cache miss a source
-checkout builds it with cargo, and an installed binary fetches the pinned
-image set's member. If the required initramfs cannot be resolved, the boot
-fails closed.
+keyed by the signed root rather than the CLI version. A source checkout
+assembles it from its own guest-runtime archive, and a release binary from the
+signed guest runtime its release ships, when `mvmctl bootstrap` runs; both file
+it under the version-keyed path. A release binary that has not adopted its
+guest runtime yet fetches the pinned image set's member instead, and one that
+has refuses that member. If the required initramfs cannot be resolved, the
+boot fails closed.
 
 ## Boot inputs and device layout
 

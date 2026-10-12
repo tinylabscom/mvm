@@ -271,7 +271,7 @@ What it provides:
 - **Busybox-as-PID-1 init** — under-5-second cold boot, no systemd
 - **Guest agent** — one universal Rust binary built from `mvm-src`, communicating over vsock (ADR-001 W4.1, W6.1.2). Production-safe runs receive a runtime profile and signed `VerbGrant`; DevOnly handlers remain unreachable without that authorization.
 - **Networking** — none. A workload microVM boots with no guest NIC; egress leaves only over vsock to the per-VM `mvm-network-endpoint`
-- **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the agent runs as uid 990, and the entrypoint runs as uid 1000 in prod / uid 0 in dev for the dev shell
+- **Privilege model** — PID 1 runs as uid 0 (kernel requirement); the agent runs as uid 901 (`mvm-worker`), and the entrypoint runs as uid 901 in prod / uid 0 in dev for the dev shell. Every root names the same fixed identity set: root 0, `mvm-worker` 901, and the service uids 987–989
 - **Hardening** — `setpriv --no-new-privs` (W2.3), seccomp `standard` (W2.4), per-service uids (W2.1), read-only `/etc` overlay (W2.2), dm-verity verified boot (W3)
 - **Drive mounting** — `/mnt/config`, `/mnt/secrets`, `/mnt/data`
 
@@ -574,7 +574,7 @@ Once the rootfs is booted and the agent is up, a function call is just a vsock R
 host (mvmctl machine run --entrypoint --flake <dir>, stdin=[[], {"name": "Alice"}])
      │
      ▼  vsock: RunEntrypoint { stdin = encoded([args, kwargs]) }
-agent (uid 990, dev_image: do_exec gated by `interactive` feature)
+agent (uid 901, dev_image: do_exec gated by `interactive` feature)
      │
      ▼  fork+exec /etc/mvm/entrypoint → /usr/lib/mvm/wrappers/runner
 wrapper (cold: per-call process; warm: per-pool process)
@@ -663,7 +663,7 @@ Typical output:
   "expectedBootMs":        300,
   "agentBinary":           "real",
   "rootlessEntrypoint":    true,
-  "uids":                  { "agent": 990, "entrypoint": 1000 },
+  "uids":                  { "agent": 901, "entrypoint": 901 },
   "overlayAware":          true
 }
 ```

@@ -388,9 +388,39 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// function used to do by discarding the return value — releases the exclusion
 /// before the VM ever boots, so two runs naming one image can both format and
 /// write it. That was invisible while every transient mount was read-only.
+///
+/// A writable image holds guest-written plaintext, so before anything is
+/// created its location must be on verified encrypted storage, or the
+/// operator must have accepted unverified storage with the audited
+/// development override (which `--prod` refuses). The image and any directory
+/// created for it are owner-only. A read-only image is only read, so neither
+/// rule applies to it.
 pub fn materialize_disk_volume(
     v: &VmVolume,
 ) -> Result<Option<mvm_build::volume_image::VolumeImageLock>> {
+    #[cfg(not(test))]
+    {
+        materialize_disk_volume_verified(
+            v,
+            mvm_core::host_storage_encryption::require_host_path_encryption,
+        )
+    }
+    #[cfg(test)]
+    {
+        materialize_disk_volume_verified(v, |_| Ok(()))
+    }
+}
+
+/// [`materialize_disk_volume`] with the storage verifier as a parameter, so a
+/// test can stand in for a host whose storage is or is not encrypted.
+pub(crate) fn materialize_disk_volume_verified(
+    v: &VmVolume,
+    verify_encrypted: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<Option<mvm_build::volume_image::VolumeImageLock>> {
+    if !v.read_only {
+        admit_disk_image_storage(std::path::Path::new(&v.host), verify_encrypted)
+            .with_context(|| format!("disk volume '{}'", v.host))?;
+    }
     let size_mib = mvm_core::util::parse_human_size(&v.size)
         .with_context(|| format!("disk volume '{}' size '{}'", v.guest, v.size))?;
     let size_bytes = u64::from(size_mib) * 1024 * 1024;
@@ -401,6 +431,30 @@ pub fn materialize_disk_volume(
     )
     .with_context(|| format!("materializing disk volume image '{}'", v.host))?;
     Ok(Some(lock))
+}
+
+/// The storage rule for a writable disk image, checked before anything is
+/// created: the filesystem the image will live on (its nearest existing
+/// ancestor) must be verified encrypted, or the development override admits
+/// it, audited.
+fn admit_disk_image_storage(
+    image: &std::path::Path,
+    verify_encrypted: impl FnOnce(&std::path::Path) -> Result<()>,
+) -> Result<()> {
+    let parent = image
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(std::path::Path::new("."));
+    let probe_at = mvm_core::host_storage_encryption::nearest_existing_ancestor(parent)
+        .with_context(|| format!("no existing directory above {}", image.display()))?;
+    match verify_encrypted(&probe_at) {
+        Ok(()) => Ok(()),
+        Err(refusal) => mvm_core::host_storage_encryption::admit_unverified_storage(
+            image,
+            "writable disk image",
+            refusal,
+        ),
+    }
 }
 
 /// Enforce the guest-mount policy: the guest path must sit under one of
@@ -933,6 +987,89 @@ mod volume_spec_tests {
     /// Asserting the created file's length is what makes this
     /// discriminate; asserting the call returns `Ok` is what the
     /// whole-function `-> Ok(())` mutant passes.
+    fn writable_disk(host: &std::path::Path, read_only: bool) -> VmVolume {
+        VmVolume {
+            materialized_image: None,
+            volume_label: None,
+            host: host.to_string_lossy().into_owned(),
+            guest: "/data".to_string(),
+            size: "10M".to_string(),
+            read_only,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+        }
+    }
+
+    fn refuse_storage(path: &std::path::Path) -> Result<()> {
+        anyhow::bail!("synthetic: {} has no dm-crypt mapping", path.display())
+    }
+
+    /// On storage that is not verified encrypted a writable disk image is
+    /// refused before its directory or the image exists, and the refusal
+    /// names the fix and the override.
+    #[test]
+    fn a_writable_disk_image_on_unverified_storage_is_refused_before_creation() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path().join("home"));
+        env.remove(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV);
+        let parent = tmp.path().join("state");
+        let host = parent.join("data.img");
+        let mut probed = None;
+        let error = materialize_disk_volume_verified(&writable_disk(&host, false), |path| {
+            probed = Some(path.to_path_buf());
+            refuse_storage(path)
+        })
+        .expect_err("unverified storage refuses");
+        let message = format!("{error:#}");
+        assert!(message.contains("not verified encrypted"), "{message}");
+        assert!(
+            message.contains(mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV),
+            "{message}"
+        );
+        assert_eq!(
+            probed.as_deref(),
+            Some(tmp.path()),
+            "the filesystem the image would land on is probed"
+        );
+        assert!(!parent.exists(), "nothing created");
+    }
+
+    /// The development override admits the image, records the use in the
+    /// local audit log, and still creates it owner-only.
+    #[test]
+    fn the_override_admits_a_writable_disk_image_and_audits_it() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path().join("home"));
+        env.set(
+            mvm_core::host_storage_encryption::ALLOW_UNVERIFIED_STORAGE_ENV,
+            "1",
+        );
+        let host = tmp.path().join("state").join("data.img");
+        let _lock = materialize_disk_volume_verified(&writable_disk(&host, false), refuse_storage)
+            .expect("the override admits");
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&host).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let log = std::fs::read_to_string(mvm_core::policy::audit::default_audit_log())
+            .expect("override audited");
+        assert!(log.contains("volume_storage_override"), "{log}");
+        assert!(log.contains("purpose=writable disk image"), "{log}");
+    }
+
+    /// A read-only image is only read: the storage rule is not consulted.
+    #[test]
+    fn a_read_only_disk_image_skips_the_storage_check() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let host = tmp.path().join("missing.img");
+        let error = materialize_disk_volume_verified(&writable_disk(&host, true), |_| {
+            panic!("a read-only image must not be storage-checked")
+        })
+        .expect_err("a missing read-only image still refuses");
+        assert!(format!("{error:#}").contains("materializing disk volume image"));
+    }
+
     #[test]
     fn a_disk_volume_is_materialised_at_the_requested_size() {
         let tmp = tempfile::tempdir().expect("tempdir");
