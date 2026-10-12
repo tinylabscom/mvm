@@ -187,6 +187,24 @@ fn names_installed_bundle(id_or_slot: &str) -> bool {
     is_slot_hash_dirname(id_or_slot) && !std::path::Path::new(&slot_dir(id_or_slot)).exists()
 }
 
+/// The signed manifest of the installed bundle `id_or_slot` names, verified
+/// against the local trust store before anything in it is believed.
+///
+/// `None` when the key is a template slot or names no installed bundle. A
+/// manifest edited on disk after install refuses rather than reads.
+fn installed_bundle_verified_manifest(
+    id_or_slot: &str,
+) -> Result<Option<mvm_core::plan::BundleManifest>> {
+    if !names_installed_bundle(id_or_slot) {
+        return Ok(None);
+    }
+    let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+    let trust = mvm_core::plan::FsTrustStore::default_path()?;
+    registry
+        .verified_manifest(id_or_slot, &trust)
+        .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))
+}
+
 /// The signed security posture of the installed bundle `id_or_slot` names.
 ///
 /// `None` when the key is a template slot, names no installed bundle, or the
@@ -196,15 +214,20 @@ fn names_installed_bundle(id_or_slot: &str) -> bool {
 pub fn installed_bundle_posture(
     id_or_slot: &str,
 ) -> Result<Option<mvm_core::plan::BundleSecurityPosture>> {
-    if !names_installed_bundle(id_or_slot) {
-        return Ok(None);
-    }
-    let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
-    let trust = mvm_core::plan::FsTrustStore::default_path()?;
-    let manifest = registry
-        .verified_manifest(id_or_slot, &trust)
-        .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))?;
-    Ok(manifest.and_then(|manifest| manifest.security_posture().copied()))
+    Ok(installed_bundle_verified_manifest(id_or_slot)?
+        .and_then(|manifest| manifest.security_posture().copied()))
+}
+
+/// The signed environment descriptor of the installed bundle `id_or_slot`
+/// names, verified the same way as [`installed_bundle_posture`].
+///
+/// `None` when the key is a template slot, names no installed bundle, or the
+/// bundle carries no descriptor.
+pub fn installed_bundle_environment(
+    id_or_slot: &str,
+) -> Result<Option<mvm_core::plan::EnvironmentDescriptor>> {
+    Ok(installed_bundle_verified_manifest(id_or_slot)?
+        .and_then(|manifest| manifest.environment().cloned()))
 }
 
 /// The declared arch of an installed bundle, for the *export* path, which
@@ -498,7 +521,7 @@ mod tests {
     /// The run path learns a bundle's posture from the installed archive's
     /// signed manifest, verified against the trust store under `MVM_HOME`.
     #[test]
-    fn installed_bundle_posture_reads_the_signed_declaration() {
+    fn installed_bundle_posture_and_environment_read_the_signed_declarations() {
         use mvm_core::plan::bundle::{
             ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember,
             BundleRegistry, BundleSecurityPosture, FsTrustStore, key_id_from_pubkey, sha256_hex,
@@ -529,6 +552,14 @@ mod tests {
             allows_volumes: false,
             allows_egress: false,
         };
+        let environment: mvm_core::plan::EnvironmentDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "descriptor_version": 1,
+                "target": format!("{}-linux", mvm_core::arch::GuestArch::host()),
+                "entrypoint": { "argv": ["/usr/bin/app"] },
+                "resources": { "cpu_cores": 3, "memory_mb": 768 },
+            }))
+            .expect("environment fixture");
         let kernel = b"kernel".to_vec();
         let manifest = BundleManifest {
             schema_version: BUNDLE_SCHEMA_VERSION,
@@ -547,7 +578,10 @@ mod tests {
                 sha256: sha256_hex(&kernel),
                 size_bytes: kernel.len() as u64,
             }],
-            members: vec![BundleMember::SecurityPosture(posture)],
+            members: vec![
+                BundleMember::SecurityPosture(posture),
+                BundleMember::Environment(environment.clone()),
+            ],
             verity: None,
             resources: None,
         };
@@ -568,5 +602,10 @@ mod tests {
         );
         assert_eq!(installed_bundle_posture(&"ab".repeat(32)).unwrap(), None);
         assert_eq!(installed_bundle_posture("not-a-key").unwrap(), None);
+        assert_eq!(
+            installed_bundle_environment(&installed.sha256).unwrap(),
+            Some(environment)
+        );
+        assert_eq!(installed_bundle_environment("not-a-key").unwrap(), None);
     }
 }

@@ -4,6 +4,7 @@
 //! existing paths.
 
 pub mod bundle;
+pub mod environment;
 pub mod execution_plan;
 pub mod output_grant;
 pub mod sdk_sidecar;
