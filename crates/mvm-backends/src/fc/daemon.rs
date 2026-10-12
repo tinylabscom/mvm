@@ -328,20 +328,30 @@ fn launch_script(
     };
     let payload = match identity_file {
         None => format!(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket}"#),
+        Some(identity) => format!(
+            r#"'s=$(sed "s/^.*) //" /proc/$$/stat | cut -d" " -f20); echo "$$ $s" > "$2"; echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} {q_identity}"#,
+            q_identity = shell_quote(identity),
+        ),
+    };
+    let precreate = match identity_file {
+        None => String::new(),
         Some(identity) => {
-            // A root caller can read owner-only files; a sudo-elevated
-            // process must leave its records readable to the invoking user,
-            // inside the pool's owner-only directory.
-            let umask = if euid == 0 { "umask 077; " } else { "" };
-            format!(
-                r#"'{umask}s=$(sed "s/^.*) //" /proc/$$/stat | cut -d" " -f20); echo "$$ $s" > "$2"; echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} {q_identity}"#,
-                q_identity = shell_quote(identity),
-            )
+            let mut records = vec![
+                identity.to_string(),
+                format!("{abs_dir}/fc.pid"),
+                format!("{abs_dir}/console.log"),
+                format!("{abs_dir}/{FIRECRACKER_STDERR_LOG}"),
+            ];
+            if !scope.is_empty() {
+                records.push(format!("{abs_dir}/{SCOPE_LAUNCHER_PID_FILE}"));
+            }
+            idle_records_precreate(&records)
         }
     };
     format!(
         r#"
         mkdir -p {q_dir} {q_socket_dir}
+        {precreate}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
@@ -350,6 +360,7 @@ fn launch_script(
         {record_launcher}
         "#,
         q_dir = q_dir,
+        precreate = precreate,
         payload = payload,
         q_socket_dir = q_socket_dir,
         vsock_cleanup = vsock_cleanup,
@@ -357,6 +368,19 @@ fn launch_script(
         sudo = sudo,
         record_launcher = record_launcher,
     )
+}
+
+/// Create an idle process's records before anything elevated writes them:
+/// owner-only, as the invoking user, and refusing any path that already
+/// exists, a symlink included (`set -C` opens with `O_EXCL`). The elevated
+/// process then writes into files the invoking user owns, so a `sudo` launch
+/// leaves no root-owned record and no record wider than 0600.
+fn idle_records_precreate(records: &[String]) -> String {
+    let creates: Vec<String> = records
+        .iter()
+        .map(|p| format!(": > {}", shell_quote(p)))
+        .collect();
+    format!("( umask 077; set -C; {} ) || exit 1", creates.join(" && "))
 }
 
 /// How long to wait for Firecracker to create its API socket. The shell loop
@@ -509,14 +533,15 @@ mod tests {
         assert!(idle.contains(r#"echo "$$ $s" > "$2""#), "{idle}");
         assert!(idle.contains("/proc/$$/stat"), "{idle}");
         assert!(idle.contains("'/p/idle-1/fc.identity'"), "{idle}");
-        assert!(
-            idle.contains("umask 077"),
-            "root keeps its records owner-only"
-        );
-        let as_user = launch_script("/p/i", "/p/i/fc.socket", false, "", 1000, Some("/p/i/id"));
-        assert!(!as_user.contains("umask"), "{as_user}");
+        for euid in [0, 1000] {
+            let script = launch_script("/p/i", "/p/i/fc.socket", false, "", euid, Some("/p/i/id"));
+            let precreate = script.find("set -C").expect("records are pre-created");
+            let elevated = script.find("setsid").expect("launch line");
+            assert!(precreate < elevated, "euid {euid}: {script}");
+        }
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
+        assert!(!vm.contains("set -C"), "{vm}");
         assert!(
             vm.contains(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"'"#),
             "{vm}"
@@ -904,5 +929,87 @@ mod sudo_elision_tests {
             let launch_at = script.find("setsid nohup sh -c").expect("launch present");
             assert!(scope_at < launch_at, "euid {euid}: {script}");
         }
+    }
+
+    /// Run the idle launch line against a stand-in `firecracker` that exits
+    /// at once, and wait for its identity record to be written.
+    #[cfg(target_os = "linux")]
+    fn run_idle_launch(dir: &std::path::Path) -> std::process::Output {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let fake = bin.join("firecracker");
+        std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = dir.join("idle-1");
+        let script = launch_script(
+            &entry.to_string_lossy(),
+            &entry.join("fc.socket").to_string_lossy(),
+            false,
+            "",
+            0,
+            Some(&entry.join("fc.identity").to_string_lossy()),
+        );
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && std::fs::read_to_string(entry.join("fc.identity")).map_or(true, |t| t.is_empty())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        output
+    }
+
+    /// Every record an idle launch leaves is owner-only, and the identity
+    /// record names the process that became Firecracker with its start time.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_launch_records_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let output = run_idle_launch(dir.path());
+        assert!(output.status.success(), "{output:?}");
+        let entry = dir.path().join("idle-1");
+        for name in ["console.log", "firecracker.log", "fc.pid", "fc.identity"] {
+            let mode = std::fs::metadata(entry.join(name))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{name} is {mode:o}");
+        }
+        let identity = std::fs::read_to_string(entry.join("fc.identity")).unwrap();
+        let pid = std::fs::read_to_string(entry.join("fc.pid")).unwrap();
+        let mut fields = identity.split_whitespace();
+        assert_eq!(fields.next(), Some(pid.trim()), "{identity}");
+        assert!(
+            fields.next().is_some_and(|t| t.parse::<u64>().is_ok()),
+            "start time recorded: {identity}"
+        );
+    }
+
+    /// A symlink planted at a record's path is refused before anything is
+    /// launched, and its target is left untouched.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_launch_refuses_a_symlinked_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("idle-1");
+        std::fs::create_dir(&entry).unwrap();
+        let target = dir.path().join("target");
+        std::fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, entry.join("fc.identity")).unwrap();
+        let output = run_idle_launch(dir.path());
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        assert!(!entry.join("fc.pid").exists(), "nothing was launched");
     }
 }
