@@ -183,7 +183,8 @@ impl EndpointHandle {
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
     pub fn defuse(&mut self) {
-        self.telemetry.join();
+        // The collector start stays in flight: joining here would put it on
+        // the launch path it was moved off. Dropping the handle joins it.
         self.guard.defuse();
     }
 }
