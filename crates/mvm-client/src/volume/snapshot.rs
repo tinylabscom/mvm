@@ -293,7 +293,7 @@ mod tests {
     use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
 
     use super::super::service::VolumeService;
-    use super::super::test_support::TestVolumeHome;
+    use super::super::test_support::{TEST_VOLUME_MIB, TestVolumeHome};
     use super::*;
 
     fn write_marker(value: u8) {
@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn snapshot_restore_roundtrip_recovers_prior_encrypted_bytes() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         let service = crate::volume::test_support::service();
         service.unlock_volume("work").unwrap();
         write_marker(0x41);
@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn restore_refuses_tampered_snapshot_without_replacing_current_ciphertext() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         create("work", "before").unwrap();
         let catalog = LocalVolumeCatalog::load().unwrap();
         let encryption = match &catalog.get("work").unwrap().encryption {
@@ -368,7 +368,7 @@ mod tests {
     #[test]
     fn snapshot_manifest_is_canonical_strict_and_roundtrips() {
         let home = TestVolumeHome::new();
-        home.create_block("work", 16);
+        home.create_block("work", TEST_VOLUME_MIB);
         create("work", "before").unwrap();
         let manifest_path = snapshot_volume_root("work")
             .join("before")

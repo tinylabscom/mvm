@@ -131,8 +131,50 @@ fn a_set_built_from_the_pair_as_it_is_reads_at_the_local_dev_tier() {
 
     assert_eq!(set.tier(), ImageTrustTier::LocalDev);
     assert_eq!(&set.checkouts.images, pair.images.identity());
-    assert_eq!(set.checkouts.mvm, probe_identity(&pair.mvm()).unwrap());
+    assert_eq!(
+        set.checkouts.mvm,
+        Some(probe_identity(&pair.mvm()).unwrap())
+    );
     assert_eq!(set.artifacts.len(), 1);
+}
+
+#[test]
+fn linux_only_set_does_not_depend_on_a_paired_mvm_checkout() {
+    let pair = Pair::new();
+    pair.emit_current();
+    let path = pair.set_dir().join(LOCAL_SET_MANIFEST_NAME);
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["schema_version"] = serde_json::json!(3);
+    manifest
+        .as_object_mut()
+        .unwrap()
+        .remove("mvm_source_commit");
+    manifest["producer"]["local_checkouts"]
+        .as_object_mut()
+        .unwrap()
+        .remove("mvm");
+    manifest["compatibility"]
+        .as_object_mut()
+        .unwrap()
+        .remove("guest_agent_protocol");
+    manifest["compatibility"]["base_image_contract"] = serde_json::json!(1);
+    manifest["compatibility"]["builder_boot_abi"] =
+        serde_json::json!(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY.get());
+    manifest["compatibility"]["builder_cache_contract"] =
+        serde_json::json!(crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION);
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let set = pair
+        .read_with(
+            &pair.set_dir().join("no-mvm-checkout"),
+            &[ImageSetRole::WorkloadKernel(
+                WorkloadImageProfile::DefaultTenant,
+            )],
+        )
+        .unwrap();
+    assert_eq!(set.checkouts.mvm, None);
+    assert_eq!(set.manifest.mvm_source_commit, None);
+    assert_eq!(&set.checkouts.images, pair.images.identity());
 }
 
 #[test]

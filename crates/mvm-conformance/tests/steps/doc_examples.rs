@@ -1588,8 +1588,10 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // provider; its flow is tested in-process against a loopback provider.
 // Pack inspection needs an installed signed artifact, so its documented
 // examples are parse-tier while isolated CLI and installed-cache tests exercise
-// refusal and successful verification.
-const PARSE_TIER_PIN: usize = 83;
+// refusal and successful verification. Revocation import also requires
+// externally published signed files, so its examples are parse-tier while
+// core tests exercise verification and rollback refusal.
+const PARSE_TIER_PIN: usize = 84;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

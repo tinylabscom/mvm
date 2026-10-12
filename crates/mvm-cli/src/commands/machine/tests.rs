@@ -4209,6 +4209,8 @@ fn start_resolver_recreates_with_force() {
 /// An unlocked managed block volume named `state`, registered read-write
 /// against `machine`. Registered before the machine has a spec, so no profile
 /// is applied until the machine starts.
+/// Registers a 3 MiB managed volume: the smallest the ext4 layout accepts, and
+/// every lifecycle step encrypts the whole image with an unoptimised cipher.
 fn register_writable_state_volume(machine: &str) {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
     let volumes =
@@ -4219,7 +4221,7 @@ fn register_writable_state_volume(machine: &str) {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .expect("volume name")
-                .capacity_mib(16)
+                .capacity_mib(3)
                 .build()
                 .expect("create request"),
         )
@@ -4284,7 +4286,7 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .expect("volume name")
-                .capacity_mib(16)
+                .capacity_mib(3)
                 .build()
                 .expect("create request"),
         )

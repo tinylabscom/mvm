@@ -1,0 +1,36 @@
+# Generated from exact-tag signature-verified release assets.
+pkgname=mvmctl-bin
+pkgver=@@VERSION@@
+pkgrel=1
+pkgdesc='MicroVM command-line tool and complete guest runtime'
+arch=('x86_64')
+url='https://github.com/tinylabscom/mvm'
+license=('Apache-2.0')
+depends=('glibc' 'gcc-libs')
+provides=('mvmctl')
+conflicts=('mvmctl')
+options=('!strip')
+_release="$url/releases/download/v$pkgver"
+_guest="mvm-guest-bins-v$pkgver.tar.gz"
+source=("$_release/$_guest" "$_release/$_guest.sha256" "$_release/$_guest.bundle")
+sha256sums=('@@SHA_GUEST@@' '@@SHA_GUEST_CHECKSUM@@' '@@SHA_GUEST_BUNDLE@@')
+source_x86_64=("$_release/mvmctl-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('@@SHA_X86_64@@')
+# Preserve the authenticated archive, including both guest architectures.
+noextract=("$_guest")
+
+package() {
+  local host="$srcdir/mvmctl-$CARCH-unknown-linux-gnu"
+  local dest="$pkgdir/usr/lib/mvmctl"
+  install -dm755 "$dest/guest-runtime" "$pkgdir/usr/bin"
+  for bin in @@HOST_BINS@@; do
+    install -m755 "$host/$bin" "$dest/$bin"
+    ln -s "../lib/mvmctl/$bin" "$pkgdir/usr/bin/$bin"
+  done
+  install -m755 "$host/libmvm_hostlib.so" "$dest/libmvm_hostlib.so"
+  ln -s mvmctl/libmvm_hostlib.so "$pkgdir/usr/lib/libmvm_hostlib.so"
+  install -m644 "$srcdir/$_guest" "$srcdir/$_guest.sha256" \
+    "$srcdir/$_guest.bundle" "$dest/guest-runtime/"
+  install -dm755 "$pkgdir/usr/share/mvmctl"
+  printf 'aur\n' > "$pkgdir/usr/share/mvmctl/package-managed"
+}

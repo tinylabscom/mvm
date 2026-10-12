@@ -283,12 +283,42 @@ pub fn is_running() -> Result<bool> {
 
 /// Check if a specific VM's Firecracker process is alive (by PID file path).
 /// Uses `/proc/<pid>/comm` instead of kill -0 because firecracker runs as root.
+///
+/// On Linux this reads the marker and `/proc` directly. It sits on the boot
+/// path, polled while the guest comes up, and spawning a shell and two `cat`s
+/// for each probe cost about 3 ms apiece. Any read failure answers "not
+/// running", as the shell probe's `|| echo no` did.
 pub fn is_vm_running(pid_file: &str) -> Result<bool> {
-    let result = run_in_vm_stdout(&format!(
-        r#"[ -f {pid} ] && p=$(cat {pid}) && [ -f "/proc/$p/comm" ] && [ "$(cat /proc/$p/comm)" = "firecracker" ] && echo yes || echo no"#,
-        pid = pid_file,
-    ))?;
-    Ok(result.trim() == "yes")
+    #[cfg(target_os = "linux")]
+    {
+        Ok(pid_marker_names_firecracker(
+            std::path::Path::new(pid_file),
+            std::path::Path::new("/proc"),
+        ))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let result = run_in_vm_stdout(&format!(
+            r#"[ -f {pid} ] && p=$(cat {pid}) && [ -f "/proc/$p/comm" ] && [ "$(cat /proc/$p/comm)" = "firecracker" ] && echo yes || echo no"#,
+            pid = pid_file,
+        ))?;
+        Ok(result.trim() == "yes")
+    }
+}
+
+/// Whether the pid recorded in `pid_file` names a live `firecracker` under
+/// `proc_root`. Every failure to read either file is "no".
+#[cfg(any(target_os = "linux", test))]
+fn pid_marker_names_firecracker(pid_file: &std::path::Path, proc_root: &std::path::Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(pid_file) else {
+        return false;
+    };
+    let Ok(pid) = raw.trim().parse::<u32>() else {
+        return false;
+    };
+    std::fs::read_to_string(proc_root.join(pid.to_string()).join("comm"))
+        .is_ok_and(|comm| comm.trim() == "firecracker")
 }
 
 /// Check whether one already-captured PID still names a Firecracker process.
@@ -785,6 +815,33 @@ impl FcForkRestorer {
 
 #[cfg(test)]
 mod tests {
+
+    /// The direct probe answers exactly what the shell probe it replaced did:
+    /// yes only for a readable marker naming a pid whose `comm` is
+    /// `firecracker`, and no for every failure along the way.
+    #[test]
+    fn the_pid_marker_probe_matches_the_shell_probe_it_replaced() {
+        let root = tempfile::tempdir().unwrap();
+        let proc_root = root.path().join("proc");
+        std::fs::create_dir_all(proc_root.join("41")).unwrap();
+        std::fs::create_dir_all(proc_root.join("42")).unwrap();
+        std::fs::write(proc_root.join("41").join("comm"), b"firecracker\n").unwrap();
+        std::fs::write(proc_root.join("42").join("comm"), b"sh\n").unwrap();
+        let marker = root.path().join("fc.pid");
+        let probe = || super::pid_marker_names_firecracker(&marker, &proc_root);
+
+        assert!(!probe(), "no marker");
+        std::fs::write(&marker, b"41\n").unwrap();
+        assert!(probe(), "marker naming a live firecracker");
+        std::fs::write(&marker, b"42\n").unwrap();
+        assert!(!probe(), "marker naming another program");
+        std::fs::write(&marker, b"43\n").unwrap();
+        assert!(!probe(), "marker naming a pid that is gone");
+        std::fs::write(&marker, b"not a pid\n").unwrap();
+        assert!(!probe(), "marker that is not a pid");
+        std::fs::write(&marker, b"").unwrap();
+        assert!(!probe(), "empty marker");
+    }
 
     fn proc_entry(files: &[(&str, &[u8])]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

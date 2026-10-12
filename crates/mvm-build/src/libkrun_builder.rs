@@ -3748,6 +3748,21 @@ mod tests {
         }
     }
 
+    /// Point the supervisor lookup at a path that is not a file, so
+    /// `run_build` stops at the first environment check after validation.
+    ///
+    /// Without it, a host that has the supervisor on `$PATH` and is running
+    /// from a source checkout takes the auto-build arm, which spawns
+    /// `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor`. Under an
+    /// isolated `HOME` that cargo cannot see the developer's toolchain, so
+    /// rustup downloads a fresh one and the supervisor compiles from nothing:
+    /// on a contributor Mac with libkrun installed, each test that reached it
+    /// ran for 26 minutes. A host without libkrun, CI included, already
+    /// stopped here with `LibkrunUnavailable`.
+    fn name_no_supervisor(env: &mut TestEnv, home: &Path) {
+        env.set("MVM_LIBKRUN_SUPERVISOR_PATH", home.join("no-supervisor"));
+    }
+
     fn ok_job() -> BuilderJob {
         BuilderJob::Flake {
             flake_ref: "path:/work".to_string(),
@@ -3932,6 +3947,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
+        name_no_supervisor(&mut env, home.path());
         let scratch = TempDir::new().unwrap();
         let spec_path = scratch.path().join("spec.json");
         std::fs::write(&spec_path, b"{}").unwrap();
@@ -4050,6 +4066,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
+        name_no_supervisor(&mut env, home.path());
         let scratch = TempDir::new().unwrap();
         let mounts = ok_mounts(&scratch);
         let err = LibkrunBuilderVm::default()

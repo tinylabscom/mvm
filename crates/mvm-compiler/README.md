@@ -65,6 +65,9 @@ cargo clippy -p mvm-compiler -p mvm-sdk --features mvm-sdk/compiler,mvm-sdk/depl
 ```
 
 The compiler dependency-boundary test rejects SDK, execution, and packaging
-dependencies, including development dependencies. SDK compatibility tests
+dependencies, including development dependencies. It also rejects key-custody
+and TLS crates and any signing-key type named in compiler source, so no
+publisher or host signing key can enter compilation or the builder input it
+produces. SDK compatibility tests
 exercise both API paths, compare generated files and archives for Python and
 TypeScript workloads, and verify error-type compatibility.

@@ -52,6 +52,9 @@ pub mod oci;
 /// Frozen resolution of an authored pack, checked before every frozen build.
 #[cfg(feature = "protocol")]
 pub mod pack_lock;
+/// Optional digest-bound task scenario beside a pack environment.
+#[cfg(feature = "protocol")]
+pub mod pack_scenario;
 /// Language-neutral authored pack input, not a resolved build or release.
 #[cfg(feature = "protocol")]
 pub mod pack_spec;

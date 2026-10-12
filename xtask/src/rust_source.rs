@@ -32,11 +32,37 @@
 /// counting braces or splitting on delimiters never meets half a literal.
 #[must_use]
 pub fn blank_comments_and_strings(source: &str) -> String {
+    blank_source(source, CommentSyntax::Rust, false)
+}
+
+/// Comment syntax for a source gate that must retain literal arguments.
+#[derive(Clone, Copy)]
+pub enum CommentSyntax {
+    Rust,
+    /// Nix composition and its embedded shell: hash line comments, block
+    /// comments and quoted arguments. Indented-string delimiters are retained.
+    NixShell,
+}
+
+/// Blank comments without destroying quoted paths and command arguments.
+/// Uses the same nested-comment and Rust literal lexer as the token gates.
+#[must_use]
+pub fn blank_comments(source: &str, syntax: CommentSyntax) -> String {
+    blank_source(source, syntax, true)
+}
+
+fn blank_source(source: &str, syntax: CommentSyntax, retain_literals: bool) -> String {
+    if matches!(syntax, CommentSyntax::NixShell) {
+        return blank_nix_shell_comments(source);
+    }
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
     let mut i = 0usize;
     while i < chars.len() {
-        i = match classify(&chars, i) {
+        let span = classify(&chars, i);
+        let literal = matches!(span, Span::Quoted | Span::RawString | Span::CharLiteral);
+        let output_start = out.len();
+        let end = match span {
             Span::LineComment => blank_line_comment(&chars, i, &mut out),
             Span::BlockComment => blank_block_comment(&chars, i, &mut out),
             Span::Quoted => blank_quoted(&chars, i, &mut out),
@@ -47,6 +73,183 @@ pub fn blank_comments_and_strings(source: &str) -> String {
                 i + 1
             }
         };
+        if retain_literals && literal {
+            out.truncate(output_start);
+            out.extend(&chars[i..end]);
+        }
+        i = end;
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum NixContext {
+    Expression(usize),
+    Quoted(char),
+    Indented,
+    ShellComment,
+    ShellExpansion(usize),
+}
+
+fn emit_nix_text(out: &mut String, chars: &[char], shell_comment: bool) {
+    for &c in chars {
+        if shell_comment {
+            blank_char(c, out);
+        } else {
+            out.push(c);
+        }
+    }
+}
+
+// Nix interpolations re-enter expression syntax; shell globs inside an
+// indented string are not Nix block comments. Keep that boundary explicit.
+fn blank_nix_shell_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut contexts = vec![NixContext::Expression(0)];
+    let mut i = 0;
+    while i < chars.len() {
+        let context = *contexts.last().expect("root Nix expression remains");
+        let pair = chars.get(i..i + 2);
+        let indented = contexts
+            .iter()
+            .rev()
+            .find(|c| matches!(c, NixContext::Indented | NixContext::Expression(_)))
+            .is_some_and(|c| matches!(c, NixContext::Indented));
+        let shell_comment = contexts
+            .iter()
+            .any(|c| matches!(c, NixContext::ShellComment));
+        if matches!(context, NixContext::ShellComment) && chars[i] == '\n' {
+            contexts.pop();
+            out.push('\n');
+            i += 1;
+            continue;
+        }
+        if indented && pair == Some(&['\'', '\'']) {
+            if chars.get(i + 2) == Some(&'$') && chars.get(i + 3) == Some(&'{') {
+                // Escaped Nix interpolation is a shell parameter expansion.
+                // Its #/quote characters do not open comments or Nix strings.
+                if !shell_comment {
+                    contexts.push(NixContext::ShellExpansion(1));
+                }
+                emit_nix_text(&mut out, &chars[i..i + 4], shell_comment);
+                i += 4;
+                continue;
+            }
+            if matches!(chars.get(i + 2), Some('\'' | '\\')) {
+                let width = if chars.get(i + 2) == Some(&'\'') {
+                    3
+                } else {
+                    4
+                };
+                let end = (i + width).min(chars.len());
+                emit_nix_text(&mut out, &chars[i..end], shell_comment);
+                i = end;
+                continue;
+            }
+            if !matches!(context, NixContext::Indented) {
+                // Nix closes the string even when Bash sees the delimiter's
+                // characters as part of a comment. Do not consume it as text.
+                while let Some(frame) = contexts.pop() {
+                    if matches!(frame, NixContext::Indented) {
+                        break;
+                    }
+                }
+                emit_nix_text(&mut out, &chars[i..i + 2], shell_comment);
+                i += 2;
+                continue;
+            }
+        }
+        let end = match context {
+            NixContext::Expression(_) if chars[i] == '#' => {
+                Some(blank_line_comment(&chars, i, &mut out))
+            }
+            NixContext::Expression(_) if pair == Some(&['/', '*']) => {
+                Some(blank_block_comment(&chars, i, &mut out))
+            }
+            NixContext::Indented if chars[i] == '#' => {
+                contexts.push(NixContext::ShellComment);
+                blank_char(chars[i], &mut out);
+                i += 1;
+                continue;
+            }
+            _ => None,
+        };
+        if let Some(end) = end {
+            i = end;
+            continue;
+        }
+        if pair == Some(&['$', '{'])
+            && !matches!(
+                context,
+                NixContext::Expression(_) | NixContext::ShellExpansion(_)
+            )
+        {
+            contexts.push(NixContext::Expression(1));
+            emit_nix_text(&mut out, &chars[i..i + 2], shell_comment);
+            i += 2;
+            continue;
+        }
+        match context {
+            NixContext::Expression(depth) => match chars[i] {
+                '"' => contexts.push(NixContext::Quoted('"')),
+                '\'' if pair == Some(&['\'', '\'']) => {
+                    contexts.push(NixContext::Indented);
+                    emit_nix_text(&mut out, &chars[i..i + 2], shell_comment);
+                    i += 2;
+                    continue;
+                }
+                '{' => {
+                    *contexts.last_mut().expect("expression") = NixContext::Expression(depth + 1);
+                }
+                '}' if depth == 1 && contexts.len() > 1 => {
+                    contexts.pop();
+                }
+                '}' if depth > 0 => {
+                    *contexts.last_mut().expect("expression") = NixContext::Expression(depth - 1);
+                }
+                _ => {}
+            },
+            NixContext::Quoted(quote) => {
+                if chars[i] == '\\' {
+                    let end = (i + 2).min(chars.len());
+                    emit_nix_text(&mut out, &chars[i..end], shell_comment);
+                    i = end;
+                    continue;
+                }
+                if chars[i] == quote {
+                    contexts.pop();
+                }
+            }
+            NixContext::Indented => {
+                if pair == Some(&['\'', '\'']) {
+                    contexts.pop();
+                    emit_nix_text(&mut out, &chars[i..i + 2], shell_comment);
+                    i += 2;
+                    continue;
+                }
+                if matches!(chars[i], '"' | '\'') {
+                    contexts.push(NixContext::Quoted(chars[i]));
+                }
+            }
+            NixContext::ShellComment => {}
+            NixContext::ShellExpansion(depth) => match chars[i] {
+                '{' => {
+                    *contexts.last_mut().expect("shell expansion") =
+                        NixContext::ShellExpansion(depth + 1);
+                }
+                '}' if depth == 1 => {
+                    contexts.pop();
+                }
+                '}' => {
+                    *contexts.last_mut().expect("shell expansion") =
+                        NixContext::ShellExpansion(depth - 1);
+                }
+                _ => {}
+            },
+        }
+        emit_nix_text(&mut out, &chars[i..i + 1], shell_comment);
+        i += 1;
     }
     out
 }
@@ -334,6 +537,86 @@ fn cfg_test_item_end(chars: &[char], from: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comments_are_blanked_but_literal_arguments_are_preserved() {
+        let source = "call(\"//literal\", r##\"/* raw */\"##, b\"#bytes\", '/'); \
+                      /* outer /* hidden(); */ hidden(); */ // hidden();\nlive();";
+        let code = blank_comments(source, CommentSyntax::Rust);
+        assert!(code.contains("\"//literal\""));
+        assert!(code.contains("r##\"/* raw */\"##"));
+        assert!(code.contains("b\"#bytes\""));
+        assert!(code.contains("'/'"));
+        assert!(code.contains("live();"));
+        assert!(!code.contains("hidden();"));
+        assert_eq!(source.chars().count(), code.chars().count());
+        assert_eq!(source.lines().count(), code.lines().count());
+    }
+
+    #[test]
+    fn nix_shell_hash_comments_do_not_destroy_quoted_paths() {
+        let source = "value = \"# literal\"; # hidden\n\
+                      script = ''\ncp 'a#b' \"$out/init\" # hidden\n'';\n\
+                      /* outer /* hidden */ hidden */";
+        let code = blank_comments(source, CommentSyntax::NixShell);
+        assert!(code.contains("\"# literal\""));
+        assert!(code.contains("'a#b'"));
+        assert!(code.contains("\"$out/init\""));
+        assert!(!code.contains("hidden"));
+        assert_eq!(source.chars().count(), code.chars().count());
+        assert_eq!(source.lines().count(), code.lines().count());
+    }
+
+    #[test]
+    fn nix_indented_strings_and_interpolations_preserve_following_metadata() {
+        let source = r#"script = ''
+            modules=("$root"/lib/modules/*)
+            for dep in ''${dep_line#*:}; do
+                echo "''${dep%.xz}" # hidden-shell
+            done
+            ${lib.optionalString true ''
+                # hidden-inner-shell
+                cp ${lib.escapeShellArg "a#b"} "$out/etc/mvm/entrypoint"
+            ''}
+        '';
+        value = "${ /* hidden-expression */ "a#b" }";
+        # hidden-nix
+        initSystem = "initramfs-agent";
+        overlayAware = true;
+        runtimeLean = true;
+        "#;
+        let code = blank_comments(source, CommentSyntax::NixShell);
+        for marker in [
+            "/lib/modules/*",
+            "''${dep_line#*:}",
+            "''${dep%.xz}",
+            "\"a#b\"",
+            "initSystem = \"initramfs-agent\";",
+            "overlayAware = true;",
+            "runtimeLean = true;",
+        ] {
+            assert!(code.contains(marker), "lost {marker}: {code}");
+        }
+        assert!(!code.contains("hidden"));
+        assert_eq!(source.chars().count(), code.chars().count());
+    }
+
+    #[test]
+    fn nix_closes_indented_strings_before_applying_shell_comment_rules() {
+        for script in [
+            "script = ''# a shell comment'';",
+            "script = ''# escaped ''${unfinished'';",
+            "script = ''# escaped ''${unfinished\n'';",
+            "script = ''# ${\"interpolation\"} a shell comment'';",
+        ] {
+            let source = format!("{script}\n/* hidden(); */\nlive();");
+            let code = blank_comments(&source, CommentSyntax::NixShell);
+            assert!(!code.contains("hidden();"), "{script}: {code}");
+            assert!(!code.contains("shell comment"), "{script}: {code}");
+            assert!(code.contains("live();"), "{script}: {code}");
+            assert_eq!(source.chars().count(), code.chars().count());
+        }
+    }
 
     #[test]
     fn cfg_test_items_are_blanked_and_the_code_after_them_is_kept() {

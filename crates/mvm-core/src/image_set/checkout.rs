@@ -109,7 +109,8 @@ impl fmt::Display for RepoIdentity {
     }
 }
 
-/// The two working trees a locally built set came from.
+/// The working trees a locally built set came from. Linux-only sets record
+/// just the image checkout; legacy sets also record their runtime sources.
 ///
 /// This is the whole of a local producer: it names no repository, workflow,
 /// tag or signer, so nothing in it can be mistaken for the identity a release
@@ -120,5 +121,10 @@ pub struct LocalCheckouts {
     /// The image checkout whose flakes built the set.
     pub images: RepoIdentity,
     /// The mvm checkout its guest and host binaries were compiled from.
-    pub mvm: RepoIdentity,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::deserialize_present"
+    )]
+    pub mvm: Option<RepoIdentity>,
 }

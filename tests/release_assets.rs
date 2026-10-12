@@ -317,8 +317,9 @@ fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
 
     // The build matrix entries. `target` is the stable release-asset contract;
     // `build_target` is the Rust ABI that actually goes into that archive.
+    // Installation-only matrices do not compile a Rust target.
     let mut pairs = Vec::new();
-    let lines: Vec<&str> = workflow.lines().collect();
+    let lines: Vec<&str> = job_block(&workflow, "build").lines().collect();
     for (i, line) in lines.iter().enumerate() {
         let Some(target) = line.trim().strip_prefix("- target: ") else {
             continue;
@@ -652,6 +653,12 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
     let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
         .expect("distro-packages.yml must exist");
     assert!(
+        packages.contains(
+            "uses: sigstore/cosign-installer@v3\n        with:\n          cosign-release: v2.5.2"
+        ),
+        "packaging must use installer v3's verified bootstrap: cosign v3 binaries lack the detached .sig it requires"
+    );
+    assert!(
         packages.contains("bash scripts/build-distro-packages.sh")
             && !packages.contains("cargo build")
             && !packages.contains("cargo zigbuild"),
@@ -823,6 +830,73 @@ fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
             && script.contains("release archive $runtime_name"),
         "the smoke must require the launch pieces to come from the staged runtime"
     );
+}
+
+#[test]
+fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
+    let workflow = release_workflow();
+    let smoke = job_block(&workflow, "archive-install-smoke");
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-apple-darwin",
+    ] {
+        assert!(smoke.contains(target), "{target} needs an installed smoke");
+    }
+    for runner in ["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"] {
+        assert!(
+            smoke.contains(runner),
+            "{runner} must run its native payload"
+        );
+    }
+    assert!(smoke.contains("ctypes.CDLL(str(path))"));
+    assert!(smoke.contains("library.mvm_hostlib_abi_version()"));
+    assert!(smoke.contains("\"${prefix}/bin/mvmctl\" --version"));
+    assert!(
+        job_block(&workflow, "release").contains("needs.archive-install-smoke.result == 'success'"),
+        "publishing must require every installed platform smoke"
+    );
+}
+
+#[test]
+fn macos_release_signing_precedes_archive_checksums() {
+    let workflow = release_workflow();
+    let build = job_block(&workflow, "build");
+    let stage = build.find("name: Stage binary and helpers").unwrap();
+    let sign = build
+        .find("name: Sign and notarize the staged macOS release")
+        .unwrap();
+    let package = build
+        .find("name: Package binary and generate checksums")
+        .unwrap();
+    assert!(stage < sign && sign < package);
+    let signing = &build[sign..package];
+    assert!(signing.contains("github.ref_type == 'tag'"));
+    assert!(signing.contains("matrix.target == 'aarch64-apple-darwin'"));
+    assert!(signing.contains("scripts/release/sign_macos.py"));
+    assert!(signing.contains("--payload staging/mvmctl-aarch64-apple-darwin"));
+    assert!(signing.contains("macos-notarization.json"));
+    assert!(
+        signing.contains("--skip-unconfigured"),
+        "a tag build without Apple credentials must ship ad-hoc signed, not fail"
+    );
+    assert!(
+        build.contains("--features mvm-client/release-channel"),
+        "the published host library must acquire the matching signed runtime"
+    );
+}
+
+#[test]
+fn the_release_observes_homebrew_install_and_publication_results() {
+    let workflow = release_workflow();
+    let channel = job_block(&workflow, "homebrew-channel");
+    assert!(channel.contains("needs: [promote-release]"));
+    assert!(channel.contains("needs.promote-release.result == 'success'"));
+    assert!(channel.contains("uses: ./.github/workflows/update-homebrew-tap.yml"));
+    assert!(channel.contains("tag: ${{ github.ref_name }}"));
+    let updater = fs::read_to_string(".github/workflows/update-homebrew-tap.yml").unwrap();
+    assert!(updater.contains("workflow_call:"));
+    assert!(job_block(&updater, "update-tap").contains("needs: [resolve, smoke]"));
 }
 
 /// Slice one job's block out of a workflow — from its key to the next line at
@@ -1442,9 +1516,12 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
 
     let promote = job_block(&workflow, "promote-release");
     assert!(
-        promote.contains("    needs: [first-run-smoke]\n")
-            && promote.contains("needs.first-run-smoke.result == 'success'"),
-        "promotion must require every first-run lane to pass"
+        promote.contains(
+            "    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]\n"
+        ) && promote.contains("needs.first-run-smoke.result == 'success'")
+            && promote.contains("needs.published-package-smoke.result == 'success'")
+            && promote.contains("needs.recipe-install-smoke.result == 'success'"),
+        "promotion must require first-run and published-package installation witnesses"
     );
     assert!(
         promote.contains("if [[ \"${TAG_NAME#v}\" == *-* ]]; then"),

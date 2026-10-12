@@ -162,7 +162,7 @@ const BUILDERD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// typed control socket at `<vm_state_dir>/vsock-<BUILDERD_CONTROL_PORT>.sock`;
 /// every present socket is probed with a bounded handshake. Informational:
 /// absence just means no builder VM is running, so `ok` stays true.
-fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
+fn builderd_daemon_summary(vms_root: &std::path::Path, timeout: std::time::Duration) -> String {
     let Ok(entries) = std::fs::read_dir(vms_root) else {
         return "absent (no builder VM yet; run `mvmctl bootstrap`)".to_string();
     };
@@ -182,8 +182,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
             continue;
         };
         let name = entry.file_name().to_string_lossy().into_owned();
-        let readiness =
-            mvm_build::builderd_client::probe_builderd_readiness(&sock, BUILDERD_PROBE_TIMEOUT);
+        let readiness = mvm_build::builderd_client::probe_builderd_readiness(&sock, timeout);
         lines.push(format!(
             "{name}: {}",
             mvm_build::builderd_client::readiness_summary(&readiness)
@@ -203,7 +202,7 @@ pub(super) fn builderd_daemon_check() -> Check {
         name: "builder daemon",
         category: "platform",
         ok: true,
-        info: builderd_daemon_summary(&vms_root),
+        info: builderd_daemon_summary(&vms_root, BUILDERD_PROBE_TIMEOUT),
     }
 }
 
@@ -510,6 +509,12 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    /// The live-daemon tests serve the socket from a thread of this
+    /// process, which a loaded runner may not schedule within doctor's
+    /// 300 ms deadline. A ready daemon answers as soon as it is scheduled,
+    /// so the generous bound only lengthens a run that is already failing.
+    const TEST_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
     struct EnvGuard {
         _env: TestEnv,
         _tmp_root: Option<tempfile::TempDir>,
@@ -646,12 +651,15 @@ mod tests {
     #[test]
     fn builderd_daemon_summary_absent_when_root_missing_or_empty() {
         let root = tempfile::tempdir().unwrap();
-        assert!(builderd_daemon_summary(&root.path().join("missing")).starts_with("absent"));
+        assert!(
+            builderd_daemon_summary(&root.path().join("missing"), TEST_PROBE_TIMEOUT)
+                .starts_with("absent")
+        );
         // An empty vms root, and a builder-VM dir with no control socket,
         // both read as absent (nothing to probe).
-        assert!(builderd_daemon_summary(root.path()).starts_with("absent"));
+        assert!(builderd_daemon_summary(root.path(), TEST_PROBE_TIMEOUT).starts_with("absent"));
         std::fs::create_dir_all(root.path().join("mvm-persistent-builder-vm-x")).unwrap();
-        assert!(builderd_daemon_summary(root.path()).starts_with("absent"));
+        assert!(builderd_daemon_summary(root.path(), TEST_PROBE_TIMEOUT).starts_with("absent"));
     }
 
     #[test]
@@ -685,7 +693,7 @@ mod tests {
             .expect("serve");
         });
 
-        let s = builderd_daemon_summary(root.path());
+        let s = builderd_daemon_summary(root.path(), TEST_PROBE_TIMEOUT);
         assert!(s.contains("bv: ready"), "got {s:?}");
         handle.join().expect("server thread");
     }
@@ -720,7 +728,7 @@ mod tests {
             .expect("serve");
         });
 
-        let s = builderd_daemon_summary(root.path());
+        let s = builderd_daemon_summary(root.path(), TEST_PROBE_TIMEOUT);
         assert!(s.contains("bhvf: ready"), "got {s:?}");
         handle.join().expect("server thread");
     }

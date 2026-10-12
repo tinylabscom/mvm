@@ -19,7 +19,7 @@ crate-type = ["lib", "cdylib"]
 [dependencies]
 # The local backend behind the ABI. Nothing depends on this crate, so linking
 # the whole client closure here cannot form a cycle.
-mvm-client.workspace = true
+mvm-client = { workspace = true, features = ["manifest-verify"] }
 # The guest-agent payload types the `guest.*` methods return.
 mvm-agentd.workspace = true
 mvm-core = { workspace = true, features = ["client"] }

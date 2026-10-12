@@ -635,6 +635,10 @@ fn refresh_registered_host_snapshots_using(
 
 #[cfg(test)]
 mod tests {
+    /// Smallest whole-MiB managed volume the ext4 layout accepts. Each
+    /// lifecycle step encrypts or decrypts the whole image with an unoptimised
+    /// test-build cipher, so the size is the test's run time.
+    const VOLUME_SIZE: &str = "3M";
 
     /// The `--guest` help restates the allow-root policy, and a doc comment
     /// cannot read the constant it restates. The two drifted once: the help
@@ -698,7 +702,7 @@ mod tests {
     fn mvm_managed_volume_create_unlock_lock_roundtrip() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
 
         let catalog = LocalVolumeCatalog::load().unwrap();
         let entry = catalog.get("work").unwrap();
@@ -762,7 +766,7 @@ mod tests {
     fn registered_managed_mount_is_consumed_by_launch_resolution() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", true).unwrap();
 
@@ -781,7 +785,7 @@ mod tests {
     fn block_attachment_lease_is_exclusive_and_released_on_stop() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", true).unwrap();
         mount("vm-2", "work", None, "/data/work", true).unwrap();
@@ -815,7 +819,7 @@ mod tests {
     fn launch_resolution_refuses_volume_locked_after_registration() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", false).unwrap();
         lock("work").unwrap();
@@ -828,7 +832,7 @@ mod tests {
     fn launch_resolution_refuses_explicit_guest_path_collision() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         unlock("work").unwrap();
         mount("vm-1", "work", None, "/data/work", false).unwrap();
         let explicit = mvm_runtime::image::RuntimeVolume {
@@ -1023,7 +1027,7 @@ mod tests {
     fn mvm_managed_mount_refuses_locked_volume() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         let err = mount("vm-1", "work", None, "/data/work", false).unwrap_err();
         assert!(format!("{err:#}").contains("is locked"), "got: {err:#}");
     }
@@ -1032,7 +1036,7 @@ mod tests {
     fn mvm_managed_unlock_rejects_tampered_ciphertext() {
         let guard = DataDirGuard::new();
         let root = guard.path().join("vol-root");
-        create("work", Some(root.to_str().unwrap()), "16M").unwrap();
+        create("work", Some(root.to_str().unwrap()), VOLUME_SIZE).unwrap();
         let catalog = LocalVolumeCatalog::load().unwrap();
         let entry = catalog.get("work").unwrap();
         let ciphertext = match &entry.encryption {
