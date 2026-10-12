@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// Guest RAM, in MiB, idle standbys may hold in total when the operator has
+/// not set `standby_memory_mib`: four standbys at the default 512 MiB sizing.
+pub const DEFAULT_STANDBY_MEMORY_MIB: u64 = 2048;
+
 /// Persistent operator configuration stored at `~/.mvm/config/config.toml`.
 ///
 /// CLI flags always take precedence over these values. This config is
@@ -71,6 +75,16 @@ pub struct MvmConfig {
     /// uncapped and contributes nothing, so this bounds the total of what was
     /// promised rather than the total of what can be consumed.
     pub host_budget_cpu_millicores: Option<u32>,
+    /// Guest RAM, in MiB, that standbys may hold in total across every image.
+    /// `None` = [`DEFAULT_STANDBY_MEMORY_MIB`].
+    ///
+    /// A run leaves one standby of the image it booted so the next run of that
+    /// image claims it; this bounds what those standbys cost the host while
+    /// idle. When a new standby would not fit, the oldest are released first,
+    /// and a standby larger than the whole budget is not prepared. A configured
+    /// `host_budget_memory_mib` bounds standbys too: they never take headroom
+    /// the live machines' admitted charge has not left.
+    pub standby_memory_mib: Option<u64>,
     /// External signers whose Ed25519-signed plans this host will admit.
     ///
     /// Empty by default, and the default is the security posture: a host that
@@ -165,6 +179,13 @@ impl MvmConfig {
         }
     }
 
+    /// Guest RAM, in MiB, idle standbys may hold in total on this host.
+    #[must_use]
+    pub fn standby_memory_budget_mib(&self) -> u64 {
+        self.standby_memory_mib
+            .unwrap_or(DEFAULT_STANDBY_MEMORY_MIB)
+    }
+
     /// The host's default grant: the dimensions this operator wants applied to
     /// a workload that named none itself.
     ///
@@ -232,6 +253,7 @@ impl Default for MvmConfig {
             // a large machine while under-protecting a small one.
             host_budget_memory_mib: None,
             host_budget_cpu_millicores: None,
+            standby_memory_mib: None,
             // Empty = refuse every externally-signed plan. Trusting a fleet
             // issuer is a delegation of plan authority; it has to be written
             // by the operator, never defaulted into.
@@ -386,11 +408,15 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
         "max_wall_clock_secs" => {
             cfg.max_wall_clock_secs = optional_number(key, value)?;
         }
+        "standby_memory_mib" => {
+            cfg.standby_memory_mib = optional_number(key, value)?;
+        }
         other => {
             anyhow::bail!(
                 "Unknown config key {:?}. Valid keys: dev_vm_cpus, dev_vm_mem_gib, \
                  default_cpus, default_memory_mib, log_format, metrics_port, catalog_url, \
-                 mvmd_url, max_cpu_millicores, max_memory_mib, max_wall_clock_secs",
+                 mvmd_url, max_cpu_millicores, max_memory_mib, max_wall_clock_secs, \
+                 standby_memory_mib",
                 other
             );
         }
@@ -571,6 +597,20 @@ mod tests {
         // the round trip that persists it.
         let parsed: MvmConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(parsed.grant_ceiling(), ceiling);
+    }
+
+    #[test]
+    fn the_standby_budget_defaults_and_is_settable() {
+        let mut cfg = MvmConfig::default();
+        assert_eq!(cfg.standby_memory_budget_mib(), DEFAULT_STANDBY_MEMORY_MIB);
+        set_key(&mut cfg, "standby_memory_mib", "1024").unwrap();
+        assert_eq!(cfg.standby_memory_budget_mib(), 1024);
+        let parsed: MvmConfig = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(parsed.standby_memory_mib, Some(1024));
+        set_key(&mut cfg, "standby_memory_mib", "0").unwrap();
+        assert_eq!(cfg.standby_memory_budget_mib(), 0, "zero keeps no standbys");
+        set_key(&mut cfg, "standby_memory_mib", "none").unwrap();
+        assert_eq!(cfg.standby_memory_budget_mib(), DEFAULT_STANDBY_MEMORY_MIB);
     }
 
     #[test]

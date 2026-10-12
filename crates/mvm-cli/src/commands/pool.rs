@@ -8,7 +8,8 @@
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
 //! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
-//! Anything else is refused by the strict startup contract. Both halves of
+//! Anything else boots cold, and records why. An unnamed run of an eligible shape
+//! leaves a standby of its image behind for the next run (`refill`). Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
@@ -28,6 +29,7 @@ use mvm_fs::snapshot_store::FsSnapshotStore;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::CheckpointStore;
 use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool};
+use mvm_runtime::workload_runner::claim::ClaimRefusal;
 use mvm_runtime::workload_runner::{ChildGrantIssuer, ClaimContext, PreloadContext, SpawnContext};
 use sha2::{Digest, Sha256};
 
@@ -40,9 +42,18 @@ use mvm_hostd::plan_admission::{
     AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run, stash_plan_and_mint_verb_grant,
 };
 
+mod cold_start;
+mod refill;
+mod select;
 mod status;
 mod warm;
 
+pub use cold_start::{ColdStartReason, WarmClaimOutcome};
+use cold_start::{claim_gate, claim_required, outcome_for_refusal};
+pub use refill::{StandbyRefill, schedule_standby_refill};
+use select::{
+    WarmSelection, announce_recent_selection, images_to_warm, recent_image_limit, warm_each,
+};
 use status::{PoolStatus, PoolStatusEntry};
 pub use warm::WarmResult;
 
@@ -560,13 +571,6 @@ fn residency_source() -> mvm_core::residency::ResidencySource {
     mvm_core::residency::resolve_residency().1
 }
 
-fn warm_launch_mode(
-    _source: mvm_core::residency::ResidencySource,
-    _require_claim_override: bool,
-) -> WarmLaunchMode {
-    WarmLaunchMode::Required
-}
-
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
     if p.target == 0 {
         return Ok(WarmResult {
@@ -704,12 +708,12 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             }
         }
     }
-    // Bound the retained parent footprint for this template. The target is
-    // also the intended number of parents, so its per-parent memory cap gives
-    // the warm set a deterministic upper bound even when older records were
-    // created with a different resource shape.
+    // Bound the retained parent footprint for this launch shape. The target
+    // is also the intended number of parents, so its per-parent memory gives
+    // the shape's warm set a deterministic upper bound. Other shapes — other
+    // images included — are bounded by the host-wide standby budget instead.
     let max_memory_mib = u64::from(p.target).saturating_mul(u64::from(want.mem_mib));
-    let evicted = pool.evict_to_memory_budget(want.template_id.as_deref(), max_memory_mib)?;
+    let evicted = pool.evict_compatible_to_memory_budget(&want, max_memory_mib)?;
     if !evicted.is_empty() {
         tracing::debug!(
             template_id = ?want.template_id,
@@ -766,29 +770,15 @@ pub enum LaunchDecision {
     Refused(WarmClaimRefusal),
 }
 
-/// Try a warm claim in the default compatibility mode: use warm capacity when
-/// available and preserve the existing cold-boot fallback.
-///
-/// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
-/// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
-/// standby-id, so the caller must compute those paths against `handle.id`. Errors from
-/// `make_claim` are surfaced to [`claim_with_mode`] for mode-specific handling.
-pub fn claim_or_cold<F>(
-    pool: &SupervisorStandbyPool,
-    backend: &AnyBackend,
-    want: &StandbyCompat,
-    make_claim: F,
-) -> Result<LaunchDecision>
-where
-    F: FnOnce(&StandbyHandle) -> Result<StandbyClaim>,
-{
-    claim_with_mode(pool, backend, want, WarmLaunchMode::Optional, make_claim)
-}
-
 /// Try to claim an idle standby compatible with `want` under an explicit warm
 /// launch mode. A required warm launch returns a typed refusal for every
 /// capacity, compatibility, preparation, and backend claim failure; it never
 /// silently turns those failures into a cold boot.
+///
+/// `make_claim` builds the [`StandbyClaim`] **for the selected standby's id** — the audit
+/// substrate (`gateway-<vm>.sock`) is name-keyed, and a claimed VM runs under its
+/// standby-id, so the caller must compute those paths against `handle.id`. Errors from
+/// `make_claim` are surfaced as a preparation refusal.
 pub fn claim_with_mode<F>(
     pool: &SupervisorStandbyPool,
     backend: &AnyBackend,
@@ -914,7 +904,7 @@ fn decision_for_mode(mode: WarmLaunchMode, refusal: WarmClaimRefusal) -> LaunchD
 /// Resolve the checkpoint a standby parent was captured as. A parent that never
 /// went through the spawn-and-capture path (or predates it) has no checkpoint to
 /// verify content and lineage against, so a claim against it must refuse rather
-/// than clone unverified content. Kept separate from [`claim_or_cold`] so the
+/// than clone unverified content. Kept separate from [`claim_with_mode`] so the
 /// refusal is unit-testable without a pool or a VM.
 fn parent_checkpoint_for(handle: &StandbyHandle) -> Result<CheckpointId> {
     handle
@@ -984,56 +974,43 @@ fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
         && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
 }
 
-/// Excluded shapes keep their cold path even when residency holds no standbys.
-/// Eligible launches, however, must opt into a prepared claim rather than
-/// silently falling back to a cold boot.
-fn warm_claim_requested(cfg: &VmStartConfig, user_named: bool) -> Result<bool> {
-    if user_named || !warm_eligible_launch(cfg) {
-        return Ok(false);
-    }
-    if cfg.warm_pool_size == 0 {
-        anyhow::bail!(
-            "strict startup requires a prepared warm standby; set MVM_RESIDENCY=warm \
-             for the launch (and remove any explicit warm_pool_size=0 override), \
-             then prepare the image with `mvmctl pool warm --image <IMAGE>`; \
-             pool warm alone does not enable claims"
-        );
-    }
-    Ok(true)
-}
-
-/// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
-/// the VM now runs under) or `None` when this launch shape is not eligible. A configured
-/// warm pool on a backend without standby support is an explicit typed error; it must not
-/// silently become a cold boot.
+/// Attempt a warm-pool claim for this launch: the claimed `VmId` (the standby
+/// id the VM now runs under), or the reason it boots cold.
 ///
-/// Eligibility (all required): `warm_pool_size > 0`, the launch is auto-named (no explicit
-/// `--name` — a claimed VM is named by its standby-id), a launch shape a shared parent can
-/// serve ([`warm_eligible_launch`]), the backend supports the pool, and the admitted tenant
-/// is threaded into the config. libkrun additionally requires the signed
-/// plan JSON because its claimed standby enters the gateway-bridge supervisor path;
-/// Firecracker can claim with only the resolved launch config because the default path
-/// enforces networking directly via TAP/nftables and only needs plan JSON when its optional
-/// bridge is enabled.
+/// A launch never fails for want of a standby. The first run of an image on
+/// this host finds none, as does a run after its standby was claimed and not
+/// yet replaced, or released for sitting idle; those boot cold, and the reason
+/// is recorded on the chain-signed log. A run that leaves a standby behind is
+/// [`schedule_standby_refill`]'s job, not this function's.
+///
+/// Eligibility (all required): the launch is auto-named (a claimed VM is named
+/// by its standby id), a launch shape a shared parent can serve
+/// ([`warm_eligible_launch`]), a non-zero standby target, an admitted tenant
+/// and signed plan threaded into the config, and a backend with a standby
+/// pool. An operator who set `MVM_RESIDENCY` on a backend without one still
+/// gets the explicit typed error.
 pub fn try_warm_claim(
     backend: &AnyBackend,
     cfg: &VmStartConfig,
     user_named: bool,
-) -> Result<Option<VmId>> {
-    if !warm_claim_requested(cfg, user_named)? {
-        return Ok(None);
+) -> Result<WarmClaimOutcome> {
+    if let Err(reason) = claim_gate(cfg, user_named) {
+        return Ok(WarmClaimOutcome::Cold(reason));
     }
     let Some(tenant) = cfg.tenant_id.clone() else {
-        return Ok(None);
+        return Ok(WarmClaimOutcome::Cold(ColdStartReason::Unadmitted));
     };
     let Some(plan_json) = warm_claim_plan_json(backend.as_vm_backend(), cfg) else {
-        return Ok(None);
+        return Ok(WarmClaimOutcome::Cold(ColdStartReason::Unadmitted));
     };
     if !backend.capabilities().standby_pool {
-        return Err(anyhow::Error::new(StandbyError::Unsupported {
-            backend: backend.name().to_string(),
-        })
-        .context("requested standby-pool recovery"));
+        if unsupported_standby_pool_is_fatal(residency_source()) {
+            return Err(anyhow::Error::new(StandbyError::Unsupported {
+                backend: backend.name().to_string(),
+            })
+            .context("requested standby-pool recovery"));
+        }
+        return Ok(WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported));
     }
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
@@ -1043,10 +1020,6 @@ pub fn try_warm_claim(
     let bundle_json = cfg.bundle_json.clone();
     let claim_start_config = cfg.clone();
     let pool = SupervisorStandbyPool::open()?;
-    let claim_mode = warm_launch_mode(
-        residency_source(),
-        std::env::var("MVM_HVF_WARM_REQUIRE_CLAIM").as_deref() == Ok("1"),
-    );
     let make_claim = |handle: &StandbyHandle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
@@ -1073,16 +1046,14 @@ pub fn try_warm_claim(
             network_policy: cfg.network_policy.clone(),
         })
     };
-    let decision = if matches!(claim_mode, WarmLaunchMode::Optional) {
-        claim_or_cold(&pool, backend, &want, make_claim)
-    } else {
-        claim_with_mode(&pool, backend, &want, claim_mode, make_claim)
-    }?;
-    Ok(match decision {
-        LaunchDecision::Claimed(id) => Some(id),
-        LaunchDecision::ColdBoot => None,
-        LaunchDecision::Refused(refusal) => return Err(anyhow::Error::new(refusal)),
-    })
+    // Claim in the required mode so every way of not getting a standby comes
+    // back as a typed refusal; whether that refusal fails the launch or boots
+    // it cold is decided once, below.
+    match claim_with_mode(&pool, backend, &want, WarmLaunchMode::Required, make_claim)? {
+        LaunchDecision::Claimed(id) => Ok(WarmClaimOutcome::Claimed(id)),
+        LaunchDecision::ColdBoot => Ok(WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)),
+        LaunchDecision::Refused(refusal) => outcome_for_refusal(refusal, claim_required()),
+    }
 }
 
 fn warm_claim_plan_json(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Option<String> {
@@ -1238,23 +1209,88 @@ mod tests {
         assert_eq!(err, BuilderError::missing("StandbySpecParams", "pool_root"));
     }
 
+    /// The strict-startup refusal is gone: an eligible unnamed launch on a
+    /// host that keeps no standbys boots cold and says why, rather than
+    /// failing and telling the operator to prepare one first.
     #[test]
-    fn try_warm_claim_refuses_when_pool_size_is_zero() {
+    fn a_launch_on_a_host_keeping_no_standbys_boots_cold_instead_of_refusing() {
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
-        let error = warm_claim_requested(&c, false).unwrap_err().to_string();
-        assert!(error.contains("MVM_RESIDENCY=warm"));
-        assert!(error.contains("warm_pool_size=0"));
-        assert!(error.contains("pool warm alone does not enable claims"));
+        assert_eq!(
+            claim_gate(&c, false),
+            Err(ColdStartReason::StandbysDisabled)
+        );
+        let b = AnyBackend::from_hypervisor("libkrun");
+        assert_eq!(
+            try_warm_claim(&b, &c, false).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::StandbysDisabled)
+        );
     }
 
     #[test]
-    fn named_launch_bypasses_zero_pool_but_eligible_launch_requires_claim() {
+    fn a_named_launch_never_claims_and_an_eligible_unnamed_one_does() {
         let mut cfg = eligible_cfg();
-        assert!(warm_claim_requested(&cfg, false).unwrap());
+        assert_eq!(claim_gate(&cfg, false), Ok(()));
+        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
         cfg.warm_pool_size = 0;
-        assert!(!warm_claim_requested(&cfg, true).unwrap());
-        assert!(warm_claim_requested(&cfg, false).is_err());
+        assert_eq!(claim_gate(&cfg, true), Err(ColdStartReason::Named));
+    }
+
+    /// Finding nothing to claim is the first run of an image, not an error.
+    /// Only the bench's required-claim lane turns it into one; a standby that
+    /// exists and cannot be claimed always does.
+    #[test]
+    fn a_missing_standby_is_a_declared_cold_boot_unless_a_claim_was_required() {
+        assert_eq!(
+            outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, false).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)
+        );
+        // A standby that exists and cannot be claimed is a broken warm path,
+        // reported as such rather than hidden behind a cold boot.
+        let broken = outcome_for_refusal(
+            WarmClaimRefusal::ClaimRejected {
+                reason: "fork remap: EPERM".into(),
+            },
+            false,
+        )
+        .expect_err("a failed claim of an existing standby fails the launch");
+        assert!(format!("{broken:#}").contains("EPERM"), "{broken:#}");
+        assert!(
+            outcome_for_refusal(
+                WarmClaimRefusal::PreparationFailed {
+                    reason: "audit substrate".into()
+                },
+                false
+            )
+            .is_err()
+        );
+        // Losing the parent to a concurrent launch is an absence, not a fault.
+        assert_eq!(
+            outcome_for_refusal(
+                WarmClaimRefusal::ClaimRejected {
+                    reason: format!(
+                        "claim refused: {}",
+                        mvm_runtime::workload_runner::claim::ClaimRefusal::ParentNotClaimable
+                    )
+                },
+                false
+            )
+            .unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::NoStandbyReady)
+        );
+        assert_eq!(
+            outcome_for_refusal(
+                WarmClaimRefusal::BackendUnsupported {
+                    backend: "qemu".into()
+                },
+                false
+            )
+            .unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported)
+        );
+        let required = outcome_for_refusal(WarmClaimRefusal::NoCompatibleParent, true)
+            .expect_err("a required claim that finds nothing fails");
+        assert!(required.is::<WarmClaimRefusal>());
     }
 
     #[test]
@@ -1268,7 +1304,10 @@ mod tests {
         for pool_size in [0, 2] {
             cfg.warm_pool_size = pool_size;
             assert!(!warm_eligible_launch(&cfg));
-            assert!(!warm_claim_requested(&cfg, false).unwrap());
+            assert_eq!(
+                claim_gate(&cfg, false),
+                Err(ColdStartReason::IneligibleShape)
+            );
         }
     }
 
@@ -1283,7 +1322,10 @@ mod tests {
             read_only: true,
             ..Default::default()
         });
-        assert!(!warm_claim_requested(&cfg, false).unwrap());
+        assert_eq!(
+            claim_gate(&cfg, false),
+            Err(ColdStartReason::IneligibleShape)
+        );
     }
 
     // ── Auditing a captured factory parent ───────────────────────────────
@@ -1486,21 +1528,27 @@ mod tests {
         );
     }
 
-    /// A backend without standby support cannot satisfy strict startup,
-    /// regardless of how the residency target was selected.
+    /// A backend without a standby pool boots cold when nobody asked for one
+    /// by name: the host default is a preference, not a requirement.
     #[test]
-    fn try_warm_claim_refuses_an_unsupported_backend() {
+    fn try_warm_claim_cold_boots_on_an_unsupported_backend_by_default() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.remove("MVM_RESIDENCY");
 
         let backend = AnyBackend::from_hypervisor("qemu");
-        assert!(try_warm_claim(&backend, &eligible_cfg(), false).is_err());
+        assert_eq!(
+            try_warm_claim(&backend, &eligible_cfg(), false).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported)
+        );
     }
 
     #[test]
     fn try_warm_claim_cold_boots_a_user_named_transient() {
         let b = AnyBackend::from_hypervisor("libkrun");
-        assert_eq!(try_warm_claim(&b, &eligible_cfg(), true).unwrap(), None);
+        assert_eq!(
+            try_warm_claim(&b, &eligible_cfg(), true).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::Named)
+        );
     }
 
     #[test]
@@ -1518,7 +1566,10 @@ mod tests {
             kind: VmVolumeKind::Disk,
             encrypted: false,
         }];
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert_eq!(
+            try_warm_claim(&b, &c, false).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
+        );
     }
 
     #[test]
@@ -1574,7 +1625,10 @@ mod tests {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.plan_json = None;
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert_eq!(
+            try_warm_claim(&b, &c, false).unwrap(),
+            WarmClaimOutcome::Cold(ColdStartReason::Unadmitted)
+        );
     }
 
     #[test]
@@ -1623,33 +1677,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_operator_requested_warm_launch_refuses_a_failed_claim() {
-        assert_eq!(
-            warm_launch_mode(mvm_core::residency::ResidencySource::EnvOverride, false),
-            WarmLaunchMode::Required
-        );
-    }
-
-    #[test]
-    fn a_host_default_warm_launch_refuses_a_cold_fallback() {
-        assert_eq!(
-            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, false),
-            WarmLaunchMode::Required
-        );
-    }
-
-    #[test]
-    fn a_required_claim_override_remains_fail_closed() {
-        assert_eq!(
-            warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, true),
-            WarmLaunchMode::Required
-        );
-    }
-
-    #[test]
-    fn inline_replenish_skips_zero_unsupported_and_ineligible_shapes() {}
-
     /// The claim and the replenish must exclude exactly the same launch shapes.
     /// Excluding a shape from one but not the other is silent: the replenish
     /// fills the pool with parents the claim never looks for, so every launch
@@ -1686,11 +1713,15 @@ mod tests {
             for size in [0, 2] {
                 let mut cfg = cfg.clone();
                 cfg.warm_pool_size = size;
-                assert!(!warm_claim_requested(&cfg, false).unwrap(), "{why}");
+                assert_eq!(
+                    claim_gate(&cfg, false),
+                    Err(ColdStartReason::IneligibleShape),
+                    "{why}"
+                );
             }
             assert_eq!(
                 try_warm_claim(&b, &cfg, false).unwrap(),
-                None,
+                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape),
                 "{why} must cold-boot rather than claim"
             );
         }
@@ -1723,9 +1754,16 @@ mod tests {
             assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
             for size in [0, 2] {
                 cfg.warm_pool_size = size;
-                assert!(!warm_claim_requested(&cfg, false).unwrap(), "{why}");
+                assert_eq!(
+                    claim_gate(&cfg, false),
+                    Err(ColdStartReason::IneligibleShape),
+                    "{why}"
+                );
             }
-            assert_eq!(try_warm_claim(&b, &cfg, false).unwrap(), None);
+            assert_eq!(
+                try_warm_claim(&b, &cfg, false).unwrap(),
+                WarmClaimOutcome::Cold(ColdStartReason::IneligibleShape)
+            );
         }
     }
 
@@ -2162,7 +2200,7 @@ mod tests {
         );
     }
 
-    /// `claim_or_cold` must hand the runner a parent that is still claimable.
+    /// `claim_with_mode` must hand the runner a parent that is still claimable.
     ///
     /// The runner reserves the parent itself, in the same locked section it
     /// verifies it in, and refuses one that is already `Claimed`. Reserving here
@@ -2176,7 +2214,7 @@ mod tests {
     /// must still be claimable on disk.
     #[cfg(feature = "test-support")]
     #[test]
-    fn claim_or_cold_leaves_the_parent_claimable_for_the_runner_to_reserve() {
+    fn a_claim_leaves_the_parent_claimable_for_the_runner_to_reserve() {
         let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -2220,12 +2258,13 @@ mod tests {
 
         let want = compat_for_launch(&cfg).unwrap();
         let observed: std::cell::Cell<Option<StandbyState>> = std::cell::Cell::new(None);
-        let decision = claim_or_cold(&pool, &backend, &want, |handle| {
-            observed.set(Some(pool.load(&handle.id).unwrap().state));
-            // Stop here: the reservation state is the whole subject of this test.
-            anyhow::bail!("halt after inspecting the reservation state")
-        })
-        .unwrap();
+        let decision =
+            claim_with_mode(&pool, &backend, &want, WarmLaunchMode::Optional, |handle| {
+                observed.set(Some(pool.load(&handle.id).unwrap().state));
+                // Stop here: the reservation state is the whole subject of this test.
+                anyhow::bail!("halt after inspecting the reservation state")
+            })
+            .unwrap();
 
         assert_eq!(
             observed.get(),
@@ -2462,21 +2501,42 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PoolAction {
-    /// Sweep the standby pool toward a target count, warming parents that boot
-    /// the shape a matching launch will claim.
+    /// Prepare standbys ahead of a run: of `--image REF`, of the image a bare
+    /// run boots with `--default`, or with neither, of the most recently
+    /// pulled images (the default image when nothing was pulled).
     ///
-    /// The shape is resolved the same way a real launch resolves it — same
-    /// image, kernel, verity sidecars, runtime overlay and cmdline tokens — so a
-    /// later `mvmctl machine run` with the same image and sizing claims what
-    /// this spawned. A launch that differs in image, kernel, vCPUs, memory or
-    /// egress enablement is refused until that shape is warmed. Default count 1.
+    /// Optional. Every unnamed run already leaves one standby of the image it
+    /// booted, so the second run of an image starts warm without this verb;
+    /// warming ahead makes the first one warm too, or keeps more than one.
+    ///
+    /// The pool is swept toward a target count of standbys per image. The
+    /// shape is resolved the same way a real launch resolves it — same image,
+    /// kernel, verity sidecars, runtime overlay and cmdline tokens — so a later
+    /// run with the same image and sizing claims what this prepared. A launch
+    /// that differs in image, kernel, vCPUs, memory or egress enablement boots
+    /// cold instead. Default count 1.
+    ///
+    /// Which images are warmed:
+    ///
+    ///   --image REF   that OCI image.
+    ///   --default     the image a bare `machine run` boots.
+    ///   neither       the images most recently pulled into the local OCI
+    ///                 cache (by `image pull`, or by a `machine run --image`
+    ///                 that fetched one), newest first, at most as many as the
+    ///                 residency standby target and never fewer than one. With
+    ///                 no pulled images, the default image.
+    #[command(verbatim_doc_comment)]
     Warm {
-        /// How many idle standbys to warm the pool toward (default 1).
+        /// How many idle standbys to warm each image toward (default 1).
         count: Option<u32>,
         /// OCI image the warmed parents boot, matching the `--image` the launch
-        /// will pass. Omit to warm the image a bare `machine run` boots.
-        #[arg(long)]
+        /// will pass.
+        #[arg(long, conflicts_with = "default_image")]
         image: Option<String>,
+        /// Warm the image a bare `machine run` boots, whatever was pulled
+        /// recently.
+        #[arg(long = "default")]
+        default_image: bool,
         /// vCPUs the warmed parents boot with; must match the launch's `--cpus`
         /// (default: the configured `default_cpus`).
         #[arg(long)]
@@ -2492,14 +2552,47 @@ pub(in crate::commands) enum PoolAction {
         #[arg(long)]
         json: bool,
     },
+    /// Prepare the standby a run leaves behind, then release idle standbys
+    /// on time. Started detached by the run itself; not meant to be typed.
+    #[command(hide = true)]
+    Refill {
+        /// The OCI image the run named; omit for the image a bare run boots.
+        #[arg(long)]
+        image: Option<String>,
+        /// The run's vCPUs.
+        #[arg(long)]
+        cpus: u32,
+        /// The run's memory, in MiB.
+        #[arg(long)]
+        memory_mib: u32,
+    },
 }
 
 /// What `pool warm` warms toward, expressed as the launch it must mirror.
-struct WarmRequest {
-    image: Option<String>,
-    cpus: u32,
-    memory_mib: u32,
-    target: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct WarmRequest {
+    /// The OCI image, or `None` for the image a bare `machine run` boots.
+    pub(in crate::commands) image: Option<String>,
+    pub(in crate::commands) cpus: u32,
+    pub(in crate::commands) memory_mib: u32,
+    pub(in crate::commands) target: u32,
+}
+
+impl WarmRequest {
+    /// One standby of `image` at the configured default sizing — the shape a
+    /// `machine run` that passes no `--cpus` or `--memory` claims.
+    pub(in crate::commands) fn one_at_default_sizing(image: Option<&str>, cfg: &MvmConfig) -> Self {
+        Self {
+            image: image.map(str::to_string),
+            cpus: cfg.default_cpus,
+            memory_mib: cfg.default_memory_mib,
+            target: 1,
+        }
+    }
+
+    fn label(&self) -> &str {
+        self.image.as_deref().unwrap_or("the default image")
+    }
 }
 
 /// Resolve the launch shape a warm parent must boot, without booting one.
@@ -2555,12 +2648,25 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
-    let pool = SupervisorStandbyPool::open()?;
     match args.action {
-        PoolAction::Status { json } => run_status(&pool, json),
+        PoolAction::Status { json } => run_status(&SupervisorStandbyPool::open()?, json),
+        PoolAction::Refill {
+            image,
+            cpus,
+            memory_mib,
+        } => refill::run_refill(
+            &SupervisorStandbyPool::open()?,
+            cfg,
+            &StandbyRefill {
+                image,
+                cpus,
+                memory_mib,
+            },
+        ),
         PoolAction::Warm {
             count,
             image,
+            default_image,
             cpus,
             memory,
         } => {
@@ -2568,17 +2674,35 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
                 None => cfg.default_memory_mib,
             };
-            run_warm(
-                &pool,
-                &WarmRequest {
+            let selection = WarmSelection::from_flags(image, default_image);
+            let recent = match selection {
+                WarmSelection::Recent => {
+                    super::image::recent_image_references(&super::image::oci_cache_root())?
+                }
+                _ => Vec::new(),
+            };
+            let images = images_to_warm(selection.clone(), &recent, recent_image_limit());
+            if selection == WarmSelection::Recent {
+                announce_recent_selection(&images);
+            }
+            let requests: Vec<WarmRequest> = images
+                .into_iter()
+                .map(|image| WarmRequest {
                     image,
                     cpus: cpus.unwrap_or(cfg.default_cpus),
                     memory_mib,
                     target: count.unwrap_or(1),
-                },
-            )
+                })
+                .collect();
+            warm_each(&requests, warm_request)
         }
     }
+}
+
+/// Warm toward `req` — the one path `pool warm`, `image pull --warm` and
+/// `image dev ensure --warm` all take.
+pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
+    run_warm(&SupervisorStandbyPool::open()?, req)
 }
 
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
@@ -2617,17 +2741,20 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
             result.failed,
         ));
     } else if result.spawned == 0 && result.failed == 0 {
-        crate::ui::info(&format!("Pool already at or above target {target}."));
+        crate::ui::info(&format!(
+            "Pool already at or above target {target} for {}.",
+            req.label()
+        ));
     } else {
         crate::ui::success(&format!(
-            "Warmed {} standby(s) toward target {target}.",
+            "Warmed {} standby(s) of {} toward target {target}.",
             result.spawned,
+            req.label(),
         ));
     }
     crate::ui::info(
-        "A launch claims one of these only if it matches on image, kernel, vCPUs, memory and \
-         egress enablement, is auto-named, and runs with a non-zero warm pool size \
-         (MVM_RESIDENCY=warm on hosts whose default is parked).",
+        "A run claims one of these when it matches on image, kernel, vCPUs, memory and \
+         egress enablement and is not given a --name.",
     );
     Ok(())
 }

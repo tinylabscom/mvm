@@ -441,8 +441,8 @@ if [[ "$(uname -s)" == Linux ]]; then
   echo "==> adopting the dev default image from the pinned image set"
   MVM_HOME="$E2E_HOME" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
-  # Named, so it takes the cold path. An unnamed launch has to claim a
-  # prepared warm standby, and nothing has warmed one for the dev image.
+  # Named, so it takes the cold path and leaves no standby of the dev image
+  # running behind the suite.
   MVM_HOME="$E2E_HOME" "$MVMCTL" run --name e2e-dev-image-warm --no-detect -- /bin/true
 fi
 

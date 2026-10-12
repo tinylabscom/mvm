@@ -99,9 +99,9 @@ Feature: Transient sandbox boot
   # The cached default development image is shared by every launch that names
   # it and is hashed at admission, so a launch must leave its bytes exactly as
   # it found them. The first run populates the cache when it is empty; the
-  # second is the witness. Both runs are named so they take the cold path: an
-  # unnamed launch has to claim a prepared warm standby, and this scenario is
-  # about the cached image, not about standbys.
+  # second is the witness. Both runs are named so they take the cold path and
+  # leave no standby behind: this scenario is about the cached image, not
+  # about standbys.
   @live @firecracker
   Scenario: a transient run leaves the cached default development rootfs byte-identical
     When I run mvmctl in an isolated live home with "run --name bdd-dev-image-identical --no-detect -- /bin/true"
