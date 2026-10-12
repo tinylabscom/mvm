@@ -23,7 +23,7 @@
  * does not depend on which language wrote it.
  *
  * A failure throws {@link PackSpecError}, whose `code` is the same stable string
- * the Rust, Kotlin and Python builders report for the same mistake.
+ * every other language SDK reports for the same mistake.
  */
 
 import { createHash } from "node:crypto";

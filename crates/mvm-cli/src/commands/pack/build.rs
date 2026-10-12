@@ -33,7 +33,7 @@ use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{TemplateExport, export_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
-use mvm_client::bundle::{PostureInputs, template_artifact_digests};
+use mvm_client::bundle::{PostureInputs, seal_template_rootfs, template_artifact_digests};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct BuildArgs {
@@ -91,7 +91,16 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     }
     let slot = crate::commands::build::build::build_flake_to_slot(flake_ref, None)
         .context("building the compiled pack")?;
+    // A pack ships sealed: its rootfs gets the dm-verity pair here, before the
+    // health boot, so the boot checks it and the archive carries it.
+    seal_template_rootfs(&slot)?.context(
+        "the built pack's image does not declare itself sealed; a pack must boot from a \
+         dm-verity rootfs",
+    )?;
     let built = SlotDigests::read(&slot)?;
+    if built.missing("verity") {
+        bail!("the built pack has no dm-verity hash tree beside its rootfs; nothing was signed");
+    }
 
     // ---- 3. Health: boot the baked entrypoint, require a clean exit ----
     eprintln!(
@@ -294,6 +303,13 @@ impl SlotDigests {
         }
     }
 
+    /// Whether the artifact named `name` is absent.
+    fn missing(&self, name: &str) -> bool {
+        self.files
+            .iter()
+            .any(|(file, digest)| *file == name && digest.is_none())
+    }
+
     fn changed(&self, other: &Self) -> Vec<&'static str> {
         self.files
             .iter()
@@ -434,6 +450,9 @@ mod tests {
         };
         assert_eq!(before.changed(&after), vec!["rootfs"]);
         assert!(before.changed(&before).is_empty());
+        let unsealed = SlotDigests::from_digests(Some("k".into()), None, Some("r".into()), None);
+        assert!(unsealed.missing("verity"));
+        assert!(!unsealed.missing("rootfs"));
     }
 
     #[test]

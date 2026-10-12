@@ -23,7 +23,7 @@ returns are the same canonical bytes every language SDK emits for the same
 spec, so a lock's ``spec_sha256`` does not depend on which language wrote it.
 
 A failure raises :class:`PackSpecError`, whose ``code`` is the same stable
-string the Rust, Kotlin and TypeScript builders report for the same mistake.
+string every other language SDK reports for the same mistake.
 """
 
 from __future__ import annotations
