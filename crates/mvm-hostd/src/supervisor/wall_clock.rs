@@ -324,13 +324,11 @@ pub(crate) fn supervisor_emitter(
 /// — indistinguishable, and a supervisor that cannot open the chain will not
 /// have been able to open it at kill time either. A plan with no bound is
 /// unaffected, so the legacy non-plan boot paths never reach this.
+///
+/// `killer` decides what the expiry leaves behind: [`SupervisorTimerInputs::exit_killer`]
+/// releases the VM's host state, [`SupervisorTimerInputs::preserving_exit_killer`]
+/// keeps it for authenticated recovery.
 pub fn arm_for_supervisor(
-    inputs: SupervisorTimerInputs<'_>,
-) -> anyhow::Result<Option<WallClockGuard>> {
-    arm_for_supervisor_with_killer(inputs, Box::new(inputs.exit_killer()))
-}
-
-pub fn arm_for_supervisor_with_killer(
     inputs: SupervisorTimerInputs<'_>,
     killer: Box<dyn WorkloadKiller>,
 ) -> anyhow::Result<Option<WallClockGuard>> {
@@ -360,6 +358,12 @@ pub fn arm_for_supervisor_with_killer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn arm_for_supervisor_default(
+        inputs: SupervisorTimerInputs<'_>,
+    ) -> anyhow::Result<Option<WallClockGuard>> {
+        arm_for_supervisor(inputs, Box::new(inputs.exit_killer()))
+    }
 
     #[test]
     fn controlled_hard_expiry_records_timeout_but_retains_runtime_and_helper_evidence() {
@@ -460,7 +464,7 @@ mod tests {
         let wire: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&signed).unwrap()).unwrap();
 
-        let guard = arm_for_supervisor(SupervisorTimerInputs {
+        let guard = arm_for_supervisor_default(SupervisorTimerInputs {
             plan_json: Some(&wire),
             audit_dir: Some(audit_dir.as_path()),
             signing_key_path: Some(keys_dir.join("host-signer.ed25519").as_path()),
@@ -485,7 +489,7 @@ mod tests {
         let signed = mvm_core::plan::sign_plan(&plan, &key, "host-signer");
         let wire = serde_json::to_value(&signed).unwrap();
 
-        let guard = arm_for_supervisor(SupervisorTimerInputs {
+        let guard = arm_for_supervisor_default(SupervisorTimerInputs {
             plan_json: Some(&wire),
             audit_dir: None,
             signing_key_path: None,
@@ -504,7 +508,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wire = serde_json::json!({"not": "a plan"});
         assert!(
-            arm_for_supervisor(SupervisorTimerInputs {
+            arm_for_supervisor_default(SupervisorTimerInputs {
                 plan_json: Some(&wire),
                 audit_dir: None,
                 signing_key_path: None,

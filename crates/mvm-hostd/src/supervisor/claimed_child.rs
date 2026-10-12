@@ -76,9 +76,9 @@ fn arm_child_with_policy(
             Box::new(inputs.exit_killer())
         }
     };
-    let guard = super::wall_clock::arm_for_supervisor_with_killer(inputs, killer())
+    let guard = super::wall_clock::arm_for_supervisor(inputs, killer())
         .context("arming the claimed child's wall-clock bound")?;
-    super::session_expiry::arm_for_supervisor_with_killer(&inputs, killer());
+    super::session_expiry::arm_for_supervisor(&inputs, killer());
     Ok(guard)
 }
 

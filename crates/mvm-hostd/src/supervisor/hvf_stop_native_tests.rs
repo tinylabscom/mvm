@@ -54,7 +54,7 @@ fn owned_process_helper() {
 }
 
 fn spawn(vm: &str, mode: &str) -> Child {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut child = mvm_core::env_hygiene::helper_command(std::env::current_exe().unwrap())
         .args([
             "--exact",
             HELPER_TEST,
@@ -78,7 +78,7 @@ fn spawn(vm: &str, mode: &str) -> Child {
         output.read_exact(&mut byte).unwrap();
         line.push(byte[0]);
         assert!(line.len() <= 4096, "bounded helper readiness");
-        if byte == [b'\n'] {
+        if byte == *b"\n" {
             if line.ends_with(b"OWNED_READY\n") {
                 break;
             }

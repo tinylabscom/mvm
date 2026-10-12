@@ -1218,7 +1218,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     let stderr_log = endpoint_stderr_log_path(state_dir);
     let log_file = open_endpoint_stderr_log(state_dir)?;
 
-    let mut cmd = endpoint_command(&bin, lifetime, state_dir, log_file);
+    let mut cmd = endpoint_command(
+        mvm_core::env_hygiene::helper_command(&bin),
+        lifetime,
+        state_dir,
+        log_file,
+    );
     // Detach into its own session so it survives this `mvmctl` process.
     unsafe {
         use std::os::unix::process::CommandExt;

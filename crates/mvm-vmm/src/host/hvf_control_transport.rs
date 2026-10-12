@@ -180,7 +180,7 @@ mod tests {
     fn deep_home_control_path_reuses_existing_short_socket_namespace() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let root = tempfile::tempdir().unwrap();
-        env.isolate_mvm_home(&root.path().join("deep".repeat(40)));
+        env.isolate_mvm_home(root.path().join("deep".repeat(40)));
         let state = state_dir("control-path").unwrap();
         let socket = socket_path("control-path").unwrap();
         assert_eq!(
