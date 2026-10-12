@@ -112,7 +112,7 @@ let
   # via `${pkgs.runtimeShell} -c <line>`; `kind = "argv"` lines run
   # the argv directly via `${pkgs.coreutils}/bin/env --` so paths
   # aren't word-split. The script exits non-zero on the first
-  # failing command; consumers (init bootScript, readiness watchdog,
+  # failing command; consumers (readiness watchdog,
   # shutdown hook) decide how to react.
   #
   # We emit a script even for an empty phase (no commands) so
@@ -145,17 +145,6 @@ let
     before_stop = hookScriptFor "before-stop" (hooks.before_stop or [ ]);
   };
 
-  # The legacy boot command and the sealed initramfs-agent path both use
-  # the source tree symlink staged into the immutable rootfs. PID 1 must
-  # not be the single-shot wrapper: it exits after one call. The agent
-  # execs that wrapper per RunEntrypoint.
-  bootScript = pkgs.writeShellScript "${workloadId}-boot" ''
-    set -eu
-    test "$(${pkgs.coreutils}/bin/readlink ${pkgs.lib.escapeShellArg sourcePath})" = ${pkgs.lib.escapeShellArg (toString appPkg)}
-    /etc/mvm/hooks/before_start.sh
-    exec ${pkgs.coreutils}/bin/sleep infinity
-  '';
-
   # Declarative files → rootfs entries. The bytes are base64-decoded at
   # BUILD time into a store path; the rootfs packer lands the file at the
   # requested path with the requested mode. Nothing decodes in a guest
@@ -179,8 +168,8 @@ in
   # path (e.g. one aimed at /etc/mvm/hooks/before_start.sh) lose to the
   # reserved entry, so a declared file can never clobber the boot wiring.
   extraFiles = materializedFiles // {
-    # The sealed initramfs-agent path does not run /etc/mvm/boot. Make the
-    # source tree available before PID 1 starts, including on read-only images.
+    # Make the source tree available before PID 1 starts, including on
+    # read-only images.
     ${sourcePath} = {
       link = appPkg;
     };
@@ -205,8 +194,8 @@ in
       content = runtimeJson;
       mode = "0644";
     };
-    # Lifecycle hook scripts. The bootScript
-    # invokes `before_start.sh` before exec'ing PID 1's idle loop;
+    # Lifecycle hook scripts remain available to the runtime.
+    # `before_start.sh` is baked but not dispatched by the initramfs agent;
     # `after_start.sh` is the readiness probe the worker pool polls;
     # `before_stop.sh` runs at shutdown when wired by the agent;
     # `before_build.sh` runs in the builder VM via
@@ -215,8 +204,7 @@ in
     # `source =` (copy the script file), NOT `content =` (which would
     # writeText the store-PATH string as the file body — a 0755 file
     # whose only content is a bare /nix/store path with no shebang,
-    # relying on a fragile ENOEXEC shell-retry to run under the boot
-    # script's `set -eu`). With `source =` the real script lands, and
+    # relying on a fragile ENOEXEC shell-retry). With `source =` the real script lands, and
     # because the ext4 packs the closure of every store path referenced
     # by a rootfs file, the hook's interpreter (+coreutils) ride along.
     "/etc/mvm/hooks/before_build.sh" = {
@@ -236,10 +224,6 @@ in
       mode = "0755";
     };
   };
-
-  # PID 1 idle boot command (see `bootScript`). Callers pass this to
-  # mkGuest's `bootCommand`; /etc/mvm/entrypoint stays the agent marker.
-  bootCommand = [ "${bootScript}" ];
 
   servicePackages = lang.servicePackages;
 

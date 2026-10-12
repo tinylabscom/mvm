@@ -45,6 +45,7 @@ pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
 pub const BUILDER_BOOT_ABI_FILE: &str = "images/builder-vm/boot-abi.nix";
 /// The image checkout's local-manifest emitter, relative to its root.
 pub const EMIT_MANIFEST_SCRIPT: &str = "scripts/emit-local-manifest.py";
+const BASE_IMAGE_CONTRACT_FILE: &str = "images/base-image-contract.nix";
 
 /// Where each checkout sits inside the staged `/work` tree.
 const WORK_IMAGES: &str = "images";
@@ -433,7 +434,9 @@ fn host_bin_dir_from(stdout: &str) -> Option<PathBuf> {
 #[derive(Debug, Clone, Copy)]
 pub struct EmitRequest<'a> {
     pub images_root: &'a Path,
-    pub mvm_root: &'a Path,
+    /// Only a verified legacy producer consumes this checkout. A Linux-only
+    /// producer receives no mvm source argument, even when one is available.
+    pub legacy_mvm_root: Option<&'a Path>,
     pub arch: GuestArch,
     pub builder_cache_contract: u32,
     /// The directory the builder copied the target's files into.
@@ -460,15 +463,24 @@ pub fn emit_argv(request: &EmitRequest<'_>) -> Result<Vec<OsString>, LocalImageB
         request.images_root.join(EMIT_MANIFEST_SCRIPT).into(),
         "--images-checkout".into(),
         request.images_root.into(),
-        "--mvm-checkout".into(),
-        request.mvm_root.into(),
+    ];
+    if emitter_uses_legacy_mvm_input(request.images_root)? {
+        let mvm = request
+            .legacy_mvm_root
+            .ok_or_else(|| LocalImageBuildError::Tool {
+                what: "invoking the legacy local manifest emitter".into(),
+                detail: "the documented schema-2 producer requires its paired mvm checkout".into(),
+            })?;
+        argv.extend(["--mvm-checkout".into(), mvm.into()]);
+    }
+    argv.extend([
         "--arch".into(),
         request.arch.to_string().into(),
         "--builder-cache-contract".into(),
         request.builder_cache_contract.to_string().into(),
         "--out".into(),
         request.out.into(),
-    ];
+    ]);
     for file in request.contract.files {
         let path = request.built.join(file.name);
         let format = match file.format {
@@ -486,6 +498,81 @@ pub fn emit_argv(request: &EmitRequest<'_>) -> Result<Vec<OsString>, LocalImageB
         argv.extend(["--capability".into(), (*role).into(), (*capability).into()]);
     }
     Ok(argv)
+}
+
+fn read_contract_source(path: &Path) -> Result<String, LocalImageBuildError> {
+    let io = |source| LocalImageBuildError::Io {
+        op: "reading",
+        path: path.to_path_buf(),
+        source,
+    };
+    let metadata = std::fs::symlink_metadata(path).map_err(io)?;
+    if !metadata.file_type().is_file() {
+        return Err(LocalImageBuildError::Tool {
+            what: format!("reading producer contract {}", path.display()),
+            detail: "producer contract must be a regular nonsymlink file".into(),
+        });
+    }
+    std::fs::read_to_string(path).map_err(io)
+}
+
+fn emitter_uses_legacy_mvm_input(images_root: &Path) -> Result<bool, LocalImageBuildError> {
+    let capability = images_root.join(BASE_IMAGE_CONTRACT_FILE);
+    match std::fs::symlink_metadata(&capability) {
+        Ok(_) => {
+            let text = read_contract_source(&capability)?;
+            if text.trim() != mvm_core::image_set::BaseImageContract::LINUX_LAYER.to_string() {
+                return Err(LocalImageBuildError::Tool {
+                    what: format!("reading base-image contract {}", capability.display()),
+                    detail: format!(
+                        "malformed or unsupported base-image contract; this host supports {}",
+                        mvm_core::image_set::BaseImageContract::LINUX_LAYER
+                    ),
+                });
+            }
+            return Ok(false);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(LocalImageBuildError::Io {
+                op: "reading",
+                path: capability,
+                source,
+            });
+        }
+    }
+    let refused = || LocalImageBuildError::Tool {
+        what: "selecting the local manifest producer interface".into(),
+        detail:
+            "no supported base-image declaration or documented legacy mvm source-input contract"
+                .into(),
+    };
+    let lock: serde_json::Value =
+        serde_json::from_str(&read_contract_source(&images_root.join("flake.lock"))?)
+            .map_err(|_| refused())?;
+    let root = lock["root"].as_str().ok_or_else(refused)?;
+    let input = lock["nodes"][root]["inputs"]["mvm"]
+        .as_str()
+        .ok_or_else(refused)?;
+    let pinned = &lock["nodes"][input]["locked"];
+    if pinned["type"].as_str() != Some("github")
+        || pinned["owner"].as_str() != Some("tinylabscom")
+        || pinned["repo"].as_str() != Some("mvm")
+        || pinned["rev"]
+            .as_str()
+            .is_none_or(|revision| mvm_core::image_set::GitCommit::new(revision).is_err())
+    {
+        return Err(refused());
+    }
+    let emitter = read_contract_source(&images_root.join(EMIT_MANIFEST_SCRIPT))?;
+    if !emitter.contains("SCHEMA_VERSION = 2")
+        || !emitter.contains("\"--mvm-checkout\"")
+        || !emitter.contains("args.mvm_checkout")
+        || !emitter.contains("guest_agent_protocol(mvm)")
+    {
+        return Err(refused());
+    }
+    Ok(true)
 }
 
 /// Whether `path` sits at or under `root`, both resolved the way the emitter
@@ -515,7 +602,7 @@ fn emit_manifest_into_staging(
     let emit = |out: &Path| {
         emit_local_manifest(&EmitRequest {
             images_root,
-            mvm_root,
+            legacy_mvm_root: Some(mvm_root),
             arch,
             builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
             built,
@@ -1138,6 +1225,8 @@ mod tests {
     #[test]
     fn the_emitter_is_told_every_file_its_format_and_capability() {
         let tmp = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        write(&images.join(BASE_IMAGE_CONTRACT_FILE), b"1\n");
         let built = tmp.path().join("built");
         let t = target(ImageBuildRole::DefaultTenant, "default");
         let contract = contract_for(&t).unwrap();
@@ -1146,8 +1235,8 @@ mod tests {
         }
         write(&built.join("vmlinux"), &elf_kernel());
         let request = EmitRequest {
-            images_root: Path::new("/images"),
-            mvm_root: Path::new("/mvm"),
+            images_root: &images,
+            legacy_mvm_root: None,
             arch: GuestArch::X86_64,
             builder_cache_contract: 4,
             built: &built,
@@ -1162,8 +1251,12 @@ mod tests {
             .collect();
         let joined = argv.join(" ");
 
-        assert_eq!(argv[0], "/images/scripts/emit-local-manifest.py");
-        assert!(joined.contains("--images-checkout /images --mvm-checkout /mvm"));
+        assert_eq!(
+            argv[0],
+            images.join(EMIT_MANIFEST_SCRIPT).display().to_string()
+        );
+        assert!(joined.contains(&format!("--images-checkout {}", images.display())));
+        assert!(!joined.contains("--mvm-checkout"));
         assert!(joined.contains("--arch x86_64 --builder-cache-contract 4 --out /cache/staged"));
         assert!(joined.contains(&format!(
             "--artifact default_tenant_workload_kernel kernel:elf {}",
@@ -1331,6 +1424,8 @@ mod tests {
     #[test]
     fn a_kernel_with_no_known_magic_is_not_described() {
         let tmp = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        write(&images.join(BASE_IMAGE_CONTRACT_FILE), b"1\n");
         let built = tmp.path().join("built");
         let t = target(ImageBuildRole::BuilderVm, "default");
         let contract = contract_for(&t).unwrap();
@@ -1338,8 +1433,8 @@ mod tests {
             write(&built.join(file.name), b"not a kernel");
         }
         let request = EmitRequest {
-            images_root: Path::new("/images"),
-            mvm_root: Path::new("/mvm"),
+            images_root: &images,
+            legacy_mvm_root: None,
             arch: GuestArch::Aarch64,
             builder_cache_contract: 4,
             built: &built,
@@ -1350,6 +1445,81 @@ mod tests {
         let err = emit_argv(&request).unwrap_err();
 
         assert!(err.to_string().contains("neither an ELF"), "{err}");
+    }
+
+    #[test]
+    fn producer_interface_requires_explicit_base_or_verified_legacy_source_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let images = tmp.path().join("images");
+        let lock = serde_json::json!({
+            "root": "root",
+            "nodes": {
+                "root": {"inputs": {"mvm": "mvm"}},
+                "mvm": {"locked": {"type": "github", "owner": "tinylabscom", "repo": "mvm", "rev": "a".repeat(40)}}
+            }
+        });
+        write(
+            &images.join("flake.lock"),
+            &serde_json::to_vec(&lock).unwrap(),
+        );
+        // The actual schema-2 emitter's source-input declarations.
+        write(&images.join(EMIT_MANIFEST_SCRIPT),
+            b"SCHEMA_VERSION = 2\nparser.add_argument(\"--mvm-checkout\", required=True)\nmvm = checkout_root(args.mvm_checkout, \"mvm\", MVM_MARKERS)\nprotocol = guest_agent_protocol(mvm)\n");
+        assert!(emitter_uses_legacy_mvm_input(&images).unwrap());
+        let built = tmp.path().join("built");
+        let contract = contract_for(&target(ImageBuildRole::DefaultTenant, "default")).unwrap();
+        for file in contract.files {
+            write(&built.join(file.name), b"artifact");
+        }
+        write(&built.join("vmlinux"), &elf_kernel());
+        let request = EmitRequest {
+            images_root: &images,
+            legacy_mvm_root: Some(Path::new("/legacy-mvm")),
+            arch: GuestArch::X86_64,
+            builder_cache_contract: 5,
+            built: &built,
+            out: Path::new("/cache/staged"),
+            contract,
+        };
+        let argv = emit_argv(&request).unwrap();
+        assert!(
+            argv.windows(2)
+                .any(|args| args == ["--mvm-checkout", "/legacy-mvm"])
+        );
+        for invalid in ["", "2\n", "01\n", "1.0\n", "# comment\n1\n", "1\njunk\n"] {
+            write(&images.join(BASE_IMAGE_CONTRACT_FILE), invalid.as_bytes());
+            assert!(
+                emit_argv(&request).is_err(),
+                "present invalid capability must not fall back"
+            );
+        }
+        write(&images.join(BASE_IMAGE_CONTRACT_FILE), b"1\n");
+        let argv = emit_argv(&request).unwrap();
+        assert!(!argv.iter().any(|arg| arg == "--mvm-checkout"));
+        std::fs::remove_file(images.join(BASE_IMAGE_CONTRACT_FILE)).unwrap();
+        let mut absent_input = lock;
+        absent_input["nodes"]["root"]["inputs"] = serde_json::json!({});
+        write(
+            &images.join("flake.lock"),
+            &serde_json::to_vec(&absent_input).unwrap(),
+        );
+        assert!(
+            emit_argv(&request).is_err(),
+            "missing declaration is not automatically legacy"
+        );
+        #[cfg(unix)]
+        {
+            write(&images.join("real-contract"), b"1\n");
+            std::os::unix::fs::symlink(
+                images.join("real-contract"),
+                images.join(BASE_IMAGE_CONTRACT_FILE),
+            )
+            .unwrap();
+            assert!(
+                emit_argv(&request).is_err(),
+                "a symlink capability is not trusted"
+            );
+        }
     }
 
     #[test]

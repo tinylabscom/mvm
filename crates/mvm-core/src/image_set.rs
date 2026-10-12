@@ -65,7 +65,8 @@ pub use verify::{
     verify_image_set_root,
 };
 
-pub const IMAGE_SET_SCHEMA_VERSION: u32 = 2;
+pub const IMAGE_SET_SCHEMA_VERSION: u32 = 3;
+pub const LEGACY_IMAGE_SET_SCHEMA_VERSION: u32 = 2;
 
 /// The root object of one image set: a published release, or a set built
 /// locally from two checkouts. Both are read by the same parser and checked by
@@ -78,10 +79,14 @@ pub struct ImageSetManifest {
     pub set_version: ImageSetVersion,
     pub issued_at: DateTime<Utc>,
     pub producer: ImageSetProducer,
-    /// The `mvm` commit whose guest and builder binaries are embedded in the
-    /// images. Recorded apart from the producer commit because the image
-    /// repository checks `mvm` out at an exact commit rather than tracking it.
-    pub mvm_source_commit: GitCommit,
+    /// Legacy schema 2 runtime-source provenance. Required in that schema and
+    /// absent in schema 3: the Linux-only image producer reads no mvm source.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub mvm_source_commit: Option<GitCommit>,
     pub compatibility: ImageSetCompatibility,
     pub nix_inputs: NixInputs,
     /// Where revocations of a released set are published. Required of a
@@ -244,7 +249,11 @@ pub struct ImageSetCompatibility {
     /// the guest agent. The agent now ships with `mvmctl`, which speaks its own
     /// protocol, so nothing reads this. It stays parseable because every set up
     /// to `image-set/v0.2.4` declares it, and the signed bytes must round-trip.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub guest_agent_protocol: Option<ProtocolRange>,
     /// The builder image cache layout. Exact rather than a range: a builder
     /// image laid out under a different contract is unusable, not degraded.
@@ -258,8 +267,20 @@ pub struct ImageSetCompatibility {
     /// What the set's workload base root filesystems promise the guest runtime
     /// `mvmctl` boots them with; see [`BaseImageContract`]. A set published
     /// before the field existed omits it, which means the legacy contract 0.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub base_image_contract: Option<BaseImageContract>,
+}
+
+// Absent and null are different: a present declaration must be well formed,
+// never a null that erases a contradictory field.
+fn deserialize_present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    deserializer: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(deserializer).map(Some)
 }
 
 impl ImageSetCompatibility {
@@ -346,7 +367,11 @@ pub struct ImageSetMember {
     /// (see [`RetiredGuestRuntimeRole`]), and parsed so those sets stay
     /// readable. Nothing reads it: the guest runtime ships with the CLI, so no
     /// image-set member is adopted in place of a build any more.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     pub source_fingerprint: Option<Sha256Hex>,
     /// Present exactly for roles that boot; see [`ImageSetRole::is_bootable`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

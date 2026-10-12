@@ -400,8 +400,8 @@ jobs:
 
       # At the commit that produced the image set images.lock pins, never at
       # mvm-images `main`: this lane proves this tree builds the builder image
-      # it pins, and the two `main`s are compared by the `image-pair.yml`
-      # canary.
+      # it pins. Image definitions and reproduction belong to that repository;
+      # no comparison against this tree's guest runtime is required.
       - name: Resolve the mvm-images commit images.lock pins
         id: images-ref
         run: |

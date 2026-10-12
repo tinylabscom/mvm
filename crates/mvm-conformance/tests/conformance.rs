@@ -53,6 +53,8 @@ async fn main() {
         }
     };
 
+    stop_launched_vms_when_interrupted();
+
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
     // no other thread observes the environment mid-scenario.
@@ -64,14 +66,15 @@ async fn main() {
         .max_concurrent_scenarios(1)
         .after(|_, _, scenario, _, world| {
             Box::pin(async move {
+                let Some(world) = world else { return };
                 if scenario
                     .tags
                     .iter()
                     .any(|tag| tag == "destructive_lab_only")
-                    && let Some(world) = world
                 {
                     steps::cve_containment::cleanup_after_scenario(world);
                 }
+                stop_what_the_scenario_left_running(&scenario.name, world);
             })
         })
         .filter_run(features_dir(), move |feature, rule, scenario| {
@@ -111,6 +114,76 @@ async fn main() {
         );
         std::process::exit(1);
     }
+}
+
+/// On SIGINT, SIGTERM or SIGHUP, stop every VM a live step launched before
+/// exiting.
+///
+/// A job that hits its timeout or is cancelled signals this process while a
+/// step is still blocked on `mvmctl`, so neither the `after` hook nor any
+/// destructor runs, and a detached VMM started through `sudo setsid` is not in
+/// the process tree the runner then kills. The watcher runs on its own task
+/// because a blocked synchronous step holds the task that drives cucumber.
+fn stop_launched_vms_when_interrupted() {
+    use tokio::signal::unix::{SignalKind, signal};
+    tokio::spawn(async {
+        let (Ok(mut interrupt), Ok(mut terminate), Ok(mut hangup)) = (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) else {
+            eprintln!("conformance: could not install the interrupt handler");
+            return;
+        };
+        let code = tokio::select! {
+            _ = interrupt.recv() => 130,
+            _ = terminate.recv() => 143,
+            _ = hangup.recv() => 129,
+        };
+        let report = tokio::task::spawn_blocking(mvm_conformance::vmm_reaper::reap_launched_homes)
+            .await
+            .unwrap_or_default();
+        if !report.found.is_empty() {
+            eprintln!(
+                "\nconformance: interrupted; stopped {} process(es) live steps started:\n{}",
+                report.found.len(),
+                mvm_conformance::vmm_reaper::ReapReport::describe(&report.found)
+            );
+        }
+        if !report.is_clean() {
+            eprintln!(
+                "conformance: could not stop:\n{}",
+                mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+            );
+        }
+        std::process::exit(code);
+    });
+}
+
+/// Stop every process the scenario left running against its own homes, and
+/// fail the run if one survives.
+///
+/// Runs on every exit path, a failed or panicked step included: cucumber calls
+/// the `after` hook for each scenario that got a world. That is the path that
+/// leaked — a live VMM is started detached through `sudo setsid`, so when a
+/// step failed before the scenario's own `machine stop`, nothing stopped it and
+/// dropping the temporary home only deleted its pid marker. A process found
+/// here after a passing scenario is reported too; one that survives SIGKILL
+/// fails the hook, which fails the run.
+fn stop_what_the_scenario_left_running(scenario: &str, world: &CliWorld) {
+    let report = world.reap_scenario_processes();
+    if !report.found.is_empty() {
+        eprintln!(
+            "[bdd] scenario {scenario:?} left {} process(es) running; stopped:\n{}",
+            report.found.len(),
+            mvm_conformance::vmm_reaper::ReapReport::describe(&report.found)
+        );
+    }
+    assert!(
+        report.is_clean(),
+        "scenario {scenario:?} left processes running that SIGTERM and SIGKILL did not stop:\n{}",
+        mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+    );
 }
 
 /// Refuse to run against an `mvmctl` that is missing or older than the
