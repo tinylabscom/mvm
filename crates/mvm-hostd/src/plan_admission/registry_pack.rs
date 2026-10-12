@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use mvm_core::plan::{AssetKind, ExecutionPlan};
+use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 
 /// Re-open every pack identity under the host's current publisher trust and
 /// lock state. A signed plan alone cannot establish that an installed payload
@@ -41,6 +42,63 @@ pub(super) fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
             verified.manifest_sha256().as_str() == identity.digest,
             "registry pack {reference} does not match its signed-plan digest"
         );
+    }
+    Ok(())
+}
+
+/// Revalidate built workload bytes against the final configuration, not just
+/// the pack identity admitted earlier. Source packs keep their existing path.
+pub(super) fn verify_registry_pack_boot(
+    plan: &ExecutionPlan,
+    config: &VmStartConfig,
+    backend: BackendKind,
+) -> Result<()> {
+    use mvm_core::registry_pack::{PackPin, RegistryPackImage};
+    use mvm_core::registry_pack_boot::BuiltPackBootContract;
+
+    for identity in plan
+        .asset_identities
+        .iter()
+        .filter(|identity| identity.kind == AssetKind::RegistryPack)
+    {
+        let reference = identity
+            .name
+            .parse()
+            .context("invalid registry pack reference at final boot verification")?;
+        let pin = PackPin::new(
+            reference,
+            mvm_core::packs::Sha256Hex::new(&identity.digest)?,
+        )?;
+        let lock = mvm_core::registry_pack_store::load_pack_lockfile(
+            &mvm_core::config::pack_lockfile_path(),
+        )?;
+        let publisher =
+            mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+                &mvm_core::config::registry_pack_publisher_policy_path(),
+            )?
+            .policy;
+        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+            &mvm_core::config::registry_pack_cache_dir(),
+            &lock,
+            &publisher,
+            pin.reference(),
+        )?;
+        anyhow::ensure!(
+            verified.manifest_sha256() == pin.manifest_sha256(),
+            "registry pack no longer matches the admitted pin at backend handoff"
+        );
+        if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
+            let contract = BuiltPackBootContract::open_for_admission(
+                &pin,
+                &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+            )?;
+            contract.verify_image_config(
+                plan,
+                config,
+                mvm_core::arch::GuestArch::host(),
+                backend,
+            )?;
+        }
     }
     Ok(())
 }

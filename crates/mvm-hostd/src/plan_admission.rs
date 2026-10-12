@@ -1884,7 +1884,7 @@ pub fn record_charge_or_undo_launch(
     })
 }
 
-/// The four post-admission gates between `plan.admitted` and the backend
+/// The post-admission gates between `plan.admitted` and the backend
 /// start, run in order. On refusal the failing stage's wire label is
 /// returned alongside the error so the caller can emit a terminal
 /// `plan.failed` entry naming the gate.
@@ -1918,6 +1918,9 @@ fn run_post_admission_gates(
     }
     if let Err(e) = attach_admitted_extensions(&mut config, admitted) {
         return Err(("extension-attachment", e));
+    }
+    if let Err(e) = registry_pack::verify_registry_pack_boot(admitted.plan(), &config, backend) {
+        return Err(("registry-pack-boot", e));
     }
     Ok(config)
 }
@@ -3014,6 +3017,15 @@ mod tests {
         );
         let error = verify_registry_pack_assets(&plan).expect_err("version required");
         assert!(error.to_string().contains("exact version"), "{error}");
+        assert!(
+            registry_pack::verify_registry_pack_boot(
+                &plan,
+                &VmStartConfig::default(),
+                BackendKind::Firecracker,
+            )
+            .is_err(),
+            "backend handoff must also refuse a non-versioned pack pin"
+        );
 
         plan.asset_identities
             .last_mut()
@@ -3043,6 +3055,12 @@ mod tests {
         let (_env, _home) = host_with_ceiling(Default::default());
         let plan = plan_binding(&[]);
         verify_registry_pack_assets(&plan).expect("ordinary plan has no pack lookup");
+        registry_pack::verify_registry_pack_boot(
+            &plan,
+            &VmStartConfig::default(),
+            BackendKind::Mock,
+        )
+        .expect("ordinary workloads need no built-pack boot contract");
     }
 
     #[cfg(feature = "manifest-verify")]
@@ -3061,6 +3079,12 @@ mod tests {
             .expect("pack asset identity"),
         );
         verify_registry_pack_assets(&plan).expect("signed pack admits");
+        registry_pack::verify_registry_pack_boot(
+            &plan,
+            &VmStartConfig::default(),
+            BackendKind::Mock,
+        )
+        .expect("source packs do not acquire built-image boot authority");
 
         plan.asset_identities
             .last_mut()
