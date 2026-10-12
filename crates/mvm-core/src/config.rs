@@ -581,6 +581,21 @@ pub fn vms_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     mvm_home.as_ref().join("vms")
 }
 
+/// Idle Firecracker processes waiting to be claimed by a cold launch:
+/// `<mvm_home>/fc-idle/`.
+///
+/// A sibling of [`vms_dir`] rather than inside it, so nothing that walks the
+/// per-VM directories mistakes an unclaimed process for a machine, and on the
+/// same filesystem, so a claim can rename its files into the VM's state dir.
+pub fn fc_idle_pool_dir() -> std::path::PathBuf {
+    fc_idle_pool_dir_at(mvm_home())
+}
+
+/// [`fc_idle_pool_dir`] beneath an explicit mvm home.
+pub fn fc_idle_pool_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("fc-idle")
+}
+
 /// Per-VM state directory: `<mvm_home>/vms/<name>/`. Holds the
 /// libkrun pid file, console log, vsock listener socket(s), runtime
 /// `mode.json`, `rootfs.ref` / `kernel.ref`, and the `ports` file.

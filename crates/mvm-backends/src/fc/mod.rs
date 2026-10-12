@@ -11,6 +11,7 @@ pub mod fc_api;
 pub mod fork_namespace;
 pub mod guards;
 pub mod host;
+pub mod idle_pool;
 pub mod io;
 pub mod lifecycle;
 pub mod observe;
