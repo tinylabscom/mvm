@@ -897,7 +897,7 @@ fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
     let mut last_error: Option<anyhow::Error> = None;
-    while Instant::now() < deadline {
+    loop {
         if socket.exists() {
             // The HVF agent socket is the bridge's direct stream endpoint. It
             // is not a Firecracker-style CONNECT multiplexer, so sending the
@@ -916,6 +916,12 @@ fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result
                 }
                 Err(error) => last_error = Some(error.into()),
             }
+        }
+        // Probe first, then check the clock: an agent already serving is
+        // ready whatever the budget, and the remaining time, not a comparison
+        // against the deadline, decides whether to keep waiting.
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            break;
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
         attempt = attempt.saturating_add(1);
@@ -1346,6 +1352,28 @@ mod tests {
         wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
             .expect("a ponging agent is ready");
         guest.join().expect("guest thread");
+    }
+
+    /// An agent that comes up partway through the budget is waited for. A
+    /// deadline that is already behind the first probe gives up on a guest
+    /// that is still booting, which is the common case for a parent.
+    #[test]
+    fn standby_readiness_waits_for_an_agent_that_binds_late() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let socket = home.path().join("hvf-agent.sock");
+        let late = socket.clone();
+        let guest = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            serve_one_agent_answer(&late, mvm_agentd::vsock::GuestResponse::Pong)
+                .join()
+                .expect("guest thread");
+        });
+
+        wait_for_standby_agent(&socket, std::time::Duration::from_secs(10))
+            .expect("an agent that binds within the budget is ready");
+        guest.join().expect("late binder");
     }
 
     /// A bound socket with nothing serving behind it is still not readiness,
