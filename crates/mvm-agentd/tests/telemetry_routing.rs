@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use ed25519_dalek::{Signer as _, SigningKey, VerifyingKey};
-use mvm_agentd::telemetry_capture::session::serve_capture_session;
+use mvm_agentd::telemetry_capture::session::{SessionDeadlines, serve_capture_session};
 use mvm_agentd::telemetry_capture::{CaptureState, ProducerId};
 use mvm_agentd::telemetry_service::SessionEnd;
 use mvm_core::net::telemetry::outbox::Outbox;
@@ -69,11 +69,12 @@ fn capture_with_marker() -> CaptureState {
     capture
 }
 
-fn bound(stream: &mut UnixStream) {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(10)))
-        .unwrap();
-}
+/// Short idle probes so a session notices its peer leave promptly; the
+/// handshake and frame writes keep the agent's own limits.
+const BOUNDS: SessionDeadlines = SessionDeadlines {
+    probe: Duration::from_millis(10),
+    ..SessionDeadlines::AGENT
+};
 
 fn serve_guest(
     mut guest: UnixStream,
@@ -83,7 +84,7 @@ fn serve_guest(
 ) -> std::thread::JoinHandle<SessionEnd> {
     std::thread::spawn(move || {
         let stop = AtomicBool::new(false);
-        serve_capture_session(&mut guest, guest_key, &anchor, &capture, &stop, bound)
+        serve_capture_session(&mut guest, guest_key, &anchor, &capture, &stop, BOUNDS)
     })
 }
 
