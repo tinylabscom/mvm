@@ -3099,8 +3099,10 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
         ));
     }
     crate::ui::info(
-        "A run claims one of these when it matches on image, kernel, vCPUs, memory and \
-         egress enablement (`--egress` for runs that allow egress) and is not given a --name.",
+        "A launch claims one of these only if it matches on image, kernel, vCPUs, memory and \
+         egress enablement (`--egress` for launches that allow egress), is auto-named, and \
+         runs with a non-zero warm pool size (MVM_RESIDENCY=warm on hosts whose default is \
+         parked).",
     );
     Ok(())
 }

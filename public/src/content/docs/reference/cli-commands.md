@@ -1919,10 +1919,10 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-`pool warm` is optional. Unnamed runs already leave one standby of each image
-they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
-of an image is warm without it; `pool warm` makes the first one warm too, or
-holds more than one standby of an image:
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes, enable claims
+explicitly:
 
 ```bash
 mvmctl image pull alpine
@@ -1942,8 +1942,16 @@ path: the guest runtime it pins predates the claim handshake.
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
 capacity and fail rather than silently cold-booting. Named launches and shapes
-with extra volumes (including directory mounts) or allowed egress retain their
-cold path, including when the pool size is zero.
+with extra volumes (including directory mounts) retain their cold path,
+including when the pool size is zero.
+
+A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
+with `pool warm --egress`. That standby's guest starts its egress client but
+holds no policy and no destinations; the claim spawns the child's own endpoint
+under the policy its signed plan recorded, and refuses any other. A launch
+whose endpoint must terminate TLS for its own destinations (a bound secret or
+an intercepted route) keeps its cold path, because a shared standby cannot
+hold a certificate minted for them.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left
