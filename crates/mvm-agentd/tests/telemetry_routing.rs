@@ -154,11 +154,14 @@ fn a_host_with_the_wrong_anchor_receives_no_record_plaintext() {
         inner: host,
         seen: Vec::new(),
     };
+    // Set before the handshake: once the guest refuses and closes, macOS
+    // rejects a timeout change on the dead socket. The guest closing ends the
+    // drain below; the timeout only guards against a guest that never does.
+    tee.inner
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
     assert!(authenticate(&mut tee, imposter, &guest_key.verifying_key()).is_none());
     // Whatever the guest still sends before closing is recorded too.
-    tee.inner
-        .set_read_timeout(Some(Duration::from_millis(200)))
-        .unwrap();
     let mut rest = [0u8; 4096];
     while let Ok(n) = tee.read(&mut rest) {
         if n == 0 {
