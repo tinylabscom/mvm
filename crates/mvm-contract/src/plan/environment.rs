@@ -100,6 +100,8 @@ pub struct EnvironmentVolume {
 /// A secret the workload reads, named the way the workload sees it.
 ///
 /// There is deliberately no value field: the shape refuses one.
+// allow(secret-debug): a slot is a name and a required flag; the value is
+// bound on the host at launch and never reaches this type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretSlot {
