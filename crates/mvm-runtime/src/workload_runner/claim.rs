@@ -18,7 +18,9 @@ use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
 use crate::workload_runner::runner::FlowMuxIdentitySource;
-use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
+use crate::workload_runner::runner::{
+    NetworkEndpointSpawnRequest, NetworkEndpointSpawner, TelemetryStart,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimRefusal {
@@ -154,7 +156,16 @@ pub struct EndpointSpawnInputs<'a> {
 pub struct EndpointHandle {
     egress_uds: Option<PathBuf>,
     identity_drive: Option<PathBuf>,
+    telemetry: TelemetryStart,
     guard: EndpointGuard,
+}
+
+impl Drop for EndpointHandle {
+    fn drop(&mut self) {
+        // Finish an in-flight collector start before the guard decides
+        // whether to reap it, so a failed launch never leaves one behind.
+        self.telemetry.join();
+    }
 }
 
 impl EndpointHandle {
@@ -172,6 +183,7 @@ impl EndpointHandle {
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
     pub fn defuse(&mut self) {
+        self.telemetry.join();
         self.guard.defuse();
     }
 }
@@ -246,11 +258,12 @@ impl<'a> ClaimGuards<'a> {
             return Ok(EndpointHandle {
                 egress_uds: None,
                 identity_drive,
-                guard: if telemetry {
+                guard: if telemetry.provisioned {
                     EndpointGuard::new(&vm.0)
                 } else {
                     EndpointGuard::defused()
                 },
+                telemetry,
             });
         }
         // No protocol choice is made here any more. Whether a workload carries
@@ -262,6 +275,7 @@ impl<'a> ClaimGuards<'a> {
         Ok(EndpointHandle {
             egress_uds: Some(spawned.egress_uds),
             identity_drive: spawned.identity_drive,
+            telemetry: TelemetryStart::default(),
             guard: EndpointGuard::new(&vm.0),
         })
     }
@@ -320,9 +334,15 @@ mod tests {
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
-        fn start_telemetry_without_endpoint(&self, req: &NetworkEndpointSpawnRequest<'_>) -> bool {
+        fn start_telemetry_without_endpoint(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> TelemetryStart {
             *self.telemetry_vm.lock().unwrap() = Some(req.vm_name.to_string());
-            self.collect_telemetry
+            TelemetryStart {
+                provisioned: self.collect_telemetry,
+                pending: None,
+            }
         }
 
         fn prepare_identity(

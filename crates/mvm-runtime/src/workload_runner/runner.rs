@@ -74,7 +74,7 @@ use refusal::{
 use sockets::standing_sockets;
 pub use spawner::{
     FlowMuxIdentitySource, NetworkEndpointSpawnRequest, NetworkEndpointSpawner,
-    RealNetworkEndpointSpawner, SpawnedEndpoint,
+    RealNetworkEndpointSpawner, SpawnedEndpoint, TelemetryStart,
 };
 /// What the runner needs to register the per-VM host-services broker after boot.
 pub struct BrokerRegisterRequest<'a> {

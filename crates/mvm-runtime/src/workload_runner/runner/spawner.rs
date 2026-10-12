@@ -63,8 +63,33 @@ pub trait NetworkEndpointSpawner: Send + Sync {
     /// For a boot with no endpoint, start its VM-lifetime telemetry collector
     /// on its own and record whether the boot is provisioned for it. Never
     /// fails a launch: a collector that cannot start costs telemetry only.
-    fn start_telemetry_without_endpoint(&self, _req: &NetworkEndpointSpawnRequest<'_>) -> bool {
-        false
+    fn start_telemetry_without_endpoint(
+        &self,
+        _req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> TelemetryStart {
+        TelemetryStart::default()
+    }
+}
+
+/// What [`NetworkEndpointSpawner::start_telemetry_without_endpoint`] did: whether
+/// the boot asserts telemetry, and the collector start still in flight.
+///
+/// The start runs beside the boot rather than ahead of it, so it costs the
+/// launch nothing; whoever holds this joins it once the VM is up.
+#[derive(Default)]
+pub struct TelemetryStart {
+    /// The boot is provisioned: its guest serves the telemetry listener.
+    pub provisioned: bool,
+    /// The collector start, when one is still running.
+    pub pending: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TelemetryStart {
+    /// Wait for an in-flight collector start to finish.
+    pub fn join(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            let _ = pending.join();
+        }
     }
 }
 
@@ -112,47 +137,67 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         prepare_observation_identity(req, &anchor_path)
     }
 
-    fn start_telemetry_without_endpoint(&self, req: &NetworkEndpointSpawnRequest<'_>) -> bool {
+    fn start_telemetry_without_endpoint(
+        &self,
+        req: &NetworkEndpointSpawnRequest<'_>,
+    ) -> TelemetryStart {
         if !telemetry_for_boot(
             mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
             req.identity,
         ) {
-            return false;
+            return TelemetryStart::default();
         }
-        let provisioning = std::time::Instant::now();
-        let started = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
-            req.vm_name,
-            req.tenant,
-            req.state_dir,
-            req.redaction,
-        )
-        .inspect_err(|error| {
+        // The provisioning decision is made now, because the guest's command
+        // line is built from it; the collector itself starts beside the boot.
+        // If it cannot start, its absent status says so and the guest's
+        // listener simply waits to be dialed.
+        if let Err(error) =
+            mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, true)
+        {
             tracing::warn!(
                 vm = req.vm_name,
-                error = format!("{error:#}"),
-                "telemetry collector did not start; booting without it"
+                error = %error,
+                "recording telemetry provisioning failed; booting without it"
             );
-        })
-        .is_ok();
-        tracing::debug!(
-            vm = req.vm_name,
-            started,
-            elapsed_us = provisioning.elapsed().as_micros() as u64,
-            "telemetry collector provisioning on the launch path"
-        );
-        match mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(
-            req.state_dir,
-            started,
-        ) {
-            Ok(()) => started,
-            Err(error) => {
-                tracing::warn!(
-                    vm = req.vm_name,
-                    error = %error,
-                    "recording telemetry provisioning failed; booting without it"
+            return TelemetryStart::default();
+        }
+        let vm_name = req.vm_name.to_string();
+        let tenant = req.tenant.to_string();
+        let state_dir = req.state_dir.to_path_buf();
+        let redaction = req.redaction.clone();
+        let pending = std::thread::Builder::new()
+            .name("mvm-telemetry-start".into())
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let outcome = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
+                    &vm_name, &tenant, &state_dir, &redaction,
                 );
-                mvm_vmm::host::network_endpoint_spawn::reap_telemetry_collector(req.state_dir);
-                false
+                tracing::debug!(
+                    vm = vm_name,
+                    started = outcome.is_ok(),
+                    elapsed_us = started.elapsed().as_micros() as u64,
+                    "telemetry collector start, beside the boot"
+                );
+                if let Err(error) = outcome {
+                    tracing::warn!(
+                        vm = vm_name,
+                        error = format!("{error:#}"),
+                        "telemetry collector did not start; the VM runs without it"
+                    );
+                }
+            });
+        match pending {
+            Ok(pending) => TelemetryStart {
+                provisioned: true,
+                pending: Some(pending),
+            },
+            Err(error) => {
+                tracing::warn!(vm = req.vm_name, error = %error, "telemetry start thread failed");
+                let _ = mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(
+                    req.state_dir,
+                    false,
+                );
+                TelemetryStart::default()
             }
         }
     }
