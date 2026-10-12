@@ -207,9 +207,17 @@ and cite #4100 for the direction, never the reverse.
 - The guest runtime leaves the image-set contract, and fetch-when-unchanged is
   deleted, including its `pinned` value and its module (#4105, landed); the
   members' `source_fingerprint` stays parseable until no published set carries
-  it. The `guest_agent_protocol` range in `images.lock` is replaced by a
-  base-image contract version that the base root filesystem declares and
-  `mvmctl` checks before boot; that needs `mvm-images` to declare one first.
+  it. The `guest_agent_protocol` range is no longer copied into `images.lock`
+  or checked: the guest-agent protocol is a property of the CLI and its own
+  guest runtime, which ship together. It is replaced by a base-image contract
+  version (`mvm_core::image_set::BaseImageContract`) that the base root
+  filesystem declares in `/etc/mvm/base-image-contract`, the signed set copies
+  into `compatibility.base_image_contract`, and `mvmctl` checks before any
+  member is fetched (#4105, landed). Contract 0 is a set that declares none —
+  every set up to `image-set/v0.2.4` — and is checked by that number rather
+  than skipped; contract 1 is a base root filesystem with no mvm binary and no
+  mvm `/init`, carrying the fixed guest identities. This CLI
+  boots 0 and 1. `mvm-images` declaring it is tinylabscom/mvm-images#64.
 - mvm's CI stops building guest pieces through `mvm-images` (#4108).
 - `mvm-images` drops the `mvm` input and every read of mvm's source
   (tinylabscom/mvm-images#49) and attests build provenance for image sets

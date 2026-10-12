@@ -192,7 +192,7 @@ impl PublishedImageSet {
         let host = crate::stage0_kernel::current_image_set_protocol_support();
         check_protocol_compatibility(&manifest, &host)
             .context("refuse an image set incompatible with this host")?;
-        if manifest.compatibility != train.compatibility {
+        if !manifest.compatibility.same_contract(&train.compatibility) {
             bail!(
                 "images.lock compatibility does not match the signed image-set manifest; run the pin-update workflow"
             );
@@ -288,8 +288,10 @@ impl PublishedImageSet {
             self.fetch_artifact(artifact, &destination)?;
         }
 
-        let protocol_version = u8::try_from(self.manifest.compatibility.guest_agent_protocol.max())
-            .context("signed guest-agent protocol does not fit the runtime sidecar")?;
+        // The guest agent is this CLI's own, attached from its guest runtime,
+        // so the protocol it speaks is the one compiled in here.
+        let protocol_version = u8::try_from(mvm_agentd::vsock::PROTOCOL_VERSION)
+            .context("the guest-agent protocol does not fit the runtime sidecar")?;
         crate::builder_vm::GuestSidecar {
             name: "mvm-default-microvm".to_string(),
             accessible: false,

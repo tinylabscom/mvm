@@ -21,6 +21,7 @@ use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 
+mod base_contract;
 mod boot_abi;
 mod checkout;
 mod error;
@@ -32,6 +33,7 @@ mod trust_tier;
 mod validate;
 mod verify;
 
+pub use base_contract::{BASE_IMAGE_CONTRACT_MARKER, BaseImageContract, BaseImageContractRange};
 pub use boot_abi::{BuilderBootAbi, BuilderBootAbiRange};
 pub use checkout::{LocalCheckouts, RepoIdentity, WorktreeState};
 pub use error::{ImageSetError, ImageSetStage};
@@ -238,7 +240,12 @@ impl From<ImageSetProducer> for RawProducer {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageSetCompatibility {
-    pub guest_agent_protocol: ProtocolRange,
+    /// Retired: the guest-agent protocol range a set recorded while it shipped
+    /// the guest agent. The agent now ships with `mvmctl`, which speaks its own
+    /// protocol, so nothing reads this. It stays parseable because every set up
+    /// to `image-set/v0.2.4` declares it, and the signed bytes must round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_agent_protocol: Option<ProtocolRange>,
     /// The builder image cache layout. Exact rather than a range: a builder
     /// image laid out under a different contract is unusable, not degraded.
     pub builder_cache_contract: u32,
@@ -248,9 +255,32 @@ pub struct ImageSetCompatibility {
     /// its emitter always writes it, so one without it predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builder_boot_abi: Option<BuilderBootAbi>,
+    /// What the set's workload base root filesystems promise the guest runtime
+    /// `mvmctl` boots them with; see [`BaseImageContract`]. A set published
+    /// before the field existed omits it, which means the legacy contract 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_image_contract: Option<BaseImageContract>,
 }
 
 impl ImageSetCompatibility {
+    /// The base-image contract the set declares, reading an absent field as
+    /// the legacy contract every set published before the field carried.
+    #[must_use]
+    pub fn base_image_contract_or_legacy(&self) -> BaseImageContract {
+        self.base_image_contract
+            .unwrap_or(BaseImageContract::LEGACY)
+    }
+
+    /// Whether two declarations promise the same thing. The retired
+    /// guest-agent range is left out: the checked-in lock no longer copies it,
+    /// and nothing decides on it.
+    #[must_use]
+    pub fn same_contract(&self, other: &Self) -> bool {
+        self.builder_cache_contract == other.builder_cache_contract
+            && self.builder_boot_abi == other.builder_boot_abi
+            && self.base_image_contract == other.base_image_contract
+    }
+
     /// The builder boot ABI the set's builder image declares, reading an
     /// absent field as the legacy ABI a release published before the field
     /// meant. A local set without it is refused before this is asked.

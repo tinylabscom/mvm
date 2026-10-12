@@ -178,12 +178,13 @@ fn prewarm_pieces_from_release(
             release.archive.display()
         )
     })?;
-    ui::info(&release_assembly_line(release, &assembly.runtime.digest));
+    ui::notice(&release_assembly_line(release, &assembly.runtime.digest));
     Ok(())
 }
 
-/// What bootstrap says once a release binary's pieces are assembled. The
-/// fresh-install smoke greps for it.
+/// What bootstrap says once a release binary's pieces are assembled. Printed
+/// whatever the verbosity, because the fresh-install smoke greps a plain
+/// `mvmctl bootstrap` for it.
 fn release_assembly_line(
     release: &mvm_build::guest_bins::release::ReleaseGuestRuntime,
     digest: &str,

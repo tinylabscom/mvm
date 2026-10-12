@@ -6,14 +6,13 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use super::BuilderBootAbiRange;
-use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
     IMAGE_SET_SCHEMA_VERSION, ImageLock, ImageSetError, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRole, LocalCheckouts, MemberTarget, ReleaseProducer,
     WorkloadImageProfile,
 };
+use super::{BaseImageContractRange, BuilderBootAbiRange};
 use crate::arch::GuestArch;
 use crate::kernel_format::KernelFormat;
 use crate::packs::Sha256Hex;
@@ -345,7 +344,8 @@ pub fn require_complete(
 /// The protocol versions this host speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostProtocolSupport {
-    pub guest_agent_protocol: ProtocolRange,
+    /// The base-image contracts this host's guest runtime boots.
+    pub base_image_contract: BaseImageContractRange,
     pub builder_cache_contract: u32,
     /// The builder boot ABIs this host can boot: through the legacy ABI only
     /// when it has no boot payload to hand a builder, through the payload ABI
@@ -370,13 +370,11 @@ pub fn check_declared_protocol_compatibility(
     declared: &super::ImageSetCompatibility,
     host: &HostProtocolSupport,
 ) -> Result<(), ImageSetError> {
-    if !declared
-        .guest_agent_protocol
-        .overlaps(host.guest_agent_protocol)
-    {
-        return Err(ImageSetError::GuestAgentProtocolDisjoint {
-            set: declared.guest_agent_protocol,
-            host: host.guest_agent_protocol,
+    let base = declared.base_image_contract_or_legacy();
+    if !host.base_image_contract.contains(base) {
+        return Err(ImageSetError::BaseImageContractUnsupported {
+            set: base,
+            host: host.base_image_contract,
         });
     }
     if declared.builder_cache_contract != host.builder_cache_contract {

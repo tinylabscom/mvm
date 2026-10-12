@@ -228,6 +228,32 @@ pub(super) struct MaterializeCall<'a> {
 /// swappable in tests for a fake that skips the real Nix/ext4 machinery.
 pub(super) type RuntimeMaterializer = for<'a> fn(MaterializeCall<'a>) -> Result<()>;
 
+/// Point a cached image's index entry at the rootfs an earlier pull already
+/// prepared for `runtime_tag`, without building anything.
+///
+/// The index records one prepared rootfs per image, but each runtime's rootfs
+/// lives at its own path, so a pull under a second guest runtime leaves the
+/// first one's rootfs on disk and moves the entry away from it. A launch under
+/// the first runtime then finds that complete rootfs here instead of refusing
+/// an image it prepared. `None` when no complete rootfs exists for this
+/// runtime: the launch still refuses, and only an explicit pull builds one.
+pub(super) fn adopt_prepared_rootfs(
+    cache_root: &Path,
+    mut image: super::oci_types::CachedOciImage,
+    runtime_tag: &str,
+    prod: bool,
+) -> Result<Option<super::oci_types::CachedOciImage>> {
+    let rootfs_path = oci_rootfs_rel(&image.resolved_digest, runtime_tag, prod)?;
+    let rootfs_abs = safe_cache_path(cache_root, &rootfs_path)?;
+    if !rootfs_abs.is_file() || !reusable_rootfs(&rootfs_abs, prod)? {
+        return Ok(None);
+    }
+    image.rootfs_path = Some(rootfs_path);
+    image.runtime_tag = Some(runtime_tag.to_string());
+    super::cache::upsert_cached_image(cache_root, image.clone())?;
+    Ok(Some(image))
+}
+
 pub(super) fn rematerialize_cached_image(
     cache_root: &Path,
     mut image: super::oci_types::CachedOciImage,

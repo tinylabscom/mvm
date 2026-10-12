@@ -424,28 +424,22 @@ fi
 #
 # The service-plane scenarios load the sidecar. `--source build` packs both
 # libc variants on the host from this checkout's guest-runtime archive,
-# compiling the archive first when it is not cached, and refuses rather than
-# falling back to the image set's members. No builder VM starts.
-#
-# The fetch knob is cleared first: the sidecar verb adopts the set's members
-# whenever it is set, and no scenario should inherit it either.
-unset MVM_FETCH_UNCHANGED_IMAGES
+# compiling the archive first when it is not cached. The image set carries no
+# sidecar this CLI reads. No builder VM starts.
 e2e_phase sdk-sidecar
 echo "==> packing the SDK sidecar from this tree's guest runtime"
 MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build --source build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
-# It is adopted from the pinned set (`MVM_FETCH_UNCHANGED_IMAGES=pinned`), and
-# a set that is refused or lacks it fails the step rather than falling back to
-# a build. A fetched install carries no pair identity, and the warm boot below
-# must answer from the completed cache, so only the ensure step sees the knob.
-# The one scenario that boots the dev image is Firecracker-only (the cached dev
+# With no image checkout selected, `image dev ensure` installs it from the
+# pinned set, and a set that is refused or lacks it fails the step rather than
+# falling back to a build. The one scenario that boots the dev image is Firecracker-only (the cached dev
 # rootfs must stay byte-identical across launches), so only the Linux lane
 # prepares it, into the warm home every scenario shares.
 if [[ "$(uname -s)" == Linux ]]; then
   e2e_phase dev-image
   echo "==> adopting the dev default image from the pinned image set"
-  MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES=pinned "$MVMCTL" image dev ensure
+  MVM_HOME="$E2E_HOME" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
   # Named, so it takes the cold path. An unnamed launch has to claim a
   # prepared warm standby, and nothing has warmed one for the dev image.

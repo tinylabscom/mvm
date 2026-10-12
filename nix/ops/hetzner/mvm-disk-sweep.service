@@ -1,0 +1,10 @@
+[Unit]
+Description=Remove stale test and runner temporary directories on the shared KVM box
+Documentation=https://github.com/tinylabscom/mvm/blob/main/nix/ops/hetzner/README.md
+
+[Service]
+Type=oneshot
+Environment=MAX_AGE_HOURS=6
+ExecStart=/usr/local/sbin/mvm-disk-sweep
+Nice=19
+IOSchedulingClass=idle

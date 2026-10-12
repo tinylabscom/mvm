@@ -4,13 +4,12 @@ use thiserror::Error;
 
 use super::checkout::RepoIdentity;
 use super::identity::{
-    ArtifactName, GitCommit, ImageSetVersion, ProtocolRange, ReleaseTag, RepositorySlug, TagRef,
-    WorkflowPath,
+    ArtifactName, GitCommit, ImageSetVersion, ReleaseTag, RepositorySlug, TagRef, WorkflowPath,
 };
 use super::validate::RequiredMember;
 use super::{
-    ArtifactFormat, BootProtocol, BuilderBootAbi, BuilderBootAbiRange, GuestDeviceRequirement,
-    ImageSetRole, MemberTarget,
+    ArtifactFormat, BaseImageContract, BaseImageContractRange, BootProtocol, BuilderBootAbi,
+    BuilderBootAbiRange, GuestDeviceRequirement, ImageSetRole, MemberTarget,
 };
 use crate::arch::GuestArch;
 use crate::packs::Sha256Hex;
@@ -139,10 +138,13 @@ pub enum ImageSetError {
     },
     #[error("image set is incomplete; missing {}", join(.missing))]
     Incomplete { missing: Vec<RequiredMember> },
-    #[error("guest-agent protocol {set} declared by the set does not overlap host support {host}")]
-    GuestAgentProtocolDisjoint {
-        set: ProtocolRange,
-        host: ProtocolRange,
+    #[error(
+        "base-image contract {set} declared by the set is not one this mvmctl boots ({host}); \
+         update mvmctl or pin a set it supports"
+    )]
+    BaseImageContractUnsupported {
+        set: BaseImageContract,
+        host: BaseImageContractRange,
     },
     #[error("builder cache contract {set} declared by the set is not the host's {host}")]
     BuilderCacheContractMismatch { set: u32, host: u32 },
@@ -379,7 +381,7 @@ impl ImageSetError {
             | Self::SigningRefMismatch { .. }
             | Self::SetVersionMismatch { .. } => ImageSetStage::LockMatch,
             Self::Incomplete { .. } => ImageSetStage::Completeness,
-            Self::GuestAgentProtocolDisjoint { .. }
+            Self::BaseImageContractUnsupported { .. }
             | Self::BuilderCacheContractMismatch { .. }
             | Self::BuilderBootAbiUnsupported { .. } => ImageSetStage::ProtocolCompatibility,
             Self::ArtifactMissing { .. }
