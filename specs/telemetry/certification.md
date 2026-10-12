@@ -13,7 +13,7 @@ that backend produced the evidence.
 
 | Backend | Status | Evidence |
 |---|---|---|
-| Firecracker (Linux KVM) | **live** | Reference host (AMD Ryzen 5 3600, Linux 6.1), 2026-10-12. Detached machines with no egress (collector-only) and with egress (collector embedded in the endpoint) each reached `collecting`, held a sealed records file, and their collector exited on `machine stop`. An idle session stays one session (two coverage announcements in 40 s). |
+| Firecracker (Linux KVM) | **live** | Reference host (AMD Ryzen 5 3600, Linux 6.1), 2026-10-12. Detached machines with no egress (collector-only) and with egress (collector embedded in the endpoint) each reached `collecting`, held a sealed records file, and their collector exited on `machine stop`. An idle session stays one session (two coverage announcements in 40 s). With collection on by default, a detached machine's workload `stdout`/`stderr` lines appeared in `mvmctl machine telemetry` (`stdio 6` for three lines on each stream). |
 | HVF (macOS 26+, Apple Silicon) | **live** | Apple M4 Max, debug build, 2026-10-12. A detached machine reached `collecting` with a sealed records file; the collector exited on `machine stop`. |
 | HVF / Firecracker warm claim | unit-witnessed | `telemetry_follows_the_boot_that_asserted_it`, `a_boot_without_an_endpoint_still_starts_its_telemetry_collector`. No live witness: neither host met the 300 ms warm ceiling during the run, with or without collection, so no claim completed. |
 | libkrun, QEMU, `apple-container` | not certified | Same dial paths (per-port socket) as HVF; never booted with collection. |
@@ -72,10 +72,9 @@ sink, writes where a VM's collector writes, and reads back through
 - guest agent diagnostics and its coverage announcement arrive;
 - one machine's telemetry is not shown for another;
 - a record carrying a secret bound to the machine is withheld, counted, and
-  absent from the output.
-
-Still `@wip`: a detached machine's *workload output* (its stdout/stderr
-producers are unwired).
+  absent from the output;
+- a detached machine's workload stdout and stderr are readable without the
+  guest.
 
 ## Cost
 
@@ -87,7 +86,6 @@ host's ±10 ms noise once that was so.
 
 ## Not certified
 
-- Workload stdout/stderr of a detached machine, and the other sources
-  `sources.toml` marks unwired.
+- Spans: the contract carries them, but no guest producer emits them yet.
 - The interval before the guest agent starts (reported as unavailable).
 - libkrun, QEMU and `apple-container` live runs; a live warm-claim witness.

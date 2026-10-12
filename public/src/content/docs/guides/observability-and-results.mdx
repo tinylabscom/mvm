@@ -52,9 +52,8 @@ withheld, and text is masked by the same redaction rules the stream
 transcript uses. The records file is sealed at rest and capped; it is a
 bounded window for inspection, not an archive.
 
-Known gaps are reported, not hidden: a detached machine's workload
-stdout/stderr is not yet a telemetry source, and the interval before the
-guest agent starts is reported as unavailable.
+Known gaps are reported, not hidden: no guest producer emits spans yet, and
+the interval before the guest agent starts is reported as unavailable.
 
 ## Host-side eBPF egress telemetry
 

@@ -200,9 +200,8 @@ Collection is on by default for every fresh workload boot, with or without
 egress (`MVM_TELEMETRY_COLLECT=0` turns it off); an OTLP exporter endpoint is
 optional; a VM claimed from a warm standby is collected once its claim has
 succeeded. The v1 data
-is: agent diagnostics events, coverage lifecycle and loss accounting, plus
-workload stdio where the inventory wires it; spans wait for a real span
-producer. A studio v1 built around a health badge, a diagnostics feed and
+is: agent diagnostics events, coverage lifecycle, loss accounting and
+workload stdout/stderr; spans wait for a real span producer. A studio v1 built around a health badge, a diagnostics feed and
 loss counters matches what the pipeline emits; anything more renders
 fixtures that production will not send.
 

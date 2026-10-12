@@ -15,7 +15,7 @@ use std::time::Duration;
 use cucumber::given;
 use ed25519_dalek::{Signer as _, SigningKey};
 use mvm_agentd::telemetry_capture::session::{SessionDeadlines, serve_capture_session};
-use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState};
+use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, offer_stdio_to};
 use mvm_contract::stream::secret_fingerprint::{SecretCategory, SecretFingerprint};
 use mvm_core::net::telemetry::outbox::Outbox;
 use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
@@ -51,6 +51,18 @@ fn home(world: &CliWorld) -> PathBuf {
 /// them over a real authenticated capture session, and persist what the
 /// host collector keeps for `machine` in the isolated home.
 fn collect(home: &Path, machine: &str, bound_secret: bool, diagnostics: impl FnOnce()) {
+    collect_with(home, machine, bound_secret, diagnostics, |_| {});
+}
+
+/// [`collect`], with workload output offered to capture the way the agent's
+/// pipe readers offer it.
+fn collect_with(
+    home: &Path,
+    machine: &str,
+    bound_secret: bool,
+    diagnostics: impl FnOnce(),
+    output: impl FnOnce(&CaptureState),
+) {
     let state_dir = mvm_core::config::vm_state_dir_at(home, machine);
     std::fs::create_dir_all(&state_dir).unwrap();
     record_boot_provisioning(&state_dir, true).unwrap();
@@ -60,6 +72,7 @@ fn collect(home: &Path, machine: &str, bound_secret: bool, diagnostics: impl FnO
         CaptureState::new(Arc::new(Outbox::new(64, 64 * MAX_RECORD_BYTES).unwrap())).unwrap(),
     );
     tracing::subscriber::with_default(AgentSubscriber::new(Arc::clone(&capture)), diagnostics);
+    output(&capture);
 
     let guest_key = SigningKey::from_bytes(&[91; 32]);
     let anchor_key = SigningKey::from_bytes(&[92; 32]);
@@ -160,6 +173,26 @@ async fn guest_logged_a_bound_secret(world: &mut CliWorld, machine: String) {
             tracing::warn!(token = SYNTHETIC_SECRET, "bdd leaked credential");
             tracing::info!("bdd clean diagnostic");
         });
+    })
+    .await
+    .unwrap();
+}
+
+#[given(expr = "a machine {string} whose detached workload wrote to stdout and stderr")]
+async fn detached_workload_wrote_output(world: &mut CliWorld, machine: String) {
+    use mvm_core::protocol::telemetry::StdioStream;
+    let home = home(world);
+    tokio::task::spawn_blocking(move || {
+        collect_with(
+            &home,
+            &machine,
+            false,
+            || {},
+            |capture| {
+                offer_stdio_to(capture, StdioStream::Stdout, b"bdd-out-line\n");
+                offer_stdio_to(capture, StdioStream::Stderr, b"bdd-err-line\n");
+            },
+        );
     })
     .await
     .unwrap();

@@ -95,11 +95,15 @@ telemetry assertion, and the child's collector starts once the claim has
 succeeded, so it never sits on the claim's path. Records the standby queued
 before it was snapshotted arrive first, under the same producer epoch.
 
+Workload stdout and stderr are collected too: every path that reads a
+workload's pipes offers each chunk to capture as it reads it, so a detached
+machine's output is readable with `mvmctl machine telemetry` long after the
+command that started it has gone.
+
 What is not collected today:
 
-- workload stdout and stderr of a detached machine, which the producer
-  inventory (`specs/telemetry/sources.toml`) still lists as an unwired source,
-  along with the other sources it marks unwired;
+- spans: the record contract carries them, with parents and links, but no
+  guest producer emits them yet;
 - the interval before the guest agent starts, which is reported as
   unavailable rather than covered.
 

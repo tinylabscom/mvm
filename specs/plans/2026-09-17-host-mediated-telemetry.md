@@ -555,11 +555,11 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       replay, malformed/flood input, restore identity, missing witnesses and gaps.
 - [ ] Add user-visible BDD for detached trace retrieval, standalone events, span
       correlation, loss visibility, slow-host operation and multi-VM isolation.
-      Landed: standalone events, guest diagnostics retrieved without the guest,
-      loss visibility (a withheld secret) and multi-VM isolation
-      (`@telemetry_collection`). Open: span correlation (no guest span
-      producer is wired yet), slow-host operation as an operator scenario, and
-      a detached machine's workload output (`@wip`).
+      Landed: detached output retrieval, standalone events, guest diagnostics
+      retrieved without the guest, loss visibility (a withheld secret) and
+      multi-VM isolation (`@telemetry_collection`). Open: span correlation (no
+      guest span producer is wired yet) and slow-host operation as an operator
+      scenario.
 
 ### W7 — Default-on rollout, documentation and queued delivery
 
@@ -569,16 +569,16 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       On by default; `MVM_TELEMETRY_COLLECT=0` turns it off and no exporter is
       needed. Measured on the Firecracker reference host: cold-boot median
       860 ms on vs 872 ms off (15 pairs); warm claims do no telemetry work until
-      the claim succeeds. Unwired sources (notably a detached machine's
-      workload stdout/stderr) and the pre-agent interval are documented as not
-      collected, in the guest-agent reference, the observability guide and the
-      studio contract.
+      the claim succeeds. What is not collected (spans, which no guest producer
+      emits yet, and the pre-agent interval) is documented in the guest-agent
+      reference, the observability guide and the studio contract.
 - [x] Update guest-agent/networking/observability references and CLI/help for any
       new inspection surface; remove superseded capture routes after parity tests.
       Guest-agent and networking references, the observability guide and the
       CLI reference describe collection as it ships; `mvmctl machine telemetry`
-      is documented and help-tested. The invocation-scoped stdio tee stays: it
-      is the only route for workload stdio until those producers are wired.
+      is documented and help-tested. The invocation-scoped stdio stream stays:
+      it is the live view of a call's output, beside the collector's durable
+      copy.
 - [ ] Observe every implementation PR through required checks, actual merge-queue
       entry and merge; immediately synchronize main. Record immutable commits and
       evidence on product issues before closing them.
