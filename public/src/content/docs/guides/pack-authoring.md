@@ -470,6 +470,45 @@ The index is a small JSON document, and unknown fields in it are refused:
 }
 ```
 
+## Optional scenarios
+
+A scenario is a graded task that travels beside a published environment. It
+is never required to run a pack, and it is never a second runnable archive:
+the document names the environment by the SHA-256 of its `.mvmpkg` and carries
+no kernel, filesystem or image of its own.
+
+```text
+scenario/
+├── scenario.json   mvm.pack-scenario/v1
+├── public/         initial files staged into every fresh run
+└── private/        expected answers and verifier inputs
+```
+
+`scenario.json` binds `environment.bundle_sha256`, the instructions handed to
+the workload, the initial files to stage, the workspace paths to collect after
+the run, the limits (`wall_clock_secs`, `max_output_bytes`,
+`max_output_files`) and the checks:
+
+- `file_exists`: a collected regular file is present.
+- `file_matches`: a collected file is byte-identical to a file in `private/`.
+- `json_matches`: the value at an RFC 6901 pointer in a collected JSON file
+  equals a JSON document in `private/`.
+- `command`: literal argv run in a separate verifier instance of the same
+  environment, which sees the collected outputs and `private/`, and must exit
+  with the declared code.
+
+A check may only read a path the scenario collects, and every path is relative
+and free of `..`. The host refuses to run a scenario against any archive but
+the one it names, including a rebuild of the same version. Each run starts
+from a workspace created empty for that run and deleted before the next.
+Collection does not follow symbolic links and stops at the byte and file
+limits, failing that run rather than truncating. `private/` is never staged
+into the workload's instance, and a verifier starts only after that instance
+is gone. Reports name what differed, never the expected value.
+
+The runner lives in `mvm_client::pack_scenario`. A scenario publishes as its
+own document and asset trees; it is not signed into the environment archive.
+
 ## Limits
 
 - A pack always carries policy and may declare a signed workload image. A

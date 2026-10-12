@@ -141,7 +141,7 @@ impl PackLock {
     }
 }
 
-fn lower_hex(value: &str, len: usize) -> bool {
+pub(crate) fn lower_hex(value: &str, len: usize) -> bool {
     value.len() == len
         && value
             .bytes()
