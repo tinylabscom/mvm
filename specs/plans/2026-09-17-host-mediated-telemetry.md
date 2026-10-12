@@ -526,11 +526,22 @@ telemetry during the run, so it has no live witness yet.
 
 ### W7 — Default-on rollout, documentation and queued delivery
 
-- [ ] Enable collection by default only when its registered coverage and acceptance
+- [x] Enable collection by default only when its registered coverage and acceptance
       gates pass. An OTLP endpoint must remain optional. Document unsupported sources
       and remaining unavailable intervals without claiming complete capture.
-- [ ] Update guest-agent/networking/observability references and CLI/help for any
+      On by default; `MVM_TELEMETRY_COLLECT=0` turns it off and no exporter is
+      needed. Measured on the Firecracker reference host: cold-boot median
+      860 ms on vs 872 ms off (15 pairs); warm claims do no telemetry work until
+      the claim succeeds. Unwired sources (notably a detached machine's
+      workload stdout/stderr) and the pre-agent interval are documented as not
+      collected, in the guest-agent reference, the observability guide and the
+      studio contract.
+- [x] Update guest-agent/networking/observability references and CLI/help for any
       new inspection surface; remove superseded capture routes after parity tests.
+      Guest-agent and networking references, the observability guide and the
+      CLI reference describe collection as it ships; `mvmctl machine telemetry`
+      is documented and help-tested. The invocation-scoped stdio tee stays: it
+      is the only route for workload stdio until those producers are wired.
 - [ ] Observe every implementation PR through required checks, actual merge-queue
       entry and merge; immediately synchronize main. Record immutable commits and
       evidence on product issues before closing them.
