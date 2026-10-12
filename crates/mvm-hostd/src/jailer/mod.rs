@@ -420,6 +420,33 @@ pub mod self_test;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_collector_only_spec_grants_its_state_dir_and_reads_only_keys() {
+        let state = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let sockets = tempfile::tempdir().unwrap();
+        let spec = ConfinementSpec::telemetry_collector(
+            state.path(),
+            Some(sockets.path()),
+            keys.path().to_path_buf(),
+        );
+        assert_eq!(spec.readable_paths, vec![keys.path().to_path_buf()]);
+        assert_eq!(
+            spec.read_write_paths,
+            vec![state.path().to_path_buf(), sockets.path().to_path_buf()]
+        );
+        // No secret store, binding store, audit dir or TLS/DNS files.
+        assert!(!spec.readable_paths.iter().any(|p| p.starts_with("/etc")));
+
+        // A socket dir inside the state dir adds nothing.
+        let nested = ConfinementSpec::telemetry_collector(
+            state.path(),
+            Some(&state.path().join("vsock")),
+            keys.path().to_path_buf(),
+        );
+        assert_eq!(nested.read_write_paths, vec![state.path().to_path_buf()]);
+    }
+
     use super::*;
 
     #[test]

@@ -368,6 +368,91 @@ fn receive_until_end<S: Read + Write>(
 }
 
 #[cfg(test)]
+mod collector_only_tests {
+    use super::*;
+
+    #[test]
+    fn collector_only_config_is_selected_by_its_key_and_refuses_unknown_fields() {
+        let telemetry = serde_json::json!({
+            "state_dir": "/s", "telemetry_sock": "/s/t.sock", "signer_sock": "/h/s.sock",
+            "host_anchor_path": "/k/a.pub", "records_byte_cap": 1, "records_key_b64": "AA=="
+        });
+        let only = serde_json::json!({ TELEMETRY_ONLY_KEY: {
+            "instance_id": "vm", "redaction": mvm_core::policy::RedactionPolicy::default(),
+            "telemetry": telemetry,
+        }});
+        let parsed = TelemetryOnlyConfig::parse(only.to_string().as_bytes())
+            .unwrap()
+            .expect("selected by its key");
+        assert_eq!(parsed.instance_id, "vm");
+
+        // A full endpoint config is not mistaken for one.
+        assert!(
+            TelemetryOnlyConfig::parse(br#"{"tenant_id":"local"}"#)
+                .unwrap()
+                .is_none()
+        );
+
+        // A malformed collector-only config is an error, not a fallback.
+        let mut extra = only.clone();
+        extra[TELEMETRY_ONLY_KEY]["surprise"] = serde_json::json!(true);
+        assert!(TelemetryOnlyConfig::parse(extra.to_string().as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_config_debug_never_prints_the_records_key() {
+        let config = TelemetryEmbedConfig {
+            state_dir: "/s".into(),
+            telemetry_sock: "/s/t.sock".into(),
+            signer_sock: "/h/s.sock".into(),
+            host_anchor_path: "/k/a.pub".into(),
+            records_byte_cap: 1,
+            records_key_b64: "c2VjcmV0LWtleS1ieXRlcw==".into(),
+        };
+        let printed = format!("{config:?}");
+        assert!(!printed.contains("c2VjcmV0"), "{printed}");
+        assert!(printed.contains("<redacted>"));
+    }
+
+    #[test]
+    fn without_a_per_port_socket_the_guest_is_dialed_through_the_firecracker_mux() {
+        use std::io::{BufRead as _, BufReader};
+        // Short path: a socket path must fit `sun_path`.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let mux = dir.path().join("v.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&mux).unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let mut stream = stream;
+            stream.write_all(b"OK 1073741824\n").unwrap();
+            // Hold the guest end open, as a live guest does.
+            let _ = done_rx.recv();
+            line
+        });
+        let stream = dial_guest_telemetry(&dir.path().join("absent.sock"), &mux).unwrap();
+        let timeout = stream.read_timeout().unwrap();
+        drop(done_tx);
+        assert_eq!(
+            server.join().unwrap().trim(),
+            format!("CONNECT {}", mvm_core::protocol::telemetry::TELEMETRY_PORT)
+        );
+        assert_eq!(
+            timeout, None,
+            "a quiet session is not cut by the dial's timeout"
+        );
+
+        // With neither socket there is nothing to dial.
+        assert!(
+            dial_guest_telemetry(&dir.path().join("a.sock"), &dir.path().join("b.sock")).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine as _;

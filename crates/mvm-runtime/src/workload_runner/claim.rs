@@ -315,9 +315,16 @@ mod tests {
         seen_vm: Mutex<Option<String>>,
         identity_vm: Mutex<Option<String>>,
         fail_identity: bool,
+        collect_telemetry: bool,
+        telemetry_vm: Mutex<Option<String>>,
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
+        fn start_telemetry_without_endpoint(&self, req: &NetworkEndpointSpawnRequest<'_>) -> bool {
+            *self.telemetry_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            self.collect_telemetry
+        }
+
         fn prepare_identity(
             &self,
             req: &NetworkEndpointSpawnRequest<'_>,
@@ -394,6 +401,36 @@ mod tests {
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
 
         // Disarm the reaper so drop doesn't chase a nonexistent endpoint.
+        child.defuse();
+    }
+
+    #[test]
+    fn a_boot_without_an_endpoint_still_starts_its_telemetry_collector() {
+        let spawner = FakeSpawner {
+            collect_telemetry: true,
+            ..FakeSpawner::default()
+        };
+        let guards = ClaimGuards::new(&spawner);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let state = tempfile::tempdir().unwrap();
+
+        let mut child = guards
+            .spawn_endpoint(
+                &VmId("child-collected".into()),
+                &endpoint_inputs(state.path(), &redaction, &policy),
+            )
+            .expect("deny-all fast path succeeds");
+
+        assert_eq!(child.egress_uds(), None, "still no egress channel");
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
+        assert_eq!(
+            spawner.telemetry_vm.lock().unwrap().as_deref(),
+            Some("child-collected"),
+            "the collector is started for this boot"
+        );
+        // A started collector arms the guard, so a failed launch reaps it.
+        assert!(child.guard.vm_name.is_some());
         child.defuse();
     }
 
