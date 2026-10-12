@@ -209,14 +209,11 @@ fn handle_client(
             // poll, which connects on a backoff while the guest boots and drops
             // each probe once it has its answer. Reporting it as a failed
             // authentication put a security-relevant line on every healthy
-            // boot, which is how a real one gets skipped.
-            Err(error) if error.is_peer_hangup() => {
-                eprintln!(
-                    "mvm-guest-agent: control peer disconnected before completing the \
-                     handshake (readiness probe); no session opened"
-                );
-                return;
-            }
+            // boot, which is how a real one gets skipped. Nor is it worth a
+            // line at all: the probe hangs up on every boot, and on
+            // Firecracker each byte of stderr is a serial-port VM exit on the
+            // launch path.
+            Err(error) if error.is_peer_hangup() => return,
             Err(error) => {
                 eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
                 return;
