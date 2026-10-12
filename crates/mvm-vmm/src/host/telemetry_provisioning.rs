@@ -27,22 +27,18 @@ pub const TELEMETRY_RECORDS_KEY_FILE: &str = "telemetry-records.key";
 /// Marker written only after this boot's telemetry-capable endpoint spawned.
 const TELEMETRY_PROVISIONED_FILE: &str = "telemetry-provisioned";
 
-/// Whether this host opts boots into telemetry collection.
+/// The variable that turns collection off for every boot this host starts.
+pub const ENV_TELEMETRY_COLLECT: &str = "MVM_TELEMETRY_COLLECT";
+
+/// Whether this host collects guest telemetry for the boots it starts.
 ///
-/// A configured OTLP exporter implies collection — nobody configures an
-/// export endpoint hoping nothing is collected. The explicit variable covers
-/// collection with no export at all, which the plan requires to work:
-/// collection is a product feature, not a side effect of OTLP configuration.
+/// On by default: collection is a product feature, not a side effect of
+/// configuring an exporter, and it costs a launch nothing measurable (the
+/// collector starts inside the endpoint process every boot already has, and
+/// the guest's listener is a thread). `MVM_TELEMETRY_COLLECT=0` turns it off;
+/// an OTLP exporter remains optional either way.
 pub fn telemetry_collection_enabled() -> bool {
-    collection_enabled_from(
-        std::env::var(mvm_core::otlp_env::ENV_TRACES_ENDPOINT)
-            .ok()
-            .as_deref(),
-        std::env::var(mvm_core::otlp_env::ENV_ENDPOINT)
-            .ok()
-            .as_deref(),
-        std::env::var("MVM_TELEMETRY_COLLECT").ok().as_deref(),
-    )
+    collection_enabled_from(std::env::var(ENV_TELEMETRY_COLLECT).ok().as_deref())
 }
 
 /// Record whether the endpoint spawned for this boot actually carries a
@@ -123,14 +119,14 @@ pub fn load_records_key(
 }
 
 /// The pure decision, split from the environment so it is testable without
-/// process-global state.
-pub fn collection_enabled_from(
-    otlp_traces_endpoint: Option<&str>,
-    otlp_endpoint: Option<&str>,
-    explicit_collect: Option<&str>,
-) -> bool {
-    let configured = |v: Option<&str>| v.is_some_and(|v| !v.trim().is_empty());
-    configured(otlp_traces_endpoint) || configured(otlp_endpoint) || explicit_collect == Some("1")
+/// process-global state: only an explicit off value disables collection.
+pub fn collection_enabled_from(explicit_collect: Option<&str>) -> bool {
+    !matches!(
+        explicit_collect
+            .map(|v| v.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
 }
 
 #[cfg(test)]
@@ -138,28 +134,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_otlp_endpoint_implies_collection() {
-        assert!(collection_enabled_from(
-            Some("https://collector.example.com"),
-            None,
-            None
-        ));
-        assert!(collection_enabled_from(
-            None,
-            Some("https://collector.example.com"),
-            None
-        ));
-    }
-
-    #[test]
-    fn the_explicit_variable_enables_collection_without_export() {
-        assert!(collection_enabled_from(None, None, Some("1")));
-    }
-
-    #[test]
-    fn nothing_configured_means_no_collection() {
-        assert!(!collection_enabled_from(None, None, None));
-        assert!(!collection_enabled_from(Some(""), Some("  "), Some("0")));
+    fn collection_is_on_unless_explicitly_turned_off() {
+        assert!(collection_enabled_from(None));
+        assert!(collection_enabled_from(Some("1")));
+        assert!(collection_enabled_from(Some("")));
+        for off in ["0", "false", "OFF", " no "] {
+            assert!(!collection_enabled_from(Some(off)), "{off:?}");
+        }
     }
 
     #[test]

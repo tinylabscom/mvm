@@ -196,15 +196,15 @@ starts over from offset 0.
 
 ## Scope of this phase, per the recorded decisions
 
-Collection is opt-in (`MVM_TELEMETRY_COLLECT=1`, or any configured OTLP
-exporter endpoint) until the enablement workstreams land their live
-baselines. The v1 data is: agent diagnostics events, coverage lifecycle and
-loss accounting. Workload stdio arrives with the invocation-scoped tee
-(detached stdio is a registered inventory gap until the collector machinery
-owns it); spans wait for a real span producer. A studio v1 built around a
-health badge, a diagnostics feed and loss counters matches what the
-pipeline emits; anything more renders fixtures that production will not
-send.
+Collection is on by default for every fresh workload boot, with or without
+egress (`MVM_TELEMETRY_COLLECT=0` turns it off); an OTLP exporter endpoint is
+optional; a VM claimed from a warm standby is collected once its claim has
+succeeded. The v1 data
+is: agent diagnostics events, coverage lifecycle and loss accounting, plus
+workload stdio where the inventory wires it; spans wait for a real span
+producer. A studio v1 built around a health badge, a diagnostics feed and
+loss counters matches what the pipeline emits; anything more renders
+fixtures that production will not send.
 
 ## Security note for the web mode
 
