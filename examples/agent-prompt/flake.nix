@@ -15,15 +15,24 @@
   outputs =
     { mvm, nixpkgs, ... }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
-      eachSystem = f: builtins.listToAttrs (map (system: { name = system; value = f system; }) systems);
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      eachSystem =
+        f:
+        builtins.listToAttrs (
+          map (system: {
+            name = system;
+            value = f system;
+          }) systems
+        );
     in
     {
       packages = eachSystem (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          idle = [ "/bin/busybox" "sh" "-c" "while :; do /bin/busybox sleep 2147483647; done" ];
           agent = pkgs.writeShellScript "agent-prompt-turns" ''
             state=/tmp/agent-prompt-turns
             prompt=$(${pkgs.coreutils}/bin/cat)
@@ -39,8 +48,7 @@
         {
           default = mvm.lib.${system}.mkGuest {
             name = "agent-prompt";
-            entrypoint.command = idle;
-            bootCommand = idle;
+            entrypoint.command = [ "${agent}" ];
             extraFiles."/etc/mvm/entrypoint" = {
               source = agent;
               mode = "0755";

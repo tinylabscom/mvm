@@ -3748,6 +3748,21 @@ mod tests {
         }
     }
 
+    /// Point the supervisor lookup at a path that is not a file, so
+    /// `run_build` stops at the first environment check after validation.
+    ///
+    /// Without it, a host that has the supervisor on `$PATH` and is running
+    /// from a source checkout takes the auto-build arm, which spawns
+    /// `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor`. Under an
+    /// isolated `HOME` that cargo cannot see the developer's toolchain, so
+    /// rustup downloads a fresh one and the supervisor compiles from nothing:
+    /// on a contributor Mac with libkrun installed, each test that reached it
+    /// ran for 26 minutes. A host without libkrun, CI included, already
+    /// stopped here with `LibkrunUnavailable`.
+    fn name_no_supervisor(env: &mut TestEnv, home: &Path) {
+        env.set("MVM_LIBKRUN_SUPERVISOR_PATH", home.join("no-supervisor"));
+    }
+
     fn ok_job() -> BuilderJob {
         BuilderJob::Flake {
             flake_ref: "path:/work".to_string(),
@@ -3932,6 +3947,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
+        name_no_supervisor(&mut env, home.path());
         let scratch = TempDir::new().unwrap();
         let spec_path = scratch.path().join("spec.json");
         std::fs::write(&spec_path, b"{}").unwrap();
@@ -4050,6 +4066,7 @@ mod tests {
         let home = TempDir::new().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
+        name_no_supervisor(&mut env, home.path());
         let scratch = TempDir::new().unwrap();
         let mounts = ok_mounts(&scratch);
         let err = LibkrunBuilderVm::default()
@@ -4722,6 +4739,100 @@ mod tests {
             }
             BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
+    }
+
+    /// Lay down a complete, current builder image cache in `arch_dir`.
+    fn write_valid_builder_cache(arch_dir: &Path) {
+        std::fs::create_dir_all(arch_dir).unwrap();
+        std::fs::write(arch_dir.join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        write_valid_builder_kernel_config(arch_dir);
+        std::fs::write(
+            arch_dir.join("cmdline.txt"),
+            "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait\n",
+        )
+        .unwrap();
+        std::fs::write(arch_dir.join("manifest.json"), VALID_BUILDER_MANIFEST).unwrap();
+    }
+
+    /// A home that has never held a builder image — what a manifest build on
+    /// a fresh home sees — acquires one once and boots it, instead of refusing
+    /// with "run `mvmctl bootstrap`".
+    #[test]
+    fn a_missing_builder_image_is_acquired_once_then_loaded() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("MVM_HOME", scratch.path());
+        env.set("HOME", scratch.path());
+        let expected = scratch
+            .path()
+            .join("cache")
+            .join("builder-vm")
+            .join(host_arch_tag());
+        let calls = std::cell::Cell::new(0);
+
+        let image = crate::builder_vm_image::ensure_builder_vm_image_with(|arch_dir| {
+            calls.set(calls.get() + 1);
+            assert_eq!(arch_dir, expected);
+            write_valid_builder_cache(arch_dir);
+            Ok(true)
+        })
+        .expect("the acquired image loads");
+
+        assert_eq!(calls.get(), 1, "acquired exactly once");
+        match image {
+            BuilderVmImage::Rootfs { rootfs_path, .. } => {
+                assert_eq!(rootfs_path, expected.join("rootfs.ext4"));
+            }
+            BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
+        }
+    }
+
+    /// An acquisition that fails verification leaves nothing to boot, and the
+    /// build is refused with that failure.
+    #[test]
+    fn a_failed_builder_image_acquisition_refuses_the_build() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("MVM_HOME", scratch.path());
+        env.set("HOME", scratch.path());
+
+        let err = crate::builder_vm_image::ensure_builder_vm_image_with(|_| {
+            Err(BuilderVmError::ExtractionFailed(
+                "signature does not verify".into(),
+            ))
+        })
+        .expect_err("a failed acquisition must refuse");
+
+        assert!(
+            err.to_string().contains("signature does not verify"),
+            "got {err}"
+        );
+    }
+
+    /// A builder image already in the cache is booted as is; nothing is
+    /// fetched again.
+    #[test]
+    fn a_cached_builder_image_is_not_acquired_again() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("MVM_HOME", scratch.path());
+        env.set("HOME", scratch.path());
+        write_valid_builder_cache(
+            &scratch
+                .path()
+                .join("cache")
+                .join("builder-vm")
+                .join(host_arch_tag()),
+        );
+
+        crate::builder_vm_image::ensure_builder_vm_image_with(|_| {
+            panic!("a cached builder image must not be acquired again")
+        })
+        .expect("the cached image loads");
     }
 
     #[test]

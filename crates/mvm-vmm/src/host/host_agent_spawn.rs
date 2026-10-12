@@ -835,14 +835,21 @@ mod tests {
                     ControlRequest::Register(r) => assert_eq!(r.vm_id, "vm-1"),
                     other => panic!("expected Register, got {other:?}"),
                 }
-                drop(stream);
-                drop(listener);
-
-                std::fs::remove_file(&socket).unwrap();
-
-                let Some(listener) = bind_unix_listener(&socket) else {
+                // Bind the restarted endpoint beside the socket before the old
+                // one goes away, then rename it into place. The old listener
+                // closes with its file still present, which is the restart
+                // `send_control` retries across. A gap with no file at all
+                // is one it deliberately does not retry, and a client attempt
+                // that happened to land in it made this test wait out the
+                // accept deadline and then return without checking anything.
+                let restarted = socket.with_extension("restarted");
+                let Some(listener_after) = bind_unix_listener(&restarted) else {
                     return false;
                 };
+                drop(stream);
+                drop(listener);
+                std::fs::rename(&restarted, &socket).unwrap();
+                let listener = listener_after;
                 let Some((mut stream, _)) = accept_with_timeout(&listener) else {
                     return false;
                 };
@@ -871,17 +878,20 @@ mod tests {
         }
 
         if let Err(err) = register_vm(&socket, &key(), sample_register(dir.path())) {
-            let helper_ready = worker.join().unwrap();
-            if !helper_ready {
-                return;
-            }
             if error_chain_has_permission_denied(err.as_ref()) {
                 eprintln!("skipping test: sandbox denied control socket usage: {err}");
                 return;
             }
-            panic!("register retries across daemon restart: {err}");
+            let helper_finished = worker.join().unwrap();
+            panic!(
+                "register retries across daemon restart: {err} \
+                 (the endpoint served both connections: {helper_finished})"
+            );
         }
-        assert!(worker.join().unwrap());
+        assert!(
+            worker.join().unwrap(),
+            "the endpoint must serve both connections"
+        );
     }
 
     fn accept_with_timeout(
@@ -891,7 +901,12 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
             match listener.accept() {
-                Ok(connection) => return Some(connection),
+                Ok((stream, addr)) => {
+                    // BSD hands the accepted socket the listener's O_NONBLOCK;
+                    // the reads that follow expect a blocking stream.
+                    stream.set_nonblocking(false).unwrap();
+                    return Some((stream, addr));
+                }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() >= deadline {
                         return None;

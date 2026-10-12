@@ -38,7 +38,7 @@ mod session;
 mod sidecar_selection;
 mod startup_slo;
 mod transient;
-use startup_slo::enforce_startup_slo;
+use startup_slo::StartupClock;
 
 pub use launch_plan::load_launch_plan;
 
@@ -56,8 +56,9 @@ pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_e
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
-    BootAttempt, boot_transient_vm, combine_run_and_flush, flush_writable_disks_before_teardown,
-    install_ctrlc_teardown, teardown_transient_vm,
+    BootAttempt, LeaveAt, boot_transient_vm, combine_run_and_flush,
+    flush_writable_disks_before_teardown, install_ctrlc_teardown, leave_standby_when,
+    standby_to_leave, start_mode, teardown_transient_vm,
 };
 
 pub const EXEC_TIMEOUT_EXIT_CODE: i32 = 124;
@@ -242,6 +243,9 @@ pub struct ExecRequest {
     /// `MachineRunMode::warm_pool_size` — nonzero only for throwaway auto-named
     /// transient/interactive-transient runs.
     pub warm_pool_size: u32,
+    /// The standby an unnamed run of a claimable shape leaves for the next run
+    /// of its image, or `None` when `pool warm` cannot prepare its source.
+    pub standby_refill: Option<crate::commands::pool::StandbyRefill>,
     /// Bytes to forward to the guest `Exec` frame's stdin field. Empty ⇒ no
     /// stdin (`GuestRequest::Exec.stdin = None`). Set from piped host stdin
     /// when the host is not a TTY; always empty for PTY / interactive modes.
@@ -577,7 +581,7 @@ fn reported_exit_code(
 /// which records it on the chain-signed admission log (`plan.boot_posture`).
 /// The command layer reads it after the run returns. `None` means the caller
 /// does not audit posture (session boots, which never reach virtiofs).
-pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
+pub type PostureSink = std::cell::Cell<mvm_client::admission::BootPosture>;
 
 fn run_inner(
     req: ExecRequest,
@@ -593,7 +597,9 @@ fn run_inner(
     let sample_path = crate::commands::vm::launch_sample::sample_path_from_env();
     let timing_mode = crate::commands::vm::phase_timing::mode();
     let timing = timing_mode.is_on() || sample_path.is_some();
-    let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(timing);
+    // Sub-phase marks are always taken: the startup ceiling names the slow
+    // phase when it refuses a launch, whether or not timing was requested.
+    let mut sub_marks = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
     let t_start = timing.then(std::time::Instant::now);
 
     // Keep every writable disk image's sidecar lock alive until after the VM
@@ -623,6 +629,7 @@ fn run_inner(
         root_strategy,
         image: resolved,
     } = launch;
+    let startup_admitted = std::time::Instant::now();
     let vm_name = start_config.name.clone();
 
     // Report the resolved strategy to the command layer for chain-audit. This is
@@ -630,7 +637,10 @@ fn run_inner(
     // so the `plan.boot_posture` entry can never diverge from what actually
     // booted.
     if let Some(sink) = posture {
-        sink.set(root_strategy);
+        sink.set(mvm_client::admission::BootPosture {
+            root_strategy,
+            start: None,
+        });
     }
 
     let t_image_resolved = resolve_marks.image_resolved;
@@ -647,14 +657,30 @@ fn run_inner(
         resolved: &resolved,
         user_named: req.name.is_some(),
     };
-    let (vm_name, launch_mode) = boot_transient_vm(
+    let booted = boot_transient_vm(
         vm_name,
         use_snapshot,
         &boot_attempt,
         timing.then_some(&mut warm_claim_marks),
         &mut sub_marks,
     )?;
-    let t_backend_started = timing.then(std::time::Instant::now);
+    let vm_name = booted.name;
+    let launch_mode = booted.launch_mode;
+    if let Some(sink) = posture {
+        sink.set(mvm_client::admission::BootPosture {
+            root_strategy,
+            start: Some(start_mode(booted.cold_reason)),
+        });
+    }
+    let refill = standby_to_leave(req.standby_refill.as_ref(), booted.cold_reason);
+    leave_standby_when(refill, launch_mode, LeaveAt::AfterBoot);
+    let startup_clock = StartupClock {
+        launch_mode,
+        started: startup_started,
+        admitted: startup_admitted,
+        booted: std::time::Instant::now(),
+    };
+    let t_backend_started = timing.then_some(startup_clock.booted);
 
     // Read the backend's own phase sidecar now: teardown removes the state
     // directory that holds it, and by the time the sample is assembled it is
@@ -695,21 +721,16 @@ fn run_inner(
             Err(e) => Err(e),
         }
     } else if boots_baked_entrypoint(&req) {
-        dispatch_baked_entrypoint(&vm_name, &req, startup_started, launch_mode, &mut sub_marks)
-            .and_then(|(status, ready)| {
+        dispatch_baked_entrypoint(&vm_name, &req, &startup_clock, &mut sub_marks).and_then(
+            |(status, ready)| {
                 baked_entrypoint_result(status, capture, &vm_name)
                     .map(|result| (result, Some(ready)))
-            })
-    } else {
-        run_in_guest(
-            &vm_name,
-            &req,
-            capture,
-            startup_started,
-            launch_mode,
-            &mut sub_marks,
+            },
         )
+    } else {
+        run_in_guest(&vm_name, &req, capture, &startup_clock, &mut sub_marks)
     };
+    leave_standby_when(refill, launch_mode, LeaveAt::AfterWorkload);
     let reported_exit_code = reported_exit_code(&run_outcome);
     let workload_completed = run_outcome.is_ok();
     let t_command_done = timing.then(std::time::Instant::now);
@@ -781,6 +802,7 @@ fn run_inner(
     ) {
         let marks = crate::commands::vm::phase_timing::RunPhaseMarks {
             launch_mode,
+            invoked: startup_started,
             start,
             image_resolved,
             drives_ready,
@@ -1496,6 +1518,7 @@ mod tests {
         ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("flake-slot".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1755,6 +1778,7 @@ mod tests {
         let req = ExecRequest {
             name: Some("named-vm".into()),
             warm_pool_size: 3,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 4,
             memory_mib: 2048,
@@ -1935,6 +1959,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -1966,6 +1991,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -2005,6 +2031,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -2059,6 +2086,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -2097,6 +2125,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -2150,6 +2179,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,

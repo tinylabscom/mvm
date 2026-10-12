@@ -99,9 +99,8 @@ With a `mvm.toml` next to `flake.nix`:
 # Build (manifest discovered from cwd)
 mvmctl machine build
 
-# Boot (auto-selects best backend). Named: an unnamed run must claim a
-# prepared warm standby, which `pool warm` cannot prepare for a manifest image.
-mvmctl machine run --name hello --manifest .
+# Boot (auto-selects best backend)
+mvmctl machine run --manifest .
 
 # Or declare signed ingress before boot
 mvmctl machine run --manifest . --name my-vm --port 8080:8080
@@ -111,7 +110,7 @@ Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy p
 
 ```bash
 mvmctl machine build --flake .
-mvmctl machine run --name hello --flake . --cpus 2 --memory 1024
+mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
 ## Check Status

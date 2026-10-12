@@ -712,14 +712,22 @@ impl<'a> Default for SynthesisInputBuilder<'a> {
 }
 
 /// The seccomp tier a launch is admitted under: `requested`, raised to
-/// `network` when the launch needs sockets.
+/// `network` when the launch needs sockets, or to `vsock` when its only socket
+/// is the GPU endpoint.
 ///
 /// The guest installs the admitted tier in every workload process, and every
 /// tier below `network` refuses `socket`. A workload reaches admitted egress
 /// through a loopback proxy and resolver it dials, answers an ingress mapping
 /// on a socket it listens on, and calls a host service over a vsock socket, so
 /// a launch with any of those would otherwise be admitted a tier that breaks
-/// it. Admission signs the raised tier into the plan and its audit labels, so
+/// it.
+///
+/// A launch with a GPU grant (`gpu`) runs shims in the workload that dial the
+/// host GPU endpoint over an `AF_VSOCK` socket. When nothing else needs
+/// sockets it is raised only to `vsock`, which opens that family and no other;
+/// when something else does, `network` already allows vsock sockets.
+///
+/// Admission signs the raised tier into the plan and its audit labels, so
 /// what the guest enforces and what the audit chain records are the same
 /// value. Nothing here ever lowers a tier.
 #[must_use]
@@ -728,14 +736,23 @@ pub fn workload_seccomp_tier(
     network_policy: &crate::network_policy::NetworkPolicy,
     ingress: &[IngressMapping],
     services: &[mvm_contract::protocol::broker::ServiceId],
+    gpu: bool,
 ) -> PlanSeccompTier {
     let needs_sockets =
         network_policy.admits_outbound() || !ingress.is_empty() || !services.is_empty();
     match requested {
-        PlanSeccompTier::Essential | PlanSeccompTier::Minimal | PlanSeccompTier::Standard
+        PlanSeccompTier::Essential
+        | PlanSeccompTier::Minimal
+        | PlanSeccompTier::Standard
+        | PlanSeccompTier::Vsock
             if needs_sockets =>
         {
             PlanSeccompTier::Network
+        }
+        PlanSeccompTier::Essential | PlanSeccompTier::Minimal | PlanSeccompTier::Standard
+            if gpu =>
+        {
+            PlanSeccompTier::Vsock
         }
         other => other,
     }
@@ -1056,28 +1073,83 @@ mod tests {
 
         for requested in [Tier::Essential, Tier::Minimal, Tier::Standard] {
             assert_eq!(
-                workload_seccomp_tier(requested, &deny, &[], &[]),
+                workload_seccomp_tier(requested, &deny, &[], &[], false),
                 requested,
                 "a launch with no socket surface keeps {requested}"
             );
             assert_eq!(
-                workload_seccomp_tier(requested, &allow, &[], &[]),
+                workload_seccomp_tier(requested, &allow, &[], &[], false),
                 Tier::Network
             );
             assert_eq!(
-                workload_seccomp_tier(requested, &deny, &ingress, &[]),
+                workload_seccomp_tier(requested, &deny, &ingress, &[], false),
                 Tier::Network
             );
             assert_eq!(
-                workload_seccomp_tier(requested, &deny, &[], &services),
+                workload_seccomp_tier(requested, &deny, &[], &services, false),
                 Tier::Network
             );
         }
         for requested in [Tier::Network, Tier::Unrestricted] {
             assert_eq!(
-                workload_seccomp_tier(requested, &allow, &ingress, &services),
+                workload_seccomp_tier(requested, &allow, &ingress, &services, true),
                 requested,
                 "{requested} already grants sockets"
+            );
+        }
+    }
+
+    /// A GPU grant needs one vsock socket to the host GPU endpoint. Alone it
+    /// raises a tier to `vsock`, which opens no other address family; with
+    /// any other socket need the launch gets `network`, which opens vsock
+    /// sockets as well. Without a GPU grant nothing changes.
+    #[test]
+    fn a_gpu_grant_admits_the_vsock_tier_and_no_wider() {
+        use crate::network_policy::{HostPort, NetworkPolicy};
+        use crate::plan::PlanSeccompTier as Tier;
+
+        let deny = NetworkPolicy::deny_all();
+        let allow = NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]);
+        let services = vec![
+            mvm_contract::protocol::broker::ServiceId::parse("host.kv.v1").expect("service id"),
+        ];
+
+        for requested in [Tier::Essential, Tier::Minimal, Tier::Standard] {
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &[], true),
+                Tier::Vsock,
+                "a GPU launch requesting {requested} reaches its endpoint under vsock"
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &[], false),
+                requested,
+                "without a GPU grant {requested} stands"
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &allow, &[], &[], true),
+                Tier::Network,
+                "GPU plus egress needs network, which also opens vsock"
+            );
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &services, true),
+                Tier::Network,
+                "GPU plus a host service needs network"
+            );
+        }
+        assert_eq!(
+            workload_seccomp_tier(Tier::Vsock, &deny, &[], &[], false),
+            Tier::Vsock,
+            "a tier is never lowered"
+        );
+        assert_eq!(
+            workload_seccomp_tier(Tier::Vsock, &allow, &[], &[], true),
+            Tier::Network,
+            "vsock is raised to network when egress is admitted"
+        );
+        for requested in [Tier::Network, Tier::Unrestricted] {
+            assert_eq!(
+                workload_seccomp_tier(requested, &deny, &[], &[], true),
+                requested
             );
         }
     }

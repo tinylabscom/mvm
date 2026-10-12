@@ -32,10 +32,14 @@ pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
 mod run_mode;
+mod standby_refill;
+mod transient_mounts;
+
 use network_access::NetworkAccess;
 pub(in crate::commands) use review_source::build_flake_slot;
 use review_source::offer_review;
 pub(in crate::commands) use run_mode::resolve_run_mode;
+use transient_mounts::parse_transient_mounts;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -662,6 +666,8 @@ pub(in crate::commands) fn run_secure_started(
     let admit_host_services =
         super::host_services::parse_host_service_bindings(&args.host_service)?;
     let admit_pty = args.pty;
+    // The start config arms the GPU endpoint from this same flag.
+    let admit_gpu = args.gpu;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
@@ -708,6 +714,7 @@ pub(in crate::commands) fn run_secure_started(
         let instruction_mounts =
             crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            gpu: admit_gpu,
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
                 .with_materialized_mounts(&instruction_mounts),
@@ -828,7 +835,7 @@ pub(in crate::commands) fn run_secure_started(
             source_override.clone(),
             &oci_provenance,
         )?);
-        let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
+        let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
         let result =
             crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
@@ -898,31 +905,6 @@ pub(in crate::commands) fn run_secure_started(
     )
 }
 
-struct TransientMounts {
-    dir_shares: Vec<crate::commands::DirShareSpec>,
-    disk_volumes: Vec<mvm_core::vm_backend::VmVolume>,
-}
-
-fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
-    let mut dir_shares = Vec::new();
-    let mut disk_volumes = Vec::new();
-    for raw in specs {
-        let parsed = super::shared::parse_volume_spec(raw)?;
-        match parsed {
-            super::shared::VolumeSpec::DirShare { .. } => {
-                dir_shares.push(crate::commands::parse_dir_share_spec(raw)?);
-            }
-            super::shared::VolumeSpec::Disk { .. } => {
-                disk_volumes.push(super::shared::vm_volume_from_spec_validated(&parsed)?);
-            }
-        }
-    }
-    Ok(TransientMounts {
-        dir_shares,
-        disk_volumes,
-    })
-}
-
 /// The boot-time admission hook plus the plumbing needed to chain-audit the
 /// run after it resolves: the cell the hook fills with the `AdmissionContext`
 /// (the audit emitter lives inside it) and the resolved backend name for the
@@ -984,7 +966,7 @@ fn run_run_args(
         source_override,
         audit.oci_provenance,
     )?);
-    let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
+    let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
@@ -1193,6 +1175,7 @@ fn build_exec_request(
     // --runtime-pack is its own image source, mutually exclusive with
     // --manifest/--image at the clap layer, so it short-circuits the match
     // below entirely rather than adding a third leg to it.
+    let source_override_was_set = source_override.is_some();
     let image = if runtime_pack {
         super::runtime_pack::resolve_runtime_pack_image_source(prod)
             .context("resolving --runtime-pack image source")?
@@ -1225,6 +1208,14 @@ fn build_exec_request(
         }
     };
     let sdk_host_services = super::host_services::parse_host_service_bindings(&args.host_service)?;
+    let standby_refill = standby_refill::standby_refill_for(&standby_refill::RefillSource {
+        image_ref,
+        manifest: manifest_arg.is_some(),
+        resolved_elsewhere: runtime_pack || source_override_was_set,
+        hypervisor: args.hypervisor.as_deref(),
+        cpus: args.cpus,
+        memory_mib,
+    });
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -1241,6 +1232,7 @@ fn build_exec_request(
         pty: args.pty,
         network_policy,
         warm_pool_size: args.warm_pool_size,
+        standby_refill,
         stdin: args.stdin,
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,
@@ -2373,6 +2365,7 @@ mod tests {
                         command_ms: 6.0,
                         teardown_ms: 7.0,
                         total_ms: 28.0,
+                        startup_ms: None,
                     },
                     crate::commands::vm::launch_sample::LaunchSubTimings::default(),
                     Vec::new(),

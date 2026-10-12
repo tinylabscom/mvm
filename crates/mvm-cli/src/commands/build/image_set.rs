@@ -84,8 +84,10 @@ mod build {
         ui::info(&format!("  entry:  {}", entry.dir.display()));
         ui::info(&format!("  images: {}", entry.key.images));
         ui::info(&format!("  mvm:    {}", entry.key.mvm));
-        if let mvm_build::image_source::MvmSourceIdentity::ConsumedInputs(_) = entry.key.mvm {
-            ui::info(&format!("          built at {}", entry.set.checkouts.mvm));
+        if let mvm_build::image_source::MvmSourceIdentity::ConsumedInputs(_) = entry.key.mvm
+            && let Some(mvm) = &entry.set.checkouts.mvm
+        {
+            ui::info(&format!("          built at {mvm}"));
         }
         for artifact in &entry.set.artifacts {
             ui::info(&format!("  {} {}", artifact.role, artifact.path.display()));

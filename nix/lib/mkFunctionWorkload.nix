@@ -18,18 +18,9 @@
 # unsupported attributes by hand. Each rejected shape names the
 # explicit path forward in its error message.
 #
-# Boot-time staging note:
-#   `mkGuest`'s `entrypoint.services` form is currently unwired — it
-#   falls through to a recovery shell. Until the per-service
-#   supervisor lands, this helper composes the factory's per-call
-#   wrapper-runner symlinks via `extraFiles`, but stages the user's
-#   `appPkg → working_dir` symlink + idles the VM using
-#   `entrypoint.command = [ <boot-script> ]`. The wrapper drops privs
-#   per-call internally (see `nix/wrappers/{python,node}/oneshot.*`),
-#   so it's safe to keep the boot script at uid 0 here. Once services
-#   are wired properly, the boot-script + `uids.entrypoint = 0`
-#   workaround in this file goes away and the factory's own `service`
-#   block takes over.
+# The universal agent owns PID 1 and dispatches the wrapper per call.
+# This helper stages the source symlink, metadata and lifecycle hook files
+# without a boot-time shell or idle command.
 {
   nixpkgs,
   microvm,
@@ -57,15 +48,17 @@ in
 let
   ir = builtins.fromJSON (builtins.readFile irFile);
 
-  failHelp = msg: throw ''
-    mkFunctionWorkload: ${msg}
+  failHelp =
+    msg:
+    throw ''
+      mkFunctionWorkload: ${msg}
 
-    mkFunctionWorkload only supports single-app, single-primary-function
-    workloads backed by a `nix_packages` image. For richer shapes (multi-
-    app, multi-function, non-nix-packages image, network policy, mounts,
-    …), drop down to `mvm.lib.<system>.mkFunctionService` +
-    `mvm.lib.<system>.mkGuest` directly. See `nix/lib/factories/README.md`.
-  '';
+      mkFunctionWorkload only supports single-app, single-primary-function
+      workloads backed by a `nix_packages` image. For richer shapes (multi-
+      app, multi-function, non-nix-packages image, network policy, mounts,
+      …), drop down to `mvm.lib.<system>.mkFunctionService` +
+      `mvm.lib.<system>.mkGuest` directly. See `nix/lib/factories/README.md`.
+    '';
 
   apps = ir.apps or (failHelp "IR has no `apps` field");
   _appsOk =
@@ -110,12 +103,13 @@ let
   # JSON sidecar is loaded via `irFile` here so the field flows in
   # unchanged. Default to four empty phases so legacy IR documents
   # without `hooks` keep evaluating.
-  hooks = ir.hooks or {
-    before_build = [ ];
-    before_start = [ ];
-    after_start = [ ];
-    before_stop = [ ];
-  };
+  hooks =
+    ir.hooks or {
+      before_build = [ ];
+      before_start = [ ];
+      after_start = [ ];
+      before_stop = [ ];
+    };
 
   # Declarative files baked into the rootfs at build time. Default to
   # empty so IR documents without `files` keep evaluating.
@@ -130,28 +124,14 @@ let
     inherit hooks files;
   };
 in
-# PID 1 is the factory's idle boot command (stage source → before_start
-# hook → idle), passed via `bootCommand` so it lands at /etc/mvm/boot.
-# /etc/mvm/entrypoint stays the agent's per-call marker (the wrapper),
-# baked by `factory.extraFiles`. Routing PID 1 through a distinct file is
-# what stops `extraFiles` from clobbering it (the boot→ping panic).
+# The initramfs agent owns PID 1. The factory stages the source, hooks and
+# per-call wrapper into the immutable root; nothing autostarts at boot.
 mkGuest {
   name = ir.id;
   inherit hypervisor vcpus memory_mib;
-  # `entrypoint` only drives classification here (sealed command form);
-  # mkGuest does not write it to disk when `bootCommand` is set — the
-  # factory's extraFiles owns /etc/mvm/entrypoint.
+  # Classify the real per-call wrapper; extraFiles owns its agent marker.
   entrypoint = {
-    command = factory.bootCommand;
-  };
-  bootCommand = factory.bootCommand;
-  # uid 0: the boot script symlinks into `/` which is root-only. The
-  # per-call wrapper drops privs internally via setpriv, so this is
-  # the same posture the sealed function-workload path already uses;
-  # a per-service uid replaces this once services are wired in
-  # mkGuest.
-  uids = {
-    entrypoint = 0;
+    command = [ "/usr/lib/mvm/wrappers/runner" ];
   };
   extraFiles = factory.extraFiles // extraExtraFiles;
   packages = factory.servicePackages ++ imagePackages ++ extraPackages;

@@ -139,14 +139,11 @@ pub fn integration_checkpoint_path(name: &str) -> String {
 /// Load integration entries from a drop-in directory.
 ///
 /// Reads all `*.json` files in `dir`, parsing each as an [`IntegrationEntry`].
-/// Invalid files are logged to stderr and skipped. Returns an empty vec if the
-/// directory does not exist.
+/// Invalid files are logged to stderr and skipped. Returns an empty vec,
+/// silently, if the directory does not exist: most images declare no
+/// integrations.
 pub fn load_dropin_dir(dir: &str) -> Vec<IntegrationEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        eprintln!(
-            "mvm-guest-agent: integrations dir {} not found, no integrations",
-            dir
-        );
         return vec![];
     };
     let mut result = Vec::new();

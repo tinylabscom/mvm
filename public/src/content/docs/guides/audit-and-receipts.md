@@ -29,14 +29,8 @@ stream that lets an operator inspect lifecycle history on the host.
 ## Write a run receipt
 
 ```sh
-export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
-mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
 mvmctl run --receipt /tmp/run-receipt.json -- python task.py
 ```
-
-An unnamed run claims a prepared warm standby of the image it boots — here the
-`python:3.12-alpine` image a `python` command infers — and refuses rather than
-cold-booting without one, so the standby is warmed first; `--name` boots cold.
 
 The receipt contains hashes and result metadata. It does not store raw argv,
 environment values, stdout, stderr, or host paths.
@@ -253,8 +247,13 @@ before the call returns.
   is synced by default.
 - **Written immediately, synced by the next barrier on the same file.**
   Descriptive records of a decision already durable: `plan.policy_resolved`,
-  `plan.boot_posture`, `plan.shares_admitted`, `plan.oci_provenance`,
-  `plan.launched`, and `cmd.*.invoked`.
+  `plan.boot_posture`, `plan.start_mode`, `plan.shares_admitted`,
+  `plan.oci_provenance`, `plan.launched`, and `cmd.*.invoked`.
+
+`plan.start_mode` records how a run started: `mode=warm` when it claimed a
+standby, or `mode=cold` with a `cold_reason` of `no_standby_ready`, `named`,
+`ineligible_shape`, `standbys_disabled`, `backend_unsupported` or
+`unadmitted`.
 
 An admission writes its burst of entries and syncs them once before the boot
 proceeds.

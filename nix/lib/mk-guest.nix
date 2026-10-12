@@ -1,4 +1,4 @@
-# mkGuest — busybox-as-PID-1 microVM image builder.
+# mkGuest — workload root filesystem composition for the initramfs agent.
 #
 # Same flake the user writes is consumed in BOTH dev and production
 # builds. The "sealed vs accessible" distinction is encoded by:
@@ -17,13 +17,8 @@
 # gate `mvmctl console <vm>` host-side; the `/etc/mvm/variant` file
 # baked into the rootfs is the in-guest cross-check.
 #
-# ── Why busybox-as-PID-1, not NixOS+systemd ──
-#
-# The short version: NixOS+systemd boots in 1-3 s; Alpine+OpenRC in 300-500 ms;
-# busybox-as-PID-1 with custom init approaches the upstream Firecracker
-# reference of ~125 ms. The 200ms cold-boot target on Firecracker
-# requires the busybox path. The previous iteration of mvm shipped
-# this exact strategy.
+# The universal initramfs agent is PID 1 on both dev and sealed boots.
+# This composition carries workload files and metadata, not a second init.
 #
 # microvm.nix is still pinned as a flake input for its
 # hypervisor abstractions and kernel-config helpers, but we DO NOT
@@ -41,8 +36,7 @@ let
   lib = nixpkgs.lib;
 
   # Static busybox — single binary, every shell utility as an applet.
-  # `pkgsStatic` ensures no glibc dynamic-linker hop at /init time
-  # (which alone saves ~10ms vs a glibc-linked init).
+  # Static utilities keep the workload's base closure small.
   busybox = pkgs.pkgsStatic.busybox;
 
   classifyEntrypoint =
@@ -135,33 +129,19 @@ in
   # closure never includes it.
   withAuditProbe ? false,
   # Whether to bake the static `mvm-setpriv` helper into the rootfs. The
-  # runtime overlay carries the helper too, at `/mvm/runtime/setpriv`, and
-  # `/init` prefers that copy; the baked one serves a rootfs_only boot and an
-  # overlay built before it carried the helper. A builder image at builder
+  # runtime overlay carries the helper too, at `/mvm/runtime/setpriv`.
+  # Workload scripts can use the baked copy outside the runtime. A builder at
   # boot ABI 2 sets this `false`: `mvmctl` hands the builder its own copy in
   # the boot payload, and the generated scripts then name that copy instead.
   withSetpriv ? true,
   # Optional kernel package. When set, mkGuest copies its module
-  # tree (`/lib/modules/<kver>/`) into the rootfs and `/init` runs
-  # `modprobe vmw_vsock_virtio_transport` before forking the agent.
+  # tree (`/lib/modules/<kver>/`) into the rootfs.
   # Required when the kernel ships AF_VSOCK as a module (the default
   # nixpkgs `linuxPackages.kernel` config). Without it,
   # `mvm-guest-agent`'s `socket(AF_VSOCK, …)` returns EAFNOSUPPORT and
   # every host-side surface (`mvmctl console`, `dev shell`, `build`)
   # goes dark on a guest booted from that kernel.
   kernel ? null,
-  # PID 1 boot command, distinct from the `entrypoint`. When set, mkGuest
-  # renders it to `/etc/mvm/boot` and `/init` sources THAT as PID 1 — while
-  # `/etc/mvm/entrypoint` is left for the caller's `extraFiles` to own (it
-  # is the guest agent's per-call marker). This separation exists
-  # because the two roles genuinely need different values for an
-  # agent-dispatched function workload: PID 1 must idle (keep the VM
-  # alive), while the agent's marker names the single-shot per-call wrapper.
-  # Baking both onto `/etc/mvm/entrypoint` made `extraFiles` clobber the
-  # rendered PID-1 command, so PID 1 exec'd the single-shot wrapper, which
-  # exits at boot → kernel panic. `null` (the default) keeps the legacy
-  # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
-  bootCommand ? null,
   # Declared-but-unenforced surface. `mvmctl generate template` emits
   # `healthChecks` into its app/web/postgres/worker scaffolds and the mkGuest
   # guide teaches all three, but the multi-service supervisor they depend on is
@@ -352,7 +332,7 @@ let
 
   # Static-musl privilege-drop helper. It replaces the much larger
   # util-linux setpriv closure while preserving the exact privilege flags
-  # emitted by the generated init script.
+  # used by generated workload scripts.
   setprivPkg = import ../packages/mvm-setpriv.nix {
     inherit pkgs;
     rustPlatform = pkgs.pkgsStatic.rustPlatform;
@@ -361,11 +341,7 @@ let
   };
   # Without a baked copy, the helper is the one the builder boot payload
   # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-build/src/builder_guest_paths.rs).
-  setpriv =
-    if withSetpriv then
-      "${setprivPkg}/bin/mvm-setpriv"
-    else
-      "/run/mvm/host-bins/mvm-setpriv";
+  setpriv = if withSetpriv then "${setprivPkg}/bin/mvm-setpriv" else "/run/mvm/host-bins/mvm-setpriv";
   setprivHelperName = "mvm-setpriv";
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
@@ -392,22 +368,20 @@ let
   # The agent mounts every root read-only, so the names it resolves
   # are the ones baked here; it cannot add its own.
   #
-  # Two uids stay configurable for the shell `/init`:
+  # Account overrides and workload-script privilege declarations:
   #
   #   agent       — the host-mediated tool agent (vsock RPC handler).
-  #                 Always non-root; defaults to 901.
+  #                 Account declaration; defaults to 901.
   #
-  #   entrypoint  — the workload the user declared. Defaults differ
-  #                 by mode:
-  #                   dev = true  → uid 0 (root shell;
-  #                                  apt install / mount work)
-  #                   dev = false → uid 901 (rootless workload)
+  #   entrypoint  — account and direct-root-script drop declaration.
+  #                 Defaults to 901 in both modes. The universal agent's
+  #                 runtime identity is fixed, independent of overrides.
   #
   # Override either via `uids = { agent = N; entrypoint = M; }`. A
   # uid outside the fixed set gets its own account row. The service
   # uids 987–989 are refused.
   workloadUid = 901;
-  defaultEntrypointUid = if isDev then 0 else workloadUid;
+  defaultEntrypointUid = workloadUid;
   resolvedUids = {
     agent = if uids != null && uids ? agent then uids.agent else workloadUid;
     entrypoint = if uids != null && uids ? entrypoint then uids.entrypoint else defaultEntrypointUid;
@@ -532,24 +506,24 @@ let
     rows: candidate:
     if lib.any (row: row.uid == candidate.uid) rows then rows else rows ++ [ candidate ]
   ) fixedIdentities extraIdentityCandidates;
-  passwdText = lib.concatMapStrings (
-    row:
-    "${row.name}:x:${toString row.uid}:${toString row.uid}:${row.gecos}:${row.home}:${row.shell}\n"
-  ) guestIdentities;
+  passwdText = builtins.seq assertDedicatedServiceUids (
+    lib.concatMapStrings (
+      row: "${row.name}:x:${toString row.uid}:${toString row.uid}:${row.gecos}:${row.home}:${row.shell}\n"
+    ) guestIdentities
+  );
   groupText = lib.concatMapStrings (row: "${row.name}:x:${toString row.uid}:\n") guestIdentities;
   identityHomes = map (row: row.home) (
     lib.filter (row: row.uid != 0 && lib.hasPrefix "/home/" row.home) guestIdentities
   );
 
-  # Wrap a command-line in `setpriv` when the target uid is non-zero. The
-  # helper is the one /init resolved into MVM_SETPRIV_BIN (Stage 2.4775),
-  # falling back to the baked path where the fragment runs outside /init.
+  # Wrap a command-line in `setpriv` when invoked as root outside the agent.
+  # The agent already dispatches workload processes as uid 901.
   #
   # **mvm-setpriv, not busybox's setpriv applet.** `pkgsStatic.busybox`
   # only supports the bare `-d / --nnp / --inh-caps / --ambient-caps`
   # flags. The dedicated static helper implements the numeric uid/gid,
   # group clearing, no-new-privileges, and loopback capability operations
-  # needed by this init without pulling util-linux into the rootfs.
+  # needed by workload scripts without pulling util-linux into the rootfs.
   #
   # The flag set is --reuid + --regid + --clear-groups + --no-new-privs.
   # uid==0 short-circuits to the bare command — no point setpriv-ing
@@ -559,13 +533,11 @@ let
     if uid == 0 then
       cmd
     else
-      # No exec: PID 1 runs the workload as a child so /init can capture $?.
-      # Persistent services exec `sleep infinity` inside and never return.
       "\"\${MVM_SETPRIV_BIN:-${setpriv}}\" "
       + "--reuid=${toString uid} --regid=${toString uid} "
       + "--clear-groups --no-new-privs -- ${cmd}";
 
-  # The argv PID 1 ends up exec'ing, as a list rather than a rendered line.
+  # The declared workload argv, as a list rather than a rendered line.
   # Exported through passthru so the host — which cannot open a materialized
   # ext4 — can see what the image runs before it boots it. The services arm
   # reports the recovery shell it genuinely falls through to: telling the host
@@ -597,12 +569,11 @@ let
   # setpriv-wrap as appropriate. For services (still stubbed),
   # bail out with a clear note + recovery shell.
   #
-  # The entrypoint is invoked both by PID 1 (as root) and by the guest
-  # agent (as the agent uid). When already non-root, skip the setpriv
+  # The entrypoint is invoked by the guest agent (as the workload uid).
+  # When already non-root, skip the setpriv
   # drop: the agent has already applied the desired isolation and no
   # longer holds CAP_SETGID, so a second setpriv would fail on
-  # setgroups(clear). PID 1 still uses the explicit drop to enforce the
-  # entrypoint uid.
+  # setgroups(clear). Direct root invocations retain the explicit drop.
   entrypointCmd =
     if entrypointKind == "services" then
       ''
@@ -624,730 +595,22 @@ let
         fi
       '';
 
-  # /init — our PID 1. Pure POSIX shell; busybox provides every
-  # utility used here. Boot-time-critical path so kept terse and
-  # readable. No bashisms, no externalities beyond busybox applets.
-  #
-  # Supervision pattern:
-  #   1. Stage filesystem (proc/sys/dev + tmpfs).
-  #   2. Fork the guest agent in background under setpriv→agent uid.
-  #   3. Re-attach stdio (dev variant).
-  #   4. setpriv→entrypoint uid + exec the workload.
-  #
-  # PID 1 stays uid 0 (kernel mandate); both children run rootless
-  # by default in production (see uids resolution above).
-  initText = ''
-    #!/bin/sh
-    # mvm /init — busybox PID 1.
-
-    # Stage 1 — kernel pseudofs. Required before anything else
-    # can read /proc/self or write to /dev/console.
-    /bin/busybox mount -t proc     proc     /proc
-    /bin/busybox mount -t sysfs    sysfs    /sys
-    /bin/busybox mount -t devtmpfs devtmpfs /dev
-
-    # Stage 1b — unified cgroup hierarchy, best-effort. The sealed workload
-    # kernel compiles cgroups out (the mount fails ENODEV); an orchestrator
-    # guest (rootless Kubernetes) boots a cgroup-capable kernel instead and
-    # gets a delegated subtree owned by the entrypoint uid, which is the
-    # cgroup v2 delegation contract without a systemd to issue it.
-    /bin/busybox mkdir -p /sys/fs/cgroup 2>/dev/null || true
-    if /bin/busybox mount -t cgroup2 cgroup2 /sys/fs/cgroup 2>/dev/null; then
-      for mvm_ctrl in cpu memory pids cpuset io; do
-        /bin/busybox echo "+$mvm_ctrl" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
-      done
-      /bin/busybox mkdir -p /sys/fs/cgroup/mvm-workload 2>/dev/null || true
-      /bin/busybox chown -R ${toString entrypointUid}:${toString entrypointUid} /sys/fs/cgroup/mvm-workload 2>/dev/null || true
-      echo "mvm-init: mounted cgroup2; delegated /sys/fs/cgroup/mvm-workload to uid ${toString entrypointUid}"
-    fi
-
-    # devpts is required for openpty(3): the guest agent allocates a PTY per
-    # interactive `dev` console session (mvm-agentd::console). devtmpfs gives
-    # /dev/ptmx the node but not the /dev/pts slave fs, so without this
-    # openpty() fails ("openpty() failed") and the interactive dev shell
-    # can't open even from a real terminal. Harmless for sealed
-    # workload guests (they never openpty); 0620,gid=5 is the standard
-    # tty-group layout. Best-effort (`|| true`): a kernel without
-    # CONFIG_DEVPTS_* falls back to the current non-interactive behavior
-    # rather than wedging PID 1.
-    /bin/busybox mkdir -p /dev/pts
-    /bin/busybox mount -t devpts -o mode=0620,gid=5,nosuid,noexec devpts /dev/pts || true
-
-    # /dev/fd → /proc/self/fd is what bash process substitution
-    # (`< <(...)`, `mapfile -t x < <(...)`) needs to open the
-    # subshell's pipe FD at /dev/fd/N. devtmpfs creates device
-    # nodes but never these symlinks; udev/mdev/systemd-tmpfiles
-    # normally do, and we run none of them. Without /dev/fd a
-    # nixpkgs-style build hook fails with "/dev/fd/63: No such
-    # file or directory" — same gap is fixed in mvm-host-vm-init's
-    # mount_pseudofs(). The four lines are kept symmetric on both
-    # sides on purpose.
-    [ -e /dev/fd ]     || /bin/busybox ln -s /proc/self/fd   /dev/fd
-    [ -e /dev/stdin ]  || /bin/busybox ln -s /proc/self/fd/0 /dev/stdin
-    [ -e /dev/stdout ] || /bin/busybox ln -s /proc/self/fd/1 /dev/stdout
-    [ -e /dev/stderr ] || /bin/busybox ln -s /proc/self/fd/2 /dev/stderr
-
-    # Stage 2 — runtime tmpfs. /tmp + /run are RAM so the rootfs
-    # stays read-only-leaning; volumes attach to fixed
-    # mountpoints instead.
-    /bin/busybox mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
-    /bin/busybox mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
-
-    # Stage 2.05 — optional chained PID 1. Some images want the
-    # busybox /init bootstrap (pseudofs + tmpfs + /dev/fd setup)
-    # before handing control to a second static binary. The builder
-    # image uses this to enter mvm-host-vm-init after the generic
-    # bootstrap so backends that struggle with a direct `init=/sbin/...`
-    # exec still start from the same minimal shell-known-good path.
-    MVM_CHAIN_INIT=$(/bin/busybox sed -n 's/.*\bmvm\.chain_init=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_CHAIN_INIT" ]; then
-      if [ ! -x "$MVM_CHAIN_INIT" ]; then
-        echo "mvm-init: requested chained init $MVM_CHAIN_INIT is missing or not executable"
-        exit 1
-      fi
-      exec "$MVM_CHAIN_INIT"
-    fi
-
-    # Stage 2.25 — vsock kernel modules. Stock nixpkgs kernel ships
-    # AF_VSOCK as `=m`; without modprobe the agent's
-    # `socket(AF_VSOCK, …)` returns EAFNOSUPPORT. modprobe-ing
-    # `vmw_vsock_virtio_transport` pulls in `vsock` +
-    # `vmw_vsock_virtio_transport_common` via modules.dep. Silently
-    # skipped when `/lib/modules` is absent — e.g. on a future kernel
-    # that ships VSOCK=y, or when `mkGuest` was called without the
-    # `kernel` argument.
-    if [ -d /lib/modules ]; then
-      /bin/busybox modprobe vmw_vsock_virtio_transport 2>/dev/null || true
-    fi
-
-    # Stage 2.27 — configure the loopback interface. The kernel creates `lo`
-    # administratively DOWN and without an IPv4 address; merely raising the
-    # link still leaves `127.0.0.1` unavailable, so ANY guest-internal
-    # loopback service is unreachable
-    # (`connect()` → ENETUNREACH) — the egress proxy the workload's proxy
-    # environment names, the in-guest addon-dns resolver, and any local service
-    # a workload binds. Must run before the agent (which binds the egress proxy)
-    # and before netinit. `ip` first (canonical), `ifconfig` fallback — both are
-    # busybox applets in the defconfig this image already relies on for
-    # `modprobe`. Non-fatal: a failure logs and leaves loopback down (the prior
-    # behaviour), never wedges PID 1.
-    if ! /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null \
-      || ! /bin/busybox ip link set lo up 2>/dev/null; then
-      /bin/busybox ifconfig lo 127.0.0.1 netmask 255.0.0.0 up 2>/dev/null \
-        || echo "mvm-init: WARNING could not configure loopback (no ip/ifconfig applet); guest-internal loopback (egress proxy, addon-dns) will be unreachable"
-    fi
-
-    # Stage 2.45 — mount the optional config/secrets drives. The host uses a
-    # deterministic block order: vdb=config, vdc=secrets. These mounts are
-    # best-effort and read-only; guests without one or both drives keep booting.
-    /bin/busybox mkdir -p /mnt/config /mnt/secrets
-    [ ! -b /dev/vdb ] || /bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config || true
-    [ ! -b /dev/vdc ] || /bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdc /mnt/secrets || true
-
-    # Stage 2.3 — user-supplied volumes (`--volume` / MVM_VOLUMES).
-    # The host (mvm_core::vm_backend::encode_user_volumes_cmdline) wrote
-    # `mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>;...` onto the
-    # kernel cmdline. Mount each virtio-fs share at its guest path;
-    # best-effort so a bad mount logs and continues rather than wedging
-    # PID 1. Disk (`blk`) volumes are attached as block devices for the
-    # workload to mount itself (guest auto-mount of disks isn't wired).
-    # The guest path is hex-encoded to survive the cmdline's
-    # space/`:`/`;` delimiters; we decode it via `sed`+`printf %b`.
-    MVM_UVOLS=$(/bin/busybox sed -n 's/.*\bmvm\.uvols=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_UVOLS" ]; then
-      # virtio-fs may be a module on some rootfs. Load it best-effort, but
-      # ONLY when user volumes are present, so a no-volume boot (every
-      # core-demo workload + the dev VM) runs this entire block as a no-op
-      # and is byte-identical to pre-volume behaviour. Errors swallowed —
-      # `|| true` means this can never fail or wedge PID 1.
-      if [ -d /lib/modules ]; then
-        /bin/busybox modprobe virtiofs 2>/dev/null || true
-      fi
-      echo "$MVM_UVOLS" | /bin/busybox tr ';' '\n' | while IFS=: read -r utag uhex umode ukind; do
-        [ -n "$utag" ] || continue
-        [ -n "$uhex" ] || continue
-        upath=$(printf '%b' "$(echo "$uhex" | /bin/busybox sed 's/../\\x&/g')")
-        [ -n "$upath" ] || continue
-        if [ "$ukind" = blk ]; then
-          echo "mvm-init: user disk volume for '$upath' attached (guest auto-mount of disks not wired)"
-          continue
-        fi
-        /bin/busybox mkdir -p "$upath" 2>/dev/null || true
-        if [ "$umode" = ro ]; then
-          /bin/busybox mount -t virtiofs -o ro "$utag" "$upath" \
-            && echo "mvm-init: mounted user volume $utag at $upath (ro)" \
-            || echo "mvm-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
-        else
-          /bin/busybox mount -t virtiofs "$utag" "$upath" \
-            && echo "mvm-init: mounted user volume $utag at $upath (rw)" \
-            || echo "mvm-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
-        fi
-      done
-    fi
-
-    # Stage 2.45 — guest-side network defense.
-    # Install kernel blackhole routes for `MANDATORY_DENY_RANGES`
-    # (cloud metadata, link-local, CGNAT, host loopback) BEFORE
-    # any workload code runs. We're still uid 0 here — the agent
-    # fork below drops to uid 901, which doesn't have
-    # CAP_NET_ADMIN, so the install has to happen here. Mirrors
-    # the agent-bin resolution: prefer /mvm/runtime/netinit (from
-    # the runtime overlay) over the baked-in copy in
-    # /usr/local/bin.
-    #
-    # Output of mvm-guest-netinit is a single JSON line that the
-    # kernel console captures; the host scrape (firecracker.log /
-    # libkrun console output) forwards it so an operator can see
-    # what was installed. A future slice wires the agent to
-    # forward the same JSON as a `NetworkMandatoryDeny` audit
-    # event over vsock.
-    #
-    # On netinit failure (exit nonzero) we DO NOT abort the boot
-    # — the host-side iptables defense (where it applies) is the
-    # primary layer, and a hard guest-side fail-closed would
-    # block any workload on a kernel without rtnetlink. Log the
-    # failure and continue; an operator who needs guest-side
-    # defense flagged the issue from the JSON line.
-    # The per-VM egress CA is trusted further down, in Stage 2.485: the
-    # certificate arrives on the per-boot identity drive, and that drive is not
-    # copied out until the runtime overlay has been mounted and its Rust helper
-    # resolved.
-
-    # Stage 2.475 — provision the per-run verb-grant inputs.
-    #
-    # The launcher writes `mvm.verb_grant=<base64(JSON)>` onto the kernel
-    # cmdline — base64 rather than the hex used by stages 2.46/2.47 because this
-    # envelope is the largest thing on the cmdline and the kernel silently drops
-    # whatever runs past COMMAND_LINE_SIZE. We decode the JSON blob
-    # to `/run/mvm/verb-grant.json` (tmpfs, mode 0644). The host-signer public
-    # key lands in the same tmpfs so the agent verifies the grant against an
-    # out-of-band key: from the read-only config drive when one is attached,
-    # otherwise from the cmdline. A vsock-only guest has no config drive, so
-    # there the cmdline is the only carrier — without this the agent finds no
-    # key, refuses every control RPC, and the host's readiness probe times out.
-    # The host-signer anchor is provisioned UNCONDITIONALLY, not only when a
-    # verb grant is present. It is host *identity*, while a grant is workload
-    # *authority* -- the host ships it ungated for exactly this reason (see
-    # `host_signer_pub_cmdline_token`), and the egress client needs it to pin
-    # the host on a run that carries no grant at all. Nesting it inside the
-    # grant check meant a grant-less run had no anchor and no egress.
-    /bin/busybox mkdir -p /run/mvm
-    if [ -r /mnt/config/host-signer.pub ]; then
-      /bin/busybox cp /mnt/config/host-signer.pub /run/mvm/host-signer.pub
-      /bin/busybox chmod 0644 /run/mvm/host-signer.pub
-    else
-      # The agent accepts the raw 32 bytes or this 64-char hex form.
-      MVM_HOST_SIGNER_PUB_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.host_signer_pub=\([^ ]*\).*/\1/p' /proc/cmdline)
-      if [ -n "$MVM_HOST_SIGNER_PUB_HEX" ]; then
-        printf '%s' "$MVM_HOST_SIGNER_PUB_HEX" > /run/mvm/host-signer.pub
-        /bin/busybox chmod 0644 /run/mvm/host-signer.pub
-      fi
-    fi
-
-    MVM_VERB_GRANT_B64=$(/bin/busybox sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_VERB_GRANT_B64" ]; then
-      printf '%s' "$MVM_VERB_GRANT_B64" | /bin/busybox base64 -d \
-        > /run/mvm/verb-grant.json
-      /bin/busybox chmod 0644 /run/mvm/verb-grant.json
-      echo "mvm-init: provisioned verb-grant"
-    fi
-
-    # The per-boot FlowMux identity is provisioned after the runtime overlay is
-    # mounted and its Rust helper is resolved. The mount stays in one Rust
-    # implementation; the shell only orders that short privileged action before
-    # the long-lived service drops to its dedicated uid.
-
-    # Stage 2.476 — declared runtime-source policy. The host carries
-    # the per-boot runtime contract on the kernel cmdline; when
-    # omitted we keep the historical preferred-overlay compatibility
-    # behavior. Resolved here, ahead of Stage 2.48, so the addon-DNS
-    # activation ladder below can share the same policy gate as
-    # netinit / egress-client / agent further down.
-    MVM_RUNTIME_SOURCE_POLICY=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_source_policy=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -z "$MVM_RUNTIME_SOURCE_POLICY" ]; then
-      MVM_RUNTIME_SOURCE_POLICY=prefer_overlay
-    fi
-
-    # Stage 2.477 — runtime overlay mount for non-verity boots. A sealed
-    # (verity) boot has its initramfs mount the runtime overlay at
-    # /mvm/runtime before switch_root; a plain dev boot has no initramfs, so
-    # the overlay rides a read-only virtio-blk device the host names on the
-    # kernel cmdline as `mvm.runtime_data=/dev/vdN`. Mount it here — before the
-    # addon-dns / netinit / egress-client / agent ladders below resolve any
-    # /mvm/runtime/<bin> — but only when /mvm/runtime is not already a
-    # mountpoint, so a verity boot that already mounted it is left untouched.
-    # Absent token ⇒ legacy boot; /mvm/runtime stays as baked. Non-fatal.
-    MVM_RUNTIME_DATA_DEV=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_data=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_RUNTIME_DATA_DEV" ] \
-      && ! /bin/busybox grep -q ' /mvm/runtime ' /proc/mounts 2>/dev/null; then
-      if /bin/busybox mount -t ext4 -o ro "$MVM_RUNTIME_DATA_DEV" /mvm/runtime 2>/dev/null; then
-        echo "mvm-init: mounted runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime (ro)"
-      else
-        echo "mvm-init: warn: could not mount runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime"
-      fi
-    fi
-
-    # Stage 2.4775 — resolve the privilege helper every launch below drops
-    # through. Prefer the runtime overlay's copy, which ships with the guest
-    # runtime; fall back to the one baked into the root (or, on a builder,
-    # the boot payload's). A rootfs_only boot uses the baked copy. This does
-    # not fail closed under required_overlay: an overlay built before it
-    # carried the helper is still a complete overlay, and the baked copy is
-    # the same program.
-    MVM_SETPRIV_BIN=${setpriv}
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" != rootfs_only ] && [ -x /mvm/runtime/setpriv ]; then
-      MVM_SETPRIV_BIN=/mvm/runtime/setpriv
-    fi
-
-    # Stage 2.478 — optional SDK sidecar mount. The glibc host-services cdylib
-    # the language SDKs dlopen is not in this rootfs and not in the runtime
-    # overlay, so a workload that was admitted to call a host service gets it as
-    # its own read-only virtio-blk device. The host names that device on the
-    # cmdline as `mvm.sdk_dev=/dev/vdN`: the slot depends on whether this boot
-    # carries verity, a runtime overlay, and how many user volumes precede it, so
-    # the guest cannot derive it. Absent token => this workload binds no
-    # SDK-served host service and /mvm/sdk stays empty.
-    #
-    # `noexec` is deliberately NOT set: the workload process maps the cdylib
-    # executable via dlopen. `nosuid,nodev` still hold, and the device is
-    # read-only at the hypervisor level as well as at the mount.
-    MVM_SDK_DEV=$(/bin/busybox sed -n 's/.*\bmvm\.sdk_dev=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_SDK_DEV" ] \
-      && ! /bin/busybox grep -q ' /mvm/sdk ' /proc/mounts 2>/dev/null; then
-      if /bin/busybox mount -t ext4 -o ro,nosuid,nodev "$MVM_SDK_DEV" /mvm/sdk 2>/dev/null; then
-        echo "mvm-init: mounted SDK sidecar $MVM_SDK_DEV at /mvm/sdk (ro)"
-      else
-        echo "mvm-init: warn: could not mount SDK sidecar $MVM_SDK_DEV at /mvm/sdk"
-      fi
-    fi
-
-    # Stage 2.48 — local addon DNS bootstrap.
-    #
-    # The "always-install + no-op when zone empty" pattern from
-    # `specs/contracts/local-addon-dns.md`: the addon DNS binary rides
-    # the runtime overlay at /mvm/runtime/addon-dns (resolved via the
-    # same ladder netinit/egress-client/agent use below), and is only
-    # activated when a zone file was baked at
-    # /etc/mvm/addon_dns_zone.json (via mkGuest's `extraFiles`) or
-    # staged on the config-disk path before init runs. Guests without
-    # addons skip this block entirely, so /etc/resolv.conf stays
-    # byte-for-byte the build-time default.
-    #
-    # When activated, we:
-    #   1. Copy the zone file into /run/mvm so reloads (SIGHUP) and
-    #      runtime-only edits land on tmpfs, not in the read-only
-    #      rootfs.
-    #   2. Snapshot the existing /etc/resolv.conf into
-    #      /run/mvm/upstream-resolv.conf BEFORE rewriting it. The
-    #      addon DNS server reads this file to seed its upstream
-    #      forwarders; without the snapshot, the binary would either
-    #      have no upstream or (worse) recurse into itself once
-    #      resolv.conf points at 127.0.0.1.
-    #   3. Write a new resolv.conf into /run/mvm and bind-mount it
-    #      over /etc/resolv.conf. Single-file bind-mounts survive the
-    #      read-only /etc bind that will eventually land
-    #      so this works on both dev and hardened images.
-    #   4. Resolve the binary from the overlay-resident
-    #      /mvm/runtime/addon-dns (required-overlay boots fail closed
-    #      if it is absent) — then fork it under setpriv
-    #      to the agent uid with CAP_NET_BIND_SERVICE preserved via
-    #      ambient + inheritable caps so it can bind UDP/53 on
-    #      loopback only. The server validates loopback +
-    #      self-upstream constraints itself; we do not pass any
-    #      other privilege.
-    MVM_ADDON_DNS_ZONE_SRC=
-    if [ -r /run/mvm/addon_dns_zone.json ]; then
-      MVM_ADDON_DNS_ZONE_SRC=/run/mvm/addon_dns_zone.json
-    elif [ -r /etc/mvm/addon_dns_zone.json ]; then
-      MVM_ADDON_DNS_ZONE_SRC=/etc/mvm/addon_dns_zone.json
-    fi
-    MVM_ADDON_DNS_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-addon-dns ]; then
-        MVM_ADDON_DNS_BIN=/usr/local/bin/mvm-addon-dns
-      fi
-    elif [ -x /mvm/runtime/addon-dns ]; then
-      MVM_ADDON_DNS_BIN=/mvm/runtime/addon-dns
-    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
-      echo "mvm-init: runtime overlay required but /mvm/runtime/addon-dns is missing"
-      exit 1
-    elif [ -x /usr/local/bin/mvm-addon-dns ]; then
-      MVM_ADDON_DNS_BIN=/usr/local/bin/mvm-addon-dns
-    fi
-    if [ -n "$MVM_ADDON_DNS_ZONE_SRC" ] && [ -n "$MVM_ADDON_DNS_BIN" ]; then
-      /bin/busybox mkdir -p /run/mvm
-      /bin/busybox chmod 0755 /run/mvm
-      if [ "$MVM_ADDON_DNS_ZONE_SRC" != /run/mvm/addon_dns_zone.json ]; then
-        /bin/busybox cp "$MVM_ADDON_DNS_ZONE_SRC" /run/mvm/addon_dns_zone.json
-      fi
-      /bin/busybox chmod 0644 /run/mvm/addon_dns_zone.json
-
-      # Snapshot the pre-rewrite resolver chain so addon-dns can
-      # forward non-configured names without recursing into itself.
-      if [ -r /etc/resolv.conf ]; then
-        /bin/busybox cp /etc/resolv.conf /run/mvm/upstream-resolv.conf
-      else
-       : > /run/mvm/upstream-resolv.conf
-      fi
-      /bin/busybox chmod 0644 /run/mvm/upstream-resolv.conf
-
-      # Build the new resolv.conf in /run (tmpfs, always writable)
-      # and bind-mount it over /etc/resolv.conf. The:: literal is
-      # written via printf so the heredoc body stays parameter-free.
-      printf 'nameserver 127.0.0.1\nnameserver ::1\n' > /run/mvm/resolv.conf
-      /bin/busybox chmod 0644 /run/mvm/resolv.conf
-      /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf
-
-      /bin/busybox setsid "$MVM_SETPRIV_BIN" \
-        --reuid=${toString addonDnsUid} --regid=${toString addonDnsUid} \
-        --clear-groups --no-new-privs \
-        --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
-        -- "$MVM_ADDON_DNS_BIN" &
-    fi
-
-    # Stage 2.55 — decode the vsock-egress opt-in. Backends that route outbound
-    # egress through the host vsock gate set `mvm.vsock_egress=1` on the kernel
-    # cmdline; export the env var Stage 2.6 keys on. Mirrors the
-    # mvm.verb_grant cmdline parser above. Absent token ⇒ no-op.
-    MVM_VSOCK_EGRESS=
-    if /bin/busybox grep -qE ' mvm\.vsock_egress=1( |$)' /proc/cmdline 2>/dev/null; then
-      export MVM_VSOCK_EGRESS=1
-    fi
-
-    # Stage 2.56 — guest-side netinit. MVM_RUNTIME_SOURCE_POLICY was
-    # resolved earlier (ahead of the addon-DNS block, which needs it
-    # too); this is its first overlay-preferred / rootfs-only ladder.
-    MVM_NETINIT_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-guest-netinit ]; then
-        MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
-      fi
-    elif [ -x /mvm/runtime/netinit ]; then
-      MVM_NETINIT_BIN=/mvm/runtime/netinit
-    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
-      echo "mvm-init: runtime overlay required but /mvm/runtime/netinit is missing"
-      exit 1
-    elif [ -x /usr/local/bin/mvm-guest-netinit ]; then
-      MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
-    fi
-    if [ -n "$MVM_NETINIT_BIN" ]; then
-      "$MVM_NETINIT_BIN" || echo "mvm-init: netinit exited nonzero; continuing without guest-side defense"
-    fi
-
-    # Stage 2.6 — vsock egress shim. Prefer the overlay-resident helper on
-    # overlay-backed boots; keep the baked rootfs fallback only on
-    # prefer-overlay / rootfs-only paths. On required-overlay boots, a
-    # requested egress shim must come from /mvm/runtime.
-    MVM_EGRESS_CLIENT_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-egress-client ]; then
-        MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
-      fi
-    elif [ -x /mvm/runtime/egress-client ]; then
-      MVM_EGRESS_CLIENT_BIN=/mvm/runtime/egress-client
-    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ] && [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
-      echo "mvm-init: runtime overlay required but /mvm/runtime/egress-client is missing"
-      exit 1
-    elif [ -x /usr/local/bin/mvm-egress-client ]; then
-      MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
-    fi
-    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
-      if [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
-        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for
-      else
-        MVM_IDENTITY_PROVISION_COMMAND=provision-identity-for-if-present
-      fi
-      if ! "$MVM_EGRESS_CLIENT_BIN" "$MVM_IDENTITY_PROVISION_COMMAND" ${toString egressUid}; then
-        echo "mvm-init: failed to provision FlowMux identity for the egress service"
-        exit 1
-      fi
-    fi
-
-    # Stage 2.485 — trust the per-VM egress CA (https substitution). The host
-    # mints a name-constrained CA for the destinations the plan's secrets are
-    # bound to and puts its CERTIFICATE on the per-boot identity drive (the key
-    # stays host-side in the terminator). The step above copied that drive into
-    # /run/mvm, which is tmpfs and therefore writable under a dm-verity-sealed
-    # rootfs. Point the common TLS-trust env vars at a bundle = baked roots +
-    # this certificate, so a workload trusts host-terminated bound-host TLS.
-    # The export reaches the entrypoint (setpriv preserves env).
-    #
-    # Scope caveat: the certificate's nameConstraints bound what a leaked per-VM
-    # key could be used for, and OpenSSL-backed clients (curl, Python `ssl`,
-    # Node) do enforce them. They are not the egress control either way — the
-    # real boundary is the host-side allow-list check (claim 12), which decides
-    # whether a flow is admitted at all.
-    #
-    # The bundle is built by the same Rust helper the agent init uses rather
-    # than by `cat`: concatenating a baked bundle that does not end in a newline
-    # with the certificate fuses their armor lines, and every PEM parser then
-    # reads one truncated certificate instead of two. It writes the bundle
-    # whether or not a certificate was delivered, so the exported path always
-    # resolves — OpenSSL that cannot open SSL_CERT_FILE loads no trust store at
-    # all, which would break TLS to destinations unrelated to substitution.
-    if [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
-      if ! "$MVM_EGRESS_CLIENT_BIN" install-egress-ca-trust; then
-        echo "mvm-init: failed to install the egress CA trust bundle"
-        exit 1
-      fi
-      # OpenSSL (curl/most), curl, python-requests → the combined bundle;
-      # Node appends just the extra cert.
-      export SSL_CERT_FILE=/run/mvm/ca-bundle.crt
-      export CURL_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      export REQUESTS_CA_BUNDLE=/run/mvm/ca-bundle.crt
-      if [ -r /run/mvm/egress-ca.crt ]; then
-        export NODE_EXTRA_CA_CERTS=/run/mvm/egress-ca.crt
-        echo "mvm-init: installed per-VM egress CA (https substitution trust)"
-      fi
-    fi
-    if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
-      /bin/busybox ip addr replace 127.0.0.1/8 dev lo 2>/dev/null || true
-      /bin/busybox ip link set lo up 2>/dev/null || true
-      /bin/busybox mkdir -p /run/mvm
-      printf 'nameserver 127.0.0.1\n' > /run/mvm/resolv.conf
-      /bin/busybox chmod 0644 /run/mvm/resolv.conf
-      if [ -e /etc/resolv.conf ]; then
-        /bin/busybox mount --bind /run/mvm/resolv.conf /etc/resolv.conf \
-          || /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
-      else
-        /bin/busybox cp /run/mvm/resolv.conf /etc/resolv.conf
-      fi
-      /bin/busybox setsid "$MVM_SETPRIV_BIN" \
-        --reuid=${toString egressUid} --regid=${toString egressUid} \
-        --clear-groups --no-new-privs \
-        --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
-        -- "$MVM_EGRESS_CLIENT_BIN" &
-      export ALL_PROXY="socks5h://127.0.0.1:1080"
-      export HTTP_PROXY="$ALL_PROXY"
-      export HTTPS_PROXY="$ALL_PROXY"
-      export http_proxy="$ALL_PROXY"
-      export https_proxy="$ALL_PROXY"
-    fi
-
-    # Stage 2.5 — guest agent supervisor. Fork the agent into
-    # the background under its own uid before we drop to the
-    # entrypoint. The agent is responsible for vsock RPC (host
-    # tool calls, lifecycle hooks); without it, the host can boot
-    # us but can't talk to us. We never block on it — if the agent
-    # fails to start, the entrypoint still runs and the lack of
-    # agent shows up in `mvmctl status`.
-    #
-    # The agent rides the runtime overlay: on a verity boot
-    # the guest agent bind-mounts it at /mvm/runtime before
-    # switch_root, and on a non-verity boot the overlay is mounted
-    # there directly, so /mvm/runtime/agent is the canonical binary
-    # location. mkGuest no longer bakes a /usr/local/bin fallback, so ANY
-    # boot fails closed when no agent can be resolved (the guard after the
-    # ladder) — a half-attached overlay never boots agent-less silently,
-    # regardless of policy. The rootfs_only / prefer-overlay
-    # /usr/local/bin lookups below are inert for current mkGuest output
-    # (nothing is baked); they matter only if a future non-lean image
-    # reintroduces a baked agent.
-    MVM_VARIANT=$(/bin/busybox cat /etc/mvm/variant 2>/dev/null || echo prod)
-    MVM_AGENT_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-guest-agent ]; then
-        MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
-      fi
-    elif [ -x /mvm/runtime/agent ]; then
-      MVM_AGENT_BIN=/mvm/runtime/agent
-    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
-      echo "mvm-init: runtime overlay required but no matching /mvm/runtime agent is present"
-      exit 1
-    elif [ -x /usr/local/bin/mvm-guest-agent ]; then
-      MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
-    fi
-    if [ -z "$MVM_AGENT_BIN" ]; then
-      # Fail closed regardless of policy. Every mkGuest /init boot needs the
-      # agent, so an empty resolution means the overlay is missing or
-      # half-attached (or a future non-lean shape lost its baked agent).
-      # Booting on would leave vsock 5252 unbound and the control plane
-      # silently dead — refuse instead.
-      echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
-      exit 1
-    fi
-    # CRNG reseed helper. A restored clone must rekey the kernel generator at
-    # once, and those ioctls need CAP_SYS_ADMIN, which the agent never holds.
-    # This root init starts a separate process holding only that capability,
-    # under its own uid; it reseeds from a token and does nothing else. It runs
-    # in the agent's group so the agent can connect: the directory is the
-    # helper's with group read and search, the socket it binds is 0660, and
-    # the agent checks the peer uid before trusting a reply. If it fails to
-    # start, the agent reports every restore as not reseeded and the host
-    # refuses the clone.
-    /bin/busybox mkdir -p /run/mvm/crng-reseed
-    /bin/busybox chown ${toString crngReseedUid}:${toString agentUid} /run/mvm/crng-reseed
-    /bin/busybox chmod 0750 /run/mvm/crng-reseed
-    /bin/busybox setsid "$MVM_SETPRIV_BIN" \
-      --reuid=${toString crngReseedUid} --regid=${toString agentUid} \
-      --clear-groups --securebits=keep-caps \
-      --inh-caps=+sys_admin --ambient-caps=+sys_admin --no-new-privs \
-      -- "$MVM_AGENT_BIN" --crng-reseed-helper --listen &
-
-    # Static-musl mvm-setpriv — the helper applies the uid/gid, group, and
-    # no-new-privileges drop before the agent exec. Without this step the
-    # agent never forks and vsock port 5252 stays unbound.
-    /bin/busybox setsid "$MVM_SETPRIV_BIN" \
-      --reuid=${toString agentUid} --regid=${toString agentUid} \
-      --clear-groups --securebits=keep-caps \
-      --inh-caps=+kill --ambient-caps=+kill \
-      --inh-caps=+sys_time --ambient-caps=+sys_time --no-new-privs \
-      -- "$MVM_AGENT_BIN" &
-
-    # Stage 3 — hostname + console. /dev/console is what the
-    # hypervisor wires our virtio-console to; in dev mode we keep
-    # stdio attached to it so `mvmctl console` sees output.
-    /bin/busybox hostname "$(/bin/busybox cat /etc/mvm/name 2>/dev/null || echo mvm)"
-
-    # Stage 4 — exec the entrypoint. /etc/mvm/variant (dev|prod) +
-    # /etc/mvm/entrypoint are baked at build time. dev variant gets
-    # stdio re-attached to /dev/console so the user can interact;
-    # prod variant lets the entrypoint inherit whatever the hypervisor
-    # provided (typically the same console, but the variant marker
-    # is the host-side gate).
-    if [ -e /etc/mvm/variant ] && [ "$(/bin/busybox cat /etc/mvm/variant)" = "dev" ]; then
-      exec </dev/console >/dev/console 2>&1
-      # The dev VM is long-lived, so PID 1 idles here instead of
-      # running the /etc/mvm/entrypoint `/bin/sh` on /dev/console. The guest
-      # agent (forked above) serves the interactive shell over vsock — it
-      # openpty()s and forks its OWN `/bin/sh -i` (mvm-agentd::console),
-      # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
-      # Running `/bin/sh` on /dev/console here is fatal wherever the serial
-      # console is input-less — which is every backend that captures the
-      # guest console write-only, with no host input fd: the read hits EOF,
-      # the shell exits, PID 1 dies, and the VM powers off ~5 s after boot.
-      # On libkrun this just swaps a blocking console read for an explicit
-      # idle — same "stay alive", no change to the agent shell path. A
-      # busybox-portable loop avoids depending on `sleep infinity`.
-      while :; do /bin/busybox sleep 2147483647; done
-    fi
-
-    # Stage 4.5 — mvm runtime overlay env.
-    # When the overlay is mounted (verity boot path), surface its
-    # presence + SDK-library paths to the entrypoint via env
-    # variables. Per-language path vars (PYTHONPATH, NODE_PATH)
-    # are prepended so they take precedence over a user's existing
-    # value; an empty existing value leaves no trailing colon.
-    # Setting these unconditionally on the overlay-mounted path
-    # gives a stable contract for SDK addons (vsock hooks)
-    # without per-image opt-in. The dev/legacy path (no overlay)
-    # leaves the env untouched so existing flakes keep their
-    # current behaviour.
-    if [ -d /mvm/runtime ] && [ -e /mvm/runtime/VERSION ]; then
-      export MVM_RUNTIME_OVERLAY=1
-      if [ -d /mvm/runtime/sdk-py ]; then
-        export PYTHONPATH="/mvm/runtime/sdk-py''${PYTHONPATH:+:''${PYTHONPATH}}"
-      fi
-      if [ -d /mvm/runtime/sdk-ts ]; then
-        export NODE_PATH="/mvm/runtime/sdk-ts''${NODE_PATH:+:''${NODE_PATH}}"
-      fi
-    fi
-
-    # Source the PID 1 boot command. Rendered at build time so the
-    # exec line below is final — no shell injection from runtime config.
-    # `/etc/mvm/boot` (mode 0500) is the agent-dispatched-workload split:
-    # when present it is PID 1's command and `/etc/mvm/entrypoint` is left
-    # as the agent's per-call marker. Absent it, /etc/mvm/entrypoint is
-    # both (the legacy single-file path).
-    MVM_BOOT=/etc/mvm/entrypoint
-    [ -e /etc/mvm/boot ] && MVM_BOOT=/etc/mvm/boot
-    # Run the workload as a child (setprivWrap no longer execs) so PID 1
-    # can capture its exit code. Persistent services exec `sleep infinity`
-    # inside and never return here.
-    # Detach the workload's stdin from the input-less serial console: a
-    # write-only console hands the guest an immediate EOF, which crashes a
-    # workload that reads stdin shortly after boot. /dev/null is the correct
-    # stdin for a non-interactive sealed workload; stdout/stderr stay on the
-    # console for capture, and the exit-code capture below is unaffected.
-    . "$MVM_BOOT" </dev/null
-    MVM_CODE=$?
-    # Report the exit code to the host (best-effort), then power off —
-    # never reboot. The host reads it from the control vsock port.
-    # Resolve the binary the same overlay-preferred / rootfs-only way
-    # as netinit/egress-client/agent above: prefer the overlay-resident
-    # /mvm/runtime/exit-report; a required-overlay boot fails closed if
-    # it is absent.
-    MVM_EXIT_REPORT_BIN=
-    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
-      if [ -x /usr/local/bin/mvm-exit-report ]; then
-        MVM_EXIT_REPORT_BIN=/usr/local/bin/mvm-exit-report
-      fi
-    elif [ -x /mvm/runtime/exit-report ]; then
-      MVM_EXIT_REPORT_BIN=/mvm/runtime/exit-report
-    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
-      echo "mvm-init: runtime overlay required but /mvm/runtime/exit-report is missing"
-      exit 1
-    elif [ -x /usr/local/bin/mvm-exit-report ]; then
-      MVM_EXIT_REPORT_BIN=/usr/local/bin/mvm-exit-report
-    fi
-    if [ -n "$MVM_EXIT_REPORT_BIN" ]; then
-      "$MVM_EXIT_REPORT_BIN" "$MVM_CODE" || \
-        echo "mvm: exit-report failed (code=$MVM_CODE); powering off anyway"
-    else
-      echo "mvm: exit-report binary missing (code=$MVM_CODE); powering off anyway"
-    fi
-    /bin/busybox sync
-    /bin/busybox poweroff -f
-  '';
-
-  # The kernel exec()s /init directly, so `#!` must be the first two bytes of
-  # the file: shift them by even one column and the boot dies with ENOEXEC
-  # before any userspace runs, leaving a kernel panic as the only symptom.
-  # Nix derives an indented string's baseline from its least-indented line, so
-  # one under-indented line anywhere in the block above silently moves every
-  # other line — including the shebang — one column right. Assert the rendered
-  # bytes instead of trusting the indentation to stay uniform.
-  initScript = builtins.seq assertDedicatedServiceUids (
-    lib.throwIf (!lib.hasPrefix "#!/bin/sh\n" initText) ''
-      mkGuest: the rendered /init does not start with the "#!/bin/sh" shebang.
-      The kernel exec()s /init and will panic with ENOEXEC. This almost always
-      means a line inside the /init block of nix/lib/mk-guest.nix is indented
-      less than its neighbours, which moves the whole script one or more
-      columns right. Re-align that line.
-    '' (pkgs.writeScript "mvm-init" initText)
-  );
-
-  # Render the entrypoint as a shell-sourced fragment. /init does
-  # `. /etc/mvm/entrypoint`, so this is just a script.
+  # Workload script dispatched by the guest agent, never a PID 1 program.
   entrypointFile = pkgs.writeText "mvm-entrypoint" ''
     #!/bin/sh
     # Auto-generated by mkGuest at build time. Do not edit.
     ${entrypointCmd}
   '';
 
-  # PID 1 boot command, rendered to `/etc/mvm/boot` (sourced by /init
-  # in preference to /etc/mvm/entrypoint). Only emitted when the caller
-  # passes `bootCommand` — see that arg's doc. Same setpriv wrap as the
-  # entrypoint so PID 1 drops to the entrypoint uid (a no-op at uid 0).
-  bootFile =
-    if bootCommand == null then
-      null
-    else
-      pkgs.writeText "mvm-boot" ''
-        #!/bin/sh
-        # Auto-generated by mkGuest at build time. Do not edit.
-        ${setprivWrap entrypointUid (renderCommand bootCommand)}
-      '';
-
-  # A caller that hands us a `bootCommand` has split PID 1 (idle) from
-  # the agent's per-call marker, so it MUST supply that marker itself via
-  # extraFiles — otherwise /etc/mvm/entrypoint would be absent and the
-  # agent's RunEntrypoint would have nothing to dispatch.
-  _bootContract =
-    if bootCommand != null && !(extraFiles ? "/etc/mvm/entrypoint") then
-      throw ''
-        mkGuest: `bootCommand` is set but `extraFiles` does not provide
-        "/etc/mvm/entrypoint" (the guest agent's per-call marker, ADR-005).
-        The function-service factory must bake it.
-      ''
-    else
-      true;
-
   # Variant marker (dev|prod). In-guest source of truth — paired
   # with passthru.mvm.{accessible,sealed} on the derivation.
   variantFile = pkgs.writeText "mvm-variant" (if isDev then "dev\n" else "prod\n");
 
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
+  baseImageContract = lib.throwIf (
+    extraFiles ? "/etc/mvm/base-image-contract"
+  ) "mkGuest: /etc/mvm/base-image-contract is reserved for the base image contract" 1;
+  baseImageContractFile = pkgs.writeText "mvm-base-image-contract" "${toString baseImageContract}\n";
 
   # Verb-trust policy — baked into sealed images only (`isSealed`).
   # Present on every image. Sealed images fail closed because control RPCs
@@ -1358,13 +621,12 @@ let
   # Side-binaries from the guest-agent derivation. The agent, netinit,
   # addon-dns, exit-report, and egress-client the guest execs at boot now
   # come exclusively from the mounted runtime overlay at `/mvm/runtime`, so
-  # mkGuest no longer bakes them into the rootfs. This one is still needed
-  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line.
+  # mkGuest no longer bakes them into the rootfs. The seccomp helper remains
+  # exported for downstream package consumers, not a shell service launcher.
   #
   # `mvm-seccomp-apply` ships in the same Cargo workspace member and
-  # derivation as the agent. The per-service launch line in
-  # `mkServiceBlock` execs it via setpriv to apply the tier's seccomp
-  # filter before handing control to the workload.
+  # derivation as the agent. Exporting its store path does not apply a
+  # workload seccomp filter; service supervision is not wired here.
   seccompApplyBinary = "${guestAgentPkg}/bin/mvm-seccomp-apply";
 
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
@@ -1429,7 +691,7 @@ let
   #
   # We construct the rootfs as a real directory tree (not a NixOS
   # closure) so the boot path is a flat ext4. Every binary the
-  # /init script touches resolves through /bin/* symlinks pointing
+  # workload script uses resolves through /bin/* symlinks pointing
   # at /bin/busybox.
   #
   # A later layer adds the security overlay (per-service uids,
@@ -1446,7 +708,7 @@ let
     # `/closure-seed` receives the optional pre-fetched toolchain closure
     # NAR (empty + unused unless the host attaches one). `/mnt`,
     # `/data` are the user-volume mount roots (MountPathPolicy allow-roots,
-    # alongside `/work`) — `/init` mounts `--volume` shares here and can't
+    # alongside `/work`) — the agent mounts `--volume` shares here and can't
     # mkdir on the ro rootfs either.
     mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins,closure-seed,mnt,data}
     chmod 1777 "$out/tmp"
@@ -1461,9 +723,8 @@ let
     # bind-mount has a target. Mode 0755 (owner root); the overlay
     # itself is mounted read-only over it, so contents can't be
     # written by the guest regardless. Outside the verity-boot
-    # path (dev-mode VMs that mount no overlay) the
-    # directory is empty — /init below falls back to the baked-in
-    # agent. `/mvm/` is reserved (an admission-time check
+    # path the directory is empty; there is no baked agent fallback.
+    # `/mvm/` is reserved (an admission-time check
     # rejects OCI images that carry content under this path).
     mkdir -p "$out/mvm/runtime"
     # Mount target for the optional read-only SDK sidecar. Empty on every
@@ -1489,33 +750,12 @@ let
       cp ${setprivPkg}/bin/mvm-setpriv "$out/bin/mvm-setpriv"
       chmod 0755 "$out/bin/mvm-setpriv"
     ''}
-    # /sbin/init is what the kernel actually execs at boot (when
-    # there's no init=/init kernel param). We point both at our
-    # custom init script so either path works.
-    cp ${initScript} "$out/init"
-    ${pkgs.gnused}/bin/sed -i '1s/^ *//' "$out/init"
-    chmod 0500 "$out/init"
-    ln -sf /init "$out/sbin/init"
-
-    # mvm metadata. The PID 1 boot command is the load-bearing file —
-    # /init sources it. The sealed entrypoint must be executable by the
-    # non-root guest agent; a later layer makes /etc read-only.
-    # When `bootCommand` is set it lands at /etc/mvm/boot and the caller's
-    # extraFiles owns /etc/mvm/entrypoint (the agent marker); otherwise
-    # the rendered entrypoint is both. `_bootContract` is forced here so
-    # the misconfig throws at build time, not at boot.
-    ${builtins.seq _bootContract (
-      if bootCommand == null then
-        ''
-          cp ${entrypointFile} "$out/etc/mvm/entrypoint"
-          chmod 0755 "$out/etc/mvm/entrypoint"
-        ''
-      else
-        ''
-          cp ${bootFile} "$out/etc/mvm/boot"
-          chmod 0500 "$out/etc/mvm/boot"
-        ''
-    )}
+    # Workload entrypoint, never an init. extraFiles may replace it with a
+    # per-call marker or wrapper; the agent owns dispatch and exit handling.
+    cp ${entrypointFile} "$out/etc/mvm/entrypoint"
+    chmod 0755 "$out/etc/mvm/entrypoint"
+    cp ${baseImageContractFile} "$out/etc/mvm/base-image-contract"
+    chmod 0444 "$out/etc/mvm/base-image-contract"
     cp ${variantFile} "$out/etc/mvm/variant"
     chmod 0444 "$out/etc/mvm/variant"
     cp ${nameFile} "$out/etc/mvm/name"
@@ -1568,7 +808,7 @@ let
     # extraFiles the caller installs there). The guest-runtime binaries
     # (agent, netinit, addon-dns, exit-report, egress-client) are no longer
     # baked here — the guest sources them from the runtime overlay mounted at
-    # /mvm/runtime; see the resolution ladders in initScript.
+    # /mvm/runtime, mounted by the universal initramfs agent.
     mkdir -p "$out/usr/local/bin"
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
@@ -1583,8 +823,7 @@ let
         ""
     }
 
-    # Kernel modules. `/init` `modprobe`s vsock before forking the
-    # agent (default nixpkgs kernel ships AF_VSOCK as `=m`); without
+    # Kernel modules for callers that select a modular kernel; without
     # `/lib/modules/<kver>/` in the rootfs, modprobe has nothing to
     # load and the agent fails to open AF_VSOCK. Copy only the vsock
     # transport closure instead of the full kernel module tree; the
@@ -1792,7 +1031,7 @@ let
     accessible = isDev;
     sealed = isSealed;
     entrypointKind = entrypointKind;
-    # What PID 1 execs, as argv. The host cannot read inside a materialized
+    # What the workload declares, as argv. The host cannot read inside a materialized
     # ext4, so this is where admission learns what a workload runs — and the
     # only reason it can refuse to hand a shell-shaped entrypoint a stdin
     # writer.
@@ -1801,28 +1040,28 @@ let
     # itself is universal; mvmctl and admission use this image fact only for
     # transport setup and user-facing access checks.
     withInteractive = withInteractive;
-    initSystem = "busybox";
+    initSystem = "initramfs-agent";
+    inherit baseImageContract;
     # Single 300ms boot-budget floor across
-    # every backend. Custom /init + trimmed kernel + direct vmlinux
+    # every backend. The initramfs agent + trimmed kernel + direct vmlinux
     # boot are the levers that keep us under it. A backend that can't
     # hit the floor is a backend we drop.
     expectedBootMs = 300;
-    # Privilege model — the resolved uids `setpriv` drops to before
-    # exec. PID 1 is uid 0 (kernel requirement); these are the
-    # workload + agent uids. Surfaces here so mvmctl status can
-    # verify the actual /proc/<pid>/Uid against the declared
-    # intent.
+    # Actual universal-runtime identities after privileged activation.
     uids = {
-      agent = agentUid;
-      entrypoint = entrypointUid;
+      agent = workloadUid;
+      entrypoint = workloadUid;
     };
+    # Account rows and the generated script's direct-root invocation drop.
+    # These declarations do not change the universal runtime's identity.
+    declaredUids = resolvedUids;
     # Every account row the root's /etc/passwd and /etc/group carry, as
     # { name, uid } in file order. Forcing it runs the reserved-uid checks.
     identities = builtins.seq assertDedicatedServiceUids (
       map (row: { inherit (row) name uid; }) guestIdentities
     );
     inherit builderUid;
-    rootlessEntrypoint = entrypointUid != 0;
+    rootlessEntrypoint = true;
     # Agent binary kind: "real" — the cross-compiled Rust binary.
     # The previous "stub" value flagged a placeholder sh script.
     # `mvmctl status` reads this;
@@ -1830,9 +1069,8 @@ let
     agentBinary = "real";
     setprivHelperName = setprivHelperName;
     # The rootfs carries a `/mvm/runtime`
-    # bind-mount target and the /init script prefers the overlay
-    # agent at `/mvm/runtime/agent` over the baked-in
-    # `/usr/local/bin/mvm-guest-agent`. Admission-time gates can
+    # bind-mount target. The initramfs agent mounts the overlay before pivot;
+    # there is no baked guest-agent fallback. Admission-time gates can
     # refuse to boot a workload whose rootfs is not overlay-aware
     # (e.g. an old cached template predating overlay support).
     overlayAware = true;
@@ -1879,10 +1117,8 @@ warnUnenforced (
       # the runtime — no NixOS evaluation needed.
       inherit hypervisor;
       resources = { inherit vcpus memory_mib; };
-      # Expose the side-binaries from the guest-agent build so
-      # downstream derivations (per-service launch line
-      # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
-      # `mvm-seccomp-apply` without re-running the cargo build.
+      # Preserve the exported guest package and seccomp-helper store path
+      # for downstream package consumers without baking either into the root.
       inherit guestAgentPkg seccompApplyBinary;
     };
   })

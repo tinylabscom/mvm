@@ -761,8 +761,11 @@ debug = "line-tables-only"
 # over across the workspace's compile graph. The list is the
 # well-known "speed dev/test builds" recipe — proc-macro engines
 # (syn, quote, proc-macro2), serde derive, sha2/ring/zeroize crypto
-# (used by many transitive callers), and the four tree-sitter
-# grammar crates the mvm-sdk pulls in unconditionally.
+# (used by many transitive callers), the four tree-sitter
+# grammar crates the mvm-sdk pulls in unconditionally, and the
+# signature and regex crates below. A level set here only reaches
+# code compiled in that crate: a generic hot loop monomorphised into
+# its caller (AES-GCM's, for one) stays at the caller's level.
 [profile.dev.package."*"]
 opt-level = 0
 
@@ -789,6 +792,31 @@ opt-level = 3
 [profile.dev.package.tree-sitter-javascript]
 opt-level = 3
 [profile.dev.package.tree-sitter-typescript]
+opt-level = 3
+
+# The ed25519 and X25519 arithmetic every signed artifact goes through: plan
+# signing, the audit chain and its verification, bundle and image-set
+# signatures, flow identities. At opt-level 0 one ed25519 verification costs
+# tens of milliseconds, so a test that verifies a few hundred audit lines spent
+# its whole run in field arithmetic (`audit_chain_prune` took 34.5 s; 0.5 s
+# optimised). The hot code is not generic, so a per-package level reaches it.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+# Regex matching: secret redaction over workload streams, the secret-shape
+# scanners, and the xtask gates that read the tree. The supervisor redactor's
+# long-stream test drops from 10.7 s to 5.1 s.
+[profile.dev.package.regex]
+opt-level = 3
+[profile.dev.package.regex-automata]
+opt-level = 3
+[profile.dev.package.regex-syntax]
+opt-level = 3
+[profile.dev.package.aho-corasick]
+opt-level = 3
+[profile.dev.package.memchr]
 opt-level = 3
 
 # What goes to crates.io: the public crates and nothing else. `mvm-contract` is

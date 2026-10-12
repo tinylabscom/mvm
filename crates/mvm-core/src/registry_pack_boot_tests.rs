@@ -296,3 +296,55 @@ fn symlinks_are_not_verified_regular_boot_artifacts() {
     std::os::unix::fs::symlink(target, path).unwrap();
     assert!(f.check().is_err());
 }
+
+fn refused_admission(store_root: &std::path::Path) -> String {
+    let pin = PackPin::new(
+        "runtime/python@1.0.0".parse().unwrap(),
+        Sha256Hex::from_bytes(b"synthetic-pin"),
+    )
+    .unwrap();
+    let error = BuiltPackBootContract::open_with_store(
+        &pin,
+        &HostProtocolSupport {
+            base_image_contract: crate::image_set::BaseImageContractRange::SUPPORTED,
+            builder_cache_contract: 5,
+            builder_boot_abi: crate::image_set::BuilderBootAbiRange::WITH_PAYLOAD,
+        },
+        &ImageSetRevocationStore::new(store_root.to_owned()),
+        Utc::now(),
+    )
+    .expect_err("admission without an applied image-set list must refuse");
+    format!("{error:#}")
+}
+
+#[test]
+fn admission_without_an_applied_image_set_list_refuses_and_names_the_fix() {
+    let home = tempfile::tempdir().unwrap();
+    let message = refused_admission(&home.path().join("image-set-revocations"));
+    assert!(message.contains("image-set revocation list"), "{message}");
+    assert!(
+        message.contains("mvmctl image revocations update"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_modified_image_set_list_is_not_read_as_empty_at_admission() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join("image-set-revocations");
+    let feed = crate::signed_feed_store::SignedFeedStore::new(root.clone());
+    std::fs::create_dir_all(&root).unwrap();
+    // An unsigned, empty-looking list and a matching-looking checkpoint where
+    // a prepared list would live. Neither is authenticated.
+    let empty = br#"{"schema_version":1,"issued_at":"2026-01-01T00:00:00Z","not_after":"2099-01-01T00:00:00Z","revocations":[]}"#;
+    let state = serde_json::json!({
+        "document": String::from_utf8_lossy(empty),
+        "bundle": "{}",
+        "checkpoint": {"publication": 1, "issued_at": "2026-01-01T00:00:00Z",
+                       "sha256": Sha256Hex::from_bytes(empty).as_str()},
+    });
+    std::fs::write(feed.state_path(), state.to_string()).unwrap();
+    std::fs::write(feed.checkpoint_path(), state["checkpoint"].to_string()).unwrap();
+    let message = refused_admission(&root);
+    assert!(message.contains("image-set revocation"), "{message}");
+}

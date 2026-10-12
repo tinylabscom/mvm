@@ -70,17 +70,17 @@ runs:
 
         case "${target}" in
           "")
-            cargo build --release -p mvm-hostlib
+            cargo build --release -p mvm-hostlib --features mvm-client/release-channel
             src="target/release/libmvm_hostlib.${ext}"
             ;;
           *-gnu)
-            cargo zigbuild --release --target "${target}.2.17" -p mvm-hostlib
+            cargo zigbuild --release --target "${target}.2.17" -p mvm-hostlib --features mvm-client/release-channel
             src="target/${target}/release/libmvm_hostlib.${ext}"
             ;;
           *-musl)
             var="CARGO_TARGET_$(echo "${target}" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
             export "${var}=-C target-feature=-crt-static"
-            cargo zigbuild --release --target "${target}" -p mvm-hostlib
+            cargo zigbuild --release --target "${target}" -p mvm-hostlib --features mvm-client/release-channel
             src="target/${target}/release/libmvm_hostlib.${ext}"
             ;;
         esac

@@ -23,6 +23,6 @@ rm -rf node_modules    # never committed — the build produces it
 
 ```sh
 mvmctl build compile examples/typescript/hello-app-with-deps/app.ts --out /tmp/hello-ts-deps
-mvmctl machine run --name hello-ts-deps --flake /tmp/hello-ts-deps   # named: boots cold
+mvmctl machine run --flake /tmp/hello-ts-deps
 # invoke greet → uses is-number from the baked node_modules
 ```

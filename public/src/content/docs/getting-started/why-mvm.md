@@ -32,8 +32,7 @@ witnesses, and limitations behind these statements.
 ## What you can use today
 
 - Run an OCI image in a transient microVM with
-  `mvmctl machine run --image alpine -- uname -a`, claiming a standby prepared
-  by `mvmctl pool warm --image alpine` under `MVM_RESIDENCY=warm`.
+  `mvmctl machine run --image alpine -- uname -a`.
 - Build reproducible workloads from Nix flakes or Python and TypeScript
   declarations.
 - Drive transient and persistent machines from the CLI, Python, TypeScript, or

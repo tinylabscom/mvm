@@ -1641,15 +1641,19 @@ class SeccompTier3(Enum):
 
 
 class SeccompTier4(Enum):
-    network = 'network'
+    vsock = 'vsock'
 
 
 class SeccompTier5(Enum):
+    network = 'network'
+
+
+class SeccompTier6(Enum):
     unrestricted = 'unrestricted'
 
 
 SeccompTier = Union[
-    SeccompTier1, SeccompTier2, SeccompTier3, SeccompTier4, SeccompTier5
+    SeccompTier1, SeccompTier2, SeccompTier3, SeccompTier4, SeccompTier5, SeccompTier6
 ]
 
 

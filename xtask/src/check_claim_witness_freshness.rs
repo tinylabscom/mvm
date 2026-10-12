@@ -13,8 +13,13 @@
 //!
 //! On its scheduled reporting pass this gate independently reconciles both
 //! properties. For every scheduled workflow that anchors a `ci:` witness, it
-//! reads the most recent scheduled run and fails when that run is older than
-//! the schedule can explain or did not complete successfully. Pull requests
+//! reads the most recent *completed* scheduled run and fails when that run is
+//! older than the schedule can explain or did not complete successfully. A
+//! run still in flight is not evidence either way: Security's nightly
+//! routinely takes longer than the gap between its cron and this one, and
+//! judging the in-flight run reported a missing lane on mornings when the
+//! previous night was green. The completed run it falls back to still ages
+//! out, so a run that hangs forever turns stale rather than hiding. Pull requests
 //! validate only the static mapping and schedules, because mutable run history
 //! cannot be repaired by the branch under review.
 //!
@@ -463,7 +468,8 @@ fn now_unix() -> Result<i64> {
         .as_secs() as i64)
 }
 
-/// Most recent scheduled run of `file`, or None when it has never run.
+/// The scheduled run of `file` this gate judges (see [`judged_run`]), or
+/// None when it has never run.
 fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
     let out = std::process::Command::new("gh")
         .args([
@@ -474,7 +480,7 @@ fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
             "--event",
             "schedule",
             "--limit",
-            "1",
+            SCHEDULED_RUNS_READ,
             "--json",
             "createdAt,status,conclusion",
         ])
@@ -486,13 +492,31 @@ fn latest_scheduled_run(file: &str) -> Result<Option<LatestRun>> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(first_run(&String::from_utf8_lossy(&out.stdout)))
+    Ok(judged_run(&String::from_utf8_lossy(&out.stdout)))
 }
 
-/// First entry in `gh run list --json createdAt,status,conclusion` output.
-pub fn first_run(json: &str) -> Option<LatestRun> {
+/// How many scheduled runs to read when looking for the newest completed one.
+/// Enough to see past one in-flight run and a queued one behind it.
+const SCHEDULED_RUNS_READ: &str = "5";
+
+/// The run this gate judges from `gh run list` output, newest first: the
+/// newest *completed* run, so a nightly still executing when this gate fires
+/// is not read as a failure. With no completed run in the window the newest
+/// run is returned as-is, and its unfinished status is reported.
+pub fn judged_run(json: &str) -> Option<LatestRun> {
+    let runs = all_runs(json)?;
+    runs.iter()
+        .find(|run| run.status == "completed")
+        .or_else(|| runs.first())
+        .cloned()
+}
+
+fn all_runs(json: &str) -> Option<Vec<LatestRun>> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let run = v.as_array()?.first()?;
+    v.as_array()?.iter().map(parse_run).collect()
+}
+
+fn parse_run(run: &serde_json::Value) -> Option<LatestRun> {
     Some(LatestRun {
         created_at: run.get("createdAt")?.as_str()?.to_string(),
         status: run.get("status")?.as_str()?.to_string(),
@@ -728,18 +752,79 @@ mod tests {
     }
 
     #[test]
-    fn first_run_reads_status_and_conclusion() {
+    fn judged_run_reads_status_and_conclusion() {
         let json = r#"[{"createdAt":"2026-08-21T04:17:00Z","status":"completed","conclusion":"cancelled"}]"#;
         assert_eq!(
-            first_run(json),
+            judged_run(json),
             Some(LatestRun {
                 created_at: "2026-08-21T04:17:00Z".to_string(),
                 status: "completed".to_string(),
                 conclusion: Some("cancelled".to_string()),
             })
         );
-        assert_eq!(first_run("[]"), None);
-        assert_eq!(first_run("not json"), None);
+        assert_eq!(judged_run("[]"), None);
+        assert_eq!(judged_run("not json"), None);
+    }
+
+    #[test]
+    fn a_nightly_still_running_is_judged_by_the_last_completed_one() {
+        // The shape of the morning that kept this gate red after a green
+        // night: today's run in flight, yesterday's finished and green.
+        let json = r#"[
+            {"createdAt":"2026-10-12T04:33:00Z","status":"in_progress","conclusion":""},
+            {"createdAt":"2026-10-11T04:33:44Z","status":"completed","conclusion":"success"},
+            {"createdAt":"2026-10-10T04:32:37Z","status":"completed","conclusion":"failure"}
+        ]"#;
+        let run = judged_run(json).expect("a completed run is in the window");
+        assert_eq!(run.created_at, "2026-10-11T04:33:44Z");
+        assert_eq!(classify_outcome(&run), RunOutcome::Healthy);
+    }
+
+    #[test]
+    fn a_failed_night_is_not_hidden_behind_a_run_in_flight() {
+        let json = r#"[
+            {"createdAt":"2026-10-11T04:33:44Z","status":"queued","conclusion":""},
+            {"createdAt":"2026-10-10T04:32:37Z","status":"completed","conclusion":"failure"}
+        ]"#;
+        let run = judged_run(json).expect("a completed run is in the window");
+        assert_eq!(
+            classify_outcome(&run),
+            RunOutcome::Unhealthy {
+                status: "completed".to_string(),
+                conclusion: Some("failure".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn with_nothing_completed_the_unfinished_run_is_reported() {
+        let json =
+            r#"[{"createdAt":"2026-10-11T04:33:44Z","status":"in_progress","conclusion":""}]"#;
+        let run = judged_run(json).expect("the in-flight run is returned");
+        assert_eq!(
+            classify_outcome(&run),
+            RunOutcome::Unhealthy {
+                status: "in_progress".to_string(),
+                conclusion: Some(String::new()),
+            }
+        );
+    }
+
+    #[test]
+    fn the_completed_run_still_ages_out_behind_a_hung_one() {
+        // A run that never finishes must not keep the gate green forever:
+        // freshness is measured on the completed run it falls back to.
+        let json = r#"[
+            {"createdAt":"2026-10-15T04:33:00Z","status":"in_progress","conclusion":""},
+            {"createdAt":"2026-10-11T04:33:44Z","status":"completed","conclusion":"success"}
+        ]"#;
+        let run = judged_run(json).unwrap();
+        let now = parse_utc_rfc3339("2026-10-15T09:23:00Z").unwrap();
+        let age = age_hours_since(&run.created_at, now).unwrap();
+        assert!(matches!(
+            classify(Some(age), Some(24 * MISSED_FIRINGS_ALLOWED)),
+            Freshness::Stale { .. }
+        ));
     }
 
     #[test]

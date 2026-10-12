@@ -8,10 +8,13 @@
 //!   and `NVML_OK ...` with the answers the host endpoint returned. Exit 0
 //!   only if every call succeeded — i.e. the calls were remoted to the
 //!   host endpoint and answered.
-//! - `dial`: opens `AF_VSOCK` and connects to the host endpoint port. The
-//!   GPU channel exists only on launches that armed it, so a boot without
-//!   the GPU plane must refuse here; the probe prints `CONNECT_REFUSED`
-//!   and exits 3 (other failures exit 4).
+//! - `dial`: opens `AF_VSOCK` and connects to the host endpoint port,
+//!   printing `CONNECT_OK` and exiting 0 when it connects. A launch without
+//!   a GPU grant runs its workload under a seccomp tier that refuses the
+//!   vsock socket outright: the probe prints `CONNECT_ERROR errno=1
+//!   (socket)` and exits 4. Where the socket opens but nothing listens on
+//!   the GPU port, it prints `CONNECT_REFUSED` and exits 3; any other
+//!   failure exits 4.
 //!
 //! Built for the guest's own libc (aarch64-linux-gnu for the glibc BDD
 //! guest) with `cargo zigbuild --example gpu_guest_probe`.

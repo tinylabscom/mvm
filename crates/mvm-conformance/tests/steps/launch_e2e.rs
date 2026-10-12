@@ -57,13 +57,13 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The residency the README's quick start exports before it launches.
+/// The residency the warm-launch scenarios run under.
 ///
-/// An unnamed launch must claim a prepared warm standby, and only a warm
-/// residency lets it: Linux otherwise resolves to `parked`, whose warm target
-/// is zero, and refuses every unnamed launch even after `pool warm`. These
-/// scenarios run the documented shell, so they set what it sets. A launch that
-/// means to boot cold is named.
+/// An unnamed launch claims a standby when one is ready and boots cold when
+/// none is; either way it leaves one behind for the next run. The warm
+/// scenarios prepare their standby explicitly and pin the residency so the
+/// claim they measure is the one they prepared for. A launch that means to
+/// boot cold is named, which also keeps it from leaving a standby behind.
 const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
 const DOCUMENTED_RESIDENCY: &str = "warm";
 
@@ -79,11 +79,16 @@ pub(crate) fn e2e_home() -> PathBuf {
 /// process, so the number asserted is the number the launch budget is defined
 /// in: guest-dispatchable, excluding process startup and teardown.
 fn parse_dispatch_window_ms(output: &str) -> Option<f64> {
+    parse_phase_timing_ms(output, "dispatch_window=")
+}
+
+/// Parse one `<key><n>ms` token out of the `phase-timing` line.
+fn parse_phase_timing_ms(output: &str, key: &str) -> Option<f64> {
     output
         .lines()
         .find(|line| line.contains("phase-timing:"))?
         .split_whitespace()
-        .find_map(|token| token.strip_prefix("dispatch_window="))?
+        .find_map(|token| token.strip_prefix(key))?
         .strip_suffix("ms")?
         .parse()
         .ok()
@@ -259,6 +264,40 @@ fn warm_parent_is_ready(image: &str) {
         result.exit_code, 0,
         "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
+    );
+}
+
+/// Wait for the standby an unnamed run leaves behind. The run starts the
+/// refill and returns; the standby is ready once `pool status` counts an idle
+/// one.
+#[then(expr = "a standby left by that run is ready within {int} seconds")]
+fn standby_left_by_run_is_ready(_world: &mut CliWorld, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let status = run_in_e2e_home("pool status --json", &[]);
+        last = status.stdout.clone();
+        let idle = serde_json::from_str::<serde_json::Value>(&status.stdout)
+            .ok()
+            .and_then(|v| v.get("idle").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0);
+        if idle > 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    panic!("no idle standby within {secs}s of the run that should leave one; last status:\n{last}");
+}
+
+/// The launch claimed a standby rather than booting cold, read off its own
+/// phase-timing line.
+#[then(expr = "the launch claimed a standby")]
+fn launch_claimed_a_standby(world: &mut CliWorld) {
+    let record = last(world);
+    assert!(
+        record.combined().contains("launch_mode=warm"),
+        "the launch did not claim a standby\n--- combined ---\n{}",
+        record.combined()
     );
 }
 
@@ -548,6 +587,21 @@ fn warm_launch_meets_hard_dispatch_ceiling(world: &mut CliWorld) {
     assert!(
         mvm_cli::launch_contract::within_warm_start_slo_ms(observed),
         "dispatch window was {observed:.1}ms; the warm-claim contract is strictly under {:.0}ms",
+        mvm_cli::launch_contract::WARM_START_MAX_MS,
+    );
+    // The dispatch window starts at admission. The ceiling is held from the
+    // caller's command, which also covers resolution and admission.
+    let startup = parse_phase_timing_ms(&record.combined(), "startup=").unwrap_or_else(|| {
+        panic!(
+            "no `startup=` token in the phase-timing line, so the launch could not be \
+             measured from invocation.\n--- combined ---\n{}",
+            record.combined()
+        )
+    });
+    assert!(
+        mvm_cli::launch_contract::within_warm_start_slo_ms(startup),
+        "startup from invocation was {startup:.1}ms; the warm-claim contract is strictly \
+         under {:.0}ms",
         mvm_cli::launch_contract::WARM_START_MAX_MS,
     );
 }

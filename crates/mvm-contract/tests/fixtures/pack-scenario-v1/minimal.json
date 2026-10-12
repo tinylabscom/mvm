@@ -1,0 +1,22 @@
+{
+  "schema": "mvm.pack-scenario/v1",
+  "name": "fix-failing-test",
+  "version": "1.0.0",
+  "environment": {
+    "identity": { "name": "acme/hello", "version": "1.0.0" },
+    "target": "aarch64-linux",
+    "bundle_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "instructions": "Make the test in repo/test_app.py pass and write the result to out/result.json.",
+  "initial_files": [
+    { "source": "repo", "destination": "repo" }
+  ],
+  "outputs": ["out", "repo/app.py"],
+  "limits": { "wall_clock_secs": 600, "max_output_bytes": 1048576, "max_output_files": 64 },
+  "checks": [
+    { "kind": "file_exists", "name": "wrote-result", "path": "out/result.json" },
+    { "kind": "json_matches", "name": "result-passed", "path": "out/result.json", "pointer": "/status", "expected": "status.json" },
+    { "kind": "file_matches", "name": "fixed-source", "path": "repo/app.py", "expected": "app.py" },
+    { "kind": "command", "name": "hidden-tests", "argv": ["python3", "-m", "pytest", "-q"], "exit_code": 0 }
+  ]
+}

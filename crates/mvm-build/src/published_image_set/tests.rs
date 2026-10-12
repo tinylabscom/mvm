@@ -7,6 +7,289 @@ use mvm_core::util::test_env::TestEnv;
 const ARCH: GuestArch = GuestArch::Aarch64;
 const MEMBER: &str = "stage0-vmlinux-aarch64";
 
+fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
+    use mvm_fs::ext4::{Node, Owner};
+    let mut nodes = ["/etc", "/etc/mvm"]
+        .into_iter()
+        .map(|path| Node::Dir {
+            path: path.into(),
+            mode: 0o755,
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        })
+        .collect::<Vec<_>>();
+    if let Some(bytes) = marker {
+        nodes.push(Node::File {
+            path: "/etc/mvm/base-image-contract".into(),
+            mode: 0o444,
+            data: bytes.to_vec(),
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        });
+    }
+    if let Some(path) = symlink {
+        nodes.retain(|node| node.path() != path && !node.path().starts_with(&format!("{path}/")));
+        nodes.push(Node::Symlink {
+            path: path.into(),
+            target: "/somewhere".into(),
+            owner: Owner::ROOT,
+        });
+    }
+    mvm_fs::ext4::build_image(nodes, &Default::default()).unwrap()
+}
+
+#[test]
+fn new_base_markers_are_checked_after_authentication_for_each_profile_and_arch() {
+    let _env = unsigned_env();
+    for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+        for profile in [
+            WorkloadImageProfile::DefaultTenant,
+            WorkloadImageProfile::RootlessTenant,
+        ] {
+            for marker in [
+                Some(b"1\n".as_slice()),
+                None,
+                Some(b"2\n".as_slice()),
+                Some(b"1".as_slice()),
+                Some(b"01\n".as_slice()),
+                Some(b"1\njunk".as_slice()),
+            ] {
+                let served = tempfile::tempdir().unwrap();
+                let root = contract_root(marker, None);
+                let fixture = ImageSetFixture::complete()
+                    .with_base_image_contract(Some(
+                        mvm_core::image_set::BaseImageContract::LINUX_LAYER,
+                    ))
+                    .publish(
+                        ImageSetRole::WorkloadRootfs(profile),
+                        MemberTarget::Arch(arch),
+                        "contract-root.ext4",
+                        root,
+                    );
+                let set =
+                    PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+                let out = tempfile::tempdir().unwrap();
+                let destination = out.path().join("root.ext4");
+                let result = set.fetch_member_artifact(
+                    ImageSetRole::WorkloadRootfs(profile),
+                    arch,
+                    "contract-root.ext4",
+                    &destination,
+                );
+                if marker == Some(b"1\n".as_slice()) {
+                    result.unwrap();
+                    assert!(destination.exists());
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(ImageSetMemberError::BaseImageContract { .. })
+                    ));
+                    assert!(!destination.exists());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn installed_cache_hits_recheck_declaration_marker_and_bytes_for_prod_and_dev() {
+    let _env = unsigned_env();
+    for build_mode in [None, Some(MemberBuildMode::Dev)] {
+        for marker in [Some(b"1\n".as_slice()), None, Some(b"2\n".as_slice())] {
+            let served = tempfile::tempdir().unwrap();
+            let root = contract_root(marker, None);
+            let profile = WorkloadImageProfile::DefaultTenant;
+            let target = MemberTarget::Arch(ARCH);
+            let fixture = ImageSetFixture::complete().with_base_image_contract(Some(
+                mvm_core::image_set::BaseImageContract::LINUX_LAYER,
+            ));
+            let fixture = if build_mode.is_some() {
+                fixture
+                    .publish_dev(
+                        ImageSetRole::WorkloadKernel(profile),
+                        target,
+                        "dev-vmlinux",
+                        b"kernel".to_vec(),
+                    )
+                    .publish_dev(
+                        ImageSetRole::WorkloadRootfs(profile),
+                        target,
+                        "dev-root.ext4",
+                        root.clone(),
+                    )
+            } else {
+                fixture
+                    .publish(
+                        ImageSetRole::WorkloadKernel(profile),
+                        target,
+                        "prod-vmlinux",
+                        b"kernel".to_vec(),
+                    )
+                    .publish(
+                        ImageSetRole::WorkloadRootfs(profile),
+                        target,
+                        "prod-root.ext4",
+                        root.clone(),
+                    )
+            };
+            let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+            let out = tempfile::tempdir().unwrap();
+            std::fs::write(out.path().join("vmlinux"), b"kernel").unwrap();
+            let path = out.path().join("rootfs.ext4");
+            std::fs::write(&path, &root).unwrap();
+            let verify = || {
+                verify_installed_workload_files(
+                    set.manifest(),
+                    out.path(),
+                    ARCH,
+                    profile,
+                    build_mode,
+                )
+            };
+            if marker != Some(b"1\n".as_slice()) {
+                assert!(
+                    verify().is_err(),
+                    "an existing cache cannot waive the marker"
+                );
+                continue;
+            }
+            let started = std::time::Instant::now();
+            verify().unwrap();
+            eprintln!(
+                "warm contract verification of {} bytes: {:?}",
+                root.len(),
+                started.elapsed()
+            );
+            assert!(
+                verify_installed_workload_files(
+                    set.manifest(),
+                    out.path(),
+                    GuestArch::X86_64,
+                    profile,
+                    build_mode
+                )
+                .is_err()
+            );
+            let mut tampered = root.clone();
+            *tampered.last_mut().unwrap() ^= 1;
+            std::fs::write(&path, tampered).unwrap();
+            // Even a perfectly forged size/mtime sidecar must not authorize
+            // a cached root whose bytes differ from the signed declaration.
+            mvm_core::crypto::image_verify::sha256_file_cached(&path).unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let mtime = metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            std::fs::write(
+                mvm_core::crypto::image_verify::sha256_cache_path(&path),
+                format!(
+                    "{} {} {}\n",
+                    mvm_core::packs::Sha256Hex::from_bytes(&root).as_str(),
+                    metadata.len(),
+                    mtime
+                ),
+            )
+            .unwrap();
+            assert!(verify().is_err(), "mutable digest cache is not proof");
+            std::fs::remove_file(&path).unwrap();
+            assert!(verify().is_err());
+        }
+    }
+}
+
+#[test]
+fn renamed_ext4_payload_still_requires_the_marker_and_installs_by_authenticated_format() {
+    use mvm_core::image_set::ArtifactFormat;
+    let _env = unsigned_env();
+    let profile = WorkloadImageProfile::DefaultTenant;
+    let target = MemberTarget::Arch(ARCH);
+    for marker in [Some(b"1\n".as_slice()), None, Some(b"2\n".as_slice())] {
+        let served = tempfile::tempdir().unwrap();
+        let root = contract_root(marker, None);
+        let fixture = ImageSetFixture::complete()
+            .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+            .publish(
+                ImageSetRole::WorkloadKernel(profile),
+                target,
+                "kernel-no-extension",
+                b"kernel".to_vec(),
+            )
+            .publish(
+                ImageSetRole::WorkloadRootfs(profile),
+                target,
+                "root-no-extension",
+                root,
+            )
+            .publish_extra(
+                ImageSetRole::WorkloadRootfs(profile),
+                target,
+                "hash-tree",
+                b"verity".to_vec(),
+            )
+            .with_artifact_format("hash-tree", ArtifactFormat::VerityHashTree)
+            .publish_extra(
+                ImageSetRole::WorkloadRootfs(profile),
+                target,
+                "root-hash",
+                b"roothash".to_vec(),
+            )
+            .with_artifact_format("root-hash", ArtifactFormat::VerityRootHash);
+        let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+        let installed = tempfile::tempdir().unwrap();
+        let result = set.fetch_default_workload(ARCH, installed.path());
+        if marker == Some(b"1\n".as_slice()) {
+            result.unwrap();
+            let sidecar = crate::builder_vm::GuestSidecar::read_from_dir(installed.path())
+                .unwrap()
+                .unwrap();
+            assert_eq!(sidecar.protocol_version, 0);
+            assert_eq!(sidecar.init_system, "cli-initramfs");
+            assert!(sidecar.agent_binary.is_empty());
+        } else {
+            assert!(result.is_err(), "renaming cannot bypass the marker");
+            assert!(!installed.path().join("rootfs.ext4").exists());
+        }
+    }
+}
+
+#[test]
+fn base_marker_never_trusts_symlink_components() {
+    let mut compatibility = mvm_core::image_set::image_train_lock()
+        .compatibility
+        .clone();
+    compatibility.base_image_contract = Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER);
+    for path in ["/etc", "/etc/mvm", "/etc/mvm/base-image-contract"] {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        // Parents may be replaced by a symlink only when their children are
+        // omitted; the writer correctly refuses descendants of a symlink.
+        let bytes = contract_root(None, Some(path));
+        std::fs::write(image.path(), bytes).unwrap();
+        assert!(verify_base_image_contract(image.path(), &compatibility).is_err());
+    }
+}
+
+#[test]
+fn unknown_base_contract_is_refused_before_member_acquisition() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = with_member(b"not requested")
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::new(99)));
+    fn never_download(_: &str, _: &Path) -> Result<()> {
+        panic!("unsupported locked contract must refuse before acquisition");
+    }
+    let error = PublishedImageSet::acquire_from(
+        fixture
+            .serve_from(served.path())
+            .with_download(never_download),
+    )
+    .err()
+    .unwrap();
+    assert!(format!("{error:#}").contains("base-image contract 99"));
+}
+
 /// A fixture carries no publisher signature, so every acquisition below skips
 /// that rung; `acquire_refuses_a_root_without_a_signature` is the one that
 /// does not.

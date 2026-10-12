@@ -72,7 +72,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
     );
     assert!(
         workflow.contains(
-            "needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]"
+            "needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, release-archive-smoke, distro-packages]"
         ),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
@@ -96,6 +96,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "bdd",
         "e2e-docs",
         "build",
+        "archive-install-smoke",
         "guest-runtime",
         "release-archive-smoke",
         "distro-packages",

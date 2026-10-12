@@ -1428,7 +1428,7 @@ mod tests {
         }
         (
             ImageSetManifest {
-                schema_version: crate::image_set::IMAGE_SET_SCHEMA_VERSION,
+                schema_version: crate::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION,
                 set_version: ImageSetVersion::new("1.0.0").expect("version"),
                 issued_at: Utc.with_ymd_and_hms(2026, 9, 23, 0, 0, 0).unwrap(),
                 producer: ImageSetProducer::Release(ReleaseProducer {
@@ -1437,7 +1437,7 @@ mod tests {
                     release_tag: ReleaseTag::new("v1.0.0").expect("tag"),
                     source_commit: GitCommit::new("a".repeat(40)).expect("commit"),
                 }),
-                mvm_source_commit: GitCommit::new("b".repeat(40)).expect("commit"),
+                mvm_source_commit: Some(GitCommit::new("b".repeat(40)).expect("commit")),
                 compatibility: ImageSetCompatibility {
                     guest_agent_protocol: Some(ProtocolRange::new(2, 2).expect("protocol")),
                     builder_cache_contract: 4,

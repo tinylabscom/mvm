@@ -7,15 +7,24 @@
   outputs =
     { mvm, nixpkgs, ... }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
-      eachSystem = f: builtins.listToAttrs (map (system: { name = system; value = f system; }) systems);
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
+      eachSystem =
+        f:
+        builtins.listToAttrs (
+          map (system: {
+            name = system;
+            value = f system;
+          }) systems
+        );
     in
     {
       packages = eachSystem (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
-          idle = [ "/bin/busybox" "sh" "-c" "while :; do /bin/busybox sleep 2147483647; done" ];
           deniedCall = pkgs.writeShellScript "entrypoint-denied-host" ''
             exec ${pkgs.curl}/bin/curl -fsSL --max-time 10 https://blocked.example/
           '';
@@ -24,8 +33,7 @@
           default = mvm.lib.${system}.mkGuest {
             name = "entrypoint-denial";
             packages = [ pkgs.curl ];
-            entrypoint.command = idle;
-            bootCommand = idle;
+            entrypoint.command = [ "${deniedCall}" ];
             extraFiles."/etc/mvm/entrypoint" = {
               source = deniedCall;
               mode = "0755";

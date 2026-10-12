@@ -873,3 +873,192 @@ fn sealing_twice_with_nothing_new_writes_one_seal() {
     assert_eq!(reseal.event_count, first.event_count + 1);
     assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
 }
+
+/// An emitter whose chain rotates every `bytes`, so a test decides when the
+/// chain splits.
+fn rotating_emitter(dir: &std::path::Path, bytes: u64) -> AuditEmitter {
+    let signer = crate::supervisor::FileAuditSigner::open(key(7), dir)
+        .unwrap()
+        .with_rotation(crate::supervisor::RotationPolicy::at_bytes(bytes));
+    AuditEmitter::with_primary_signer(key(7), dir, std::sync::Arc::new(signer))
+        .expect("emitter with a rotating signer")
+}
+
+/// Run a session the way a launch does: note it before anything is recorded,
+/// admit it and publish the opening root in one batch, then record its run and
+/// exit. Leaves it unsealed.
+fn run_noted_session(emitter: &AuditEmitter, p: &ExecutionPlan) {
+    note_new_session(emitter.audit_dir(), TENANT, &p.plan_id.0);
+    emitter
+        .batched(|| {
+            emitter.emit_admitted(p, "host:test")?;
+            emitter.publish_root(TENANT)?;
+            Ok(())
+        })
+        .unwrap();
+    emitter.emit_launched(p, "mock").unwrap();
+    emitter.emit_exited(p, 0, "mock").unwrap();
+}
+
+fn segments_in(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".seg-"))
+        .count()
+}
+
+/// The seal the whole chain gives for `p` — exactly what sealing computed
+/// before it learned to read the live segment alone.
+fn whole_chain_seal(emitter: &AuditEmitter, p: &ExecutionPlan) -> SessionSeal {
+    let lines =
+        crate::audit::merkle::read_leaves(emitter.audit_dir(), TENANT, &key(7).verifying_key())
+            .unwrap();
+    compute_seal(
+        &lines,
+        &SealRequest {
+            plan_id: &p.plan_id.0,
+            reason: SealReason::Exited,
+            image_sha256: Some(p.image.sha256.to_ascii_lowercase()),
+            kernel_sha256: None,
+            compute_environment: None,
+        },
+    )
+    .unwrap()
+}
+
+fn live_segment_seal(emitter: &AuditEmitter, p: &ExecutionPlan) -> Option<SessionSeal> {
+    let request = SealRequest {
+        plan_id: &p.plan_id.0,
+        reason: SealReason::Exited,
+        image_sha256: Some(p.image.sha256.to_ascii_lowercase()),
+        kernel_sha256: None,
+        compute_environment: None,
+    };
+    match emitter
+        .decide_seal_in_live_segment(TENANT, &request)
+        .unwrap()?
+    {
+        SealDecision::New(seal) => Some(seal),
+        SealDecision::Existing(_) => panic!("the session was not sealed yet"),
+    }
+}
+
+#[test]
+fn the_live_segment_seal_is_the_whole_chain_seal_across_rotations() {
+    let dir = tempfile::tempdir().unwrap();
+    let emitter = rotating_emitter(dir.path(), 24 * 1024);
+    let mut engaged = 0;
+    for n in 0..16 {
+        let p = plan(&format!("sha256:{n:08x}"));
+        run_noted_session(&emitter, &p);
+
+        let whole = whole_chain_seal(&emitter, &p);
+        if let Some(live) = live_segment_seal(&emitter, &p) {
+            // Byte for byte: the labels are what the seal entry carries.
+            assert_eq!(live, whole, "session {n}");
+            assert_eq!(live.to_labels(), whole.to_labels(), "session {n}");
+            engaged += 1;
+        }
+        let written = emitter.seal_session(&p, SealReason::Exited).unwrap();
+        assert_eq!(written, whole, "session {n}");
+        let report = verify_session(dir.path(), TENANT, &p.plan_id.0, &key(7).verifying_key());
+        assert_eq!(report.verdict, Verdict::Verified, "session {n}: {report:?}");
+    }
+    assert!(
+        segments_in(dir.path()) >= 2,
+        "the chain must span several sealed segments for this test to mean anything"
+    );
+    // Only a session the chain rotated under, or the first one after a
+    // rotation (whose previous seal is in a sealed segment), reads the whole
+    // chain. Everything else must take the live segment.
+    assert!(
+        engaged >= 10,
+        "the live-segment seal engaged {engaged} of 16 times"
+    );
+}
+
+#[test]
+fn an_unrotated_chain_seals_from_the_live_segment_without_a_note() {
+    let chain = Chain::new();
+    for n in 0..3 {
+        let p = plan(&format!("sha256:{n:08x}"));
+        chain
+            .emitter
+            .batched(|| {
+                chain.emitter.emit_admitted(&p, "host:test")?;
+                chain.emitter.publish_root(TENANT)?;
+                Ok(())
+            })
+            .unwrap();
+        chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+        let live = live_segment_seal(&chain.emitter, &p)
+            .expect("an unrotated chain needs no note to seal from its live segment");
+        assert_eq!(live, whole_chain_seal(&chain.emitter, &p));
+        chain.emitter.seal_session(&p, SealReason::Exited).unwrap();
+        assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+    }
+}
+
+#[test]
+fn a_rotated_chain_without_a_note_is_sealed_from_the_whole_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let emitter = rotating_emitter(dir.path(), 2 * 1024);
+    for n in 0..4 {
+        let p = plan(&format!("sha256:{n:08x}"));
+        run_noted_session(&emitter, &p);
+        emitter.seal_session(&p, SealReason::Exited).unwrap();
+    }
+    assert!(segments_in(dir.path()) >= 1);
+    // A session this process did not admit: nothing says its first line is in
+    // the live segment, so the whole chain is read.
+    let p = plan("sha256:0000beef");
+    emitter
+        .batched(|| {
+            emitter.emit_admitted(&p, "host:test")?;
+            emitter.publish_root(TENANT)?;
+            Ok(())
+        })
+        .unwrap();
+    emitter.emit_exited(&p, 0, "mock").unwrap();
+    assert_eq!(live_segment_seal(&emitter, &p), None);
+    emitter.seal_session(&p, SealReason::Exited).unwrap();
+    let report = verify_session(dir.path(), TENANT, &p.plan_id.0, &key(7).verifying_key());
+    assert_eq!(report.verdict, Verdict::Verified, "{report:?}");
+}
+
+#[test]
+fn a_session_the_chain_rotated_under_is_sealed_from_the_whole_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let emitter = rotating_emitter(dir.path(), 4 * 1024);
+    let first = plan("sha256:00000001");
+    run_noted_session(&emitter, &first);
+    emitter.seal_session(&first, SealReason::Exited).unwrap();
+
+    let p = plan("sha256:00000002");
+    run_noted_session(&emitter, &p);
+    let before = segments_in(dir.path());
+    while segments_in(dir.path()) == before {
+        emitter.emit_launched(&p, "mock").unwrap();
+    }
+    emitter.emit_exited(&p, 0, "mock").unwrap();
+    assert_eq!(
+        live_segment_seal(&emitter, &p),
+        None,
+        "part of the session is in a sealed segment"
+    );
+    let seal = emitter.seal_session(&p, SealReason::Exited).unwrap();
+    assert_eq!(seal, seal_on_chain(&emitter, &p));
+    let report = verify_session(dir.path(), TENANT, &p.plan_id.0, &key(7).verifying_key());
+    assert_eq!(report.verdict, Verdict::Verified, "{report:?}");
+}
+
+/// The seal `p` carries, read back from the whole chain.
+fn seal_on_chain(emitter: &AuditEmitter, p: &ExecutionPlan) -> SessionSeal {
+    let lines =
+        crate::audit::merkle::read_leaves(emitter.audit_dir(), TENANT, &key(7).verifying_key())
+            .unwrap();
+    current_seal(&lines, &p.plan_id.0)
+        .unwrap()
+        .expect("the session is sealed")
+}

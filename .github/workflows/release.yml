@@ -187,7 +187,8 @@ jobs:
             # the glibc Python/Node hosts the SDKs run on anyway - so the
             # library is built against this arch's gnu target and staged
             # where the packaging step looks for it.
-            cargo zigbuild --release --target "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}" -p mvm-hostlib
+            cargo zigbuild --release --target "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}" \
+              -p mvm-hostlib --features mvm-client/release-channel
             mkdir -p "target/${BUILD_TARGET}/release"
             cp "target/${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}/release/libmvm_hostlib.so" \
               "target/${BUILD_TARGET}/release/libmvm_hostlib.so"
@@ -200,7 +201,8 @@ jobs:
               --bin mvm-audit-signer
             cargo build --release --target "${BUILD_TARGET}" -p mvm-gpu \
               --bin mvm-gpu-endpoint
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
+              --features mvm-client/release-channel
           fi
 
       - name: Verify Linux release payloads are statically linked
@@ -264,7 +266,7 @@ jobs:
         # mvm-cli + its heavy build.rs); release is the only caller.
         run: cargo run --package xtask --features man -- gen-man --output-dir man/
 
-      - name: Package binary and generate checksums
+      - name: Stage binary and helpers
         env:
           TARGET: ${{ matrix.target }}
           BUILD_TARGET: ${{ matrix.build_target }}
@@ -319,6 +321,38 @@ jobs:
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
 
+      - name: Sign and notarize the staged macOS release
+        if: ${{ matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --payload staging/mvmctl-aarch64-apple-darwin \
+            --skip-unconfigured \
+            --report "${RUNNER_TEMP}/macos-notarization.json"
+
+      - name: Retain macOS notarization evidence
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-notarization
+          path: ${{ runner.temp }}/macos-notarization.json
+          if-no-files-found: warn
+
+      - name: Package binary and generate checksums
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE_NAME="mvmctl-${TARGET}"
+          HOSTLIB_EXT=so
+          if [[ "${TARGET}" == *apple-darwin ]]; then HOSTLIB_EXT=dylib; fi
           cd staging
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
           # No `grep -q` here: the step runs with pipefail, and grep -q exits
@@ -340,6 +374,63 @@ jobs:
           path: |
             staging/*.tar.gz
             staging/*.sha256
+
+  archive-install-smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            library: libmvm_hostlib.so
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            library: libmvm_hostlib.so
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            library: libmvm_hostlib.dylib
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: mvmctl-${{ matrix.target }}
+          path: ${{ runner.temp }}/archive
+      - name: Install the archive and load its native library
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          LIBRARY: ${{ matrix.library }}
+          EXPECT_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP}/archive"
+          shasum -a 256 --check "mvmctl-${TARGET}.tar.gz.sha256"
+          prefix="${RUNNER_TEMP}/installed"
+          mkdir -p "${prefix}/lib" "${prefix}/bin"
+          tar -xzf "mvmctl-${TARGET}.tar.gz" -C "${prefix}/lib"
+          ln -s "${prefix}/lib/mvmctl-${TARGET}/mvmctl" "${prefix}/bin/mvmctl"
+          cd "${RUNNER_TEMP}"
+          installed="$("${prefix}/bin/mvmctl" --version)"
+          if [ -n "${EXPECT_VERSION}" ]; then
+            test "${installed}" = "mvmctl ${EXPECT_VERSION#v}"
+          fi
+          "${prefix}/bin/mvmctl" --help
+          python3 - "${prefix}/lib/mvmctl-${TARGET}/${LIBRARY}" <<'PY'
+          import ctypes
+          import json
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1]).resolve(strict=True)
+          library = ctypes.CDLL(str(path))
+          library.mvm_hostlib_abi_version.argtypes = []
+          library.mvm_hostlib_abi_version.restype = ctypes.c_uint32
+          abi = library.mvm_hostlib_abi_version()
+          assert abi >> 16 == 1, f"unsupported hostlib ABI: {abi:#x}"
+          print(json.dumps({"loaded_library": str(path), "abi": abi}))
+          PY
 
   # The archive `build` just produced, booted before it is published. Every
   # other pre-publish lane builds mvmctl and its host binaries from the tree
@@ -365,7 +456,7 @@ jobs:
       tarballs: build
 
   release:
-    needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]
+    needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, release-archive-smoke, distro-packages]
     # `e2e-docs` was added to `needs` above when the documented-surface gate
     # landed, and its result was never added here. `!cancelled()` overrides the
     # implicit all-needs-succeeded rule, so for as long as that was true the
@@ -378,7 +469,7 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -495,6 +586,26 @@ jobs:
             echo "Signed: ${blob}"
           done
 
+      - name: Render and sign the AUR and Nix release recipes
+        if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python3 nix/packaging/aur/render-packages.py \
+            --version "${TAG_NAME#v}" --assets-dir artifacts --out-dir recipes
+          for recipe in PKGBUILD package.nix; do
+            cp "recipes/${recipe}" artifacts/
+            cosign sign-blob --yes --new-bundle-format \
+              --bundle "artifacts/${recipe}.bundle" "artifacts/${recipe}"
+          done
+          (
+            cd artifacts
+            sha256sum PKGBUILD package.nix >> checksums-sha256.txt
+            cosign sign-blob --yes --new-bundle-format \
+              --bundle checksums-sha256.txt.bundle checksums-sha256.txt
+          )
+
       # Build provenance for the binary tarballs, recorded in the GitHub
       # attestation store and verifiable with `gh attestation verify`.
       #
@@ -543,6 +654,8 @@ jobs:
             artifacts/*.rpm.bundle
             artifacts/mvm-guest-bins-v*.tar.gz.sha256
             artifacts/mvm-guest-bins-v*.tar.gz.sha256.bundle
+            artifacts/PKGBUILD*
+            artifacts/package.nix*
             artifacts/checksums-sha256.txt
             artifacts/checksums-sha256.txt.bundle
             sbom.cdx.json
@@ -661,7 +774,7 @@ jobs:
       - name: Verify release asset set (checksums + signatures + SBOM + version)
         env:
           # Keyless GitHub-OIDC signing identity for this workflow's blobs.
-          COSIGN_IDENTITY_REGEXP: "^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/.*$"
+          COSIGN_IDENTITY: "https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/${{ github.ref_name }}"
           COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
           TAG_NAME: ${{ github.ref_name }}
         run: |
@@ -669,6 +782,21 @@ jobs:
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"
+
+      - name: Verify published build provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for asset in release-assets/*.tar.gz release-assets/*.deb release-assets/*.rpm; do
+            test -f "${asset}"
+            gh attestation verify "${asset}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release.yml" \
+              --source-ref "refs/tags/${TAG_NAME}" \
+              --source-digest "${GITHUB_SHA}"
+          done
 
   # What a new user gets from the release just published: its own install.sh,
   # pinned to the tag, installing into a throwaway HOME — builder bootstrap
@@ -696,6 +824,21 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
+  published-package-smoke:
+    needs: [verify-release]
+    if: ${{ github.event_name == 'push' }}
+    uses: ./.github/workflows/distro-packages.yml
+    with:
+      release_tag: ${{ github.ref_name }}
+      published_packages: true
+
+  recipe-install-smoke:
+    needs: [verify-release]
+    if: ${{ github.event_name == 'push' && !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/release-recipes-smoke.yml
+    with:
+      tag: ${{ github.ref_name }}
+
   # The only step that makes a release reach users who did not ask for it:
   # GitHub's latest marker (`mvmctl update`), install.sh's default (the newest
   # full release), and the installer runmvm.com serves, whose baked fallback
@@ -703,8 +846,8 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [first-run-smoke]
-    if: ${{ github.event_name == 'push' && needs.first-run-smoke.result == 'success' }}
+    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.first-run-smoke.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -725,6 +868,16 @@ jobs:
           gh workflow run workers.yml --repo "${GITHUB_REPOSITORY}" \
             --ref "${TAG_NAME}" \
             -f install_version="${TAG_NAME}"
+
+  homebrew-channel:
+    name: Validate and update the Homebrew channel
+    needs: [promote-release]
+    if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/update-homebrew-tap.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   propose-prebuilt-pin:
     name: Propose verified Nix prebuilt pin

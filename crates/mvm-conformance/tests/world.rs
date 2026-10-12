@@ -545,6 +545,21 @@ pub struct WarmClaimWitness {
     pub post_restore_grant_verifies_under_host_key: bool,
 }
 
+/// Backstop for a world dropped without the runner's `after` hook — the hook
+/// is where a survivor fails the run. Runs before the fields drop, so the
+/// processes are gone before their temporary homes are deleted.
+impl Drop for CliWorld {
+    fn drop(&mut self) {
+        let report = self.reap_scenario_processes();
+        if !report.is_clean() {
+            eprintln!(
+                "[bdd] processes outlived their scenario and could not be stopped:\n{}",
+                mvm_conformance::vmm_reaper::ReapReport::describe(&report.survivors)
+            );
+        }
+    }
+}
+
 impl fmt::Debug for CliWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CliWorld")
@@ -584,6 +599,37 @@ impl fmt::Debug for CliWorld {
 }
 
 impl CliWorld {
+    /// Every scenario-owned directory a step may have pointed `MVM_HOME` (or
+    /// a VM's state) at. A process still naming one of these when the
+    /// scenario ends was started by it.
+    fn scenario_homes(&self) -> Vec<&std::path::Path> {
+        [
+            &self.isolated_home,
+            &self.scratch_dir,
+            &self.warm_restore_home,
+            &self.hvf_restore_tmp,
+            &self.hvf_ckpt_tmp,
+            &self.snapshot_tmp,
+            &self.warm_claim_store_root,
+            &self.warm_claim_src,
+            &self.one_transport_dir,
+            &self.one_transport_state,
+        ]
+        .into_iter()
+        .flatten()
+        .map(tempfile::TempDir::path)
+        .collect()
+    }
+
+    /// Stop everything this scenario left running against its own homes.
+    ///
+    /// A live VMM is detached and root-owned, so it outlives the step that
+    /// started it; a scenario that fails before its own `machine stop` would
+    /// otherwise leave it running after the home is deleted.
+    pub fn reap_scenario_processes(&self) -> mvm_conformance::vmm_reaper::ReapReport {
+        mvm_conformance::vmm_reaper::reap_homes(&self.scenario_homes())
+    }
+
     /// The `Output` of the most recent CLI invocation, or a failed
     /// assertion naming the step that forgot to run one first.
     pub fn last_output(&self) -> &Output {
