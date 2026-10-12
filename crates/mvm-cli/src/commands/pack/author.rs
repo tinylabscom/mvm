@@ -15,7 +15,7 @@ use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::PackSpec;
 
 /// File name a lock is written to beside its spec when no path is given.
-pub(super) const DEFAULT_LOCK_FILE: &str = "pack.lock.json";
+pub(super) use mvm_compiler::pack::LOCK_FILE as DEFAULT_LOCK_FILE;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct LockArgs {

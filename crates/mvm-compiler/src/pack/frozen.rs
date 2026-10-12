@@ -3,7 +3,7 @@
 use super::app_tree::assemble;
 use super::lock::{LockInputs, derive_lock, stale_fields};
 use super::lower::{APP_TREE, lower};
-use super::{PackError, PackInput};
+use super::{LOCK_FILE, PackError, PackInput};
 use crate::deps::validate_lockfiles;
 use crate::orchestrator::compile_pinned;
 use crate::source::copy_source;
@@ -68,7 +68,8 @@ fn resolve(input: &PackInput<'_>, staging: &Path) -> Result<Resolved, PackError>
     let snapshot_dir = staging.join("snapshot");
     std::fs::create_dir_all(&snapshot_dir).map_err(PackError::Staging)?;
     let snapshot = snapshot_dir.join(path);
-    let plan = copy_source(&root, &snapshot, &[], &[]).map_err(PackError::Source)?;
+    let plan =
+        copy_source(&root, &snapshot, &[], &[LOCK_FILE.to_string()]).map_err(PackError::Source)?;
     let manifest_dir = if input.spec.copy.is_empty() {
         snapshot_dir
     } else {
@@ -390,6 +391,21 @@ mod tests {
         let launch: serde_json::Value =
             serde_json::from_slice(&fs::read(artifact.join("launch.json")).unwrap()).unwrap();
         launch["ir_hash"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn a_lock_written_at_the_source_root_does_not_stale_itself() {
+        let dir = source_tree();
+        let locked = lock_for(dir.path());
+        fs::write(
+            dir.path().join(LOCK_FILE),
+            serde_json::to_vec(&locked).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(lock_for(dir.path()), locked);
+        let out = TempDir::new().unwrap();
+        compile_with(dir.path(), &locked, &out.path().join("a")).unwrap();
+        assert!(!out.path().join("a/src").join(LOCK_FILE).exists());
     }
 
     #[test]

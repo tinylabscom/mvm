@@ -52,7 +52,8 @@ dependency files, other Node lockfiles and more than one dependency
 declaration, because the IR and Nix factories cannot honor them for a command
 workload yet. A successful frozen compile runs no build; `mvmctl pack lock` and
 `mvmctl pack compile` are the command-line surface over `lock_pack` and
-`compile_frozen`.
+`compile_frozen`. A `pack.lock.json` at the source root is the lock itself and
+is left out of the snapshot it digests.
 
 ## Validation
 

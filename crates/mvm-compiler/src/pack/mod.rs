@@ -35,6 +35,11 @@ use mvm_contract::pack_spec::{PackSpec, PackSpecError};
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Conventional lock file name. A file by this name at the source root is the
+/// lock itself, so it is left out of the snapshot the lock digests: writing
+/// the lock beside a spec whose source is `.` must not stale it.
+pub const LOCK_FILE: &str = "pack.lock.json";
+
 /// A spec, the directory its relative source path resolves against, and the
 /// mvm revision its flake will pin.
 #[derive(Debug, Clone, Copy)]
