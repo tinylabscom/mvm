@@ -842,7 +842,7 @@ fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
 /// The embedded collector's inputs, carried inside the endpoint's stdin
 /// config. `deny_unknown_fields` so a section from a newer spawner fails
 /// closed rather than half-applying.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryEmbedConfig {
     /// The VM's state dir: registration, status and records live here.
@@ -855,6 +855,37 @@ pub struct TelemetryEmbedConfig {
     pub host_anchor_path: std::path::PathBuf,
     /// Byte cap for the records file; beyond it records are shed and counted.
     pub records_byte_cap: u64,
+    /// The records data key, base64. Every line of the records file is
+    /// sealed under it; the spawner keeps it on disk only wrapped under the
+    /// host key-encryption key, which this confined process cannot reach.
+    pub records_key_b64: String,
+}
+
+impl std::fmt::Debug for TelemetryEmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelemetryEmbedConfig")
+            .field("state_dir", &self.state_dir)
+            .field("telemetry_sock", &self.telemetry_sock)
+            .field("signer_sock", &self.signer_sock)
+            .field("host_anchor_path", &self.host_anchor_path)
+            .field("records_byte_cap", &self.records_byte_cap)
+            .field("records_key_b64", &"<redacted>")
+            .finish()
+    }
+}
+
+impl TelemetryEmbedConfig {
+    /// The records data key, or an error naming only what is wrong with it.
+    fn records_key(&self) -> anyhow::Result<mvm_core::crypto::aead::Key> {
+        use base64::Engine as _;
+        let bytes = zeroize::Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(self.records_key_b64.trim())
+                .map_err(|_| anyhow::anyhow!("records key is not base64"))?,
+        );
+        mvm_core::crypto::aead::Key::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("records key is not 32 bytes"))
+    }
 }
 
 /// The embedded collector: the worker plus its status writer, running as
@@ -925,6 +956,7 @@ pub fn start_embedded(
             .state_dir
             .join(mvm_vmm::host::telemetry_provisioning::TELEMETRY_RECORDS_FILE),
         config.records_byte_cap,
+        config.records_key()?,
     )
     .context("opening the records file")?;
     // The disk write runs on its own thread behind a bounded queue, so a

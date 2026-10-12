@@ -157,9 +157,14 @@ Before a record is queued for the records file, the host collector:
   redaction seam (`XXX` in place of a match), the same rules the transcript
   uses. A field the seam cannot vouch for withholds the record.
 
-Records travel encrypted from guest to host. The records file is the
-scrubbed result, owner-only (`0600`) in the VM's owner-only state
-directory.
+Records travel encrypted from guest to host, and stay encrypted at rest:
+every line of the records file is an AES-256-GCM frame (base64) under a
+per-VM data key, which is stored beside it only wrapped under the host's
+transcript key-encryption key — the same custody the stream transcript uses.
+The file is owner-only (`0600`) in the VM's owner-only state directory. The
+read seam opens lines with the host's keys; a host without them reads no
+records (`KeyUnavailable`), and a line that does not open is counted as
+undecodable rather than served.
 
 ## The status
 

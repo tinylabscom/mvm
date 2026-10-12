@@ -294,11 +294,7 @@ fn healthy_boot_page_of(limit: usize) -> TelemetryReadResponse {
         .collect();
     let persisted: u64 = records
         .iter()
-        .map(|r| {
-            ReceivedRecord::encode_line(r.received_at_ms.unwrap(), &r.record)
-                .unwrap()
-                .len() as u64
-        })
+        .map(|r| ReceivedRecord::sealed_line_len(r.received_at_ms.unwrap(), &r.record).unwrap())
         .sum();
     TelemetryReadResponse {
         exhausted: records.len() == total,

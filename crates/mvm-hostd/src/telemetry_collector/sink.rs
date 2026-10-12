@@ -16,7 +16,7 @@
 //!    Admission is a single `try_send`; a full queue is a counted shed, never
 //!    a wait. A stalled disk costs records, not the session.
 //! 3. [`CappedJsonlSink`] — the writer thread's append to the records file,
-//!    capped in bytes, and rolled back to its last whole line when a write
+//!    each line sealed under the boot's records data key, capped in bytes, and rolled back to its last whole line when a write
 //!    fails, so a full disk leaves no torn line and the next write that
 //!    succeeds starts clean.
 //!
@@ -38,6 +38,8 @@ use mvm_core::protocol::telemetry::{
     Attribute, AttributeValue, Attributes, BoundedList, MAX_RECORD_BYTES, RecordBody, StdioStream,
     TelemetryRecord, Text,
 };
+
+use mvm_core::crypto::aead;
 
 use crate::stream::redact::{StreamRedaction, StreamRedactor as _};
 use crate::stream::secret_scan::SecretScanner;
@@ -662,9 +664,10 @@ impl RecordFile for std::fs::File {
     }
 }
 
-/// A size-capped JSONL sink: each record appends as one JSON line — the
-/// record inside the served envelope, stamped with the host receive time —
-/// until the cap, then sheds. This file exists so collection is observable
+/// A size-capped JSONL sink: each record appends as one sealed line — the
+/// record inside the served envelope, stamped with the host receive time,
+/// encrypted under the records data key — until the cap, then sheds. A line
+/// that cannot be sealed is shed, never written in the clear. This file exists so collection is observable
 /// through the read seam; it is bounded, not a durable store.
 ///
 /// A failed write is a shed, never a stall, and never a torn line: the file
@@ -675,10 +678,11 @@ pub struct CappedJsonlSink<F = std::fs::File> {
     file: F,
     written: u64,
     cap: u64,
+    key: aead::Key,
 }
 
 impl CappedJsonlSink<std::fs::File> {
-    pub fn create(path: &std::path::Path, cap: u64) -> std::io::Result<Self> {
+    pub fn create(path: &std::path::Path, cap: u64, key: aead::Key) -> std::io::Result<Self> {
         use std::os::unix::fs::OpenOptionsExt as _;
         // Owner-only, like every other file under the state dir: the records
         // are guest output, readable by the operator and nobody else.
@@ -687,16 +691,21 @@ impl CappedJsonlSink<std::fs::File> {
             .append(true)
             .mode(0o600)
             .open(path)?;
-        Self::over(file, cap)
+        Self::over(file, cap, key)
     }
 }
 
 impl<F: RecordFile> CappedJsonlSink<F> {
     /// Append to an already-open file; its existing length counts against
     /// the cap.
-    pub fn over(file: F, cap: u64) -> std::io::Result<Self> {
+    pub fn over(file: F, cap: u64, key: aead::Key) -> std::io::Result<Self> {
         let written = file.current_len()?;
-        Ok(Self { file, written, cap })
+        Ok(Self {
+            file,
+            written,
+            cap,
+            key,
+        })
     }
 }
 
@@ -709,7 +718,7 @@ impl<F: RecordFile> RecordSink for CappedJsonlSink<F> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
-        let Ok(line) = ReceivedRecord::encode_line(received_at_ms, record) else {
+        let Ok(line) = ReceivedRecord::seal_line(&self.key, received_at_ms, record) else {
             return IngestOutcome::Shed(LossClass::WriteFailed);
         };
         if self.written.saturating_add(line.len() as u64) > self.cap {
@@ -763,6 +772,11 @@ mod tests {
                 code: "sink-witness".try_into().unwrap(),
             },
         )
+    }
+
+    /// The records data key every test sink seals under.
+    fn test_key() -> aead::Key {
+        aead::Key::from_bytes([9; 32])
     }
 
     /// The seam production builds, from a launch that set no redaction policy.
@@ -1139,7 +1153,7 @@ mod tests {
         let mut sink = ScrubbingSink::new(
             fingerprints(),
             seam(),
-            CappedJsonlSink::create(&file, 1 << 20).unwrap(),
+            CappedJsonlSink::create(&file, 1 << 20, test_key()).unwrap(),
             Arc::clone(&losses),
         );
         for record in records_carrying(SECRET) {
@@ -1148,13 +1162,35 @@ mod tests {
         sink.try_ingest(&coverage(9));
         sink.release_held();
         let written = std::fs::read(&file).unwrap();
-        let text = String::from_utf8_lossy(&written);
+        assert!(
+            !String::from_utf8_lossy(&written).contains("sink-witness"),
+            "lines are sealed, not plaintext"
+        );
+        // Open every line and look in what it says, not only in the file.
+        let opened: Vec<_> = written
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| ReceivedRecord::open_line(&test_key(), line).expect("opens"))
+            .collect();
+        assert_eq!(opened.len(), 1, "only the coverage record");
+        let text = String::from_utf8(opened[0].record.encode().unwrap()).unwrap();
         assert!(!text.contains(SECRET));
         // The stdio chunk is serialized as a byte array: look for that too.
         let as_array = serde_json::to_string(SECRET.as_bytes()).unwrap();
         let inner = &as_array[1..as_array.len() - 1];
         assert!(!text.contains(inner));
-        assert_eq!(text.lines().count(), 1, "only the coverage record");
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_opened_under_another_key_is_not_a_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("records.jsonl");
+        let mut sink = CappedJsonlSink::create(&file, 1 << 20, test_key()).unwrap();
+        assert_eq!(sink.try_ingest(&coverage(1)), IngestOutcome::Ingested);
+        let written = std::fs::read(&file).unwrap();
+        assert!(ReceivedRecord::open_line(&test_key(), &written).is_some());
+        assert!(ReceivedRecord::open_line(&aead::Key::from_bytes([1; 32]), &written).is_none());
+        assert!(ReceivedRecord::decode_line(&written).is_none());
     }
 
     #[test]
@@ -1224,10 +1260,11 @@ mod tests {
     #[test]
     fn the_writer_counts_the_inner_sinks_sheds_by_class() {
         let dir = tempfile::tempdir().unwrap();
-        let one_line = ReceivedRecord::encode_line(u64::MAX / 2, &coverage(1))
+        let one_line = ReceivedRecord::seal_line(&test_key(), u64::MAX / 2, &coverage(1))
             .unwrap()
             .len() as u64;
-        let inner = CappedJsonlSink::create(&dir.path().join("r.jsonl"), one_line).unwrap();
+        let inner =
+            CappedJsonlSink::create(&dir.path().join("r.jsonl"), one_line, test_key()).unwrap();
         let losses = Arc::new(LossCounters::default());
         let mut queued = QueuedSink::spawn("cap", 8, inner, Arc::clone(&losses)).unwrap();
         for sequence in 1..=4 {
@@ -1287,7 +1324,7 @@ mod tests {
 
     #[test]
     fn a_full_disk_leaves_no_torn_line_and_writing_resumes_when_space_returns() {
-        let mut sink = CappedJsonlSink::over(FlakyFile::default(), u64::MAX).unwrap();
+        let mut sink = CappedJsonlSink::over(FlakyFile::default(), u64::MAX, test_key()).unwrap();
         assert_eq!(sink.try_ingest(&coverage(1)), IngestOutcome::Ingested);
 
         sink.file.full = true;
@@ -1307,7 +1344,7 @@ mod tests {
             .bytes
             .split(|&b| b == b'\n')
             .filter(|line| !line.is_empty())
-            .map(|line| ReceivedRecord::decode_line(line).expect("every line decodes"))
+            .map(|line| ReceivedRecord::open_line(&test_key(), line).expect("every line decodes"))
             .map(|received| received.record.sequence())
             .collect();
         assert_eq!(lines, vec![1, 3]);
@@ -1324,8 +1361,10 @@ mod tests {
             .as_millis() as u64;
         // Sized with a receive time of today's width, so the cap admits
         // exactly two lines as the sink will stamp them.
-        let one_line = ReceivedRecord::encode_line(before, &record).unwrap().len() as u64;
-        let mut sink = CappedJsonlSink::create(&path, one_line * 2 + 1).unwrap();
+        let one_line = ReceivedRecord::seal_line(&test_key(), before, &record)
+            .unwrap()
+            .len() as u64;
+        let mut sink = CappedJsonlSink::create(&path, one_line * 2 + 1, test_key()).unwrap();
         assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
         assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
         assert_eq!(
@@ -1340,12 +1379,12 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 2);
         for line in lines {
-            let served = ReceivedRecord::decode_line(line).expect("the served envelope");
+            let served = ReceivedRecord::open_line(&test_key(), line).expect("the served envelope");
             assert_eq!(served.record, record);
             assert!(served.received_at_ms.is_some_and(|at| at >= before));
         }
         // Reopening appends: the cap counts what is already there.
-        let mut reopened = CappedJsonlSink::create(&path, one_line * 3).unwrap();
+        let mut reopened = CappedJsonlSink::create(&path, one_line * 3, test_key()).unwrap();
         assert_eq!(reopened.try_ingest(&record), IngestOutcome::Ingested);
         assert_eq!(
             reopened.try_ingest(&record),

@@ -18,6 +18,9 @@ use mvm_vmm::host::telemetry_provisioning::{
 };
 use tokio::sync::Mutex;
 
+/// The records data key the test hands the collector: base64 of 32 × 0x42.
+const RECORDS_KEY_B64: &str = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
+
 /// Synthetic: never a real credential.
 const SYNTHETIC_SECRET: &str = "mvm-synthetic-secret-0123456789abcdef";
 
@@ -136,6 +139,7 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
         signer_sock,
         host_anchor_path: anchor_path,
         records_byte_cap: 64 * 1024,
+        records_key_b64: RECORDS_KEY_B64.to_string(),
     };
     // Started the way the endpoint starts it, off the async runtime's thread.
     let embedded = tokio::task::spawn_blocking(move || {
@@ -157,9 +161,20 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
     let status_path = state_dir.join(TELEMETRY_COLLECTOR_STATUS_FILE);
     assert!(status_path.exists(), "first snapshot precedes dialing");
     let records_path = state_dir.join(TELEMETRY_RECORDS_FILE);
+    let records_key = mvm_core::crypto::aead::Key::from_bytes([0x42; 32]);
+    let opened = |persisted: &[u8]| -> Vec<mvm_core::protocol::telemetry::served::ReceivedRecord> {
+        persisted
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                mvm_core::protocol::telemetry::served::ReceivedRecord::open_line(&records_key, line)
+                    .expect("every persisted line opens under the records key")
+            })
+            .collect()
+    };
     wait_for("the coverage record", Duration::from_secs(10), || {
-        std::fs::read_to_string(&records_path)
-            .map(|s| s.contains("guest-agent"))
+        std::fs::read(&records_path)
+            .map(|bytes| !opened(&bytes).is_empty())
             .unwrap_or(false)
     });
     wait_for("a collecting status", Duration::from_secs(10), || {
@@ -171,21 +186,17 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
     // The two records carrying the bound secret never reached the disk, in
     // any encoding the file uses, and the status names why they are missing.
     let persisted = std::fs::read(&records_path).unwrap();
-    let decoded: Vec<_> = persisted
-        .split(|&b| b == b'\n')
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            mvm_core::protocol::telemetry::served::ReceivedRecord::decode_line(line)
-                .expect("every persisted line decodes")
-                .record
-                .sequence()
-        })
-        .collect();
+    let records = opened(&persisted);
+    let decoded: Vec<_> = records.iter().map(|r| r.record.sequence()).collect();
     assert_eq!(decoded, vec![3], "only the secret-free record was written");
     assert!(
-        !String::from_utf8_lossy(&persisted).contains(SYNTHETIC_SECRET),
-        "no plaintext secret on disk"
+        !String::from_utf8_lossy(&persisted).contains("guest-agent"),
+        "the file holds sealed lines, not plaintext"
     );
+    for received in &records {
+        let text = String::from_utf8(received.record.encode().unwrap()).unwrap();
+        assert!(!text.contains(SYNTHETIC_SECRET), "no secret once opened");
+    }
     wait_for(
         "the withheld count in the status",
         Duration::from_secs(10),

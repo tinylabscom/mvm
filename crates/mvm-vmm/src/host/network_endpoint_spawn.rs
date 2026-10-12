@@ -1199,7 +1199,20 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     }
     clear_stale_socket(&connector_socket_path(params.state_dir));
     params.session_marker = Some(session_marker);
-    let cfg = build_endpoint_config_json(&params);
+    let mut cfg = build_endpoint_config_json(&params);
+    if params.telemetry {
+        use base64::Engine as _;
+        // The endpoint is confined away from the host key directory, so it is
+        // handed the records data key itself, over the same private stdin pipe
+        // as the rest of its config. On disk the key exists only wrapped.
+        let key = super::telemetry_provisioning::provision_records_key(
+            params.state_dir,
+            &mvm_core::config::mvm_keys_dir(),
+        )
+        .map_err(|e| anyhow!("provisioning the telemetry records key: {e}"))?;
+        cfg["telemetry"]["records_key_b64"] =
+            serde_json::json!(base64::engine::general_purpose::STANDARD.encode(key.expose_bytes()));
+    }
     let SubstitutionSpawnParams {
         telemetry: _,
         vm_name,
