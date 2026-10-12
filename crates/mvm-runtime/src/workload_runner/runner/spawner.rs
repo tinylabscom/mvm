@@ -121,6 +121,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         }
         let started = mvm_vmm::host::network_endpoint_spawn::spawn_telemetry_collector(
             req.vm_name,
+            req.tenant,
             req.state_dir,
             req.redaction,
         )

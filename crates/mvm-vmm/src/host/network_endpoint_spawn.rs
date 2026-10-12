@@ -1046,26 +1046,45 @@ pub fn endpoint_config_for_identity(
 }
 
 /// The collector's inputs for the VM at `state_dir`, without its records key.
-fn telemetry_section(state_dir: &Path) -> serde_json::Value {
+/// The collector authenticates through the tenant's resident signer helper.
+fn telemetry_section(tenant: &str, state_dir: &Path) -> serde_json::Value {
     serde_json::json!({
         "state_dir": state_dir,
         "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
             state_dir,
             mvm_core::protocol::telemetry::TELEMETRY_PORT,
         ),
-        "signer_sock": state_dir.join(super::broker_services_spawn::AUDIT_SIGNER_SOCK),
+        "signer_sock": mvm_core::config::host_agent_signer_helper_socket(tenant),
         "host_anchor_path": mvm_core::config::mvm_keys_dir()
             .join(super::broker_services_spawn::HOST_SIGNER_PUB),
         "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
     })
 }
 
-/// Provision this VM's records key and hand it to the collector config: the
-/// endpoint is confined away from the host key directory, so it is handed the
-/// data key itself over its private stdin pipe. On disk the key exists only
-/// wrapped.
-fn attach_records_key(section: &mut serde_json::Value, state_dir: &Path) -> Result<()> {
+/// Provision what the collector needs beyond its config: the tenant's
+/// resident signer it authenticates through, and this VM's records key.
+///
+/// The signer helper belongs to the host-agent daemon; making sure the daemon
+/// runs is idempotent and, once it is up, a socket probe. A daemon that cannot
+/// start costs this VM its telemetry (the collector reports the failed
+/// authentication), never its launch.
+///
+/// The endpoint is confined away from the host key directory, so it is handed
+/// the records data key itself over its private stdin pipe. On disk the key
+/// exists only wrapped.
+fn provision_collector(
+    section: &mut serde_json::Value,
+    tenant: &str,
+    state_dir: &Path,
+) -> Result<()> {
     use base64::Engine as _;
+    if let Err(error) = super::host_agent_spawn::ensure_host_agent_daemon(tenant) {
+        tracing::warn!(
+            tenant,
+            error = format!("{error:#}"),
+            "host-agent daemon unavailable; the telemetry collector cannot authenticate"
+        );
+    }
     let key = super::telemetry_provisioning::provision_records_key(
         state_dir,
         &mvm_core::config::mvm_keys_dir(),
@@ -1089,12 +1108,13 @@ pub const TELEMETRY_COLLECTOR_PID_FILE: &str = "telemetry-collector.pid";
 /// that scales with the guest.
 pub fn spawn_telemetry_collector(
     vm_name: &str,
+    tenant: &str,
     state_dir: &Path,
     redaction: &mvm_core::policy::RedactionPolicy,
 ) -> Result<()> {
     use std::io::Write;
-    let mut telemetry = telemetry_section(state_dir);
-    attach_records_key(&mut telemetry, state_dir)?;
+    let mut telemetry = telemetry_section(tenant, state_dir);
+    provision_collector(&mut telemetry, tenant, state_dir)?;
     let cfg = serde_json::json!({
         "telemetry_only": {
             "instance_id": vm_name,
@@ -1192,7 +1212,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
-        cfg["telemetry"] = telemetry_section(params.state_dir);
+        cfg["telemetry"] = telemetry_section(params.tenant, params.state_dir);
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1300,7 +1320,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     params.session_marker = Some(session_marker);
     let mut cfg = build_endpoint_config_json(&params);
     if params.telemetry {
-        attach_records_key(&mut cfg["telemetry"], params.state_dir)?;
+        provision_collector(&mut cfg["telemetry"], params.tenant, params.state_dir)?;
     }
     let SubstitutionSpawnParams {
         telemetry: _,
