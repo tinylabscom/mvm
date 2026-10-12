@@ -593,3 +593,83 @@ fn a_rootfs_over_the_entry_cap_is_refused_before_it_is_read() {
     assert!(format!("{err:#}").contains("per-entry limit"), "{err:#}");
     assert_nothing_written(&out);
 }
+
+fn environment_descriptor(capabilities: &[&str]) -> mvm_core::plan::EnvironmentDescriptor {
+    serde_json::from_value(serde_json::json!({
+        "descriptor_version": 1,
+        "pack": { "name": "acme/agent", "version": "0.1.0" },
+        "target": "x86_64-linux",
+        "entrypoint": { "argv": ["/usr/bin/agent"], "working_dir": "/srv" },
+        "resources": { "cpu_cores": 2, "memory_mb": 1024 },
+        "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+        "capabilities": capabilities,
+        "services": [{ "name": "indexer", "argv": ["/usr/bin/indexer"] }],
+    }))
+    .expect("environment fixture")
+}
+
+#[test]
+fn an_environment_survives_export_and_stamps_schema_five() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .posture(PostureInputs::new(AgentProfile::Dev).allows_egress(true))
+        .environment(environment_descriptor(&["egress"]));
+
+    export(&inputs, &signer);
+
+    let manifest = verify(&out, &signer).expect("the export verifies").manifest;
+    assert_eq!(
+        manifest.schema_version,
+        mvm_core::plan::bundle::ENVIRONMENT_MEMBER_MIN_SCHEMA
+    );
+    assert_eq!(
+        manifest.environment(),
+        Some(&environment_descriptor(&["egress"]))
+    );
+}
+
+#[test]
+fn an_export_without_an_environment_keeps_the_schema_older_readers_accept() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+
+    export(
+        &BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out),
+        &signer,
+    );
+
+    let manifest = verify(&out, &signer).expect("the export verifies").manifest;
+    assert_eq!(manifest.schema_version, 3);
+}
+
+#[test]
+fn an_environment_beyond_the_posture_is_refused_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .posture(PostureInputs::new(AgentProfile::Dev))
+        .environment(environment_descriptor(&["egress"]));
+
+    let err = export_bundle_with_signer(&inputs, &signer).expect_err("egress not permitted");
+
+    assert!(format!("{err:#}").contains("egress"), "{err:#}");
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn an_environment_for_another_arch_is_refused_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out)
+        .environment(environment_descriptor(&[]));
+
+    let err = export_bundle_with_signer(&inputs, &signer).expect_err("arch mismatch");
+
+    assert!(format!("{err:#}").contains("x86_64"), "{err:#}");
+    assert_nothing_written(&out);
+}

@@ -22,6 +22,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+use crate::plan::environment::EnvironmentDescriptor;
 use crate::plan::types::BuildProvenance;
 use crate::policy::security::AgentProfile;
 
@@ -42,7 +43,16 @@ use crate::policy::security::AgentProfile;
 /// its member artifacts to ordinary bundle artifacts. Older bundles remain
 /// readable because `members` defaults to an empty list.
 /// Version 4 adds architecture-scoped boot assets; older readers refuse them.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 4;
+/// Version 5 adds the signed environment descriptor member
+/// ([`BundleMember::Environment`]). A bundle carrying it must declare schema 5,
+/// so a version-4 reader refuses it at the schema sniff with
+/// `UnsupportedSchema` instead of failing on an unknown member class. Exporters
+/// stamp the lowest schema a bundle's members need, so a bundle without a
+/// descriptor stays readable by version-4 readers.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 5;
+
+/// The first schema that may carry [`BundleMember::Environment`].
+pub const ENVIRONMENT_MEMBER_MIN_SCHEMA: u32 = 5;
 
 /// Filename inside the archive for the canonical-JSON manifest.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
@@ -153,7 +163,8 @@ pub const MAX_KERNEL_CMDLINE_BYTES: usize = 2048;
 /// duplicating its artifact bytes.
 ///
 /// A bundle carries at most one member of each declaration class
-/// (`kernel_cmdline`, `security_posture`, `build_provenance`); verification
+/// (`kernel_cmdline`, `security_posture`, `build_provenance`, `environment`);
+/// verification
 /// refuses a second one rather than picking between them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
@@ -179,6 +190,12 @@ pub enum BundleMember {
     /// What the workload was built from and what the build produced. The
     /// artifact digests it records must match the bundle's own artifacts.
     BuildProvenance(BuildProvenance),
+    /// What the workload requires from its launch: entrypoint, advisory
+    /// resources, volumes, secret slots by name, capabilities and application
+    /// services. Requires schema 5. Grants nothing: every capability must be
+    /// permitted by the bundle's [`BundleMember::SecurityPosture`], and the
+    /// launch is still held to the posture and the host's ceilings.
+    Environment(EnvironmentDescriptor),
 }
 
 /// The publisher's declared security posture for a bundled workload.
@@ -330,6 +347,14 @@ impl BundleManifest {
             _ => None,
         })
     }
+
+    /// The signed environment descriptor, when the bundle carries one.
+    pub fn environment(&self) -> Option<&EnvironmentDescriptor> {
+        self.members.iter().find_map(|member| match member {
+            BundleMember::Environment(environment) => Some(environment),
+            _ => None,
+        })
+    }
 }
 
 /// Pin from an `ExecutionPlan` to a specific signed bundle. Captures
@@ -420,10 +445,42 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_four() {
+    fn bundle_schema_version_is_five() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 4);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 5);
+        assert_eq!(ENVIRONMENT_MEMBER_MIN_SCHEMA, 5);
+    }
+
+    fn environment() -> EnvironmentDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "x86_64-linux",
+            "entrypoint": { "argv": ["/bin/app"] },
+            "capabilities": ["egress"],
+        }))
+        .expect("environment fixture")
+    }
+
+    #[test]
+    fn environment_member_round_trips_flat_under_its_class_tag() {
+        let member = BundleMember::Environment(environment());
+        let value = serde_json::to_value(&member).unwrap();
+        assert_eq!(value["class"], "environment");
+        assert_eq!(value["descriptor_version"], 1);
+        assert_eq!(value["entrypoint"]["argv"][0], "/bin/app");
+        assert_eq!(
+            serde_json::from_value::<BundleMember>(value).unwrap(),
+            member
+        );
+    }
+
+    #[test]
+    fn an_unknown_member_class_fails_the_parse() {
+        // What a reader that predates a member class sees: the tag is not one
+        // it knows, and the whole member list is refused rather than skipped.
+        let value = serde_json::json!({ "class": "sealed_checkpoint", "x": 1 });
+        assert!(serde_json::from_value::<BundleMember>(value).is_err());
     }
 
     #[test]
@@ -529,6 +586,7 @@ mod tests {
         assert!(manifest.security_posture().is_none());
         assert!(manifest.kernel_cmdline().is_none());
         assert!(manifest.build_provenance().is_none());
+        assert!(manifest.environment().is_none());
 
         manifest.members = alloc::vec![
             BundleMember::KernelCmdline {
@@ -538,6 +596,11 @@ mod tests {
         ];
         assert_eq!(manifest.kernel_cmdline(), Some("quiet"));
         assert_eq!(manifest.security_posture(), Some(&posture()));
+
+        manifest
+            .members
+            .push(BundleMember::Environment(environment()));
+        assert_eq!(manifest.environment(), Some(&environment()));
     }
 
     #[test]
