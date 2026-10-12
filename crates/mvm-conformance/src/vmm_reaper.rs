@@ -20,9 +20,9 @@
 //! A process the test user cannot signal (the root-owned VMM) is signalled
 //! through `sudo -n`, the same privilege its launch used.
 
+use mvm_core::env_hygiene::helper_command;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// One host process whose command line names a path the scenario owned.
@@ -141,7 +141,7 @@ pub fn select_owned(
 }
 
 fn process_table() -> Vec<ProcessRow> {
-    Command::new("ps")
+    helper_command("ps")
         .args(["-ww", "-eo", "pid=,ppid=,args="])
         .output()
         .ok()
@@ -160,13 +160,13 @@ fn scan(markers: &[String]) -> Vec<OwnedProcess> {
 /// the detached VMM runs as root because its launch went through `sudo`.
 fn signal(pid: u32, signal: &str) {
     let pid = pid.to_string();
-    let direct = Command::new("kill")
+    let direct = helper_command("kill")
         .args(["-s", signal, &pid])
         .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success());
     if !direct {
-        let _ = Command::new("sudo")
+        let _ = helper_command("sudo")
             .args(["-n", "kill", "-s", signal, &pid])
             .stderr(std::process::Stdio::null())
             .status();
@@ -283,6 +283,7 @@ impl Drop for ReapOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn row(pid: u32, ppid: u32, args: &str) -> ProcessRow {
         ProcessRow {
