@@ -486,6 +486,7 @@ fn spawn_drain<R: Read + Send + 'static>(
     buf: Arc<Mutex<Vec<u8>>>,
     cap: usize,
     latch: Arc<DrainLatch>,
+    stream: mvm_core::protocol::telemetry::StdioStream,
 ) {
     thread::spawn(move || {
         let mut chunk = [0u8; 4096];
@@ -493,6 +494,9 @@ fn spawn_drain<R: Read + Send + 'static>(
             match reader.read(&mut chunk) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Also to guest capture, past the buffer's cap: the
+                    // VM's collector keeps what nobody polled for.
+                    crate::telemetry_capture::offer_stdio(stream, &chunk[..n]);
                     let mut b = buf.lock().expect("drain buf mutex");
                     let room = cap.saturating_sub(b.len());
                     if room == 0 {
@@ -560,6 +564,7 @@ pub fn handle_proc_start(
             Arc::clone(&stdout_buf),
             caps.max_output_buffer,
             Arc::clone(&drains),
+            mvm_core::protocol::telemetry::StdioStream::Stdout,
         );
     }
     if let Some(err) = stderr_pipe {
@@ -568,6 +573,7 @@ pub fn handle_proc_start(
             Arc::clone(&stderr_buf),
             caps.max_output_buffer,
             Arc::clone(&drains),
+            mvm_core::protocol::telemetry::StdioStream::Stderr,
         );
     }
     let stdin = child.stdin.take();
@@ -1438,6 +1444,7 @@ mod tests {
             Arc::clone(&stdout_buf),
             caps.max_output_buffer,
             Arc::clone(&drains),
+            mvm_core::protocol::telemetry::StdioStream::Stdout,
         );
 
         let record = Arc::new(ProcessRecord {

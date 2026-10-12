@@ -383,8 +383,17 @@ scenarios un-tag only in the joint change where guest capture through the
 authenticated collector demonstrably passes end to end — individual W3 slices
 flip their named unit regressions only.
 
-- [ ] Wire subscribers and adapters for all inventoried sources, including
+- [x] Wire subscribers and adapters for all inventoried sources, including
       outside-span events and log bridges; preserve span parent/link relationships.
+      Guest agent diagnostics go through the agent's capture subscriber
+      (events, including outside any span); workload stdout/stderr go through
+      a tap on every path that reads a workload's pipes (entrypoint pump,
+      streaming exec, process control), so SDK and workload output written to
+      those streams is captured too. Span parent/links are carried by the
+      record contract and shown by the host view; the sealed agent's
+      subscriber is events-only by design, so no guest producer emits spans
+      yet. Live witness: a detached Firecracker machine's stdout and stderr
+      lines in `mvmctl machine telemetry`.
 - [x] Bound every upstream/downstream queue and active-span/field allocation;
       remove blocking completion sends and recursive diagnostics on capture paths.
       W3a and W3b below bound the pipe handoffs and the outbox; outside-span

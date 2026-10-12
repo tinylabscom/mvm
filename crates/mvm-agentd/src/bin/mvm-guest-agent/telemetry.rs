@@ -161,6 +161,8 @@ pub(crate) fn init_telemetry() {
     if CAPTURE.set(Arc::clone(&state)).is_err() {
         return;
     }
+    // Workload stdout/stderr the output pump reads joins capture too.
+    mvm_agentd::telemetry_capture::install_stdio_tap(Arc::clone(&state));
     // Diagnostics emitted from here on are captured; the tracing-core-only
     // subscriber keeps the sealed closure unchanged. An install failure
     // (another global subscriber — impossible in this bin) leaves the agent
