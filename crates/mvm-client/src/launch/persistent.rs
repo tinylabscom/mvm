@@ -357,8 +357,9 @@ pub fn start_persistent_oci_machine(
                     // than refusing for want of an answer.
                     backend_kind: Some(crate::backend_kind_for(backend_name)),
                     entrypoint:
-                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                            "the persistent OCI start path resolves no entrypoint",
+                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
+                            rootfs_path,
+                            has_ad_hoc_argv,
                         ),
                 },
                 ingress,

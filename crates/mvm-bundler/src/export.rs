@@ -7,7 +7,7 @@ use chrono::Utc;
 use mvm_core::crypto::image_verify::sha256_file;
 use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::plan::bundle::{
-    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
+    ARTIFACTS_DIR, ArtifactRole, BUNDLE_MEMBERS_MIN_SCHEMA, BundleArtifact, BundleManifest,
     BundleMember, BundlePayload, BundleSecurityPosture, BundleSizeBudget, KeyId, VerityInfo,
     sha256_hex, write_bundle_to,
 };
@@ -402,7 +402,22 @@ fn declarations_for(
             artifacts,
         )));
     }
+    if let Some(environment) = &inputs.environment {
+        members.push(BundleMember::Environment(environment.clone()));
+    }
     members
+}
+
+/// The lowest schema that carries every member this export seals, so a
+/// bundle stays readable by the oldest reader that understands it: 3 for
+/// plain declarations, 4 for legacy boot assets, 5 for an environment,
+/// and 6 for portable CLI boot assets.
+fn schema_for(members: &[BundleMember]) -> u32 {
+    members
+        .iter()
+        .map(BundleMember::minimum_schema_version)
+        .max()
+        .unwrap_or(BUNDLE_MEMBERS_MIN_SCHEMA)
 }
 
 fn posture_for(posture: PostureInputs, verity_protected: bool) -> BundleSecurityPosture {
@@ -441,13 +456,7 @@ fn manifest_for(
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
     BundleManifest {
-        schema_version: if inputs.cli_boot_assets.is_some() {
-            BUNDLE_SCHEMA_VERSION
-        } else if inputs.boot_assets.is_some() {
-            4
-        } else {
-            3
-        },
+        schema_version: schema_for(&members),
         publisher: signer.publisher_id(),
         key_id: key_id.clone(),
         arch: inputs.arch_label.to_string(),

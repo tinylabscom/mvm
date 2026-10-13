@@ -224,6 +224,11 @@ pub(in crate::commands) struct RunArgs {
     /// Set memory (for example, 512M or 1G).
     #[arg(long, default_value = "512M")]
     pub memory: String,
+    /// Which of `--cpus` / `--memory` the command line named. Not a flag:
+    /// recorded from clap's value sources after parsing, so a signed bundle's
+    /// advisory resources fill only what the user left unnamed.
+    #[arg(skip)]
+    pub explicit_resources: environment_defaults::ExplicitResources,
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
@@ -577,6 +582,10 @@ pub(in crate::commands) fn run_secure_started(
     // for record) redirects to `mvmctl build compile`; `--mode plan` routes
     // through the plan-mode admission dry-run.
     validate_run_profile(&args)?;
+    // An installed bundle's signed environment sizes the launch where the
+    // user named no size. Done before anything reads `cpus` / `memory`, so the
+    // preflight summary, admission and the boot all see the same values.
+    environment_defaults::apply_installed_bundle_defaults(&mut args)?;
     if args.dry_run {
         let summary = RunPreflightSummary::from_args(&args, None)?;
         if args.json {
@@ -755,13 +764,10 @@ pub(in crate::commands) fn run_secure_started(
             services: admit_host_services.clone(),
             grants: admit_grants.clone(),
             backend_kind: Some(admit_backend_kind),
-            entrypoint: if admit_has_argv {
-                crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                    "an ad-hoc argv run replaces the image entrypoint",
-                )
-            } else {
-                crate::commands::vm::entrypoint_resolve::resolve_for_rootfs(rootfs)
-            },
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::for_launch(
+                rootfs,
+                admit_has_argv,
+            ),
             assets: assets.to_vec(),
         })?;
         // Persist the bare plan so the pre-start moat / endpoint can read it
@@ -1206,6 +1212,7 @@ struct RunReceiptSignature {
 }
 
 pub(in crate::commands) mod env_args;
+pub(in crate::commands) mod environment_defaults;
 mod preflight;
 mod receipt_verify;
 mod run_args_default;

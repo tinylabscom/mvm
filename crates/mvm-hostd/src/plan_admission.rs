@@ -88,6 +88,7 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod bundle_environment;
 mod display_grants;
 mod host_trust;
 mod registry_pack;
@@ -96,6 +97,7 @@ use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
+pub use bundle_environment::BundleEnvironmentRefused;
 pub use mvm_core::time::{Clock, SystemClock};
 
 /// Production nonce ledger. Holds a `NonceStore` behind a mutex so
@@ -494,16 +496,6 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         other => anyhow::anyhow!("plan validity error: {other}"),
     })?;
 
-    // Replay protection: insert (signer_id, nonce). A second admission with
-    // the same signer + nonce — a re-submitted fleet plan, or a synthesized
-    // plan that somehow recurred — is refused.
-    {
-        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
-        store
-            .check_and_insert(&signer_id, &verified)
-            .context("replay protection check")?;
-    }
-
     // Bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
     // plan is operator misconfiguration (the driver wasn't wired
@@ -518,6 +510,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         })?;
         let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -550,6 +543,15 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
                 bundle = pin.bundle_sha256
             )
         })?;
+    }
+
+    // Spend the nonce only after every fallible descriptor and bundle check.
+    // Refusal must not consume an externally signed plan's replay allowance.
+    {
+        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
+        store
+            .check_and_insert(&signer_id, &verified)
+            .context("replay protection check")?;
     }
 
     Ok(AdmittedPlan {
@@ -4151,6 +4153,17 @@ mod tests {
         rootfs: &[u8],
         arch: &str,
     ) -> (Vec<u8>, PlanArtifact) {
+        make_test_bundle_with_members(sk, kernel, rootfs, arch, Vec::new())
+    }
+
+    // Synthetic, locally signed admission fixtures, not released image or VM evidence.
+    fn make_test_bundle_with_members(
+        sk: &ed25519_dalek::SigningKey,
+        kernel: &[u8],
+        rootfs: &[u8],
+        arch: &str,
+        members: Vec<mvm_core::plan::bundle::BundleMember>,
+    ) -> (Vec<u8>, PlanArtifact) {
         use mvm_core::plan::bundle::{
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
@@ -4177,7 +4190,7 @@ mod tests {
                 make_art("vmlinux", ArtifactRole::Kernel, kernel),
                 make_art("rootfs.ext4", ArtifactRole::Rootfs, rootfs),
             ],
-            members: Vec::new(),
+            members,
             verity: None,
             resources: None,
         };
@@ -4210,6 +4223,116 @@ mod tests {
         let mut input = fixture_input(vm_name);
         input.bundle_pin = Some(pin.clone());
         input
+    }
+
+    #[test]
+    fn direct_host_admission_enforces_signed_environment_slots() {
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": format!("{arch}-linux"),
+            "entrypoint": { "argv": ["/usr/bin/agent"] },
+            "secret_slots": [
+                { "name": "AGENT_TOKEN", "required": true },
+                { "name": "OPTIONAL_KEY", "required": false }
+            ]
+        }))
+        .unwrap();
+        let (archive, pin) = make_test_bundle_with_members(
+            &sk,
+            b"kernel",
+            b"rootfs",
+            &arch,
+            vec![BundleMember::Environment(environment)],
+        );
+        let trust = MapTrust(HashMap::from([(
+            key_id_from_pubkey(&sk.verifying_key()),
+            sk.verifying_key(),
+        )]));
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+            image: None,
+        };
+        let mut input = input_with_pin("vm-environment", &pin);
+        let error = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("direct host admission must refuse missing mandatory slot");
+        assert!(format!("{error:#}").contains("AGENT_TOKEN"), "{error:#}");
+        input.secrets = vec![mvm_core::plan::SecretBinding {
+            name: "AGENT_TOKEN".into(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "agent-token".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: false,
+        }];
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("bound required slot admits without binding optional slot");
+        assert_eq!(admitted.plan().secrets.len(), 1);
+
+        // Exercise the independently authenticated external-plan entry point,
+        // not just the host's synthesis/signing wrapper.
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "environment-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        let bound = sign_plan(admitted.plan(), &fleet, "environment-fleet");
+        admit_signed_plan_for_run(
+            &bound,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("externally signed bound required slot admits");
+        input.secrets.clear();
+        let missing = synthesize_plan(&input).unwrap();
+        let signed = sign_plan(&missing, &fleet, "environment-fleet");
+        let ledger = InMemoryNonceLedger::new();
+        let error = admit_signed_plan_for_run(
+            &signed,
+            &SystemClock,
+            &ledger,
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("externally signed plan must also bind mandatory slot");
+        assert!(format!("{error:#}").contains("AGENT_TOKEN"), "{error:#}");
+        let retry = admit_signed_plan_for_run(
+            &signed,
+            &SystemClock,
+            &ledger,
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("a rejected descriptor must not spend the nonce");
+        assert!(format!("{retry:#}").contains("AGENT_TOKEN"), "{retry:#}");
+        assert!(
+            !format!("{retry:#}").contains("replay protection"),
+            "{retry:#}"
+        );
     }
 
     #[test]
