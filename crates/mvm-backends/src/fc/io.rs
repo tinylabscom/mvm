@@ -143,6 +143,11 @@ impl FirecrackerIO {
             &self.restore_scope_prefix(vm_dir, snapshot_guest_memory_mib(dir)),
         )
         .with_context(|| "starting fresh Firecracker for snapshot restore")?;
+        // Firecracker runs through `sudo` and binds its API socket as root. Take
+        // it over before the first call, as the cold boot does, or a caller
+        // that is not root cannot dial it.
+        super::adopt_api_socket(&socket_str)
+            .context("adopting the restored Firecracker's API socket for the invoking user")?;
 
         // `resume_vm: false` — vCPUs stay paused so the device-model guard in
         // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
