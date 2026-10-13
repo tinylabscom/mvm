@@ -174,7 +174,7 @@ machine or the next state-touching command's reconcile pass removes them.
 
 This affects images built before the reseed helper existed: they cannot be
 resumed from a sealed snapshot until they are rebuilt. A snapshot taken from
-such an image keeps the old `/init` and can never reseed, so after you rebuild,
+such an image keeps the old guest runtime and can never reseed, so after you rebuild,
 boot the machine fresh before you pause it again.
 
 List and remove local sealed snapshots:

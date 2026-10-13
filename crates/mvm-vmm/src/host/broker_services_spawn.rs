@@ -495,6 +495,13 @@ fn spawn_broker_with_timeout(
         services,
         capability_bindings,
     } = params;
+    // Guest-origin declared-tool decisions forward to this VM's network
+    // endpoint connector. The socket file may not exist yet (the broker
+    // starts before the endpoint); the handler resolves it at call time,
+    // and its absence then leaves host.tool.v1 answering NotBound, which
+    // the guest treats as a denial.
+    let tool_decision_socket = mvm_core::config::vm_socket_dir_at(state_dir)
+        .join(crate::host::network_endpoint_spawn::SUBST_CONNECTOR_SOCKET);
 
     let bin = resolve_subprocess_bin_to_spawn(&AuxBin::new(
         "mvm-broker",
@@ -520,6 +527,11 @@ fn spawn_broker_with_timeout(
         "audit_signer_uds_path": audit_signer_uds_path,
         "services_bindings": services,
         "capability_bindings": capability_bindings,
+        // Guest-origin declared-tool decisions forward to this VM's network
+        // endpoint connector (absent for plans without tools or when the
+        // endpoint never starts; the broker then leaves host.tool.v1
+        // unregistered, which the guest treats as a denial).
+        "tool_decision_socket": tool_decision_socket,
     });
 
     let child = spawn_detached_with_config(&bin, &cfg, "mvm-broker")?;

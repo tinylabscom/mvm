@@ -5,22 +5,20 @@ description: Drive model, mount points, and filesystem layout inside microVMs.
 
 ## Drive Model
 
-A microVM built with `mkGuest` gets these virtio-block drives at fixed slots.
-`/init` mounts the config and secret drives itself, before any user volume is
-attached:
+A microVM boots the universal initramfs; its guest agent mounts every drive.
+The root is the one drive at a fixed slot:
 
 | Drive | Mount Point | Permissions | Purpose |
 |-------|-------------|-------------|---------|
 | `/dev/vda` | `/` | Read-only (ext4 or squashfs) | Root filesystem |
-| `/dev/vdb` | `/mnt/config` | Read-only (`ro,noexec,nosuid,nodev`) | mvm instance metadata |
-| `/dev/vdc` | `/mnt/secrets` | Read-only (`ro,noexec,nosuid,nodev`) | Runtime-delivered credentials |
 
-There is no fixed `/dev/vdd` data drive and no `/mnt/data` mount. Later slots are
-assigned dynamically — the runtime overlay and the SDK sidecar arrive as
-`mvm.runtime_data=/dev/vdN` / `mvm.sdk_dev=/dev/vdN` on the kernel cmdline, and
+Later slots are assigned per boot — the runtime overlay, the SDK sidecar and
+the per-boot identity drive among them, named to the agent at activation — and
 your own `--mount host:guest:SIZE` disk images take the slots after those.
+There is no config drive, no secrets drive, no fixed `/dev/vdd` data drive and
+no `/mnt/data` mount.
 
-`/mnt/config` and `/mnt/secrets` are runtime-owned. The host mount policy refuses
+`/mnt/config` and `/mnt/secrets` stay reserved. The host mount policy refuses
 any user share that sits inside or shadows them, and `/mnt` is not an allow-root
 at all: **a user mount path must be under `/data` or `/work`.**
 
@@ -36,11 +34,10 @@ than repaired in place — see
 
 The rootfs is built by `mkGuest` and contains:
 
-- **Busybox** — init system, core utilities
-- **Overlay-aware boot logic** — the `/init` path and `/mvm/runtime` mount point
-  needed to bring the guest runtime online
-- **Guest agent** — present directly in dev/preferred-overlay images; provided by
-  the sealed runtime overlay on overlay-required boots
+- **Busybox** — core utilities. The root carries no init: PID 1 is the
+  initramfs agent
+- **Mount points** — `/mvm/runtime` and `/mvm/sdk`, where the agent mounts the
+  runtime overlay and the SDK sidecar
 - **Your packages** — specified in the flake's `packages` parameter
 - **The entrypoint** — rendered from the flake's required `entrypoint` parameter
 - **Probe drop-ins** — one `/etc/mvm/probes.d/<name>.json` per `healthChecks.<name>` entry
@@ -95,33 +92,20 @@ Runtime overlay updates are a **next-boot** operation:
 | Agent injection | Supported | Not supported (read-only) |
 | Boot time | Similar | Similar |
 
-## Config Drive
+## Config and secrets drives
 
-The config drive (`/dev/vdb`, mounted at `/mnt/config/`) contains non-sensitive configuration:
+No workload boot attaches a config drive or a secrets drive, and the guest
+mounts nothing at `/mnt/config` or `/mnt/secrets`. Credentials reach a workload
+through the host-side substitution endpoint as placeholders (see
+[Secrets and credentials](/guides/secrets-and-credentials/)); files reach it
+through `--mount` shares under `/data` or `/work`.
 
-- `config.json` — mvm instance metadata (name, role, resources)
-- Application config files from host directories you mounted yourself
-
-Files are written with mode 0444 (world-readable, read-only mount).
-
-## Secrets Drive
-
-The secrets drive (`/dev/vdc`, mounted at `/mnt/secrets/`) contains sensitive data:
-
-- `secrets.json` — tenant-level secrets
-- Application secret files from host directories you mounted yourself
-
-Security hardening:
-- `/init` mounts it `ro,noexec,nosuid,nodev`
-- Recreated on every start (never reused)
-
-The `serviceGroup` argument to `mkGuest` does **not** affect this drive. Like
+The `serviceGroup` argument to `mkGuest` does **not** affect file ownership. Like
 `services` and `volumeMounts`, it is recorded in `passthru.mvm` and warned about
-at eval time; nothing re-owns or re-modes the secret files at boot.
+at eval time.
 
-The stronger property is that raw secret *values* never reach the guest at all:
-mvm substitutes credentials host-side at the per-VM egress endpoint. See the
-secrets guide rather than shipping values in on this drive.
+Raw secret *values* never reach the guest at all: mvm substitutes credentials
+host-side at the per-VM egress endpoint.
 
 ## Persistent Disk Volumes
 

@@ -207,6 +207,7 @@ impl MvmConfig {
             egress: None,
             drive: None,
             display_input: None,
+            application_terminal: None,
         }
     }
 

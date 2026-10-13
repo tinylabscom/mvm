@@ -47,7 +47,7 @@ fn just_module(name: &str) -> String {
 /// 422.
 ///
 /// What a dry run cannot prove is asserted here too, by requiring the signing
-/// and downstream-trigger steps to stay tag-only: their keyless identity pins
+/// and attestation steps to stay tag-only: their keyless identity pins
 /// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
 /// a green dry run mean more than it does.
 #[test]
@@ -87,7 +87,6 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
     for step in [
         "Sign release tarballs, checksum manifests, and SBOM",
         "Attest build provenance for the release tarballs (release-provenance)",
-        "Trigger crates.io publish workflow",
     ] {
         let at = workflow
             .find(step)
@@ -99,6 +98,10 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
              refs/tags identity, and must not publish or trigger anything real"
         );
     }
+    assert!(
+        !workflow.contains("gh workflow run publish-crates.yml"),
+        "registry publication must remain separate from release creation"
+    );
 }
 
 /// The release must not carry a signing step for per-variant image manifests.

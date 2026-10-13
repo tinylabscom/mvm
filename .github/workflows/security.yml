@@ -618,6 +618,11 @@ jobs:
           # of earlier work in 4of6. The lane reached only 101 of that file's
           # mutants before the 315-minute step deadline. Eight shards isolate
           # that large file and keep accounting time inside the job budget.
+          #
+          # The packing weighs a file by its mutant count, not its size. Size
+          # put audit/session.rs, a small file with 155 mutants, beside two
+          # more files, and that shard was stopped at 315 minutes on
+          # 2026-10-12 while four others finished inside 75.
           - mvm-hostd/1of8
           - mvm-hostd/2of8
           - mvm-hostd/3of8
@@ -845,7 +850,31 @@ jobs:
           # A present-but-wrong sidecar passes every check above. Walking the
           # tree from the roothash down to each data block is what proves the
           # three files are one seal and not three unrelated files.
-          sudo veritysetup verify "$out/overlay.ext4" "$out/overlay.verity" "$hash"
+          #
+          # The in-process verity writer emits the bare hash tree, with no
+          # superblock, under the geometry the guest's dm-verity table is
+          # built with: sha256, 4096-byte data and hash blocks, an all-zero
+          # 32-byte salt. veritysetup has to be told that geometry, or it
+          # looks for a superblock that was never written.
+          verity_args=(--no-superblock --hash=sha256
+            --data-block-size=4096 --hash-block-size=4096
+            --salt=0000000000000000000000000000000000000000000000000000000000000000)
+          sudo veritysetup verify "${verity_args[@]}" \
+            "$out/overlay.ext4" "$out/overlay.verity" "$hash"
+          # And the seal has to bite: one flipped data byte must fail it.
+          cp "$out/overlay.ext4" /tmp/assembled-overlay/tampered.ext4
+          byte=$(od -An -tu1 -j4096 -N1 /tmp/assembled-overlay/tampered.ext4 | tr -d ' ')
+          if [ "$byte" = 0 ]; then printf '\001'; else printf '\000'; fi |
+            dd of=/tmp/assembled-overlay/tampered.ext4 bs=1 seek=4096 conv=notrunc 2>/dev/null
+          if cmp -s "$out/overlay.ext4" /tmp/assembled-overlay/tampered.ext4; then
+            echo "::error::the tamper step changed nothing" >&2
+            exit 1
+          fi
+          if sudo veritysetup verify "${verity_args[@]}" \
+            /tmp/assembled-overlay/tampered.ext4 "$out/overlay.verity" "$hash"; then
+            echo "::error::a tampered overlay still verified against its roothash" >&2
+            exit 1
+          fi
           echo "ok: overlay.{ext4,verity,roothash} present and consistent, roothash=${hash:0:12}…"
 
   # ── Lane 6b: Sealed-prod rootfs has no SSH (plan 76 Phase 8) ──────

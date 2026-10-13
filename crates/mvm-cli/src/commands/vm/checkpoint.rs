@@ -2315,6 +2315,7 @@ mod tests {
             verbs: vec![],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -2359,6 +2360,7 @@ mod tests {
                 verbs: vec![],
                 drive: None,
                 tool_mediation: None,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         };

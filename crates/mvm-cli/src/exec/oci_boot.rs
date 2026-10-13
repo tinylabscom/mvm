@@ -3,7 +3,7 @@
 //! Three decisions hang on it. A run that boots an OCI image with egress
 //! enabled needs a NIC-less host-vsock-proxy backend; its workload needs the
 //! proxy environment handed to it, because an image's own init knows nothing
-//! of the guest's egress proxy (a `mkGuest` image exports it from `/init`);
+//! of the guest's egress proxy (on any other root the guest agent supplies it);
 //! and a dry run reports both. Each used to ask its own question — "was
 //! `--image` passed", "is this a prebuilt with an unpacked OCI tree" — so a
 //! manifest whose `image` built an OCI slot answered "no" to all of them and
@@ -122,8 +122,9 @@ fn slot_boots_oci_image_in(dir: &Path) -> Result<bool> {
 
 /// The proxy environment a workload needs when its launch boots an OCI image
 /// with egress on a backend that reaches the network only through the host
-/// vsock proxy. Empty otherwise: a `mkGuest` image exports its own, and a
-/// backend without the proxy has nothing to point at.
+/// vsock proxy. Empty otherwise: on any other root the guest agent fills in
+/// the same variables on an egress boot, and a backend without the proxy has
+/// nothing to point at.
 pub(crate) fn oci_proxy_env(
     boots_oci: bool,
     caps: &mvm_core::vm_backend::VmCapabilities,

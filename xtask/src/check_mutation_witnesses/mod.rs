@@ -93,7 +93,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         let previous = read_baseline(&baseline_path).ok();
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
-            let surface = for_shard(workspace, &scoped, shard);
+            let surface = for_shard(workspace, &scoped, shard, &pinned)?;
             let out_root = run_mutants_over(workspace, &surface, &pinned)?;
             seed_accepted(&observed_misses(&collect_evidence(
                 &out_root, &surface, &pinned,
@@ -146,7 +146,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         // The committed surface, not the freshly resolved one: resolution
         // cannot know about scopes, and running the unscoped surface would
         // report every out-of-claim mutant as a new miss.
-        let surface = for_shard(workspace, &baseline.surface, shard);
+        let surface = for_shard(workspace, &baseline.surface, shard, &pinned)?;
         if surface.is_empty() {
             bail!(
                 "check-mutation-witnesses: --package {} matches no surface file. A shard that \

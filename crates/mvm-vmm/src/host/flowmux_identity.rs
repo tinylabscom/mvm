@@ -18,9 +18,8 @@
 //! the invariant in [`super::network_endpoint_spawn::EgressTlsDelivery`]: keys
 //! do not travel to a guest by a channel that leaks them.
 //!
-//! So the key rides a per-boot read-only ext4 drive instead. The guest mount
-//! already exists and is already hardened (`nix/lib/mk-guest.nix` mounts it
-//! `ro,noexec,nosuid,nodev`); only the host-side producer had been deleted.
+//! So the key rides a per-boot read-only ext4 drive instead, which the guest
+//! mounts `ro,noexec,nosuid,nodev`.
 //! The image is assembled **in memory** — the signing key is never written to a
 //! host temp file on the way in — and is stamped with
 //! [`IDENTITY_DRIVE_LABEL`] so a guest mounts it by content rather than by

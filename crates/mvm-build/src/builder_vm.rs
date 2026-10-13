@@ -227,7 +227,8 @@ pub struct GuestSidecar {
     /// caller gating on it must treat empty as *unknown*, never as safe.
     #[serde(default)]
     pub entrypoint_argv: Vec<String>,
-    /// Init system in use; "busybox" today.
+    /// Init system the image declares: "initramfs-agent" for an image whose PID 1
+    /// is the universal initramfs agent, "busybox" for one built before that.
     pub init_system: String,
     /// Per-backend boot floor in milliseconds. Used by perf gates to
     /// flag regressions.
@@ -240,9 +241,8 @@ pub struct GuestSidecar {
     pub rootless_entrypoint: bool,
     /// Active hypervisor declaration.
     pub hypervisor: String,
-    /// Whether the rootfs carries the `/mvm/runtime` bind-mount target
-    /// and a mkGuest `/init` that prefers the overlay-resident
-    /// agent/seccomp-apply/netinit.
+    /// Whether the rootfs carries the `/mvm/runtime` bind-mount target the
+    /// universal initramfs agent mounts the runtime overlay on.
     ///
     /// Set by mkGuest's `passthru.mvm.overlayAware = true`. Sidecars
     /// written *before* the field existed deserialize as `false` (via
@@ -322,8 +322,8 @@ impl GuestSidecar {
         Ok(path)
     }
 
-    /// Whether the rootfs is overlay-aware (carries `/mvm/runtime` +
-    /// uses mkGuest's overlay-preferring `/init`). The admission gate
+    /// Whether the rootfs is overlay-aware (carries the `/mvm/runtime`
+    /// mount target). The admission gate
     /// consults this; see [`admit_runtime_overlay_contract`].
     pub fn is_overlay_aware(&self) -> bool {
         self.overlay_aware
@@ -340,7 +340,8 @@ impl GuestSidecar {
     ///
     /// Load-bearing: an OCI image's own init knows nothing of the guest's
     /// egress proxy, so a launch that boots one must hand the workload the
-    /// proxy environment itself. A `mkGuest` image exports it from `/init`.
+    /// proxy environment itself. On any other root the guest agent supplies
+    /// it on an egress boot.
     pub fn is_oci_materialized(&self) -> bool {
         self.hypervisor == OCI_MATERIALIZED_HYPERVISOR
     }
@@ -1346,8 +1347,7 @@ pub fn emit_sidecar_via_passthru_query(
 /// - **Sidecar present, `overlay_aware: false`** → refuse. This is
 ///   the older cached-template case: the rootfs has no
 ///   `/mvm/runtime` mount point, so the overlay disk has nowhere
-///   to land. mkGuest's `/init` would either fail or silently
-///   degrade to the baked-in agent path.
+///   to land, and the initramfs agent would refuse the mount.
 /// - **Sidecar malformed** → propagate. Same posture as
 ///   [`GuestSidecar::read_from_dir`].
 ///

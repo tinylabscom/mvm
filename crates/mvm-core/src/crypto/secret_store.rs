@@ -257,6 +257,14 @@ fn default_key_path_for_base(base: &Path) -> PathBuf {
     base.join(FILE_STORE_KEY_FILENAME)
 }
 
+/// The file key path for a secret store rooted at `base`. The resolver
+/// re-reads the key on every `get`, so a process confined before it resolves
+/// (the network endpoint) needs this exact path inside its read grant — it
+/// sits beside the store directory, not inside it.
+pub fn file_store_key_path_for_base(base: &Path) -> PathBuf {
+    default_key_path_for_base(base)
+}
+
 fn keyring_user_for_base(base: &Path) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base.as_os_str().as_encoded_bytes());

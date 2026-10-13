@@ -75,11 +75,11 @@ pub use rpc::{
 };
 pub use verb_grant::{
     HOST_SIGNER_PUB_CMDLINE_KEY, HOST_SIGNER_PUBKEY_PATH, TrustDecision, VERB_TRUST_POLICY_PATH,
-    enforce_drive_grant, enforce_verb_grant, host_signer_pub_token, is_verb_trust_baseline,
-    launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
-    load_verb_trust_policy, parse_require_grant_cmdline, pin_verb_grant,
-    provision_host_signer_anchor_from_cmdline, re_pin_verb_grant, trust_decision,
-    verifying_key_from_hex, write_host_signer_anchor,
+    enforce_application_terminal_grant, enforce_drive_grant, enforce_verb_grant,
+    host_signer_pub_token, is_verb_trust_baseline, launch_requires_grant,
+    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy,
+    parse_require_grant_cmdline, pin_verb_grant, provision_host_signer_anchor_from_cmdline,
+    re_pin_verb_grant, trust_decision, verifying_key_from_hex, write_host_signer_anchor,
 };
 pub use workload_privilege::{current_uid, workload_privilege_refusal};
 
@@ -157,6 +157,12 @@ const _: () = assert!(EGRESS_PORT == 5253);
 /// pre-broker secrets channel once held (that channel was removed), so there
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
+/// Connect and request deadline for the in-guest tool shim and helper.
+pub const TOOL_REQUEST_TIMEOUT_SECS: u64 = 10;
+/// Read deadline for one host tool decision. The endpoint can hold an `ask`
+/// for its full approval timeout, so this waits just past it and never
+/// mistakes a slow approval for a transport failure.
+pub const TOOL_DECISION_TIMEOUT_SECS: u64 = 125;
 
 /// Base vsock port for interactive console PTY sessions.
 pub const CONSOLE_PORT_BASE: u32 = 20000;

@@ -446,6 +446,46 @@ mod tests {
         }
     }
 
+    /// A slot that cannot be removed is reported, not taken for already gone.
+    /// Only an absent slot is success: a caller that discards a piece so the
+    /// next assembly rebuilds it would otherwise go on to reuse the copy it
+    /// believes it removed.
+    #[test]
+    fn discarding_a_slot_that_cannot_be_removed_is_an_error() {
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let piece = RuntimePiece::Initramfs;
+        let slot = piece.local_dir(cache.path(), "1.2.3", arch);
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        // A file where the directory belongs: removal fails with something
+        // other than NotFound.
+        std::fs::write(&slot, b"not a directory").unwrap();
+
+        let error = discard_local_piece(cache.path(), "1.2.3", arch, piece)
+            .expect_err("a slot that could not be removed must not report success");
+        assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            slot.is_file(),
+            "the failed discard must leave the slot alone"
+        );
+    }
+
+    /// The labels are what `mvmctl doctor` prints per piece, so each one names
+    /// its piece and no two collide.
+    #[test]
+    fn each_piece_carries_its_own_label() {
+        let labels: Vec<String> = RuntimePiece::ALL.iter().map(|p| p.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "runtime overlay",
+                "initramfs",
+                "SDK sidecar glibc",
+                "SDK sidecar musl",
+            ]
+        );
+    }
+
     /// The fresh one-clone install, end to end on the host: a release binary
     /// whose cache has never seen an image set adopts the guest runtime the
     /// installer placed beside it and assembles every launch-time piece from

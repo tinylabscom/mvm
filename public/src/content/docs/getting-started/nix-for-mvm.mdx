@@ -335,10 +335,9 @@ The flag is `--mount`, with `--volume` as an alias. There is no short form —
 `-v` is the global verbosity counter, not a mount flag.
 
 **Guest mount paths must live under `/data` or `/work`.** Those are the only
-allow-roots. `/mnt` is deliberately excluded: `/init` mounts mvm's own read-only
-config and secret drives at `/mnt/config` and `/mnt/secrets` before any user
-volume is attached, and the mount policy refuses a share that would sit inside
-or shadow a runtime-owned path.
+allow-roots. `/mnt` is deliberately excluded: `/mnt/config` and `/mnt/secrets`
+are reserved runtime paths, and the mount policy refuses a share that would sit
+inside or shadow one.
 
 Inside the guest, the files appear at the mount paths:
 
