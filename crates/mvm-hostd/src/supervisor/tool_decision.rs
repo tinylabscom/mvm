@@ -113,12 +113,27 @@ impl ToolTelemetry for TracingToolTelemetry {
 struct LiveInvocation {
     binding: ToolInvocationBinding,
     tool: String,
-    trace: Box<dyn ActiveToolTrace>,
+    trace: Option<Box<dyn ActiveToolTrace>>,
 }
 
 impl LiveInvocation {
-    fn finish(self, outcome: &'static str) {
-        self.trace.finish(outcome);
+    fn finish(mut self, outcome: &'static str) {
+        if let Some(trace) = self.trace.take() {
+            trace.finish(outcome);
+        }
+    }
+}
+
+impl Drop for LiveInvocation {
+    fn drop(&mut self) {
+        // Taking the trace makes explicit retirement and shutdown mutually
+        // exclusive. Telemetry must not turn resource teardown into a panic,
+        // including when a subscriber panics during an existing unwind.
+        if let Some(trace) = self.trace.take() {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trace.finish("shutdown");
+            }));
+        }
     }
 }
 
@@ -178,7 +193,7 @@ impl ToolDecisionGate {
     }
 
     /// Decide and record one invocation. Every allow gets a fresh binding and
-    /// a telemetry span that stays live until [`Self::release`]. Tools with
+    /// a telemetry span that ends on release, eviction, or gate shutdown. Tools with
     /// endpoint scopes use the same binding for route and secret enforcement.
     pub async fn decide_invocation(
         &self,
@@ -240,7 +255,7 @@ impl ToolDecisionGate {
         let invocation = LiveInvocation {
             binding,
             tool: tool.to_string(),
-            trace,
+            trace: Some(trace),
         };
         let mut live = self.live();
         if live.len() >= MAX_LIVE_INVOCATIONS
@@ -318,9 +333,156 @@ mod tests {
 
     use async_trait::async_trait;
     use mvm_core::plan::TenantId;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
     use crate::supervisor::audit::{CapturingAuditSigner, NoopAuditSigner};
+
+    #[derive(Default)]
+    struct FieldCapture(std::collections::BTreeMap<String, String>);
+
+    impl Visit for FieldCapture {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().into(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Default)]
+    struct TraceCapture {
+        spans: Vec<(u64, FieldCapture)>,
+        events: Vec<(u64, FieldCapture)>,
+    }
+
+    struct CaptureLayer(Arc<Mutex<TraceCapture>>);
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            if attrs.metadata().target() == "mvm.tool" {
+                assert_eq!(attrs.metadata().name(), "mvm.tool.invocation");
+                let mut fields = FieldCapture::default();
+                attrs.record(&mut fields);
+                self.0.lock().unwrap().spans.push((id.into_u64(), fields));
+            }
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: Context<'_, S>) {
+            if event.metadata().target() == "mvm.tool" {
+                let mut fields = FieldCapture::default();
+                event.record(&mut fields);
+                let id = ctx
+                    .event_span(event)
+                    .expect("tool event belongs to invocation")
+                    .id();
+                self.0.lock().unwrap().events.push((id.into_u64(), fields));
+            }
+        }
+    }
+
+    #[test]
+    fn real_trace_fields_are_safe_and_finish_in_the_original_span() {
+        let capture = Arc::new(Mutex::new(TraceCapture::default()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer(capture.clone()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let tool = "tool-secret-marker";
+        let argv = "argv-secret-marker";
+        let executable = "/bin/executable-secret-marker";
+        let mut bindings = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            runtime.block_on(async {
+                let rules = ToolRules {
+                    allow: vec![tool.into()],
+                    detail: [(
+                        tool.into(),
+                        mvm_contract::policy::tool_rules::ToolRuleDetail {
+                            executable: Some(executable.into()),
+                            ..Default::default()
+                        },
+                    )]
+                    .into(),
+                    ..Default::default()
+                };
+                let (gate, _) = gate(rules, approving());
+                for origin in [ToolOrigin::Host, ToolOrigin::GuestBroker] {
+                    let InvocationVerdict::Allow {
+                        binding: Some(binding),
+                    } = gate
+                        .decide_invocation(
+                            &ToolCheckRequest {
+                                tool: tool.into(),
+                                executable: Some(executable.into()),
+                                argv: argv.into(),
+                            },
+                            origin,
+                        )
+                        .await
+                        .expect("audit before trace")
+                    else {
+                        panic!("allowed invocation must be bound");
+                    };
+                    bindings.push(binding);
+                }
+                gate.release(&bindings[0]);
+                gate.release(&bindings[0]);
+                drop(gate);
+            });
+        });
+        let capture = capture.lock().unwrap();
+        assert_eq!(capture.spans.len(), 2);
+        assert_eq!(capture.events.len(), 4);
+        for (index, (id, fields)) in capture.spans.iter().enumerate() {
+            assert_eq!(fields.0.len(), 3);
+            assert_eq!(fields.0["binding_id"], bindings[index].audit_id());
+            assert_eq!(fields.0["tool_sha256"], hex::encode(Sha256::digest(tool)));
+            let origin = [ToolOrigin::Host, ToolOrigin::GuestBroker][index];
+            assert_eq!(fields.0["origin"], format!("{:?}", origin.audit_label()));
+            let events: Vec<_> = capture
+                .events
+                .iter()
+                .filter(|(event_id, _)| event_id == id)
+                .collect();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].1.0["phase"], "\"start\"");
+            assert_eq!(events[0].1.0.len(), 2);
+            assert_eq!(events[1].1.0["phase"], "\"finish\"");
+            assert_eq!(
+                events[1].1.0["outcome"],
+                if index == 0 {
+                    "\"completed\""
+                } else {
+                    "\"shutdown\""
+                }
+            );
+            assert_eq!(events[1].1.0.len(), 4);
+            assert!(events[1].1.0["duration_ms"].parse::<u64>().is_ok());
+        }
+        for (_, fields) in capture.spans.iter().chain(capture.events.iter()) {
+            for value in fields.0.values() {
+                assert!(!value.contains(tool));
+                assert!(!value.contains(argv));
+                assert!(!value.contains(executable));
+                assert!(
+                    bindings
+                        .iter()
+                        .all(|binding| !value.contains(binding.as_str()))
+                );
+            }
+        }
+    }
 
     struct ScriptedApprover {
         calls: AtomicUsize,
@@ -552,7 +714,85 @@ mod tests {
         assert!(telemetry.finishes.lock().unwrap().is_empty());
 
         gate.release(&binding);
+        gate.release(&binding);
+        drop(gate);
         assert_eq!(telemetry.finishes.lock().unwrap().as_slice(), ["completed"]);
+    }
+
+    #[tokio::test]
+    async fn host_release_and_shutdown_finish_each_trace_once_even_with_poison() {
+        let telemetry = Arc::new(FakeTelemetry::default());
+        let recorder = Arc::new(Recorder::new(
+            Arc::new(CapturingAuditSigner::new()),
+            TenantId("local".into()),
+        ));
+        let gate = ToolDecisionGate::with_telemetry(
+            scoped_rules(),
+            approving(),
+            recorder,
+            telemetry.clone(),
+        );
+        let mut bindings = Vec::new();
+        for origin in [ToolOrigin::Host, ToolOrigin::Host, ToolOrigin::GuestBroker] {
+            let InvocationVerdict::Allow {
+                binding: Some(binding),
+            } = gate
+                .decide_invocation(&request("plain", "plain x"), origin)
+                .await
+                .expect("audit")
+            else {
+                panic!("allowed invocation must be bound");
+            };
+            bindings.push(binding);
+        }
+        gate.release(&bindings[0]);
+        gate.release(&bindings[0]);
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _live = gate.live();
+            panic!("poison the invocation mutex");
+        }));
+        assert!(poisoned.is_err());
+        drop(gate);
+        assert_eq!(telemetry.starts.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            telemetry.finishes.lock().unwrap().as_slice(),
+            ["completed", "shutdown", "shutdown"]
+        );
+    }
+
+    #[test]
+    fn shutdown_contains_telemetry_panics_and_continues_finishing() {
+        struct PanickingTrace(Arc<AtomicUsize>);
+        impl ActiveToolTrace for PanickingTrace {
+            fn finish(self: Box<Self>, outcome: &'static str) {
+                assert_eq!(outcome, "shutdown");
+                self.0.fetch_add(1, Ordering::Relaxed);
+                panic!("trace implementation failed");
+            }
+        }
+        for already_unwinding in [false, true] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let invocations: Vec<_> = (0..2)
+                    .map(|_| LiveInvocation {
+                        binding: ToolInvocationBinding::from_random([1; 16]),
+                        tool: "plain".into(),
+                        trace: Some(
+                            Box::new(PanickingTrace(attempts.clone())) as Box<dyn ActiveToolTrace>
+                        ),
+                    })
+                    .collect();
+                if already_unwinding {
+                    panic!("outer failure");
+                }
+                drop(invocations);
+            }));
+            assert_eq!(result.is_err(), already_unwinding);
+            if let Err(payload) = result {
+                assert_eq!(payload.downcast_ref::<&str>(), Some(&"outer failure"));
+            }
+            assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        }
     }
 
     #[tokio::test]
@@ -581,22 +821,43 @@ mod tests {
 
     #[tokio::test]
     async fn an_unaudited_scoped_allow_leaves_no_live_binding() {
+        let telemetry = Arc::new(FakeTelemetry::default());
         let recorder = Arc::new(Recorder::new(
             Arc::new(NoopAuditSigner),
             TenantId("local".into()),
         ));
-        let gate = ToolDecisionGate::new(scoped_rules(), approving(), recorder);
-        assert!(
-            gate.decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
-                .await
-                .is_err()
+        let gate = ToolDecisionGate::with_telemetry(
+            scoped_rules(),
+            approving(),
+            recorder,
+            telemetry.clone(),
         );
+        for origin in [ToolOrigin::Host, ToolOrigin::GuestBroker] {
+            assert!(
+                gate.decide_invocation(&request("gh", "gh api"), origin)
+                    .await
+                    .is_err()
+            );
+        }
         assert!(gate.live().is_empty());
+        drop(gate);
+        assert_eq!(telemetry.starts.load(Ordering::Relaxed), 0);
+        assert!(telemetry.finishes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn past_the_bound_the_oldest_binding_is_retired() {
-        let (gate, _signer) = gate(scoped_rules(), approving());
+        let telemetry = Arc::new(FakeTelemetry::default());
+        let recorder = Arc::new(Recorder::new(
+            Arc::new(CapturingAuditSigner::new()),
+            TenantId("local".into()),
+        ));
+        let gate = ToolDecisionGate::with_telemetry(
+            scoped_rules(),
+            approving(),
+            recorder,
+            telemetry.clone(),
+        );
         let mut minted = Vec::new();
         for _ in 0..=MAX_LIVE_INVOCATIONS {
             match gate
@@ -613,6 +874,12 @@ mod tests {
         assert_eq!(gate.live().len(), MAX_LIVE_INVOCATIONS);
         assert_eq!(gate.tool_for(&minted[0]), None);
         assert_eq!(gate.tool_for(&minted[1]).as_deref(), Some("gh"));
+        gate.release(&minted[0]);
+        assert_eq!(telemetry.finishes.lock().unwrap().as_slice(), ["evicted"]);
+        drop(gate);
+        let finishes = telemetry.finishes.lock().unwrap();
+        assert_eq!(finishes.len(), MAX_LIVE_INVOCATIONS + 1);
+        assert!(finishes[1..].iter().all(|outcome| *outcome == "shutdown"));
     }
 
     #[tokio::test]
