@@ -862,7 +862,6 @@ mod tests {
             "\"$WORKSPACE_BUILD_RESULT\"",
             "\"$WORKSPACE_RESULT\"",
             "\"$WORKSPACE_EXTRAS_RESULT\"",
-            "\"$WORKSPACE_AARCH64_BUILD_RESULT\"",
             "\"$WORKSPACE_AARCH64_RESULT\"",
             "\"$FEATURE_CLIPPY_RESULT\"",
             "\"$CORE_RESULT\"",
