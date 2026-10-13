@@ -44,9 +44,26 @@ pub enum ResolvedEntrypoint {
         /// Why, in the words the refusal quotes back to the operator.
         because: String,
     },
+    /// The caller explicitly replaces the image entrypoint with an ad-hoc command.
+    ///
+    /// This is not a successful resolution and grants no production input access.
+    /// Existing posture and command-admission rules still govern the override.
+    AdHocOverride { because: String },
 }
 
 impl ResolvedEntrypoint {
+    /// Resolve a normal launch, or record its explicit ad-hoc replacement.
+    ///
+    /// Shared by transient and persistent launches so metadata failures never
+    /// receive the override exemption.
+    pub fn for_launch(rootfs: &Path, has_ad_hoc_argv: bool) -> Self {
+        if has_ad_hoc_argv {
+            Self::ad_hoc_override()
+        } else {
+            resolve_for_rootfs(rootfs)
+        }
+    }
+
     /// The argv when it is known, or an empty slice when it is not.
     ///
     /// Test-only, and deliberately so. It flattens `Known { argv: [] }` and
@@ -58,7 +75,14 @@ impl ResolvedEntrypoint {
     fn argv(&self) -> &[String] {
         match self {
             Self::Known { argv, .. } => argv,
-            Self::Unresolved { .. } => &[],
+            Self::Unresolved { .. } | Self::AdHocOverride { .. } => &[],
+        }
+    }
+
+    /// Record an explicit ad-hoc command, not missing or invalid image metadata.
+    pub fn ad_hoc_override() -> Self {
+        Self::AdHocOverride {
+            because: "an ad-hoc argv run replaces the image entrypoint".to_string(),
         }
     }
 
@@ -134,6 +158,27 @@ mod tests {
                 shebang: None,
             }
         );
+    }
+
+    #[test]
+    fn both_launch_modes_distinguish_metadata_failure_from_explicit_override() {
+        let (dir, rootfs) = image_dir();
+        assert!(matches!(
+            ResolvedEntrypoint::for_launch(&rootfs, false),
+            ResolvedEntrypoint::Unresolved { .. }
+        ));
+        assert!(matches!(
+            ResolvedEntrypoint::for_launch(&rootfs, true),
+            ResolvedEntrypoint::AdHocOverride { .. }
+        ));
+        GuestSidecar::for_oci_run("resolved", true, true)
+            .with_entrypoint_argv(vec!["/usr/bin/agent".to_string()])
+            .write_to_dir(dir.path())
+            .unwrap();
+        assert!(matches!(
+            ResolvedEntrypoint::for_launch(&rootfs, false),
+            ResolvedEntrypoint::Known { .. }
+        ));
     }
 
     #[test]

@@ -210,6 +210,19 @@ fn validate_environment(
     Ok(())
 }
 
+/// Required descriptor slots not bound by the signed plan. This checks names,
+/// not secret values or endpoint substitution, which remain broker-owned.
+pub fn unbound_environment_secret_slots(
+    environment: &EnvironmentDescriptor,
+    secrets: &[crate::plan::SecretBinding],
+) -> Vec<String> {
+    environment
+        .required_secret_slots()
+        .filter(|slot| !secrets.iter().any(|binding| binding.name == *slot))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Every capability `environment` requires that `posture` does not permit,
 /// by wire name. With no posture, every required capability is forbidden.
 ///

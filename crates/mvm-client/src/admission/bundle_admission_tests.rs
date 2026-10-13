@@ -634,6 +634,12 @@ fn a_bound_required_secret_slot_admits_the_launch() {
     params.keys_dir = Some(&keys_dir);
     params.audit_dir = Some(&audit_dir);
     params.bundle_pin = Some(BundlePin::boots(&archive));
+    // This synthetic bundle fixture declares /usr/bin/agent; it is not a
+    // native image whose entrypoint this test can discover from a sidecar.
+    params.entrypoint = ResolvedEntrypoint::Known {
+        argv: vec!["/usr/bin/agent".to_string()],
+        shebang: None,
+    };
     params.secrets = vec![mvm_core::plan::SecretBinding {
         name: "AGENT_TOKEN".to_string(),
         source: mvm_core::plan::SecretSource::Keystore {
