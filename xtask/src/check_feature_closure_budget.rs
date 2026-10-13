@@ -93,7 +93,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 486 (was 485): the first-party `mvm-compiler` extraction adds one workspace
 /// crate. All of its third-party dependencies were already present.
-const FEATURE_CLOSURE_BUDGET: usize = 486;
+///
+/// 488 (was 486): the standalone public Rust hostlib client adds one crate and
+/// libloading 0.8, retaining Rust 1.85 support without internal runtime dependencies.
+const FEATURE_CLOSURE_BUDGET: usize = 488;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

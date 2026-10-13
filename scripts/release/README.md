@@ -24,6 +24,12 @@ macOS payload: the step emits a warning and the report records
 still a hard failure, so a missing or misspelled secret cannot quietly turn a
 notarized release into an unsigned one.
 
+The current distribution policy uses Sigstore-authenticated release assets and
+macOS ad-hoc signatures with the required entitlements. Apple Developer ID
+signing and notarization are explicitly deferred, not prerequisites for that
+distribution model. An `Unconfigured` report must never be described as
+successful notarization. Nothing in this workflow publishes to the Mac App Store.
+
 ## Provisioning (release administrator)
 
 An Apple Developer Program team with Developer ID distribution access is

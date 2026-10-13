@@ -444,6 +444,7 @@ pub fn verify_release_runtime_for_launch(
     config: &VmStartConfig,
     minimum_protocol: u32,
 ) -> Result<VerifiedRuntimeManifest> {
+    check_runtime_provenance(config)?;
     if config.unsigned_runtime_development
         || config.source_runtime_archive_sha256.is_some()
         || config.legacy_bundle_runtime.is_some()
@@ -469,6 +470,7 @@ fn verify_runtime_for_launch_at(
     minimum_protocol: u32,
     bound_home: Option<&Path>,
 ) -> Result<Option<VerifiedLaunchRuntime>> {
+    check_runtime_provenance(config)?;
     if config.legacy_portable_runtime.is_some() {
         return Ok(Some(VerifiedLaunchRuntime::LegacyPortable(
             crate::legacy_portable_runtime::verify(config, minimum_protocol)?,
@@ -518,6 +520,25 @@ fn verify_runtime_for_launch_at(
         bail!("selected guest runtime root differs from its checked declaration");
     }
     Ok(Some(verified))
+}
+
+fn check_runtime_provenance(config: &VmStartConfig) -> Result<()> {
+    let proof_classes = [
+        config.runtime_release_proof.is_some(),
+        config.legacy_bundle_runtime.is_some(),
+        config.legacy_portable_runtime.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    anyhow::ensure!(proof_classes <= 1, "conflicting runtime proof classes");
+    anyhow::ensure!(
+        proof_classes == 0
+            || (!config.unsigned_runtime_development
+                && config.source_runtime_archive_sha256.is_none()),
+        "runtime proof cannot include source or developer provenance"
+    );
+    Ok(())
 }
 
 fn has_external_runtime(config: &VmStartConfig) -> bool {
@@ -715,6 +736,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn generic_preflight_refuses_mixed_provenance_before_proof_or_snapshot_effects() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let portable =
+            crate::legacy_portable_runtime::fixtures::signed_legacy_portable_runtime_fixture(
+                home.path(),
+            );
+        let proof = portable.legacy_portable_runtime.as_ref().unwrap();
+        let baked = mvm_core::vm_backend::LegacyBundleRuntimeProof {
+            archive: proof.archive.clone(),
+            pin: proof.pin.clone(),
+        };
+        let release = mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+            archive: home.path().join("missing-release"),
+            checksum: home.path().join("missing-checksum"),
+            signature_bundle: home.path().join("missing-signature"),
+            archive_sha256: "a".repeat(64),
+            version: "99.2.3".into(),
+            arch: GuestArch::host(),
+        };
+        for mask in 1_u8..8 {
+            let mut config = VmStartConfig::default();
+            if mask & 1 != 0 {
+                config.runtime_release_proof = Some(release.clone());
+            }
+            if mask & 2 != 0 {
+                config.legacy_bundle_runtime = Some(baked.clone());
+            }
+            if mask & 4 != 0 {
+                config.legacy_portable_runtime = Some(proof.clone());
+            }
+            for source in [false, true] {
+                let mut mixed = config.clone();
+                if source {
+                    mixed.source_runtime_archive_sha256 = Some("b".repeat(64));
+                } else {
+                    mixed.unsigned_runtime_development = true;
+                }
+                let before = format!("{mixed:?}");
+                let error = verify_runtime_for_launch(&mixed, 2).unwrap_err();
+                assert!(
+                    error.to_string().contains(if mask.count_ones() > 1 {
+                        "conflicting runtime proof classes"
+                    } else {
+                        "runtime proof cannot include source or developer provenance"
+                    }),
+                    "{error:#}"
+                );
+                assert_eq!(format!("{mixed:?}"), before);
+            }
+            if mask.count_ones() > 1 {
+                assert!(
+                    verify_runtime_for_launch(&config, 2)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("conflicting runtime proof classes")
+                );
+            }
+        }
+        assert!(verify_runtime_for_launch(&portable, 2).is_ok());
+        let source = VmStartConfig {
+            unsigned_runtime_development: true,
+            source_runtime_archive_sha256: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert!(check_runtime_provenance(&source).is_ok());
+    }
+
+    #[test]
     fn release_only_preflight_rejects_missing_or_developer_provenance() {
         for config in [
             VmStartConfig::default(),
@@ -805,6 +896,10 @@ mod tests {
             bound.source_runtime_archive_sha256.as_deref(),
             Some(runtime.digest.as_str())
         );
+        let mut explicitly_checked_source = config.clone();
+        explicitly_checked_source.source_runtime_archive_sha256 = Some(runtime.digest.clone());
+        explicitly_checked_source.unsigned_runtime_development = true;
+        assert!(verify_runtime_for_launch(&explicitly_checked_source, 2).is_ok());
         let binding = CliRuntimeLaunchBinding {
             provenance: RuntimeBindingProvenance::Source {
                 version: version.into(),
@@ -962,6 +1057,13 @@ mod tests {
         config.runtime_overlay_roothash = Some("a".repeat(64));
         config.initrd_path = Some("/missing/initramfs".into());
         config.unsigned_runtime_development = true;
+        assert!(
+            verify_runtime_for_launch(&config, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime proof cannot include source or developer provenance")
+        );
+        config.unsigned_runtime_development = false;
         assert!(
             verify_runtime_for_launch(&config, 2)
                 .unwrap_err()
