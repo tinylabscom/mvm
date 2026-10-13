@@ -603,7 +603,6 @@ mod tests {
         let script = firecracker_launch_script_as(
             vm.to_str().unwrap(),
             vm.join("fc.socket").to_str().unwrap(),
-            false,
             "",
             0,
         );

@@ -60,6 +60,11 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "parent_path",
         "an empty mount-point placeholder a bind mount covers",
     ),
+    (
+        "crates/mvm-backends/src/fc/fork_devices.rs",
+        "open(recorded)",
+        "an empty drive placeholder the retarget replaces before the child runs",
+    ),
 ];
 
 /// How far past `OpenOptions::new()` a chain is read for `.create` and a mode.
