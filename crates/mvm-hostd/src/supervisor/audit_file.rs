@@ -177,6 +177,7 @@ const DEFERRABLE_EVENTS: &[&str] = &[
     // and already covered by the admission that authorized the boot.
     "plan.policy_resolved",
     "plan.boot_posture",
+    "plan.start_mode",
     "plan.shares_admitted",
     // Provenance for an admission that has already been synced.
     "plan.oci_provenance",

@@ -44,6 +44,7 @@
 
 pub mod admission;
 pub mod agent_prompt;
+pub mod application_terminal;
 pub mod approval_broker;
 pub mod audit;
 pub mod boot;
@@ -75,6 +76,7 @@ pub mod registration;
 pub mod replay;
 pub mod secret;
 pub mod snapshot;
+pub mod standby;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;

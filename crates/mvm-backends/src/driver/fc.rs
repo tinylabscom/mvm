@@ -108,7 +108,8 @@ impl Default for FcDriver {
 /// guest, at the cost documented on [`fc_console_verbosity`].
 pub const GUEST_CONSOLE_VERBOSE_ENV: &str = "MVM_GUEST_CONSOLE_VERBOSE";
 
-/// The console-verbosity token for a Firecracker boot, `" quiet"` by default.
+/// The console-verbosity tokens for a Firecracker boot, `" quiet loglevel=3"`
+/// by default.
 ///
 /// Firecracker's `ttyS0` is an emulated 16550A: the guest takes a VM exit per
 /// byte written to it. Measured on a Linux/KVM host with speculative-execution
@@ -118,9 +119,18 @@ pub const GUEST_CONSOLE_VERBOSE_ENV: &str = "MVM_GUEST_CONSOLE_VERBOSE";
 /// mock boot `console=hvc0`, a virtio-console whose output rides a ring.
 ///
 /// `quiet` raises the console loglevel so `KERN_INFO` chatter stops crossing
-/// the port. Warnings and errors still print, and the guest agent's own
-/// messages are userspace writes rather than printk, so they are unaffected —
-/// `console.log` keeps the lines an operator actually reads.
+/// the port, and `loglevel=3` (parsed after it, so it wins) holds back
+/// `KERN_ERR` too for the rest of kernel boot. On a healthy boot those errors
+/// are the same fifteen lines every time, about 25 ms of VM exits: Firecracker
+/// describes its virtio-mmio devices in ACPI and also passes them as
+/// `virtio_mmio.device=`, so each one registers twice and the second
+/// registration fails with `-EBUSY`, and there is no PCI config space to find.
+/// The guest agent, as PID 1, raises the level back to the `quiet` value as
+/// soon as it has `/proc` (`mvm_agentd::console_loglevel`), so an error raised
+/// once the guest is running — the OOM killer's report, which diagnostics scan
+/// `console.log` for — still reaches the console. Early-boot errors stay in
+/// the kernel ring buffer (`dmesg`). The agent's own messages are userspace
+/// writes rather than printk and are unaffected either way.
 ///
 /// The escape hatch matters: kernel boot output is how a hung guest gets
 /// diagnosed. [`GUEST_CONSOLE_VERBOSE_ENV`] restores it in full.
@@ -133,7 +143,7 @@ fn fc_console_verbosity() -> &'static str {
 fn verbosity_token_for(requested: Option<&str>) -> &'static str {
     match requested {
         Some(v) if v == "1" || v.eq_ignore_ascii_case("true") => "",
-        _ => " quiet",
+        _ => " quiet loglevel=3",
     }
 }
 
@@ -1650,7 +1660,10 @@ mod tests {
 
         // Verity / initramfs base: serial console only, no root/init token.
         let verity = d.workload_base_bootargs(false);
-        assert_eq!(verity, "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0");
+        assert_eq!(
+            verity,
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
+        );
         assert!(!verity.contains("root="), "got: {verity}");
 
         // There is no third shape: Firecracker never served a virtiofs root
@@ -1884,7 +1897,9 @@ mod tests {
             "{boot}"
         );
         assert!(
-            boot.contains(r#""boot_args": "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0""#),
+            boot.contains(
+                r#""boot_args": "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0""#
+            ),
             "{boot}"
         );
     }
@@ -2721,7 +2736,7 @@ mod console_verbosity_tests {
         for has_disk in [false, true] {
             let args = fc_base_bootargs(has_disk);
             assert!(
-                args.contains("console=ttyS0 quiet"),
+                args.contains("console=ttyS0 quiet loglevel=3 "),
                 "boot shape (has_disk={has_disk}) lost the quiet token: {args}"
             );
         }
@@ -2733,15 +2748,29 @@ mod console_verbosity_tests {
     fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
         assert_eq!(
             fc_base_bootargs(true),
-            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0 rootwait init=/init"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
         // PID 1 owns root/init selection. The virtiofs-root shape that used to
         // be here is gone.
         assert_eq!(
             fc_base_bootargs(false),
-            "console=ttyS0 quiet reboot=k panic=1 net.ifnames=0"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
         );
+    }
+
+    /// `quiet` and `loglevel=` both set the console loglevel and the kernel
+    /// applies them in cmdline order, so `loglevel=3` only holds back the
+    /// early-boot `KERN_ERR` lines if it comes after `quiet`.
+    #[test]
+    fn the_boot_loglevel_follows_quiet_so_it_takes_effect() {
+        let token = verbosity_token_for(None);
+        let quiet = token.find("quiet").expect("quiet token");
+        let loglevel = token.find("loglevel=3").expect("loglevel token");
+        assert!(quiet < loglevel, "{token:?}");
+        // The guest agent restores exactly the level `quiet` selects, so the
+        // two halves of this have to agree on it.
+        assert_eq!(mvm_agentd::console_loglevel::QUIET_CONSOLE_LOGLEVEL, 4);
     }
 
     /// A hung guest is diagnosed from kernel boot output, so the suppression
@@ -2749,9 +2778,9 @@ mod console_verbosity_tests {
     #[test]
     fn the_verbose_escape_hatch_restores_full_kernel_output() {
         // Pure over the env read so the test does not mutate process state.
-        assert_eq!(verbosity_token_for(None), " quiet");
-        assert_eq!(verbosity_token_for(Some("0")), " quiet");
-        assert_eq!(verbosity_token_for(Some("no")), " quiet");
+        assert_eq!(verbosity_token_for(None), " quiet loglevel=3");
+        assert_eq!(verbosity_token_for(Some("0")), " quiet loglevel=3");
+        assert_eq!(verbosity_token_for(Some("no")), " quiet loglevel=3");
         assert_eq!(verbosity_token_for(Some("1")), "");
         assert_eq!(verbosity_token_for(Some("true")), "");
         assert_eq!(verbosity_token_for(Some("TRUE")), "");

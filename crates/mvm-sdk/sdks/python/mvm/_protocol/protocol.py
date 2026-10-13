@@ -1822,6 +1822,11 @@ VolumeMountResult = Union[VolumeMountResult1, VolumeMountResult2, VolumeMountRes
 
 
 @dataclass
+class ApplicationTerminalBinding:
+    argv_digest: Sha256Digest
+
+
+@dataclass
 class CapabilityId:
     service: ServiceId
     verb: str
@@ -2121,6 +2126,7 @@ class VerbGrant:
     session_id: str
     sig: str
     verbs: List[VerbId]
+    application_terminal: Optional[ApplicationTerminalBinding] = None
     drive: Optional[DriveGrant] = None
     tool_mediation: Optional[ToolMediationGrant] = None
 

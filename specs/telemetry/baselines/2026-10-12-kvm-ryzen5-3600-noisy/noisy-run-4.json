@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "host": {
+    "os": "linux",
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen 5 3600 6-Core Processor",
+    "logical_cores": 12
+  },
+  "comparison": {
+    "rounds": 5,
+    "phases": {
+      "live_ms": 1000,
+      "outage_ms": 500,
+      "recovery_ms": 500
+    },
+    "capture_slots": 128,
+    "record_bytes": 701,
+    "results": [
+      {
+        "policy": "drop_newest",
+        "noisy_offer_ns": {
+          "samples": 102122249,
+          "p50": 40,
+          "p99": 50,
+          "p999": 110,
+          "max": 150220
+        },
+        "quiet_offer_ns": {
+          "samples": 9420,
+          "p50": 150,
+          "p99": 650,
+          "p999": 1030,
+          "max": 7820
+        },
+        "noisy": {
+          "attempted": 102122249,
+          "queued": 316136,
+          "shed": 101461064,
+          "contended": 345049,
+          "evicted": 0,
+          "delivered": 316136
+        },
+        "quiet": {
+          "attempted": 9420,
+          "queued": 28,
+          "shed": 8179,
+          "contended": 1213,
+          "evicted": 0,
+          "delivered": 28
+        },
+        "quiet_delivered_ratio": [
+          0.003171247357293869,
+          0.0015881418740074113,
+          0.003189792663476874,
+          0.0048,
+          0.002124269782262347
+        ],
+        "live_age_us": {
+          "samples": 250539,
+          "p50": 12,
+          "p99": 27163,
+          "p999": 27163,
+          "max": 27163
+        },
+        "reconnect_oldest_age_ms": [
+          526,
+          526,
+          526,
+          526,
+          526
+        ],
+        "max_evictions_per_offer": 0
+      },
+      {
+        "policy": "drop_oldest",
+        "noisy_offer_ns": {
+          "samples": 83401224,
+          "p50": 60,
+          "p99": 100,
+          "p999": 130,
+          "max": 43500
+        },
+        "quiet_offer_ns": {
+          "samples": 9438,
+          "p50": 290,
+          "p99": 1380,
+          "p999": 1810,
+          "max": 2510
+        },
+        "noisy": {
+          "attempted": 83401224,
+          "queued": 82876706,
+          "shed": 0,
+          "contended": 524518,
+          "evicted": 82364038,
+          "delivered": 512668
+        },
+        "quiet": {
+          "attempted": 9438,
+          "queued": 6422,
+          "shed": 0,
+          "contended": 3016,
+          "evicted": 6387,
+          "delivered": 35
+        },
+        "quiet_delivered_ratio": [
+          0.007442849548112706,
+          0.002642706131078224,
+          0.001059322033898305,
+          0.004235044997353097,
+          0.0031779661016949155
+        ],
+        "live_age_us": {
+          "samples": 409124,
+          "p50": 18,
+          "p99": 45,
+          "p999": 77,
+          "max": 85
+        },
+        "reconnect_oldest_age_ms": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "max_evictions_per_offer": 1
+      }
+    ],
+    "worst_case": [
+      {
+        "policy": "drop_newest",
+        "full_typical_ns": {
+          "samples": 100000,
+          "p50": 40,
+          "p99": 50,
+          "p999": 70,
+          "max": 660
+        },
+        "full_max_size_ns": {
+          "samples": 100000,
+          "p50": 40,
+          "p99": 50,
+          "p999": 110,
+          "max": 3740
+        }
+      },
+      {
+        "policy": "drop_oldest",
+        "full_typical_ns": {
+          "samples": 100000,
+          "p50": 50,
+          "p99": 70,
+          "p999": 80,
+          "max": 130
+        },
+        "full_max_size_ns": {
+          "samples": 100000,
+          "p50": 1020,
+          "p99": 1200,
+          "p999": 1410,
+          "max": 13410
+        }
+      }
+    ]
+  }
+}

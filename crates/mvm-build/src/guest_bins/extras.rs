@@ -203,6 +203,25 @@ pub(crate) fn extra_builds(arch: GuestArch) -> Result<Vec<ExtraBuild>, GuestAgen
     Ok(builds)
 }
 
+/// The workspace inputs [`extras_source_fingerprint`] hashes beyond the two
+/// fingerprints it folds in.
+pub(crate) const EXTRAS_SOURCE_INPUTS: &[&str] = &[
+    ".cargo/config.toml",
+    "crates/mvm-gpu-shim-core/Cargo.toml",
+    "crates/mvm-gpu-shim-core/src",
+    "crates/mvm-gpu-cuda-shim/Cargo.toml",
+    "crates/mvm-gpu-cuda-shim/build.rs",
+    "crates/mvm-gpu-cuda-shim/src",
+    "crates/mvm-gpu-cudart-shim/Cargo.toml",
+    "crates/mvm-gpu-cudart-shim/build.rs",
+    "crates/mvm-gpu-cudart-shim/src",
+    "crates/mvm-gpu-nvml-shim/Cargo.toml",
+    "crates/mvm-gpu-nvml-shim/build.rs",
+    "crates/mvm-gpu-nvml-shim/src",
+    "crates/mvm-build/src/guest_bins/cdylib.rs",
+    "crates/mvm-build/src/guest_bins/extras.rs",
+];
+
 /// [`extras_source_fingerprint`] answers, by workspace root.
 static EXTRAS_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
 
@@ -222,8 +241,19 @@ pub fn extras_source_fingerprint_with(
     workspace_root: &Path,
     freshness: Freshness,
 ) -> Result<String, GuestAgentBuildError> {
+    // The two fingerprints folded in read their own inputs, so the stamp
+    // covers theirs as well as this recipe's.
+    let roots = crate::source_stamp::roots_of(&[
+        guest_agent_build::GUEST_SOURCE_INPUTS,
+        guest_agent_build::SDK_CDYLIB_SOURCE_INPUTS,
+        EXTRAS_SOURCE_INPUTS,
+    ]);
     guest_agent_build::memoized_fingerprint(
         &EXTRAS_SOURCE_FINGERPRINTS,
+        &crate::source_stamp::Fingerprint {
+            kind: "extras-source",
+            roots: &roots,
+        },
         workspace_root,
         freshness,
         |root| compute_extras_source_fingerprint(root, freshness),
@@ -245,26 +275,7 @@ fn compute_extras_source_fingerprint(
             .as_bytes(),
     );
     hasher.update(b"\0");
-    guest_agent_build::hash_inputs(
-        &mut hasher,
-        workspace_root,
-        &[
-            ".cargo/config.toml",
-            "crates/mvm-gpu-shim-core/Cargo.toml",
-            "crates/mvm-gpu-shim-core/src",
-            "crates/mvm-gpu-cuda-shim/Cargo.toml",
-            "crates/mvm-gpu-cuda-shim/build.rs",
-            "crates/mvm-gpu-cuda-shim/src",
-            "crates/mvm-gpu-cudart-shim/Cargo.toml",
-            "crates/mvm-gpu-cudart-shim/build.rs",
-            "crates/mvm-gpu-cudart-shim/src",
-            "crates/mvm-gpu-nvml-shim/Cargo.toml",
-            "crates/mvm-gpu-nvml-shim/build.rs",
-            "crates/mvm-gpu-nvml-shim/src",
-            "crates/mvm-build/src/guest_bins/cdylib.rs",
-            "crates/mvm-build/src/guest_bins/extras.rs",
-        ],
-    )?;
+    guest_agent_build::hash_inputs(&mut hasher, workspace_root, EXTRAS_SOURCE_INPUTS)?;
     Ok(hex::encode(hasher.finalize()))
 }
 

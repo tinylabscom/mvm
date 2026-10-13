@@ -46,20 +46,21 @@ few extra steps, covered in
 mvmctl doctor
 mvmctl bootstrap
 mvmctl image pull alpine
-export MVM_RESIDENCY=warm
-mvmctl pool warm 1 --image alpine
 mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
 ```
 
 `bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
-fetches and unpacks an OCI image. `pool warm` boots a standby VM, and
-`MVM_RESIDENCY=warm` lets the next matching run claim it. An unnamed run must
-claim one: with no standby of the same image and sizing it refuses rather than
-cold-booting, while a run given `--name` always boots cold. A `machine run
---image` launch reads only the local cache and never downloads anything. A run
-that claims a standby must reach the guest in under 300 ms: a launch already
-over that when its command is about to be sent is refused there, names its
-slowest phase, and runs nothing.
+fetches and unpacks an OCI image; a `machine run --image` launch reads only the
+local cache and never downloads anything.
+
+The first run of an image boots cold, says so on stderr, and leaves a standby
+VM of that image ready. The next matching run claims the standby instead of
+booting, and a fresh one is prepared behind it. Standbys are held within a host
+memory cap and released after 20 idle minutes. To make even the first run warm,
+prepare one ahead of time with `mvmctl pool warm 1 --image alpine`;
+`MVM_RESIDENCY=cold` turns standbys off. A run that claims a standby must reach
+the guest in under 300 ms: a launch already over that when its command is about
+to be sent is refused there, names its slowest phase, and runs nothing.
 
 The VM is torn down when the command exits. Networking is off unless you allow
 it:
@@ -130,11 +131,8 @@ mvmctl machine rm web
 
 ```bash
 mvmctl machine build --flake .
-mvmctl machine run --name app --flake . -- ./app
+mvmctl machine run --flake . -- ./app
 ```
-
-The run is named because `pool warm` prepares only OCI and default images, so
-an unnamed flake run would have no standby to claim.
 
 `nix build` runs inside a headless builder VM that mvm manages, so the host
 never needs Nix. Sealed images boot from a dm-verity-protected root and have no

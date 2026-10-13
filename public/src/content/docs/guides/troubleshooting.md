@@ -352,12 +352,10 @@ _transient_ runner: it streams the command's output back to the host but never
 forwards host stdin or allocates a terminal, so an interactive shell sees EOF on
 stdin and exits `0` right away.
 
-To get an interactive shell, add `-it` (dev-only). Unnamed, the run claims a
-standby prepared by `mvmctl pool warm --image <dev-image>` (with
-`MVM_RESIDENCY=warm`) and refuses without one; `--name` boots it cold:
+To get an interactive shell, add `-it` (dev-only):
 
 ```bash
-mvmctl machine run -it --name shell --image <dev-image> -- /bin/sh   # drops into a shell
+mvmctl machine run -it --image <dev-image> -- /bin/sh   # drops into a shell
 ```
 
 The command after `--` is the same command argv as a non-interactive run; `-it`
@@ -505,15 +503,13 @@ mvmctl bootstrap
 
 ### Wrong backend selected
 
-Force a specific backend. A flake or manifest run is named here because an unnamed run must claim a
-prepared warm standby, and `pool warm` prepares only OCI and default images;
-a named run boots cold.
+Force a specific backend:
 
 ```bash
-mvmctl machine run --name app --flake . --hypervisor firecracker
-mvmctl machine run --name app --flake . --hypervisor hvf
-mvmctl machine run --name app --flake . --hypervisor libkrun
-mvmctl machine run --name app --flake . --hypervisor qemu    # dev/test, no /dev/kvm
+mvmctl machine run --flake . --hypervisor firecracker
+mvmctl machine run --flake . --hypervisor hvf
+mvmctl machine run --flake . --hypervisor libkrun
+mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
@@ -528,7 +524,7 @@ The release installer signs the supervisor during installation. Standard builds 
 What you'll see on the first run:
 
 ```
-$ mvmctl machine run --name app --flake . --hypervisor hvf
+$ mvmctl machine run --flake . --hypervisor hvf
 INFO Signing binary with hypervisor entitlement...
 …starts the VM…
 ```
@@ -559,7 +555,7 @@ Hitting `KVM not available` on a cloud instance? Three options, in order of reco
 **Option 2 — Use the QEMU dev/test backend.** On a Linux host without `/dev/kvm`, run the software-emulated QEMU/TCG backend. It's a real microVM but **Tier 2 dev/test** — slower, larger TCB, partial verified boot (see the [Matryoshka model](/security/matryoshka)) — so use it for local dev/test, not production or untrusted workloads.
 
 ```bash
-mvmctl machine run --name app --flake . --hypervisor qemu
+mvmctl machine run --flake . --hypervisor qemu
 ```
 
 **Option 3 — PVM (advanced, external).** [SlicerVM's PVM mode](https://docs.slicervm.com/tasks/pvm/) runs real microVMs without `/dev/kvm` via a patched Firecracker plus a `kvm_pvm` host kernel module. mvm doesn't ship this — the maintenance cost (kernel patch + custom guest images, x86_64 only) is outside mvm's scope. If you need real microVM isolation on a non-nested-virt cloud VM and Option 1 isn't available, SlicerVM is the working answer in the ecosystem today.

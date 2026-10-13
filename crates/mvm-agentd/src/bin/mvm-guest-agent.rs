@@ -57,10 +57,10 @@ use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
     AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ToolCheckReply,
-    TrafficPlane, TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_drive_grant,
-    enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
-    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
-    workload_privilege_refusal,
+    TrafficPlane, TrustDecision, VERB_TRUST_POLICY_PATH, current_uid,
+    enforce_application_terminal_grant, enforce_drive_grant, enforce_verb_grant,
+    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
+    load_pinned_verb_grant, load_verb_trust_policy, trust_decision, workload_privilege_refusal,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -329,6 +329,10 @@ fn handle_client(
         return;
     }
     if let Some(resp) = enforce_drive_grant(&req, verb_grant.as_ref()) {
+        send_authenticated_response(&mut file, &mut session, &resp);
+        return;
+    }
+    if let Some(resp) = enforce_application_terminal_grant(&req, verb_grant.as_ref()) {
         send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }

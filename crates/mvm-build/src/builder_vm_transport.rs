@@ -339,7 +339,15 @@ impl BuilderVsockEgressEndpoint {
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("{e:#}")))?;
 
         let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
-        std::fs::write(&pid_file, child.child_mut().id().to_string()).map_err(|e| {
+        // The start time beside the pid lets the reap tell this process from
+        // whatever is handed its pid after it exits.
+        mvm_core::atomic_io::write_private_ephemeral(
+            &pid_file,
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(child.child_mut().id())
+                .render()
+                .as_bytes(),
+        )
+        .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("write {}: {e}", pid_file.display()))
         })?;
 
@@ -485,20 +493,16 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
 
 fn reap_builder_vsock_egress_endpoint(state_dir: &Path) {
     let pid_file = state_dir.join(BUILDER_SUBST_PID_FILE);
-    if let Some(pid) = read_pid(&pid_file)
-        && pid_alive(pid)
+    // Only a process that still confirms the recorded start time is
+    // signalled: a recycled pid or an edited file names something else.
+    if let Some(recorded) = std::fs::read_to_string(&pid_file)
+        .ok()
+        .and_then(|text| mvm_vmm::host::network_endpoint_spawn::EndpointPid::parse(&text))
+        && recorded.is_live_and_ours()
     {
-        kill_pid(pid, libc::SIGTERM);
+        kill_pid(recorded.pid, libc::SIGTERM);
     }
     let _ = std::fs::remove_file(pid_file);
-}
-
-fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
-}
-
-fn pid_alive(pid: libc::pid_t) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
 }
 
 fn kill_pid(pid: libc::pid_t, sig: libc::c_int) {

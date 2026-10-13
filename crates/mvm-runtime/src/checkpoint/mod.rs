@@ -3680,6 +3680,7 @@ mod tests {
                 egress: destinations(&[("api.example.com", 443), ("pypi.org", 443)]),
                 drive: None,
                 display_input: None,
+                application_terminal: None,
             }),
             Some(mvm_contract::grants::Grants {
                 cpu: share(1000),
@@ -3689,6 +3690,7 @@ mod tests {
                 egress: destinations(&[("api.example.com", 443)]),
                 drive: None,
                 display_input: None,
+                application_terminal: None,
             }),
         )
         .expect("a narrowing child is admitted");

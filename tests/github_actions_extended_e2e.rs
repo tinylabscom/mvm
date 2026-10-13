@@ -1341,7 +1341,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""),
+        script.contains(
+            "cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""
+        ),
         "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
     );
     // Checks that `cargo-fast.sh` is never handed `$E2E_FEATURES`, not that it
@@ -1351,7 +1353,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     // `embed-host-bins` was added to both arms. That flag pulls no aws-lc, so
     // it is fine on the fast path; `$E2E_FEATURES` is the one that is not.
     assert!(
-        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features \"$E2E_FEATURES"),
+        !script
+            .lines()
+            .any(|line| line.contains("cargo-fast.sh build") && line.contains("$E2E_FEATURES")),
         "the fast codegen wrapper leaves aws-lc native symbols unresolved"
     );
 }
@@ -1364,10 +1368,12 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
 
     let unembedded_build = script
-        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES\"")
+        .find("cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES\"")
         .expect("the release-feature lane must build an unembedded witness");
     let embedded_build = script
-        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"")
+        .find(
+            "cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"",
+        )
         .expect("the live suite must restore its embedded binary");
     let sidecar_warm = script
         .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
@@ -1382,6 +1388,35 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
         explicit_bootstrap < sidecar_warm,
         "the builder image must be acquired before the sidecar build needs it"
     );
+}
+
+/// The macOS lane holds every warm launch to the 300 ms startup ceiling, so
+/// it has to measure an optimized build: unoptimized, plan admission alone
+/// took most of the budget on its runner. And every binary under test has to
+/// come from that one profile, because `mvmctl` launches the helpers and loads
+/// the host library that sit beside it.
+#[test]
+fn the_ceiling_enforcing_macos_lane_builds_every_binary_under_test_optimized() {
+    let workflow = extended_ci();
+    assert!(
+        job_block(&workflow, "e2e-docs-macos").contains("MVM_E2E_PROFILE: release-witness"),
+        "the macOS HVF lane must build the binaries it holds to the startup ceiling optimized"
+    );
+
+    let script = documented_surface_script();
+    assert!(script.contains("MVMCTL=\"$TARGET_DIR/$E2E_PROFILE_DIR/mvmctl\""));
+    assert!(script.contains("just payload::supervisors --profile \"$E2E_PROFILE\""));
+    assert!(script.contains("build_sdk_hostlib \"$MVMCTL\" \"$E2E_PROFILE\""));
+    for line in script.lines().filter(|line| {
+        let line = line.trim_start();
+        (line.starts_with("cargo build") || line.starts_with("./scripts/cargo-fast.sh build"))
+            && line.contains("--bin mvmctl")
+    }) {
+        assert!(
+            line.contains("--profile \"$E2E_PROFILE\""),
+            "every mvmctl build must use the lane's profile: {line}"
+        );
+    }
 }
 
 #[test]

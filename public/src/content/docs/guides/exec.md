@@ -12,18 +12,10 @@ and tears the VM down -- success, failure, or Ctrl-C.
 Think `docker run --rm`, but with a microVM as the isolation boundary.
 
 ```bash
-export MVM_RESIDENCY=warm                       # Linux defaults to parked: no claims
-mvmctl pool warm --image alpine                 # prepare a standby of this image
 mvmctl machine run --image alpine -- uname -a
 mvmctl machine run --flake . --mount .:/work -- ls /work
-mvmctl machine run --name tpl --manifest my-tpl -- /bin/true
+mvmctl machine run --manifest my-tpl -- /bin/true
 ```
-
-An unnamed run claims a prepared warm standby of the same image and sizing —
-that is how it starts inside its 300 ms budget — and refuses rather than
-cold-booting when none is ready. A run with `--name`, a host share, a disk or
-allowed egress is never served from the pool and boots cold, which is why the
-template run above is named: `pool warm` prepares only OCI and default images.
 
 > Overriding the guest's argv (a trailing `-- <cmd>`) is a **dev-tier**
 > capability. It requires DevOnly verbs regardless of the image's sealed bit;
@@ -176,11 +168,9 @@ or cold boot. The harder branch -- parameterized snapshots that allow
 ## Resource controls
 
 ```bash
-mvmctl machine run --name bench --flake . --cpus 4 --memory 1G -- ./benchmark.sh
-mvmctl machine run --name task --flake . --timeout 300 -- ./long-running-task.sh
+mvmctl machine run --flake . --cpus 4 --memory 1G -- ./benchmark.sh
+mvmctl machine run --flake . --timeout 300 -- ./long-running-task.sh
 ```
-
-These are named so they boot cold; an unnamed flake run has no standby to claim.
 
 Defaults: 2 vCPUs (`--cpus`), 512 MiB (`--memory`). **`--timeout` has no
 default** — omit it and the run is unbounded. A sealed run fails closed when

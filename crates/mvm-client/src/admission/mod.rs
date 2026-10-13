@@ -1234,6 +1234,48 @@ fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::Roo
     }
 }
 
+/// How a transient launch came to be running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMode {
+    /// It claimed a prepared standby.
+    Warm,
+    /// It booted from nothing, for the reason the label names.
+    Cold { reason: &'static str },
+}
+
+/// What a transient launch reports back about how it booted, for the
+/// chain-signed log: the rootfs strategy, and whether it was warm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootPosture {
+    pub root_strategy: mvm_build::run_image::RootStrategy,
+    /// `None` for a launch that never reached the claim-or-boot decision.
+    pub start: Option<StartMode>,
+}
+
+impl BootPosture {
+    /// A posture with no start mode yet, as the run path seeds it.
+    #[must_use]
+    pub fn block() -> Self {
+        Self {
+            root_strategy: mvm_build::run_image::RootStrategy::BlockExt4,
+            start: None,
+        }
+    }
+}
+
+fn emit_start_mode(ctx: &AdmissionContext, start: StartMode) {
+    let (mode, reason) = match start {
+        StartMode::Warm => ("warm", None),
+        StartMode::Cold { reason } => ("cold", Some(reason)),
+    };
+    if let Err(e) = ctx
+        .emitter
+        .emit_start_mode(ctx.admitted.plan(), mode, reason)
+    {
+        tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
+    }
+}
+
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
 /// be attached isn't named in the verified `ExecutionPlan.shares`, so no
 /// host-fs grant reaches a guest unless the signed plan admitted it
@@ -1260,8 +1302,8 @@ pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Pa
 }
 
 /// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched` and the boot posture when the run succeeded, `plan.failed`
-/// when it did not.
+/// `plan.launched`, the boot posture and the start mode when the run
+/// succeeded, `plan.failed` when it did not.
 ///
 /// `admitted` is `None` only when the run failed before admission was reached —
 /// resolving the image, say. There is no plan to bind that failure to, so
@@ -1273,14 +1315,17 @@ pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Pa
 pub fn record_transient_outcome<T>(
     admitted: Option<&AdmissionContext>,
     backend: &str,
-    strategy: mvm_build::run_image::RootStrategy,
+    posture: BootPosture,
     outcome: &Result<T>,
 ) {
     let Some(ctx) = admitted else { return };
     match outcome {
         Ok(_) => {
             emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, strategy);
+            emit_boot_posture(ctx, posture.root_strategy);
+            if let Some(start) = posture.start {
+                emit_start_mode(ctx, start);
+            }
         }
         Err(e) => emit_failed(
             ctx,
@@ -2277,7 +2322,10 @@ pub(crate) mod admit_plan_tests {
         record_transient_outcome(
             Some(&ctx),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            BootPosture {
+                start: Some(StartMode::Warm),
+                ..BootPosture::block()
+            },
             &outcome,
         );
 
@@ -2285,7 +2333,40 @@ pub(crate) mod admit_plan_tests {
             .expect("audit file exists");
         assert!(content.contains("plan.launched"), "{content}");
         assert!(content.contains("plan.boot_posture"), "{content}");
+        assert!(content.contains("plan.start_mode"), "{content}");
+        assert!(content.contains("\"mode\":\"warm\""), "{content}");
+        assert!(!content.contains("cold_reason"), "{content}");
         assert!(!content.contains("plan.failed"), "{content}");
+    }
+
+    /// A cold boot is declared on the chain with its reason, so the first run
+    /// of an image can be told apart from a run that should have been warm.
+    #[test]
+    fn a_cold_transient_run_records_why_it_was_cold() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-cold");
+
+        let outcome: Result<()> = Ok(());
+        record_transient_outcome(
+            Some(&ctx),
+            "firecracker",
+            BootPosture {
+                start: Some(StartMode::Cold {
+                    reason: "no_standby_ready",
+                }),
+                ..BootPosture::block()
+            },
+            &outcome,
+        );
+
+        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit file exists");
+        assert!(content.contains("\"mode\":\"cold\""), "{content}");
+        assert!(
+            content.contains("\"cold_reason\":\"no_standby_ready\""),
+            "{content}"
+        );
     }
 
     #[test]
@@ -2298,7 +2379,12 @@ pub(crate) mod admit_plan_tests {
         record_transient_outcome(
             Some(&ctx),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            BootPosture {
+                start: Some(StartMode::Cold {
+                    reason: "no_standby_ready",
+                }),
+                ..BootPosture::block()
+            },
             &outcome,
         );
 
@@ -2308,6 +2394,7 @@ pub(crate) mod admit_plan_tests {
         assert!(content.contains("the guest never came up"), "{content}");
         assert!(!content.contains("plan.launched"), "{content}");
         assert!(!content.contains("plan.boot_posture"), "{content}");
+        assert!(!content.contains("plan.start_mode"), "{content}");
     }
 
     // ──────────────────────────────────────────────────────────────

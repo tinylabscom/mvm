@@ -57,13 +57,13 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
     ),
 ];
 
-/// The residency the README's quick start exports before it launches.
+/// The residency the warm-launch scenarios run under.
 ///
-/// An unnamed launch must claim a prepared warm standby, and only a warm
-/// residency lets it: Linux otherwise resolves to `parked`, whose warm target
-/// is zero, and refuses every unnamed launch even after `pool warm`. These
-/// scenarios run the documented shell, so they set what it sets. A launch that
-/// means to boot cold is named.
+/// An unnamed launch claims a standby when one is ready and boots cold when
+/// none is; either way it leaves one behind for the next run. The warm
+/// scenarios prepare their standby explicitly and pin the residency so the
+/// claim they measure is the one they prepared for. A launch that means to
+/// boot cold is named, which also keeps it from leaving a standby behind.
 const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
 const DOCUMENTED_RESIDENCY: &str = "warm";
 
@@ -264,6 +264,40 @@ fn warm_parent_is_ready(image: &str) {
         result.exit_code, 0,
         "failed to prepare the {image} warm parent\nstdout:\n{}\nstderr:\n{}",
         result.stdout, result.stderr
+    );
+}
+
+/// Wait for the standby an unnamed run leaves behind. The run starts the
+/// refill and returns; the standby is ready once `pool status` counts an idle
+/// one.
+#[then(expr = "a standby left by that run is ready within {int} seconds")]
+fn standby_left_by_run_is_ready(_world: &mut CliWorld, secs: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        let status = run_in_e2e_home("pool status --json", &[]);
+        last = status.stdout.clone();
+        let idle = serde_json::from_str::<serde_json::Value>(&status.stdout)
+            .ok()
+            .and_then(|v| v.get("idle").and_then(serde_json::Value::as_u64))
+            .unwrap_or(0);
+        if idle > 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    panic!("no idle standby within {secs}s of the run that should leave one; last status:\n{last}");
+}
+
+/// The launch claimed a standby rather than booting cold, read off its own
+/// phase-timing line.
+#[then(expr = "the launch claimed a standby")]
+fn launch_claimed_a_standby(world: &mut CliWorld) {
+    let record = last(world);
+    assert!(
+        record.combined().contains("launch_mode=warm"),
+        "the launch did not claim a standby\n--- combined ---\n{}",
+        record.combined()
     );
 }
 

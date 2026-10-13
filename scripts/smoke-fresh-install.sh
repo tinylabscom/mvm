@@ -8,13 +8,12 @@
 # The installer runs the way the README runs it — piped into `sh`, with the
 # builder VM bootstrap it performs by default — pinned to `version` when one
 # is given, otherwise choosing the release the one-liner would choose today.
-# Then the README's quick start runs from that HOME: `mvmctl image pull alpine`,
-# `mvmctl pool warm 1 --image alpine` and, with MVM_RESIDENCY=warm,
-# `mvmctl machine run --image alpine -- echo <token>`, which claims that
-# standby. A launch reads only the local cache, and an unnamed run must claim a
-# standby, so a smoke that skipped the pull or the warm-up would test nothing a
-# user does. The run's stdin is redirected from /dev/null, and it must print
-# the token on stdout within its time budget.
+# Then the README's quick start runs from that HOME: `mvmctl image pull alpine`
+# and `mvmctl machine run --image alpine -- echo <token>`, with nothing set and
+# nothing warmed. A launch reads only the local cache, so a smoke that skipped
+# the pull would test nothing a user does. The first run of the image boots
+# cold and leaves a standby behind. The run's stdin is redirected from
+# /dev/null, and it must print the token on stdout within its time budget.
 #
 # Three more boots follow from the same HOME, each with its own token and
 # budget, because a release binary's downloads are not checked by its first
@@ -70,7 +69,7 @@
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
 #   MVM_SMOKE_PREPARE_BUDGET_SECS  budget for each preparation step (image
-#                                  pull, pool warm); default 900
+#                                  image pulls); default 900
 #   MVM_SMOKE_RUN_BUDGET_SECS      first-command budget; default 600
 #   MVM_SMOKE_SECOND_RUN_BUDGET_SECS
 #                                  second-boot budget; default 300
@@ -431,7 +430,7 @@ SNAPSHOT
 
 # What the README has a user run between bootstrap and the first command. A
 # launch reads only the local cache, so the images the boots below use are
-# pulled first, and an unnamed run claims a standby, so one is warmed.
+# pulled first.
 prepare_step() {
   prepare_stem="$1"
   shift
@@ -450,12 +449,11 @@ prepare_step() {
 }
 prepare_step pull mvmctl image pull "$IMAGE"
 prepare_step pull-egress mvmctl image pull "$EGRESS_IMAGE"
-prepare_step warm env MVM_RESIDENCY=warm mvmctl pool warm 1 --image "$IMAGE"
 
 TOKEN="mvm-fresh-install-$(date +%s)-$$"
-section "first command (MVM_RESIDENCY=warm mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/null)"
+section "first command (mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/null)"
 boot_and_expect "first command" "$RUN_BUDGET" "$TOKEN" run \
-  env MVM_RESIDENCY=warm mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
+  mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
 RUN_ELAPSED="$STEP_ELAPSED"
 
 CACHES_FIRST="$OUT/download-caches-after-first.txt"

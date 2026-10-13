@@ -397,11 +397,28 @@ fn source_fingerprint_with(
     match freshness {
         Freshness::Memoized => SOURCE_FINGERPRINTS.get_or_try_insert(
             (workspace_root.to_path_buf(), version.to_string(), arch),
-            compute,
+            || {
+                crate::source_stamp::stamped_fingerprint(
+                    &crate::source_stamp::Fingerprint {
+                        kind: &format!("guest-runtime-source\0{version}\0{arch}"),
+                        roots: &crate::source_stamp::guest_fingerprint_roots(),
+                    },
+                    workspace_root,
+                    compute,
+                )
+            },
         ),
         Freshness::Rewalk => compute(),
     }
 }
+
+/// Files of this recipe whose bytes [`compute_source_fingerprint`] folds in.
+pub(crate) const RUNTIME_SOURCE_FILES: &[&str] = &[
+    "crates/mvm-build/src/guest_bins/mod.rs",
+    "crates/mvm-build/src/guest_bins/member.rs",
+    "crates/mvm-build/src/guest_bins/python_sdk.rs",
+    "crates/mvm-build/src/guest_runtime.rs",
+];
 
 fn compute_source_fingerprint(
     version: &str,
@@ -421,12 +438,7 @@ fn compute_source_fingerprint(
         hash.update(value.as_bytes());
         hash.update(b"\0");
     }
-    for relative in [
-        "crates/mvm-build/src/guest_bins/mod.rs",
-        "crates/mvm-build/src/guest_bins/member.rs",
-        "crates/mvm-build/src/guest_bins/python_sdk.rs",
-        "crates/mvm-build/src/guest_runtime.rs",
-    ] {
+    for relative in RUNTIME_SOURCE_FILES {
         hash.update(relative.as_bytes());
         hash.update(b"\0");
         hash.update(fs::read(workspace_root.join(relative))?);
@@ -520,6 +532,11 @@ fn load_cached(
 /// advance on a coarse clock, so an edit made in the same tick as the stamp
 /// could otherwise leave it unchanged; an object written that recently is
 /// verified in full every time instead.
+///
+/// Each launch is its own process, so the same reuse also crosses processes:
+/// a completed full verification is recorded under a digest of the object's
+/// stamp and the verifying executable, and a later process that finds the
+/// object in exactly that state, run by the same executable, reuses it.
 fn load_cached_at(
     base: &Path,
     digest: &str,
@@ -553,8 +570,17 @@ fn load_cached_scoped(
         validate_manifest(&runtime.manifest, version, arch, scope)?;
         return Ok(runtime);
     }
+    if let Some(stamp) = &stamp
+        && verified_earlier(base, digest, stamp)
+    {
+        let runtime = previously_verified_object(&object, digest)?;
+        validate_manifest(&runtime.manifest, version, arch, scope)?;
+        VERIFIED_OBJECTS.insert(object, (stamp.clone(), runtime.clone()));
+        return Ok(runtime);
+    }
     let runtime = verify_cached_object(&object, digest, version, arch, scope)?;
     if let Some(stamp) = stamp {
+        record_verification(base, digest, &stamp);
         VERIFIED_OBJECTS.insert(object, (stamp, runtime.clone()));
     }
     Ok(runtime)
@@ -565,50 +591,26 @@ thread_local! {
     static FULL_OBJECT_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// How long an object's timestamps must have been still before its
-/// verification may be reused. Comfortably above any filesystem's timestamp
-/// granularity.
-#[cfg(unix)]
-const OBJECT_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
-
 /// The filesystem state of one cached object: every entry under it, keyed by
 /// relative path.
 #[cfg(unix)]
-type ObjectStamp = std::collections::BTreeMap<PathBuf, EntryStamp>;
+type ObjectStamp = std::collections::BTreeMap<PathBuf, crate::source_stamp::EntryStamp>;
 /// No platform without an inode change time can vouch for a reuse, so there
 /// is never a stamp there and every load verifies in full.
 #[cfg(not(unix))]
 type ObjectStamp = std::convert::Infallible;
 
-#[cfg(unix)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct EntryStamp {
-    dev: u64,
-    ino: u64,
-    mode: u32,
-    len: u64,
-    mtime: (i64, i64),
-    ctime: (i64, i64),
-}
-
 /// The object's stamp, or `None` when it cannot vouch for a later reuse: an
-/// entry changed within [`OBJECT_SETTLE`] of `now`, or the object could not be
-/// walked.
+/// entry changed within [`crate::source_stamp::SETTLE`] of `now`, or the
+/// object could not be walked.
 #[cfg(unix)]
 fn settled_stamp(object: &Path, now: std::time::SystemTime) -> Option<ObjectStamp> {
     let mut entries = ObjectStamp::new();
     collect_entry_stamps(object, object, &mut entries).ok()?;
-    let horizon = now
-        .checked_sub(OBJECT_SETTLE)?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    let horizon = (
-        i64::try_from(horizon.as_secs()).ok()?,
-        i64::from(horizon.subsec_nanos()),
-    );
+    let horizon = crate::source_stamp::settle_horizon(now)?;
     entries
         .values()
-        .all(|entry| entry.mtime < horizon && entry.ctime < horizon)
+        .all(|entry| entry.settled_before(horizon))
         .then_some(entries)
 }
 
@@ -623,19 +625,11 @@ fn collect_entry_stamps(
     path: &Path,
     entries: &mut ObjectStamp,
 ) -> std::io::Result<()> {
-    use std::os::unix::fs::MetadataExt;
     let metadata = fs::symlink_metadata(path)?;
     let relative = path.strip_prefix(root).map_err(std::io::Error::other)?;
     entries.insert(
         relative.to_path_buf(),
-        EntryStamp {
-            dev: metadata.dev(),
-            ino: metadata.ino(),
-            mode: metadata.mode(),
-            len: metadata.len(),
-            mtime: (metadata.mtime(), metadata.mtime_nsec()),
-            ctime: (metadata.ctime(), metadata.ctime_nsec()),
-        },
+        crate::source_stamp::EntryStamp::of(&metadata),
     );
     if metadata.file_type().is_dir() {
         for entry in fs::read_dir(path)? {
@@ -643,6 +637,73 @@ fn collect_entry_stamps(
         }
     }
     Ok(())
+}
+
+/// Where completed full verifications are recorded, beside — never inside —
+/// the objects they cover, so recording one does not change its stamp.
+fn verification_records(base: &Path) -> PathBuf {
+    base.join("verified")
+}
+
+/// What verifying the object named `digest` in the state `stamp` describes,
+/// by the executable now running, digests to.
+#[cfg(unix)]
+fn verification_key(digest: &str, stamp: &ObjectStamp) -> Option<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mvm-guest-runtime-verified-v1\0");
+    crate::source_stamp::executable_stamp()?.fold(&mut hasher);
+    hasher.update(digest.as_bytes());
+    hasher.update(b"\0");
+    for (relative, entry) in stamp {
+        hasher.update(relative.as_os_str().as_encoded_bytes());
+        hasher.update(b"\0");
+        entry.fold(&mut hasher);
+    }
+    Some(hex::encode(hasher.finalize()))
+}
+
+#[cfg(not(unix))]
+fn verification_key(_digest: &str, stamp: &ObjectStamp) -> Option<String> {
+    match *stamp {}
+}
+
+/// Whether an earlier process verified this object in full in exactly the
+/// state it is in now.
+fn verified_earlier(base: &Path, digest: &str, stamp: &ObjectStamp) -> bool {
+    verification_key(digest, stamp).is_some_and(|key| {
+        crate::source_stamp::read_record(&verification_records(base), "verified-object", &key)
+            .as_deref()
+            == Some(digest)
+    })
+}
+
+fn record_verification(base: &Path, digest: &str, stamp: &ObjectStamp) {
+    if let Some(key) = verification_key(digest, stamp) {
+        crate::source_stamp::write_record(
+            &verification_records(base),
+            "verified-object",
+            &key,
+            digest,
+        );
+    }
+}
+
+/// The runtime an earlier full verification admitted, read back from the
+/// extracted tree whose every entry is unchanged since. That verification
+/// already held the tree's manifest equal to the archive's.
+fn previously_verified_object(
+    object: &Path,
+    digest: &str,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let tree = object.join("tree");
+    let manifest: GuestBinsManifest =
+        serde_json::from_slice(&fs::read(tree.join(GUEST_BINS_MANIFEST_FILE))?)
+            .map_err(GuestBinsError::from)?;
+    Ok(GuestRuntime {
+        root: tree,
+        digest: digest.to_string(),
+        manifest,
+    })
 }
 
 /// Verify a cached object in full: its layout, the archive against the
@@ -1263,6 +1324,84 @@ mod tests {
             ),
             "a member changed after verification is verified again, and refused"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_later_process_reuses_a_recorded_verification_until_the_object_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = fixture_manifest(GuestArch::X86_64);
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let object = base.join("objects").join(&runtime.digest);
+        // Each load below stands for a separate launch: nothing carries over
+        // in this process's memory between them.
+        let load_as_a_new_process = || {
+            VERIFIED_OBJECTS.remove(&object);
+            load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later)
+        };
+
+        let before = full_object_verifications();
+        for _ in 0..3 {
+            let loaded = load_as_a_new_process().unwrap();
+            assert_eq!(loaded.digest, runtime.digest);
+            assert_eq!(loaded.manifest, runtime.manifest);
+            assert_eq!(loaded.root, runtime.root);
+        }
+        assert_eq!(
+            full_object_verifications() - before,
+            1,
+            "only the first launch verifies in full"
+        );
+        assert!(
+            matches!(
+                {
+                    VERIFIED_OBJECTS.remove(&object);
+                    load_cached_at(&base, &runtime.digest, "4.5.6", GuestArch::X86_64, later)
+                },
+                Err(GuestRuntimeError::Version { .. })
+            ),
+            "a recorded verification still answers to the requested version"
+        );
+
+        // Same length as the original member, so only the content and the
+        // entry's timestamps move.
+        let member = runtime.root.join("x86_64/bin/mvm-ping");
+        let len = fs::metadata(&member).unwrap().len() as usize;
+        fs::write(&member, vec![b'!'; len]).unwrap();
+        assert!(
+            matches!(
+                load_as_a_new_process(),
+                Err(GuestRuntimeError::TreeDigest { .. })
+            ),
+            "a member changed after the recorded verification is verified again, and refused"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_verification_record_for_another_state_is_not_reused() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = fixture_manifest(GuestArch::X86_64);
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        let object = base.join("objects").join(&runtime.digest);
+        load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later).unwrap();
+
+        // Swap a member for a different file: its inode changes even though
+        // its path does not.
+        let member = runtime.root.join("x86_64/bin/mvm-ping");
+        let replacement = runtime.root.join("replacement");
+        fs::write(&replacement, b"other").unwrap();
+        fs::rename(&replacement, &member).unwrap();
+        VERIFIED_OBJECTS.remove(&object);
+        let before = full_object_verifications();
+        assert!(load_cached_at(&base, &runtime.digest, "1.2.3", GuestArch::X86_64, later).is_err());
+        assert_eq!(full_object_verifications() - before, 1);
     }
 
     #[test]

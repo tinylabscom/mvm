@@ -148,6 +148,7 @@ where
                     continue;
                 }
             };
+            let _teardown = StopOnExit(&boot);
             verify_boot_identity(request, session, &boot).inspect_err(|_| {
                 let _ = cleanup_boot(&boot);
                 boot.plane.close_session(&boot.started.vm_id.0);
@@ -419,6 +420,30 @@ fn verify_boot_identity(
         anyhow::bail!("admitted boot session does not match signed admission");
     }
     Ok(())
+}
+
+/// Stops the booted machine when its iteration ends, whichever way it ends.
+///
+/// The confirmed cleanup needs the open assurance session to name what it is
+/// stopping, so it cannot stop a machine whose session was revoked or never
+/// opened — and several exits between boot and cleanup return early with `?`.
+/// Each of those used to leave a running VMM behind. This is the backstop
+/// beneath all of them: it asks the backend directly and is a no-op once the
+/// confirmed cleanup has already stopped the machine.
+struct StopOnExit<'a>(&'a AdmittedTrialBoot);
+
+impl Drop for StopOnExit<'_> {
+    fn drop(&mut self) {
+        let boot = self.0;
+        let id = &boot.started.vm_id;
+        if !matches!(
+            boot.backend.status(id),
+            Ok(mvm_core::vm_backend::VmStatus::Stopped)
+        ) && let Err(error) = boot.backend.stop(id)
+        {
+            tracing::warn!(vm = %id.0, "stopping an admitted assurance machine on exit: {error:#}");
+        }
+    }
 }
 
 fn cleanup_boot(boot: &AdmittedTrialBoot) -> Result<CleanupEvidence> {
@@ -724,7 +749,12 @@ mod tests {
         }
     }
 
-    struct RevokedSessionBooter(FixtureBooter);
+    /// Boots, then closes the session the boot opened, and keeps a handle on
+    /// the machine so a test can see whether anything stopped it.
+    struct RevokedSessionBooter(
+        FixtureBooter,
+        std::sync::Mutex<Option<(mvm_runtime::MockBackend, mvm_core::vm_backend::VmId)>>,
+    );
 
     impl AdmittedTrialBooter for RevokedSessionBooter {
         fn boot(
@@ -734,6 +764,9 @@ mod tests {
         ) -> Result<AdmittedTrialBoot> {
             let boot = self.0.boot(request, session)?;
             boot.plane.close_session(&boot.started.vm_id.0);
+            if let mvm_runtime::AnyBackend::Mock(mock) = &boot.backend {
+                *self.1.lock().unwrap() = Some((mock.clone(), boot.started.vm_id.clone()));
+            }
             Ok(boot)
         }
     }
@@ -1145,12 +1178,15 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let runner = LifecycleAdmittedCampaignRunner::new(
             state.path(),
-            RevokedSessionBooter(FixtureBooter {
-                audit_root: audit.path().to_path_buf(),
-                mismatch_trial: false,
-                fail_cleanup: false,
-                attested: false,
-            }),
+            RevokedSessionBooter(
+                FixtureBooter {
+                    audit_root: audit.path().to_path_buf(),
+                    mismatch_trial: false,
+                    fail_cleanup: false,
+                    attested: false,
+                },
+                std::sync::Mutex::new(None),
+            ),
             FixtureExecutor {
                 calls: Arc::clone(&calls),
             },
@@ -1162,6 +1198,15 @@ mod tests {
             .expect_err("revoked admitted session");
         assert!(error.to_string().contains("did not open"), "{error:#}");
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // The confirmed cleanup cannot run without the session, so before the
+        // exit guard this refusal left the booted machine running.
+        let (backend, vm) = runner.booter.1.lock().unwrap().take().expect("booted");
+        assert_eq!(
+            mvm_core::vm_backend::VmBackend::status(&backend, &vm).expect("status"),
+            mvm_core::vm_backend::VmStatus::Stopped,
+            "a refused boot must not leave its machine running"
+        );
     }
 
     #[test]

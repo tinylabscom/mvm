@@ -176,6 +176,8 @@ const CACHE_SUB: &[(&str, AuditPosture)] = &[
 const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("warm", AuditPosture::Emits("PoolWarm")),
     ("status", AuditPosture::ReadOnly),
+    // The standby a run leaves behind: the same warm, recorded the same way.
+    ("refill", AuditPosture::Emits("PoolWarm")),
 ];
 
 const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
