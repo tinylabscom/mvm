@@ -484,13 +484,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         use std::io::Write;
 
         let claim_started = Instant::now();
-        let mut claim_debug = std::env::var_os("MVM_HVF_AGENT_DEBUG").and_then(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        });
+        let mut claim_debug = mvm_vmm::agent_debug::open();
         macro_rules! claim_phase {
             ($phase:expr) => {
                 warm_claim::record_phase(claim_started, &mut claim_debug, $phase);

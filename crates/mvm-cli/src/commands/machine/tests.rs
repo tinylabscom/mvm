@@ -2944,6 +2944,67 @@ fn removing_a_machine_with_no_runtime_state_is_not_an_error() {
     assert!(!config::machine_state_dir("web").exists());
 }
 
+/// The instance-scoped diagnostic surfaces of the diagnostic-data policy, each
+/// created through the helper its writer uses, carry a synthetic marker; they
+/// are owner-only while the instance exists and gone once it is removed. An
+/// operator export holding the same marker outside the state directory is not
+/// managed state and is left alone.
+#[test]
+fn instance_scoped_diagnostics_are_private_and_leave_with_the_instance() {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const MARKER: &[u8] = b"SYNTHETIC_SENSITIVE_MARKER_4184";
+    let _state = IsolatedMachineState::new();
+    let dir = config::vm_state_dir("web");
+    config::create_private_dir(&dir).expect("state dir");
+    let fresh = [
+        "console.log",
+        "firecracker.log",
+        "qemu.log",
+        "supervisor.stderr.log",
+        "network-endpoint.stderr.log",
+        "gpu-endpoint.log",
+    ];
+    for name in fresh {
+        mvm_vmm::host::console_capture::open_console_capture(&dir.join(name))
+            .expect("fresh private sink")
+            .write_all(MARKER)
+            .expect("write marker");
+    }
+    mvm_core::util::atomic_io::open_private_append(&dir.join("supervisor.lifecycle.log"))
+        .expect("private append")
+        .write_all(MARKER)
+        .expect("write marker");
+    for name in ["supervisor-config.json", "substitution-env.json"] {
+        mvm_core::util::atomic_io::write_private_ephemeral(&dir.join(name), MARKER)
+            .expect("private config");
+    }
+    let export = tempfile::tempdir().expect("export dir");
+    let exported = export.path().join("console-export.log");
+    std::fs::write(&exported, MARKER).expect("operator export");
+
+    for entry in std::fs::read_dir(&dir).expect("read state dir") {
+        let path = entry.expect("entry").path();
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} must be owner-only", path.display());
+        assert_eq!(std::fs::read(&path).expect("read"), MARKER);
+    }
+    let mode = std::fs::metadata(&dir).expect("stat").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+
+    assert!(remove_machine_runtime_state("web").expect("remove"));
+    assert!(
+        !dir.exists(),
+        "instance-scoped plaintext leaves with the instance"
+    );
+    assert_eq!(
+        std::fs::read(&exported).expect("export kept"),
+        MARKER,
+        "an operator export is outside managed cleanup"
+    );
+}
+
 #[test]
 fn runtime_state_owned_by_a_live_process_is_left_alone() {
     // The case that makes this more than a cleanup: `--force` asks the machine

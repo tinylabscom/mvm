@@ -172,20 +172,15 @@ fn validate_child_endpoints(
     std::fs::create_dir_all(mvm_core::config::vm_hvf_vsock_dir_at(child_dir))?;
     for path in bindings.paths() {
         if let Err(error) = validate_handoff_endpoint(path, root, &socket_dir) {
-            if let Some(debug_path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
-                && let Ok(mut file) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(debug_path)
-            {
-                let _ = writeln!(
-                    file,
-                    "[handoff] endpoint={} root={} socket_dir={} error={error}",
+            crate::agent_debug::line(
+                "handoff",
+                format_args!(
+                    "endpoint={} root={} socket_dir={} error={error}",
                     path.display(),
                     root.display(),
                     socket_dir.display()
-                );
-            }
+                ),
+            );
             return Err(error);
         }
     }
@@ -232,14 +227,7 @@ fn read_handoff_request(
 }
 
 fn handoff_debug(message: &str) {
-    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
-        && let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-    {
-        let _ = writeln!(file, "[vsock] {message}");
-    }
+    crate::agent_debug::line("vsock", message);
 }
 
 const R_CONFIG: u64 = 0x100; // guest_cid (u64) at +0
@@ -1222,14 +1210,7 @@ impl VirtioVsock {
     }
 
     fn fail_handoff(&self, _stream: Option<&mut UnixStream>, error: std::io::Error) {
-        if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
-            && let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-        {
-            let _ = writeln!(file, "[handoff] rejected: {error}");
-        }
+        crate::agent_debug::line("handoff", format_args!("rejected: {error}"));
         if let Some(stop) = self.handoff_stop {
             stop.store(true, Ordering::Relaxed);
         }
