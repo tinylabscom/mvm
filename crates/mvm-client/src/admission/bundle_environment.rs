@@ -52,6 +52,8 @@ pub enum EnvironmentRefusal {
         declared: Vec<String>,
         resolved: Vec<String>,
     },
+    /// An ordinary launch cannot establish the declared image entrypoint.
+    EntrypointUnresolved { because: String },
     /// Required capabilities a posture the launch is held to does not permit.
     CapabilitiesBeyondPosture { capabilities: Vec<&'static str> },
 }
@@ -67,6 +69,10 @@ impl std::fmt::Display for EnvironmentRefusal {
             Self::EntrypointMismatch { declared, resolved } => write!(
                 f,
                 "the bundle declares entrypoint {declared:?} but the image runs {resolved:?}"
+            ),
+            Self::EntrypointUnresolved { because } => write!(
+                f,
+                "the bundle's declared entrypoint cannot be verified ({because})"
             ),
             Self::CapabilitiesBeyondPosture { capabilities } => write!(
                 f,
@@ -85,21 +91,24 @@ pub fn environment_refusals(
     request: &EnvironmentRequest<'_>,
 ) -> Vec<EnvironmentRefusal> {
     let mut refused = Vec::new();
-    let unbound: Vec<String> = environment
-        .required_secret_slots()
-        .filter(|slot| !request.secrets.iter().any(|b| b.name == *slot))
-        .map(str::to_string)
-        .collect();
+    let unbound =
+        mvm_core::plan::bundle::unbound_environment_secret_slots(environment, request.secrets);
     if !unbound.is_empty() {
         refused.push(EnvironmentRefusal::UnboundSecretSlots { names: unbound });
     }
-    if let ResolvedEntrypoint::Known { argv, .. } = request.entrypoint
-        && *argv != environment.entrypoint.argv
-    {
-        refused.push(EnvironmentRefusal::EntrypointMismatch {
-            declared: environment.entrypoint.argv.clone(),
-            resolved: argv.clone(),
-        });
+    match request.entrypoint {
+        ResolvedEntrypoint::Known { argv, .. } if *argv != environment.entrypoint.argv => {
+            refused.push(EnvironmentRefusal::EntrypointMismatch {
+                declared: environment.entrypoint.argv.clone(),
+                resolved: argv.clone(),
+            });
+        }
+        ResolvedEntrypoint::Unresolved { because } => {
+            refused.push(EnvironmentRefusal::EntrypointUnresolved {
+                because: because.clone(),
+            });
+        }
+        ResolvedEntrypoint::Known { .. } | ResolvedEntrypoint::AdHocOverride { .. } => {}
     }
     let mut beyond: Vec<&'static str> = request
         .postures
@@ -230,9 +239,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolved_entrypoint_is_not_compared() {
+    fn an_explicit_ad_hoc_override_is_not_compared() {
         let secrets = [binding("AGENT_TOKEN")];
-        let entrypoint = ResolvedEntrypoint::unresolved("an ad-hoc argv run");
+        let entrypoint = ResolvedEntrypoint::ad_hoc_override();
         assert!(
             environment_refusals(
                 &environment(),
@@ -244,6 +253,43 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn failed_image_entrypoint_resolution_is_refused_without_an_input_grant() {
+        use mvm_build::builder_vm::GuestSidecar;
+        for metadata in ["missing", "malformed", "empty"] {
+            let dir = tempfile::tempdir().expect("image directory");
+            let rootfs = dir.path().join("rootfs.ext4");
+            std::fs::write(&rootfs, b"unit-only rootfs").unwrap();
+            match metadata {
+                "malformed" => {
+                    std::fs::write(GuestSidecar::path_in(dir.path()), b"not json").unwrap();
+                }
+                "empty" => {
+                    GuestSidecar::for_oci_run("empty", true, true)
+                        .write_to_dir(dir.path())
+                        .unwrap();
+                }
+                _ => {}
+            }
+            let entrypoint = super::super::entrypoint_resolve::resolve_for_rootfs(&rootfs);
+            let refused = environment_refusals(
+                &environment(),
+                &EnvironmentRequest {
+                    secrets: &[binding("AGENT_TOKEN")],
+                    entrypoint: &entrypoint,
+                    postures: &[],
+                },
+            );
+            assert!(
+                matches!(
+                    refused.as_slice(),
+                    [EnvironmentRefusal::EntrypointUnresolved { .. }]
+                ),
+                "{metadata}: {refused:?}"
+            );
+        }
     }
 
     #[test]

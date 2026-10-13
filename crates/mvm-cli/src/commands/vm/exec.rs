@@ -766,13 +766,10 @@ pub(in crate::commands) fn run_secure_started(
             services: admit_host_services.clone(),
             grants: admit_grants.clone(),
             backend_kind: Some(admit_backend_kind),
-            entrypoint: if admit_has_argv {
-                crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                    "an ad-hoc argv run replaces the image entrypoint",
-                )
-            } else {
-                crate::commands::vm::entrypoint_resolve::resolve_for_rootfs(rootfs)
-            },
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::for_launch(
+                rootfs,
+                admit_has_argv,
+            ),
             assets: assets.to_vec(),
         })?;
         // Persist the bare plan so the pre-start moat / endpoint can read it
