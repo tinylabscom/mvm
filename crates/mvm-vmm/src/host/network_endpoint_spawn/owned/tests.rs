@@ -335,11 +335,19 @@ fn prepared_spawn_uses_exact_shared_config_and_retains_all_evidence() {
         spawn_prepared(params, &env_path, &bin, &config, Duration::from_secs(3)).unwrap();
     assert_eq!(std::fs::read(config_path).unwrap(), config);
     assert_eq!(std::fs::read(&env_path).unwrap(), b"[]");
-    assert_eq!(
-        std::fs::read_to_string(state.join(SUBST_PID_FILE)).unwrap(),
-        endpoint.id().to_string()
+    let recorded =
+        EndpointPid::parse(&std::fs::read_to_string(state.join(SUBST_PID_FILE)).unwrap())
+            .expect("pid evidence parses");
+    assert_eq!(recorded.pid, endpoint.id() as libc::pid_t);
+    assert!(
+        recorded.is_live_and_ours(),
+        "the evidence carries the start time a later reap confirms"
     );
     endpoint.shutdown().unwrap();
+    assert!(
+        !recorded.is_live_and_ours(),
+        "an exited endpoint is never confirmed"
+    );
     assert!(env_path.exists());
     assert!(state.join(SUBST_PID_FILE).exists());
 }
