@@ -113,7 +113,7 @@ impl HostToolV1Handler {
                     "host.tool.v1 release payload is not a valid binding release",
                 )
             })?;
-        Self::connector_request(
+        let reply = Self::connector_request(
             connector_socket,
             &serde_json::to_value(&release).map_err(|error| {
                 ServiceError::new(
@@ -122,7 +122,19 @@ impl HostToolV1Handler {
                 )
             })?,
         )?;
-        serde_json::to_value(ToolReleaseResponse { released: true }).map_err(|error| {
+        let response: ToolReleaseResponse = serde_json::from_value(reply).map_err(|error| {
+            ServiceError::new(
+                ServiceErrorCode::InternalError,
+                format!("host.tool.v1 endpoint reply was not a release acknowledgement: {error}"),
+            )
+        })?;
+        if !response.released {
+            return Err(ServiceError::new(
+                ServiceErrorCode::InternalError,
+                "host.tool.v1 endpoint did not release the tool invocation",
+            ));
+        }
+        serde_json::to_value(response).map_err(|error| {
             ServiceError::new(
                 ServiceErrorCode::InternalError,
                 format!("host.tool.v1 release response encode failed: {error}"),
@@ -381,7 +393,7 @@ mod tests {
             // A release frame is a bare ToolInvocationRelease; it carries
             // no origin field.
             None,
-            serde_json::Value::Null,
+            serde_json::json!({"released": true}),
             Arc::new(AtomicUsize::new(0)),
         );
         let handler = HostToolV1Handler::new(socket);
@@ -393,6 +405,41 @@ mod tests {
         )
         .expect("ack decodes");
         assert!(response.released);
+    }
+
+    #[tokio::test]
+    async fn release_rejects_missing_malformed_and_negative_acknowledgements() {
+        for reply in [
+            None,
+            Some(serde_json::json!("invalid")),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"released": false})),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let socket = dir.path().join("connector.sock");
+            let listener = UnixListener::bind(&socket).expect("bind connector");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept release");
+                let _: ToolInvocationRelease =
+                    read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read release");
+                if let Some(reply) = reply {
+                    write_json_frame(&mut stream, &reply, MAX_TOOL_FRAME_BYTES)
+                        .expect("write reply");
+                }
+            });
+            let handler = HostToolV1Handler::new(socket);
+            let payload = serde_json::to_value(ToolInvocationRelease {
+                release: ToolInvocationBinding::from_random([9; 16]),
+            })
+            .expect("release serializes");
+            assert!(
+                handler
+                    .dispatch(&context(), RELEASE_VERB, payload)
+                    .await
+                    .is_err()
+            );
+            server.join().expect("server join");
+        }
     }
 
     #[tokio::test]

@@ -259,6 +259,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             artifact_count: verified.manifest.artifacts.len(),
             embedded_image_set_count: verified.embedded_image_sets.len(),
             has_verity: verified.manifest.verity.is_some(),
+            environment: verified.manifest.environment().cloned(),
         };
         summary.render();
     }
@@ -276,6 +277,63 @@ struct BundleSummary {
     artifact_count: usize,
     embedded_image_set_count: usize,
     has_verity: bool,
+    environment: Option<mvm_core::plan::EnvironmentDescriptor>,
+}
+
+/// The signed environment descriptor, one line per requirement, for the
+/// human summary. Secret slots are names only; the descriptor holds no value
+/// to print.
+fn environment_lines(environment: &mvm_core::plan::EnvironmentDescriptor) -> Vec<String> {
+    let mut lines = vec![format!(
+        "  environment: v{} for {}",
+        environment.descriptor_version,
+        environment.target.arch_label()
+    )];
+    if let Some(pack) = &environment.pack {
+        lines.push(format!("    pack:         {} {}", pack.name, pack.version));
+    }
+    lines.push(format!(
+        "    entrypoint:   {:?}",
+        environment.entrypoint.argv
+    ));
+    if let Some(dir) = &environment.entrypoint.working_dir {
+        lines.push(format!("    working dir:  {dir}"));
+    }
+    if let Some(resources) = &environment.resources {
+        lines.push(format!(
+            "    resources:    {} vCPU, {} MiB (advisory launch defaults)",
+            resources.cpu_cores, resources.memory_mb
+        ));
+    }
+    for volume in &environment.volumes {
+        lines.push(format!(
+            "    volume:       {} at {}",
+            volume.name, volume.guest_path
+        ));
+    }
+    for slot in &environment.secret_slots {
+        let need = if slot.required {
+            "required"
+        } else {
+            "optional"
+        };
+        lines.push(format!("    secret slot:  {} ({need})", slot.name));
+    }
+    if !environment.capabilities.is_empty() {
+        let names: Vec<&str> = environment
+            .capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect();
+        lines.push(format!("    capabilities: {}", names.join(", ")));
+    }
+    for service in &environment.services {
+        lines.push(format!(
+            "    service:      {} {:?}",
+            service.name, service.argv
+        ));
+    }
+    lines
 }
 
 impl BundleSummary {
@@ -300,6 +358,11 @@ impl BundleSummary {
             "  verity:    {}",
             if self.has_verity { "yes" } else { "no" }
         );
+        if let Some(environment) = &self.environment {
+            for line in environment_lines(environment) {
+                println!("{line}");
+            }
+        }
     }
 }
 
@@ -317,6 +380,37 @@ mod tests {
     use mvm_fs::oci::{
         ArtifactKind, ClientConfig, ClientProtocol, OciArtifactClient, RegistryAuthConfig,
     };
+
+    #[test]
+    fn the_summary_lists_every_environment_requirement() {
+        let environment: mvm_core::plan::EnvironmentDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "descriptor_version": 1,
+                "pack": { "name": "acme/agent", "version": "0.1.0" },
+                "target": "aarch64-linux",
+                "entrypoint": { "argv": ["/usr/bin/agent"], "working_dir": "/srv" },
+                "resources": { "cpu_cores": 2, "memory_mb": 1024 },
+                "volumes": [{ "name": "workspace", "guest_path": "/workspace" }],
+                "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+                "capabilities": ["egress", "host_volumes"],
+                "services": [{ "name": "indexer", "argv": ["/usr/bin/indexer"] }],
+            }))
+            .unwrap();
+        let text = environment_lines(&environment).join("\n");
+        for expected in [
+            "v1 for aarch64",
+            "acme/agent 0.1.0",
+            "/usr/bin/agent",
+            "/srv",
+            "2 vCPU, 1024 MiB",
+            "workspace at /workspace",
+            "AGENT_TOKEN (required)",
+            "egress, host_volumes",
+            "indexer",
+        ] {
+            assert!(text.contains(expected), "{expected} missing from:\n{text}");
+        }
+    }
 
     #[test]
     fn parse_https_url() {
