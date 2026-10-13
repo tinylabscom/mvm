@@ -10,6 +10,35 @@ const STASH: &str = "MVM_TOOL_CAPABILITY_TEST_STASH";
 const PROBE: &str = "tool_helper::capability_tests::exec_capability_probe";
 const VERIFIED: &str = "execed tool has no capabilities and cannot regain privilege";
 
+fn executable_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Neither the checkout nor TMPDIR is necessarily traversable after the
+    // child changes uid. Stage beneath /tmp without relaxing either of them.
+    let dir = tempfile::tempdir_in("/tmp").expect("probe executable directory");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("private probe directory");
+    let executable = dir.path().join("probe");
+    std::fs::copy(
+        std::env::current_exe().expect("test executable"),
+        &executable,
+    )
+    .expect("copy probe executable");
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o555))
+        .expect("probe executable mode");
+
+    // Reproduce the isolated-worktree failure even on a public checkout:
+    // executable mode alone cannot overcome an inaccessible parent directory.
+    let error = crate::guest_bootstrap::guest_helper_command(&executable, TOOL_HELPER_IDENTITY)
+        .args(["--exact", PROBE, "--nocapture"])
+        .output()
+        .expect_err("helper must not traverse the private probe directory");
+    assert_eq!(error.raw_os_error(), Some(libc::EACCES));
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("traversable probe directory");
+    (dir, executable)
+}
+
 fn assert_path_denied(path: &str) {
     assert_eq!(
         std::fs::File::open(path).unwrap_err().raw_os_error(),
@@ -37,8 +66,8 @@ fn installed_stash_executes_only_through_helper_descriptor() {
         0,
         "privileged witness needs root"
     );
-    let executable = std::env::current_exe().expect("test executable");
-    let dir = tempfile::tempdir().expect("private stash directory");
+    let (_executable_dir, executable) = executable_fixture();
+    let dir = tempfile::tempdir_in("/tmp").expect("private stash directory");
     // Match the installed stash directory without touching the guest's real
     // tool directory. It alone must prevent pathname access, not a 0700 parent.
     std::os::unix::fs::chown(dir.path(), Some(0), Some(TOOL_HELPER_IDENTITY.gid()))
@@ -132,16 +161,14 @@ fn helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege() {
         0,
         "privileged witness needs root"
     );
-    let output = crate::guest_bootstrap::guest_helper_command(
-        &std::env::current_exe().expect("test executable"),
-        TOOL_HELPER_IDENTITY,
-    )
-    .args(["--exact", PROBE, "--nocapture"])
-    .env(STAGE, "helper")
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .output()
-    .expect("exec helper identity");
+    let (_executable_dir, executable) = executable_fixture();
+    let output = crate::guest_bootstrap::guest_helper_command(&executable, TOOL_HELPER_IDENTITY)
+        .args(["--exact", PROBE, "--nocapture"])
+        .env(STAGE, "helper")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("exec helper identity");
     assert!(output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stdout).contains(VERIFIED),

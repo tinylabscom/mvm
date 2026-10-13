@@ -1265,6 +1265,15 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
 /// different, deterministic reason: nothing here dials out.
 #[test]
 fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
+    tool_route_and_trace_through_ingress(false);
+}
+
+#[test]
+fn guest_broker_tool_route_and_trace_use_the_trusted_handler() {
+    tool_route_and_trace_through_ingress(true);
+}
+
+fn tool_route_and_trace_through_ingress(guest_broker: bool) {
     use base64::Engine as _;
     use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
     use mvm_contract::protocol::network_flow::attribution::{
@@ -1277,6 +1286,10 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
 
     let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("endpoint.jsonl");
+    const EXECUTABLE: &str = "/bin/fetch-private-executable-sentinel";
+    const ARGV: &str = "fetch private-argv-sentinel";
+    const CREDENTIAL: &str = "ghp-private-credential-sentinel";
     let home = dir.path().join("mvm-home");
     std::fs::create_dir_all(home.join("keys")).unwrap();
     std::fs::write(home.join("keys/host-signer.ed25519"), [5u8; 32]).unwrap();
@@ -1303,7 +1316,7 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
         .put(
             "local",
             "github",
-            &SecretBox::new(Box::new("ghp-live".to_string())),
+            &SecretBox::new(Box::new(CREDENTIAL.to_string())),
         )
         .unwrap();
 
@@ -1321,7 +1334,7 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     tools.detail.insert(
         "fetch".into(),
         ToolRuleDetail {
-            executable: Some("/bin/fetch".into()),
+            executable: Some(EXECUTABLE.into()),
             routes: vec![target.clone()],
             ..Default::default()
         },
@@ -1374,12 +1387,17 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
         }),
     };
 
+    let (handshake_reader, handshake_writer) = UnixStream::pair().unwrap();
+    handshake_reader
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
     let mut child = Command::new(BIN)
         .env("MVM_HOME", &home)
         .env("HOME", dir.path())
+        .env("RUST_LOG", "info")
         .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(std::os::fd::OwnedFd::from(handshake_writer)))
+        .stderr(Stdio::from(std::fs::File::create(&log).unwrap()))
         .spawn()
         .expect("spawn endpoint bin");
     child
@@ -1388,7 +1406,7 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
         .unwrap()
         .write_all(&serde_json::to_vec(&cfg).unwrap())
         .unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut stdout = BufReader::new(handshake_reader);
     let guard = Kill(child);
     let mut line = String::new();
     stdout.read_line(&mut line).expect("read handshake line");
@@ -1417,21 +1435,61 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
 
     // The host admits one declared invocation of the tool and gets its binding.
     // The connector frames a tool question with the host-chosen origin label.
-    let mut ask = UnixStream::connect(&connector).expect("connect to connector");
-    write_frame(
-        &mut ask,
-        &serde_json::json!({
-            "question": ToolCheckRequest {
-                tool: "fetch".into(),
-                executable: Some("/bin/fetch".into()),
-                argv: "fetch it".into(),
-            },
-            "origin": ToolOrigin::Host,
-        }),
-    );
-    let ToolDecisionReply::AllowBound { binding } = read_frame(&mut ask) else {
+    let question = ToolCheckRequest {
+        tool: "fetch".into(),
+        executable: Some(EXECUTABLE.into()),
+        argv: ARGV.into(),
+    };
+    let broker =
+        mvm_hostd::broker::handlers::host_tool_v1::HostToolV1Handler::new(connector.clone());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let context = mvm_core::protocol::handler::ServiceCallCtx {
+        workload_id: "workload".into(),
+        tenant_id: "local".into(),
+        correlation_id: mvm_core::protocol::broker::CorrelationId::new("tool-trace"),
+        session_id: "tool-scope".into(),
+        profile: mvm_core::policy::security::AgentProfile::Dev,
+        composition_depth: 0,
+        composition_width: 0,
+    };
+    use mvm_core::protocol::handler::ServiceHandler as _;
+    let decision = if guest_broker {
+        serde_json::from_value(
+            runtime
+                .block_on(broker.dispatch(
+                    &context,
+                    mvm_core::protocol::host_tool::DECIDE_VERB,
+                    serde_json::to_value(&question).unwrap(),
+                ))
+                .expect("trusted broker reaches real endpoint"),
+        )
+        .unwrap()
+    } else {
+        let mut ask = UnixStream::connect(&connector).expect("connect to connector");
+        ask.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        write_frame(
+            &mut ask,
+            &serde_json::json!({"question": question, "origin": ToolOrigin::Host}),
+        );
+        read_frame(&mut ask)
+    };
+    let ToolDecisionReply::AllowBound { binding } = decision else {
         panic!("an allowed invocation of a tool with routes is bound");
     };
+    let lifecycle = || {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["target"] == "mvm.tool" && event["span"]["binding_id"] == binding.audit_id()
+            })
+            .collect::<Vec<_>>()
+    };
+    let started = lifecycle();
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["fields"]["phase"], "start");
 
     let mut stream = UnixStream::connect(&sock).unwrap();
     stream
@@ -1466,25 +1524,52 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
         )
     );
 
-    let mut release = UnixStream::connect(&connector).expect("connect to connector");
-    write_frame(
-        &mut release,
-        &ToolInvocationRelease {
-            release: binding.clone(),
-        },
-    );
-    drop(release);
-    let refused_after_release = (0..50).any(|attempt| {
-        let (_, reason) = open(5 + attempt * 2, encode_open_tcp(&target, Some(&binding)));
-        reason == SCOPE_REFUSAL || {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-            false
-        }
-    });
-    assert!(
-        refused_after_release,
-        "a released binding names no invocation"
-    );
+    let release = ToolInvocationRelease {
+        release: binding.clone(),
+    };
+    let response: mvm_core::protocol::host_tool::ToolReleaseResponse = if guest_broker {
+        serde_json::from_value(
+            runtime
+                .block_on(broker.dispatch(
+                    &context,
+                    mvm_core::protocol::host_tool::RELEASE_VERB,
+                    serde_json::to_value(&release).unwrap(),
+                ))
+                .expect("trusted broker release reaches real endpoint"),
+        )
+        .unwrap()
+    } else {
+        let mut socket = UnixStream::connect(&connector).expect("connect to connector");
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .unwrap();
+        write_frame(&mut socket, &release);
+        read_frame(&mut socket)
+    };
+    assert!(response.released, "endpoint acknowledges applied release");
+    let events = lifecycle();
+    assert_eq!(events.len(), 2, "{events:?}");
+    assert_eq!(events[0]["fields"]["phase"], "start");
+    assert_eq!(events[1]["fields"]["phase"], "finish");
+    assert_eq!(events[1]["fields"]["outcome"], "completed");
+    assert!(events[1]["fields"]["duration_ms"].is_u64());
+    for event in &events {
+        assert_eq!(event["span"]["name"], "mvm.tool.invocation");
+        assert_eq!(event["span"]["binding_id"], binding.audit_id());
+        assert_eq!(
+            event["span"]["origin"],
+            if guest_broker { "guest_broker" } else { "host" }
+        );
+    }
+    let captured = std::fs::read_to_string(&log).unwrap();
+    for private in [EXECUTABLE, ARGV, CREDENTIAL, binding.as_str()] {
+        assert!(
+            !captured.contains(private),
+            "private input appeared in trace"
+        );
+    }
+    let (opcode, reason) = open(5, encode_open_tcp(&target, Some(&binding)));
+    assert_eq!((opcode, reason.as_str()), (Opcode::Refused, SCOPE_REFUSAL));
     drop(stream);
     drop(guard);
 
