@@ -1088,7 +1088,6 @@ dependencies = [
  "mvm-core",
  "mvm-net",
  "mvm-vmm",
- "nix",
  "serde",
  "serde_json",
  "tempfile",

@@ -5,11 +5,14 @@
 # exported path remains in their environment.
 build_sdk_hostlib() {
   local mvmctl_path="$1"
+  # The cargo profile `mvmctl_path` was built under, so the library lands in
+  # the same directory. Defaults to the dev profile.
+  local profile="${2:-dev}"
   local hostlib_ext="so"
   local hostlib_path
 
   echo "==> building the SDK host library beside mvmctl"
-  cargo build -p mvm-hostlib
+  cargo build -p mvm-hostlib --profile "$profile"
   if [[ "$(uname -s)" == "Darwin" ]]; then
     hostlib_ext="dylib"
   fi

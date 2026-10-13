@@ -8,10 +8,12 @@
 //! exercise the BPF program at runtime. This test does:
 //!
 //! 1. Spawn `mvm-seccomp-apply <tier> -- syscall-probe`.
-//! 2. The probe attempts `socket(AF_INET, SOCK_STREAM, 0)`.
+//! 2. The probe attempts `socket(AF_INET, SOCK_STREAM, 0)`, or the
+//!    `AF_VSOCK` equivalent when asked.
 //! 3. Assert the probe's exit code matches the tier's promise:
 //!    - `unrestricted` / `network` → 0 (call allowed)
 //!    - `standard` → `EPERM` (call denied with seccomp errno-action)
+//!    - `vsock` → `AF_VSOCK` passes the filter, `AF_INET` is `EPERM`
 //!
 //! Linux-only because seccomp is a Linux kernel feature. The crate
 //! still builds on macOS (the gated stub binaries pass `cargo check`),
@@ -30,12 +32,40 @@ fn probe() -> &'static str {
 }
 
 fn run_under(tier: &str) -> Output {
+    run_family_under(tier, "inet")
+}
+
+fn run_family_under(tier: &str, family: &str) -> Output {
     Command::new(shim())
         .arg(tier)
         .arg("--")
         .arg(probe())
+        .arg(family)
         .output()
         .expect("spawn mvm-seccomp-apply")
+}
+
+/// The filter let `socket` through. The probe exits 0 when the socket opened
+/// and with the errno otherwise; a kernel without the vsock transport loaded
+/// answers `AF_VSOCK` with `EAFNOSUPPORT`, which is the kernel speaking after
+/// the filter allowed the call. Only `EPERM` is the filter's answer.
+fn assert_passed_the_filter(out: &Output, what: &str) {
+    assert!(
+        out.status.code().is_some() && out.status.code() != Some(libc::EPERM),
+        "expected {what} to pass the filter; status={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn assert_denied_by_the_filter(out: &Output, what: &str) {
+    assert_eq!(
+        out.status.code(),
+        Some(libc::EPERM),
+        "expected {what} to fail with EPERM; status={:?} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -70,6 +100,39 @@ fn standard_tier_denies_socket_with_eperm() {
         libc::EPERM,
         out.status,
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A GPU-granted launch's tier: the vsock socket its shims dial the host GPU
+/// endpoint over is allowed, and no other address family is.
+#[test]
+fn vsock_tier_allows_an_af_vsock_socket_and_denies_af_inet() {
+    assert_passed_the_filter(
+        &run_family_under("vsock", "vsock"),
+        "socket(AF_VSOCK) under vsock",
+    );
+    assert_denied_by_the_filter(
+        &run_family_under("vsock", "inet"),
+        "socket(AF_INET) under vsock",
+    );
+}
+
+/// Without a GPU grant the tier stays `standard`, which refuses a vsock
+/// socket as it refuses every other one.
+#[test]
+fn standard_tier_denies_an_af_vsock_socket_with_eperm() {
+    assert_denied_by_the_filter(
+        &run_family_under("standard", "vsock"),
+        "socket(AF_VSOCK) under standard",
+    );
+}
+
+/// A GPU launch that also needs `network` keeps its vsock socket.
+#[test]
+fn network_tier_allows_an_af_vsock_socket() {
+    assert_passed_the_filter(
+        &run_family_under("network", "vsock"),
+        "socket(AF_VSOCK) under network",
     );
 }
 

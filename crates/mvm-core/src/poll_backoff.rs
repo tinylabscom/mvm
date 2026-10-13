@@ -29,6 +29,22 @@ pub fn poll_delay(attempt: u32) -> Duration {
     Duration::from_millis(scaled.min(CAP_MS))
 }
 
+/// Ceiling for [`fine_poll_delay`], in milliseconds.
+const FINE_CAP_MS: u64 = 2;
+
+/// [`poll_delay`] capped at 2 ms, for a local event a launch is blocked on
+/// and that a probe can see cheaply — a socket appearing, a process table
+/// entry changing.
+///
+/// The doubling cadence is right when probes are expensive or the wait is
+/// long. For an event that normally lands within tens of milliseconds it is a
+/// tax: an outcome arriving at 13 ms is not seen until the 15 ms probe, and
+/// one at 16 ms not until 31 ms. A boot waits on two such events back to back.
+#[must_use]
+pub fn fine_poll_delay(attempt: u32) -> Duration {
+    poll_delay(attempt).min(Duration::from_millis(FINE_CAP_MS))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +71,15 @@ mod tests {
         for attempt in 0..1000 {
             assert!(poll_delay(attempt).as_millis() as u64 <= CAP_MS);
         }
+    }
+
+    #[test]
+    fn the_fine_cadence_starts_like_the_coarse_one_and_never_exceeds_2ms() {
+        assert_eq!(fine_poll_delay(0), poll_delay(0));
+        for attempt in 0..1000 {
+            assert!(fine_poll_delay(attempt) <= Duration::from_millis(FINE_CAP_MS));
+        }
+        assert_eq!(fine_poll_delay(64), Duration::from_millis(FINE_CAP_MS));
     }
 
     #[test]

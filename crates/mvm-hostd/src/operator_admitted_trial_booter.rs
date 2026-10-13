@@ -497,9 +497,14 @@ impl OperatorConfiguredTrialBooter {
                     .build()?,
             )?
         };
-        let plane = host_assurance_plane().ok_or_else(|| {
-            anyhow::anyhow!("admitted assurance boot did not install its controller plane")
-        })?;
+        let Some(plane) = host_assurance_plane() else {
+            // The machine is already running; refusing without stopping it
+            // would leave a detached VMM behind the error.
+            if let Err(error) = backend.stop(&started.vm_id) {
+                tracing::warn!(vm = %started.vm_id.0, "stopping a refused assurance boot: {error:#}");
+            }
+            anyhow::bail!("admitted assurance boot did not install its controller plane");
+        };
         Ok(AdmittedTrialBoot {
             backend,
             started,

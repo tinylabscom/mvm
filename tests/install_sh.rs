@@ -1458,6 +1458,58 @@ fn install_sh_refuses_an_archive_the_installed_mvmctl_rejects() {
 }
 
 #[test]
+fn explicit_archive_pin_is_enforced_with_an_installed_verifier() {
+    let (host, base, _stop) = host_with_verifier(true);
+    let before = host.snapshot();
+    let log = host.root.join("pin-verifier.log");
+    for skip_manifest in ["0", "1"] {
+        let output = host
+            .installer(&base, "v2.0.0")
+            .env("MVM_TRUSTED_ARCHIVE_SHA256", "0".repeat(64))
+            .env("MVM_SKIP_HASH_VERIFY", skip_manifest)
+            .env("MVM_TEST_INVOCATION_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("trusted archive SHA-256 mismatch"));
+        assert_eq!(host.snapshot(), before);
+        assert!(
+            !log.exists(),
+            "reject different bytes before asking the verifier"
+        );
+    }
+}
+
+#[test]
+fn explicit_archive_pin_is_enforced_with_cosign_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let release = Release::new("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+    let host = Host::new();
+    let tools = host.root.join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    let cosign = tools.join("cosign");
+    std::fs::write(&cosign, stub_cosign()).unwrap();
+    std::fs::set_permissions(&cosign, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let log = host.root.join("pin-cosign.log");
+    for skip_manifest in ["0", "1"] {
+        let output = host
+            .installer(&base, "v9.9.9")
+            .env("PATH", format!("{}:{}", tools.display(), test_tool_path()))
+            .env("MVM_TRUSTED_ARCHIVE_SHA256", "0".repeat(64))
+            .env("MVM_SKIP_HASH_VERIFY", skip_manifest)
+            .env("MVM_TEST_INVOCATION_LOG", &log)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(stderr(&output).contains("trusted archive SHA-256 mismatch"));
+        assert!(!host.bin().join("mvmctl").exists());
+        assert!(!log.exists(), "reject different bytes before asking cosign");
+    }
+}
+
+#[test]
 fn install_sh_refuses_a_missing_bundle_once_it_can_verify() {
     let (host, base, _stop) = host_with_verifier(false);
     let before = host.snapshot();
@@ -1755,7 +1807,7 @@ fn fake_codesign(host: &Host) -> (String, PathBuf) {
     std::fs::write(
         &codesign,
         format!(
-            "#!/bin/sh\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
+            "#!/bin/sh\n[ \"$1\" = --sign ] || exit 1\n[ -z \"${{FAKE_CODESIGN_FAIL:-}}\" ] || {{ echo 'signing refused' >&2; exit 1; }}\nprintf '%s\\n' \"$*\" >> \"{}\"\n",
             log.display()
         ),
     )
@@ -1763,6 +1815,44 @@ fn fake_codesign(host: &Host) -> (String, PathBuf) {
     std::fs::set_permissions(&codesign, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", fake_bin.display());
     (path, log)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_preserves_developer_id_with_bundled_profiles_and_refuses_missing_entitlements() {
+    use std::os::unix::fs::PermissionsExt;
+    let release = Release::new("v9.9.9");
+    let (base, _stop) = serve_releases(&[&release]);
+    for entitled in [true, false] {
+        let host = Host::new();
+        let fake_bin = host.root.join("fake-bin");
+        std::fs::create_dir_all(&fake_bin).unwrap();
+        let tool = fake_bin.join("codesign");
+        // Stub identity/entitlement results are control-flow evidence only;
+        // no real Developer ID identity is available in these unit tests.
+        std::fs::write(
+            &tool,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n--verify) exit 0;;\n-dvv) echo 'Authority=Developer ID Application: Fixture'; exit 0;;\n-d) {} exit 0;;\n--sign) echo 'must not replace Developer ID' >&2; exit 99;;\nesac\n",
+                if entitled { "echo '<key>com.apple.security.virtualization</key><true/><key>com.apple.security.hypervisor</key><true/>';" } else { "" },
+            ),
+        ).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = host
+            .installer(&base, "v9.9.9")
+            .env_remove("MVM_SKIP_CODESIGN")
+            .env(
+                "PATH",
+                format!("{}:{}", fake_bin.display(), test_tool_path()),
+            )
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), entitled, "{}", stderr(&output));
+        if !entitled {
+            assert!(stderr(&output).contains("refusing to replace its signature"));
+            assert!(!host.bin().join("mvmctl").exists());
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

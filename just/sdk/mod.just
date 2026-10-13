@@ -40,7 +40,7 @@ install-typescript:
 # SDK — the subprocess wrappers, the argv builders, the refusal paths —
 # unproven.
 # Usage: just sdk::test [lang]
-#   lang: sdk name (python, typescript) or "all" (default)
+#   lang: sdk name (python, typescript, kotlin) or "all" (default)
 
 # Run the language SDKs' own unit suites
 test LANG="all":
@@ -50,12 +50,13 @@ test LANG="all":
       all)
         just sdk::test-python
         just sdk::test-typescript
+        just sdk::test-kotlin
         ;;
-      python|typescript)
+      python|typescript|kotlin)
         just "sdk::test-{{ LANG }}"
         ;;
       *)
-        echo "unknown SDK language: {{ LANG }} (expected all, python, or typescript)" >&2
+        echo "unknown SDK language: {{ LANG }} (expected all, python, typescript, or kotlin)" >&2
         exit 1
         ;;
     esac
@@ -70,3 +71,10 @@ test-python:
 # Run the TypeScript SDK's unit suite
 test-typescript: install-typescript
     npm --prefix crates/mvm-sdk/sdks/typescript run test
+
+# The Kotlin pack SDK needs only kotlinc and a JDK; its suite checks the same
+# canonical PackSpec goldens as the Rust contract test.
+
+# Run the Kotlin pack SDK's suite (install kotlinc with sdks/kotlin/scripts/install-kotlinc.sh)
+test-kotlin:
+    crates/mvm-sdk/sdks/kotlin/scripts/test.sh

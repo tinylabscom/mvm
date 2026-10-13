@@ -106,6 +106,41 @@ pub struct ToolCheckDenial {
     pub reason: String,
 }
 
+/// Which ingress path carried a tool question to the per-VM decision gate.
+///
+/// The value is stamped into the `host.tool.decision` audit entry so a
+/// workload-origin decision (guest shim -> broker -> connector) is
+/// distinguishable from a host-initiated one (CLI -> connector) and from a
+/// guest service speaking the FlowMux session protocol. It is always chosen
+/// by the host-side ingress, never by the guest: the connector socket is
+/// host-local and the FlowMux handler labels its own path, so a guest
+/// process cannot talk its way into a more trusted origin label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum ToolOrigin {
+    /// A host-local caller (the CLI's `machine exec --tool` path) asked
+    /// through the endpoint's connector socket.
+    Host,
+    /// A guest process asked through the broker's `host.tool.v1` service,
+    /// which the broker proxied to the connector socket.
+    GuestBroker,
+    /// A guest service asked on the authenticated FlowMux session protocol.
+    GuestFlowMux,
+}
+
+impl ToolOrigin {
+    /// The stable label recorded in the audit chain.
+    #[must_use]
+    pub fn audit_label(self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::GuestBroker => "guest_broker",
+            Self::GuestFlowMux => "guest_flowmux",
+        }
+    }
+}
+
 /// Host-local reply after the per-VM endpoint has audited a tool decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

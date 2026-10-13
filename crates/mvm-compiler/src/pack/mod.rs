@@ -6,18 +6,25 @@
 //! against its current source tree, and [`compile_frozen`] builds only when a
 //! recorded [`PackLock`](mvm_contract::pack_lock::PackLock) still matches.
 //!
+//! Copy operations are materialized into an application tree assembled from
+//! the verified source snapshot, and an npm lockfile lowers to the IR's Node
+//! dependency declaration, installed by the Nix factory at build time.
+//!
 //! Lowering refuses what the IR and Nix factories cannot honor yet: build-scoped
-//! packages, exact package versions, language dependency files and copy
-//! operations. Package resolution, dependency installation and builder
-//! execution happen elsewhere and are not implied by a successful compile.
+//! packages, exact package versions, Python dependency files, non-npm Node
+//! lockfiles and copies outside the application tree. Builder execution
+//! happens elsewhere and is not implied by a successful compile.
 
+mod app_tree;
 mod frozen;
 mod lock;
 mod lower;
 
 pub use frozen::{compile_frozen, lock_pack};
 pub use lock::{LockField, spec_sha256, stale_fields};
-pub use lower::{PACK_EXTENSION, PACK_ROOTFS_SIZE_MIB, lower};
+pub use lower::{
+    APP_DIR, APP_TREE, NPM_LOCKFILE, NPM_MANIFEST, PACK_EXTENSION, PACK_ROOTFS_SIZE_MIB, lower,
+};
 
 use crate::mvm_pin::PinnedMvmRevision;
 use crate::orchestrator::CompileError;
@@ -27,6 +34,11 @@ use mvm_contract::pack_lock::PackLockError;
 use mvm_contract::pack_spec::{PackSpec, PackSpecError};
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Conventional lock file name. A file by this name at the source root is the
+/// lock itself, so it is left out of the snapshot the lock digests: writing
+/// the lock beside a spec whose source is `.` must not stale it.
+pub const LOCK_FILE: &str = "pack.lock.json";
 
 /// A spec, the directory its relative source path resolves against, and the
 /// mvm revision its flake will pin.
@@ -51,10 +63,34 @@ pub enum PackError {
         "package {package:?} requests version {version:?}; exact package versions cannot be resolved yet"
     )]
     UnsupportedPackageVersion { package: String, version: String },
-    #[error("language dependency files cannot be installed into a pack yet")]
+    #[error("Python dependency files cannot be installed into a pack yet")]
     UnsupportedDependencies,
-    #[error("copy operations cannot be materialized into a pack yet")]
-    UnsupportedCopy,
+    #[error(
+        "Node dependencies must be an npm `package.json` and `package-lock.json` at the source root"
+    )]
+    UnsupportedNodeDependencies,
+    #[error("a pack declares at most one dependency manifest and lockfile")]
+    MultipleDependencies,
+    #[error("copy destination {destination:?} is not inside the application directory /app")]
+    CopyOutsideApp { destination: String },
+    #[error("copy source {source_path:?} {reason}")]
+    CopySource {
+        source_path: String,
+        reason: &'static str,
+    },
+    #[error("copy to {destination:?} conflicts with an earlier copy: {reason}")]
+    CopyConflict {
+        destination: String,
+        reason: &'static str,
+    },
+    #[error("could not assemble the application tree at {}: {source}", path.display())]
+    Assemble {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("dependency lockfile check failed: {0}")]
+    Lockfile(crate::deps::DepsError),
     #[error("lowered workload is invalid: {}", join(.0))]
     InvalidWorkload(Vec<ValidationError>),
     #[error("source path {path:?} resolves outside the spec directory")]

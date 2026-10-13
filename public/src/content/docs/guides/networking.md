@@ -209,18 +209,16 @@ particular hypervisor, VPN, or Internet route.
 Pick the guest's security posture with `--profile`. It governs env injection,
 host-share permissions, and whether the guest gets the dev profile. It does
 **not** select a seccomp tier. Admission gives a run with no network surface the
-`standard` tier, which refuses `socket`, and raises a run that admits egress,
-an ingress mapping or a host service to `network`; there is no per-launch
-selector:
+`standard` tier, which refuses `socket`, raises a run that admits egress,
+an ingress mapping or a host service to `network`, and gives an otherwise
+socket-free `--gpu` run `vsock`, which opens `AF_VSOCK` sockets and no other
+family; there is no per-launch selector:
 
 ```bash
-mvmctl machine run --name app --flake . --profile restrictive   # no env injection, no host shares
-mvmctl machine run --name app --flake . --profile standard      # explicit env; read-only host dirs, writable disk images (default)
-mvmctl machine run --name app --flake . --profile dev           # dev ergonomics: as standard + the dev guest
+mvmctl machine run --flake . --profile restrictive   # no env injection, no host shares
+mvmctl machine run --flake . --profile standard      # explicit env; read-only host dirs, writable disk images (default)
+mvmctl machine run --flake . --profile dev           # dev ergonomics: as standard + the dev guest
 ```
-
-The runs are named because an unnamed run must claim a prepared warm standby,
-which `pool warm` cannot prepare for a flake image; a named run boots cold.
 
 The resolved profile is copied into the signed `ExecutionPlan` admission record — audit/provenance data binding the declared workload intent to the chosen posture, policy refs, secret-release posture, and audit labels — so `mvmctl trust audit verify` can prove which posture was admitted.
 

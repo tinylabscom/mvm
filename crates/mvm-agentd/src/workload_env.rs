@@ -67,6 +67,8 @@ fn runtime_overlay_assignments(
 
 /// `env` with the runtime-overlay variables applied, for a workload whose
 /// environment the host supplies as pairs (`RunEntrypoint`, `RunDetached`).
+/// On a vsock-egress boot it also carries the proxy variables the host did
+/// not send itself; see [`egress_proxy_defaults`].
 #[must_use]
 pub fn with_runtime_overlay_env(
     mut env: Vec<(String, String)>,
@@ -84,7 +86,56 @@ pub fn with_runtime_overlay_env(
             None => env.push((var.to_string(), value)),
         }
     }
+    let defaults = egress_proxy_defaults(boot_has_vsock_egress(), |var| {
+        env.iter().any(|(k, _)| k == var)
+    });
+    env.extend(defaults);
     env
+}
+
+/// The kernel command-line token that arms the guest's vsock egress client.
+pub const VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
+
+/// The proxy variables a workload needs to reach its admitted egress, for
+/// each one not already `present`, on a boot that started the egress client.
+///
+/// A NIC-less guest reaches the network only through the loopback proxy the
+/// egress client serves, so a workload without these variables has no route
+/// out at all. The host sends them for an OCI image; every other root gets
+/// them here, from the agent that started the client. Anything the image or
+/// the caller set is left alone: these are defaults, not policy, and policy
+/// is enforced by the host endpoint whatever the workload dials.
+fn egress_proxy_defaults(
+    vsock_egress: bool,
+    present: impl Fn(&str) -> bool,
+) -> Vec<(String, String)> {
+    if !vsock_egress {
+        return Vec::new();
+    }
+    mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
+        .into_iter()
+        .filter(|(key, _)| !present(key))
+        .collect()
+}
+
+/// Whether `cmdline` names [`VSOCK_EGRESS_TOKEN`] as a whole word.
+#[cfg(any(target_os = "linux", test))]
+fn cmdline_arms_vsock_egress(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|token| token == VSOCK_EGRESS_TOKEN)
+}
+
+/// Whether this boot started the egress client. Linux guests only, like the
+/// GPU token: host builds of this crate have no guest command line.
+#[cfg(target_os = "linux")]
+fn boot_has_vsock_egress() -> bool {
+    std::fs::read_to_string("/proc/cmdline").is_ok_and(|line| cmdline_arms_vsock_egress(&line))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn boot_has_vsock_egress() -> bool {
+    false
 }
 
 /// An image's declared runtime configuration, as materialized into its rootfs.
@@ -199,6 +250,7 @@ pub struct WorkloadEnvironmentBuilder {
     working_dir: Option<OsString>,
     term: Option<&'static str>,
     overlay_root: Option<std::path::PathBuf>,
+    vsock_egress: Option<bool>,
 }
 
 impl WorkloadEnvironmentBuilder {
@@ -265,6 +317,14 @@ impl WorkloadEnvironmentBuilder {
         self
     }
 
+    /// Answer whether the boot armed vsock egress instead of reading the
+    /// kernel command line. Tests use it; the guest reads the command line.
+    #[must_use]
+    pub fn vsock_egress(mut self, armed: bool) -> Self {
+        self.vsock_egress = Some(armed);
+        self
+    }
+
     /// Mark the session interactive, which sets `TERM`.
     #[must_use]
     pub fn interactive(mut self) -> Self {
@@ -305,6 +365,13 @@ impl WorkloadEnvironmentBuilder {
         let assignments = runtime_overlay_assignments(&overlay_root, |var| self.get(var));
         for (var, value) in assignments {
             self.set(OsString::from(var), value);
+        }
+        let defaults = egress_proxy_defaults(
+            self.vsock_egress.unwrap_or_else(boot_has_vsock_egress),
+            |var| self.has(var),
+        );
+        for (var, value) in defaults {
+            self.set(OsString::from(var), OsString::from(value));
         }
         if let Some(term) = self.term {
             self.set(OsString::from("TERM"), OsString::from(term));
@@ -450,6 +517,61 @@ mod tests {
         // A prefix of a longer parameter is not the token.
         assert_eq!(gpu_shim_base_in_cmdline("mvm.gpu=10"), None);
         assert_eq!(gpu_shim_base_in_cmdline("x-mvm.gpu=1"), None);
+    }
+
+    #[test]
+    fn the_vsock_egress_token_matches_as_a_whole_word_only() {
+        assert!(cmdline_arms_vsock_egress(
+            "console=ttyS0 mvm.vsock_egress=1 quiet"
+        ));
+        assert!(!cmdline_arms_vsock_egress("console=ttyS0"));
+        assert!(!cmdline_arms_vsock_egress("mvm.vsock_egress=10"));
+        assert!(!cmdline_arms_vsock_egress("x-mvm.vsock_egress=1"));
+    }
+
+    #[test]
+    fn an_egress_boot_hands_the_workload_the_proxy_variables() {
+        let env = WorkloadEnvironment::builder().vsock_egress(true).build();
+        let env = pairs(&env);
+        let value = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone());
+        let expected =
+            mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN);
+        for (key, val) in &expected {
+            assert_eq!(value(key).as_deref(), Some(val.as_str()), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_boot_without_egress_hands_the_workload_no_proxy() {
+        let env = pairs(&WorkloadEnvironment::builder().vsock_egress(false).build());
+        assert!(
+            env.iter()
+                .all(|(k, _)| !k.to_ascii_uppercase().ends_with("_PROXY")),
+            "{env:?}"
+        );
+    }
+
+    #[test]
+    fn a_proxy_the_caller_set_is_kept_on_an_egress_boot() {
+        let env = WorkloadEnvironment::builder()
+            .overrides([("HTTPS_PROXY", "http://corp:3128")])
+            .vsock_egress(true)
+            .build();
+        let env = pairs(&env);
+        let https: Vec<_> = env.iter().filter(|(k, _)| k == "HTTPS_PROXY").collect();
+        assert_eq!(https.len(), 1, "{env:?}");
+        assert_eq!(https[0].1, "http://corp:3128");
+        assert!(env.iter().any(|(k, _)| k == "ALL_PROXY"), "{env:?}");
+    }
+
+    #[test]
+    fn proxy_defaults_fill_only_what_is_absent() {
+        assert!(egress_proxy_defaults(false, |_| false).is_empty());
+        let all = egress_proxy_defaults(true, |_| false);
+        assert!(all.iter().any(|(k, _)| k == "HTTP_PROXY"));
+        let filled = egress_proxy_defaults(true, |k| k == "HTTP_PROXY");
+        assert!(filled.iter().all(|(k, _)| k != "HTTP_PROXY"));
+        assert_eq!(filled.len() + 1, all.len());
     }
 
     #[test]

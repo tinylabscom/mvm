@@ -149,6 +149,36 @@ fn combined(output: &Output) -> String {
     )
 }
 
+/// A launch reads only the local cache, so a pull that fails leaves the
+/// README's first command nothing to run: the smoke stops there and names the
+/// step.
+#[test]
+fn a_failed_preparation_step_fails_before_the_first_command() {
+    let smoke = Smoke::new();
+    let mvmctl = fake_mvmctl("1.2.3", ECHO_TOKEN).replace(
+        "  machine) shift 2",
+        "  image) echo 'registry unreachable' >&2; exit 1 ;;\n  machine) shift 2",
+    );
+    let installer = stand_in_installer(smoke.dir.path(), &mvmctl, 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[]);
+
+    assert!(!output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(
+        transcript.contains("FAIL: 'mvmctl image pull alpine' exited 1"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("registry unreachable"),
+        "the transcript must carry the step's stderr: {transcript}"
+    );
+    assert!(
+        !transcript.contains("=== first command"),
+        "the first command must not run after a failed pull: {transcript}"
+    );
+}
+
 #[test]
 fn a_first_command_that_prints_the_token_passes() {
     let smoke = Smoke::new();
@@ -167,13 +197,13 @@ fn a_first_command_that_prints_the_token_passes() {
         "the transcript must name the command it ran: {transcript}"
     );
     assert!(
-        transcript.contains("second boot from the same HOME (mvmctl machine run --image alpine -- echo mvm-fresh-install-")
+        transcript.contains("second boot from the same HOME (mvmctl machine run --name smoke-second --image alpine -- echo mvm-fresh-install-")
             && transcript.contains("-second </dev/null)"),
         "the transcript must name the second boot's command: {transcript}"
     );
     assert!(
         transcript
-            .contains("mvmctl machine run --image alpine --host-service host.time.v1 -- sh -c")
+            .contains("mvmctl machine run --name smoke-sdk --image alpine --host-service host.time.v1 -- sh -c")
             && transcript.contains("/mvm/sdk/lib/libmvm_host_services.so"),
         "the transcript must name the SDK boot's command: {transcript}"
     );
@@ -186,6 +216,22 @@ fn a_first_command_that_prints_the_token_passes() {
             "mvmctl machine run --image curlimages/curl:8.21.0 --allow-host example.com -- sh -c \"curl -fsS -o /dev/null https://example.com/ && echo mvm-fresh-install-"
         ),
         "the transcript must name the egress boot's command: {transcript}"
+    );
+    let prepared: Vec<usize> = [
+        "prepare: mvmctl image pull alpine",
+        "prepare: mvmctl image pull curlimages/curl:8.21.0",
+        "first command (mvmctl machine run --image alpine -- echo",
+    ]
+    .iter()
+    .map(|step| {
+        transcript
+            .find(step)
+            .unwrap_or_else(|| panic!("the transcript must show `{step}`: {transcript}"))
+    })
+    .collect();
+    assert!(
+        prepared.windows(2).all(|pair| pair[0] < pair[1]),
+        "the README's pulls must run, in order, before the first command: {transcript}"
     );
     for step in ["first command", "second boot", "SDK boot", "egress boot"] {
         assert!(
@@ -1054,4 +1100,19 @@ fn the_job_timeout_covers_every_default_budget() {
              budgets ({budgets} s)"
         );
     }
+}
+
+/// The README's quick start sets nothing and warms nothing before its first
+/// run, so neither does the smoke that runs it.
+#[test]
+fn the_quick_start_runs_with_no_residency_and_no_warm_up() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[]);
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(!transcript.contains("MVM_RESIDENCY"), "{transcript}");
+    assert!(!transcript.contains("pool warm"), "{transcript}");
 }

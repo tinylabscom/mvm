@@ -107,6 +107,19 @@
         }
       ]
     },
+    "ApplicationTerminalBinding": {
+      "description": "What the host-signed verb grant carries: the argv's digest, not the argv.",
+      "type": "object",
+      "required": [
+        "argv_digest"
+      ],
+      "properties": {
+        "argv_digest": {
+          "$ref": "#/definitions/Sha256Digest"
+        }
+      },
+      "additionalProperties": false
+    },
     "AssuranceId": {
       "description": "A bounded, audit-safe identifier.\n\nUnlike the agent-session identifiers this contract sits beside, uppercase is legal: the finding and rule identifiers minted upstream look like `SCOUT-RCE-001`, and lowercasing them here would silently break the join back to the source finding.",
       "type": "string"
@@ -5311,6 +5324,13 @@
           ]
         },
         {
+          "description": "`standard` plus `AF_VSOCK` stream sockets: `socket` is granted only for that family (see [`SeccompTier::argument_scoped_syscalls`]), with `connect` and the `sendto`/`recvfrom` pair a stream read and write lower to. No other address family can be opened, so the only peers a process can reach are the vsock ports the VMM exposes. For a launch that needs its GPU endpoint and nothing else.",
+          "type": "string",
+          "enum": [
+            "vsock"
+          ]
+        },
+        {
           "description": "~160 syscalls: adds sockets, connect, bind, sendmsg. For networked agents.",
           "type": "string",
           "enum": [
@@ -5526,6 +5546,17 @@
         "verbs"
       ],
       "properties": {
+        "application_terminal": {
+          "description": "The admitted application terminal's argv digest. Its presence lets the console verbs through this grant, and the guest then opens a terminal only for exactly that argv.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ApplicationTerminalBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "drive": {
           "description": "Drive authority copied from the admitted signed plan. It rides inside this host-signed envelope so the guest can enforce the same roots, program identity, byte bounds, and lifetime without trusting request fields.",
           "anyOf": [

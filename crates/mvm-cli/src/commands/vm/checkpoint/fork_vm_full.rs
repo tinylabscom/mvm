@@ -150,8 +150,8 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
 /// The parent may be running: a workload Firecracker carries no NIC (egress
 /// rides per-VM vsock proxies keyed by VM name), so a forked child has no
 /// host network identity to collide with. The snapshot's recorded device
-/// paths — the vsock UDS above all — are remapped onto the child's own state
-/// dir in a private mount namespace before the child VMM starts, and the
+/// paths — the vsock UDS above all — are pointed at the child's own state dir
+/// while the child VMM is still paused, and the
 /// no-NIC device-model guard runs between the child's load and resume, so a
 /// NIC-carrying snapshot can never execute. The only true parent/child
 /// identity collision — an equal VM name — is refused by the shared
@@ -345,6 +345,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: super::parent_network_mode(p.checkpoint, p.store),

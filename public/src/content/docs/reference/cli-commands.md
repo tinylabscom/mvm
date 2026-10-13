@@ -68,7 +68,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `mvmctl machine run --cpus N --memory SIZE`                                                                             | vCPU count the guest sees, and memory (supports 512M, 4G, etc.)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine run --cpu-limit MILLICORES`                                                                             | Cap the workload's share of **host CPU time**, in thousandths of a core (`1500` = 1.5 cores). A different control from `--cpus`, which sets how many vCPUs the guest sees — a workload can hold four vCPUs and be bounded to half a core. Recorded on the signed execution plan and refused when it exceeds the host's `max_cpu_millicores` ceiling                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `mvmctl machine run --grants-file PATH`                                                                                 | Read the workload's grants (CPU, wall clock, egress) from a JSON document. Unknown keys are refused, so a typo is an error rather than a silently dropped cap                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `mvmctl machine run --grants-file PATH`                                                                                 | Read the workload's grants (CPU, wall clock, egress, drive, display input, application terminal) from a JSON document. Unknown keys are refused, so a typo is an error rather than a silently dropped cap                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `mvmctl machine run --caller-commitment HEX`                                                                            | Bind opaque caller data to the admitted execution and its audit trail. `HEX` must encode exactly 32 bytes as 64 lowercase hexadecimal characters. MVM assigns the bytes no meaning; it includes them in the signed plan identity and copies the typed value into every chain-signed plan audit entry. The same option is available on `mvmctl run`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `mvmctl machine run -e KEY=VALUE`                                                                                       | Inject an environment variable (repeatable; gated by `--profile`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine run --volume host:/guest[:mode]`                                                                        | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
@@ -97,7 +97,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine apply <name> --dry-run` | Show what an apply would write without staging anything |
 | `mvmctl machine undo <name>` | Reverse the most recent reviewed apply and chain the undo manifest's committed Merkle root |
 | `mvmctl machine redo <name>` | Re-apply the most recently undone apply and chain the redo manifest's committed Merkle root |
-| `mvmctl machine prompt <name> [PROMPT]` | Send one prompt (or stdin) to the running machine's resident agent — the image's `/etc/mvm/entrypoint` — and print its answer. The plan must grant `agent-prompt`; each prompt is journaled under an agent session (`--session`, default the machine name), recorded encrypted, chain-audited by digest, and captured as a session-bound `vm_full` step checkpoint (`--no-step-checkpoint` skips it) |
+| `mvmctl machine prompt <name> [PROMPT]` | Send one prompt (or stdin) to the running machine's resident agent — the image's `/etc/mvm/entrypoint` — and print its answer. The plan must grant `agent-prompt`; each prompt is journaled under an agent session (`--session`, default the machine name), recorded encrypted, chain-audited by digest, and captured as a session-bound `vm_full` step checkpoint (`--no-step-checkpoint` skips it). A host with no snapshot key gets one before the first step is captured, as `bootstrap` would mint it |
 | `mvmctl machine replay <checkpoint>` | Fork a cursor-bound checkpoint into a fresh VM and re-run its encrypted machine-exec input journal, checkpointing each step |                                                                                     | Output filesystem diff as JSON                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl machine wait <name> --for <component>`                                                                          | Block until a guest readiness component is `Ready`, `Disabled`, or `Failed`. Targets: `control-plane`, `entrypoint`, `warm-pool`, `integrations`, `probes`, `all` (default). Exit codes: `0` ready, `65` (`EX_DATAERR`) failed, `75` (`EX_TEMPFAIL`) timeout. Plan 76 Phase 2.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>`                                                        | Tune the deadline and poll cadence. Defaults: 60s / 250ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -444,7 +444,7 @@ rules and discovery order, and the [policy schema](/reference/policy-schema/).
 | --- | --- |
 | `mvmctl policy show [PROFILE...] [--format toml\|json\|plan] [--project DIR] [--backend KIND]` | Print the merged policy: TOML with its layers, JSON with per-item provenance, or the grants, egress rules, routes and bindings the signed plan would carry. Without `PROFILE`, reads the project's `mvm.toml` `[policy]` table |
 | `mvmctl policy resolve [PROFILE...] [-o FILE] [--project DIR] [--backend KIND]` | Write the resolved manifest `run --plan` accepts |
-| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning, the unenforced `[tools]` section, and secrets the store would not bind |
+| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning and every secret the store would not bind |
 | `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
 | `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
 | `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile NAME\|PATH... \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. A routed host needs method and path for a request-level decision; a tool marked `ask` needs runtime approval and is not pre-authorized |
@@ -586,6 +586,14 @@ never the token value.
 | `mvmctl machine detach <name>`                          | Disconnect whoever is attached to the VM's console; the session keeps running                                                                                                 |
 | `mvmctl machine console <name> --command <cmd>`         | Dev-only one-shot command in the VM (refused for sealed/production VMs)                                                                                                       |
 
+When the machine's signed plan carries an `application_terminal` grant, an
+interactive attach opens that application instead of a shell: the granted
+argv runs as the workload user with the host-provisioned proxy, CA bundle and
+secret placeholders. `--env` and a different argv are refused on the host, and
+the guest agent refuses any argv but the granted one, any variable outside
+that host-provisioned set, and a program path reached through a symlink or
+writable by anyone but root, against the host-signed grant. The grant never opens a terminal on a sealed image.
+
 In an interactive console, press Enter and then `~d` to detach (the shell keeps
 running) or `~.` to end the session. Closing the terminal or losing the
 connection detaches rather than ending the shell. One client is attached at a
@@ -629,27 +637,32 @@ OCI run omits the trailing command and dispatches only the Entrypoint/Cmd sealed
 into the image; Nix-built production guests may also use
 `mvmctl machine run --entrypoint` (no shell).
 
-An unnamed transient run is served from a prepared warm standby, never a cold
-boot: it claims a VM already booted with the same image, vCPUs and memory, which
-is how startup stays inside its 300 ms budget, and it refuses rather than
-silently cold-booting when no standby matches. On Linux the default residency is
-`parked`, which holds no standbys, so set `MVM_RESIDENCY=warm` and prepare one
-for the image you will run — or give the run a `--name`, which boots it cold:
+No setup is needed before a run. An unnamed run claims a standby VM already
+booted from the same image with the same vCPUs and memory when one is ready, and
+cold-boots otherwise. A cold boot is declared on stderr and recorded in the audit
+log as `plan.start_mode`; a claimed standby is held to the 300 ms startup
+ceiling, and a standby that exists but cannot be claimed fails the run with the
+refusal rather than falling back to a cold boot. Each such run
+leaves one standby of its image prepared afterwards, refilled after every claim,
+so the first run of an image is cold and the runs after it are warm. Standbys
+stay within the `standby_memory_mib` cap and are released after 20 idle minutes, after
+which the next run is cold again. `mvmctl pool warm --image <image>` prepares
+one ahead of time, so even the first run is warm, and `MVM_RESIDENCY=cold` turns
+implicit standbys off:
 
 ```sh
-export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
-mvmctl pool warm                         # a standby of the bundled default image
-mvmctl run -- uname -a                   # claims it
-mvmctl run --name scratch -- uname -a    # named: boots cold, no standby needed
+mvmctl run -- uname -a                   # first run: cold boot, leaves a standby
+mvmctl run -- uname -a                   # claims the standby
+mvmctl pool warm --image alpine          # optional: pre-warm an OCI image
 ```
 
-Runs that share a host directory, attach a disk (`--mount`, `--volume`,
-`--output`), allow egress, or boot a signed bundle are never served from the
-pool and always boot cold, named or not.
+A named run, and a run that shares a host directory, attaches a disk
+(`--mount`, `--volume`, `--output`), allows egress, or boots a signed bundle, is
+never served from a standby and always boots cold.
 
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                           |
 | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl run -- <cmd>...`                                            | Claim a prepared standby of the bundled default image (see above), run `<cmd>`, exit                                                                                                                                                                                                                                                                                                  |
+| `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
 | `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
@@ -875,9 +888,7 @@ that stops this way leaves the same host state a `machine stop` does: its
 helper processes are stopped and no pid file is left behind.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
-run but does not make it persistent; it does take the run off the warm pool, so
-a named run boots cold while an unnamed one must claim a prepared standby (see
-[One-shot Run](#one-shot-run-transient-runner)). `-d`/`--detach`, `--up-json`, or the
+run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
 `--volume` host shares work on every run mode. The syntax is
 `HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
@@ -933,7 +944,7 @@ guest, on any tier.
 | `mvmctl machine rm --all --yes`                                                                | Remove every persisted named machine spec                                                                                                                                                                                                                                                                                            |
 | `mvmctl machine rm <name>... --yes --json`                                                     | Print a JSON array deletion summary                                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine exec <name> -- <cmd>...`                                                       | Run a command in an already-started named machine                                                                                                                                                                                                                                                                                    |
-| `mvmctl machine exec <name> --tool TOOL -- <cmd>...`                                           | Run a declared non-interactive command only after the admitted per-VM tool policy and endpoint audit allow its exact argv. The policy must bind `TOOL` to the exact absolute guest executable path passed as `<cmd>`; aliases, relative commands, a missing endpoint, or a missing approval are refused before spawn. |
+| `mvmctl machine exec <name> --tool TOOL -- <cmd>...`                                           | Run a declared non-interactive command only after the admitted per-VM tool policy and endpoint audit allow its exact argv. The policy must bind `TOOL` to the exact absolute guest executable path passed as `<cmd>`; aliases, relative commands, a missing endpoint, or a missing approval are refused before spawn. The same declared command spawned by the workload itself is intercepted in-guest and decided by the same endpoint gate before it runs (see the tool-policy guide). |
 | `mvmctl machine exec <name> -it -- <cmd>...`                                                   | Run a command in an already-started named machine attached to a PTY                                                                                                                                                                                                                                                                  |
 | `mvmctl machine exec <name>`                                                                   | Omit the command to drop into an interactive shell (same as `machine shell`)                                                                                                                                                                                                                                                         |
 | `mvmctl machine shell <name>`                                                                  | Attach an interactive shell/console to an already-started named machine — persistent or transient (a `machine run --name <name>` VM is reachable while it runs)                                                                                                                                                                      |
@@ -1091,22 +1102,16 @@ live remounting inside a running VM:
 
 ### `machine run` lifecycles in practice
 
-A transient run is the default — it boots, runs the command, and tears the VM
-down. Unnamed, it claims a prepared warm standby of the same image and sizing
-and refuses when none is ready (see [One-shot Run](#one-shot-run-transient-runner)),
-so prepare one first:
+A transient run is the default and needs no flags — it boots, runs the command,
+and tears the VM down:
 
 ```bash
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -- echo hi      # prints "hi", VM gone
 ```
 
 A bare `machine run --image alpine -- /bin/sh` is **non-interactive**: it streams
 the command's output but forwards no terminal. For a live shell or any command
-that needs a TTY, add `-it` and pass the foreground argv explicitly. An `-it` run
-claims a standby the same way, so warm `<dev-image>` first or use the named form
-below:
+that needs a TTY, add `-it` and pass the foreground argv explicitly:
 
 ```bash
 mvmctl machine run -it --image <dev-image> -- /bin/sh   # exits with /bin/sh, VM gone
@@ -1116,16 +1121,15 @@ mvmctl machine run -it --image <dev-image> -- htop      # exits with htop, VM go
 For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
 `mvmctl` selects only backends that can keep the guest NIC-less and route
 traffic through the host-side vsock mediation endpoint. On that path the
-injected guest `/init` starts `mvm-egress-client` and the runtime injects proxy
+guest agent starts `mvm-egress-client` and the runtime injects proxy
 env vars pointing at its loopback SOCKS listener automatically. Today that
 means `hvf`; incapable backends are refused rather than silently
 falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
 **not** add ICMP
 support: `ping` is not a valid smoke test for `--allow-host`.
 
-Naming a foreground run does not make it persistent; it gives the transient VM
-a stable identity while it is running, and because a standby cannot take on
-that identity, a named run boots cold and needs no prepared standby:
+Naming a foreground run does not make it persistent; it only gives the transient
+VM a stable identity while it is running:
 
 ```bash
 mvmctl machine run --name debug --image alpine -- echo hi
@@ -1203,7 +1207,10 @@ machine's admitted charge, would exceed the headroom. Both are unset by
 default. The total counts only machines whose supervisor process is actually
 alive, so a VM that crashed without cleanup cannot lock the host out, and it
 counts each machine's configured maximum rather than its current commitment,
-which the memory balloon moves at runtime. Separately, `default_cpu_millicores`
+which the memory balloon moves at runtime. `standby_memory_mib` caps the guest
+RAM held by idle standbys across all images (2048 MiB by default); when a new
+standby would exceed it, the oldest is released first, and standbys are also
+kept within the `host_budget_memory_mib` headroom. Separately, `default_cpu_millicores`
 and `default_wall_clock_secs` supply defaults for dimensions nothing else named.
 There is no host-wide egress default: one would open outbound access for every
 workload that never asked for any. Relative manifest volume host paths
@@ -1636,15 +1643,9 @@ cat ./results/status.txt ./results.manifest.json
 Read-only sized disk mounts require an existing ext4 image. A missing or empty
 read-only image is refused, not created or formatted.
 
-The unnamed runs below claim a standby of the bundled default image, so the
-first two lines prepare one; the template run is named because `pool warm`
-prepares OCI and default images only, and a named run boots cold.
-
 ```bash
-export MVM_RESIDENCY=warm                             # Linux defaults to parked
-mvmctl pool warm                                      # default-image standby
 mvmctl run -- uname -a                                # default image
-mvmctl run --name tpl --manifest minimal -- /bin/true # named template, cold boot
+mvmctl run --manifest minimal -- /bin/true            # named template
 mvmctl run --mount .:/work:ro -- ls /work            # snapshot current dir into an image, RO
 mvmctl run -e DEBUG=1 -- env | grep DEBUG             # env var injection
 mvmctl run --launch-plan ./launch.json                # launch-plan entrypoint
@@ -1756,9 +1757,7 @@ When an image-taking command is invoked without `--flake` or `--manifest`,
 `mvmctl` falls back to a bundled minimal image (busybox + the guest agent).
 This applies to:
 
-- `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`;
-  unnamed, it claims a standby prepared by `mvmctl pool warm` (with
-  `MVM_RESIDENCY=warm`), and `--name` boots it cold instead
+- `mvmctl run -- <cmd>` — boots a fresh transient microVM and runs `<cmd>`
 - `mvmctl machine run` — boots a long-running microVM with the same image
 
 The image is the bundled default — a minimal `mkGuest` rootfs shipped
@@ -1840,14 +1839,16 @@ running microVM.
 | `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
 | `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
+| `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. The spec is read as data; no author code runs |
+| `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
 | `mvmctl pack registry rm ns/name[@version]`               | Compatibility spelling of `pack rm`                                                                                                                               |
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
-| `mvmctl pack registry revocations update --help` | Show the required `--document` signed-feed path and `--bundle` signature-bundle path. Updating verifies the supplied bytes under the operator's configured release identity before advancing the durable cache checkpoint. |
+| `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1860,7 +1861,7 @@ running microVM.
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
-| `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
+| `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
 For a built-image pack, `pull` authenticates its descriptor before fetching the
@@ -1874,30 +1875,29 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-On Linux and other non-HVF hosts, the default residency remains `parked`
-(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
-policy. For a prepared, unnamed launch without extra volumes or allowed egress,
-enable claims explicitly:
+`pool warm` is optional. Unnamed runs already leave one standby of each image
+they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
+of an image is warm without it; `pool warm` makes the first one warm too, or
+holds more than one standby of an image:
 
 ```bash
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
-mvmctl machine run --image alpine -- /bin/true
+mvmctl image pull alpine
+mvmctl pool warm --image alpine          # optional pre-warm
+mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
-Remove any explicit `warm_pool_size=0` configuration override: an explicit
-size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
-capacity and fail rather than silently cold-booting. Named launches and shapes
-with extra volumes (including directory mounts) or allowed egress retain their
-cold path, including when the pool size is zero.
+A launch with no matching standby cold-boots rather than failing. Named launches
+and shapes with extra volumes (including directory mounts) or allowed egress
+always take the cold path. `MVM_RESIDENCY=cold` turns implicit standbys off.
 
-Pack inspection reports `official_status: "not_established"`: verification under the
-current publisher policy does not by itself establish official MVM release
-status. Revocation checks cover an operator-configured signed feed when one is
-configured; a feed is not required by the current registry-pack model. The
-`revocation_scope: "operator_configured_only"` JSON field makes that limit
-explicit. A valid signature proves publisher identity and content integrity,
-not safety.
+Pack inspection reports `official_status: "established"` only for a fully verified
+`mvm/` pack whose signer matches the reserved MVM publisher identity and whose
+independently signed MVM revocation feed is fresh. Other packs report
+`"not_established"`; an operator-configured feed cannot confer official status.
+Built-image packs outside `mvm/` require an operator-configured, independently
+signed fresh feed. Its JSON `revocation_scope` is `mvm_release_identity` for
+verified official packs and `operator_configured_only` otherwise. A signature
+proves identity and integrity, not safety.
 
 The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
 use the signed registry-pack cache and lockfile. Existing `pack registry`

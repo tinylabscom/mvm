@@ -123,10 +123,13 @@ impl VmObservabilityTarget {
 
 /// Read a PID from a PID file, returning `None` if the file is missing or
 /// unreadable. This is best-effort: observability must not fail VM start.
+///
+/// The pid is the file's first field: an endpoint's pid file also records
+/// when the process started, after the pid.
 pub fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(path)
         .ok()
-        .and_then(|s| s.trim().parse().ok())
+        .and_then(|s| s.split_whitespace().next()?.parse().ok())
 }
 
 /// Build an observability target from VM start configuration.
@@ -266,5 +269,15 @@ mod tests {
     fn read_pid_file_returns_none_for_missing_file() {
         let path = std::path::Path::new("/nonexistent/path/pid");
         assert_eq!(read_pid_file(path), None);
+    }
+
+    #[test]
+    fn read_pid_file_reads_the_pid_of_a_file_that_also_records_a_start_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("substitution.pid");
+        std::fs::write(&path, "4242 1791788104").unwrap();
+        assert_eq!(read_pid_file(&path), Some(4242));
+        std::fs::write(&path, "4242\n").unwrap();
+        assert_eq!(read_pid_file(&path), Some(4242));
     }
 }

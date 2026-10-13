@@ -441,7 +441,11 @@ mod tests {
             .expect("spawn a stand-in endpoint");
         let endpoint_pid_file =
             state_dir.join(mvm_vmm::host::network_endpoint_spawn::SUBST_PID_FILE);
-        std::fs::write(&endpoint_pid_file, endpoint.id().to_string()).unwrap();
+        std::fs::write(
+            &endpoint_pid_file,
+            mvm_vmm::host::network_endpoint_spawn::EndpointPid::of_child(endpoint.id()).render(),
+        )
+        .unwrap();
 
         SupervisorTimerInputs {
             plan_json: None,

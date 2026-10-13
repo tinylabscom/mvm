@@ -2502,7 +2502,7 @@ fn test_image_dev_ensure_parses() {
         cli.command,
         Commands::Image(image::Args {
             action: ImageAction::Dev {
-                action: image::dev::DevAction::Ensure,
+                action: image::dev::DevAction::Ensure { warm: false },
             },
         })
     ));
@@ -3834,10 +3834,16 @@ fn test_image_pull_parses() {
         Cli::try_parse_from(["mvmctl", "image", "pull", "docker.io/library/alpine:3.20"]).unwrap();
     match cli.command {
         Commands::Image(image::Args {
-            action: ImageAction::Pull { reference, prod },
+            action:
+                ImageAction::Pull {
+                    reference,
+                    prod,
+                    warm,
+                },
         }) => {
             assert_eq!(reference, "docker.io/library/alpine:3.20");
             assert!(!prod);
+            assert!(!warm, "--warm is opt-in");
         }
         _ => panic!("Expected Image Pull command"),
     }
@@ -3854,6 +3860,7 @@ fn test_image_pull_prod_parses() {
                 ImageAction::Pull {
                     reference: parsed,
                     prod,
+                    ..
                 },
         }) => {
             assert_eq!(parsed, reference);
@@ -3861,6 +3868,35 @@ fn test_image_pull_prod_parses() {
         }
         _ => panic!("Expected Image Pull command"),
     }
+}
+
+#[test]
+fn test_image_pull_warm_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "pull", "alpine", "--warm"]).unwrap();
+    match cli.command {
+        Commands::Image(image::Args {
+            action: ImageAction::Pull {
+                reference, warm, ..
+            },
+        }) => {
+            assert_eq!(reference, "alpine");
+            assert!(warm);
+        }
+        _ => panic!("Expected Image Pull command"),
+    }
+}
+
+#[test]
+fn test_image_dev_ensure_warm_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "dev", "ensure", "--warm"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Dev {
+                action: image::dev::DevAction::Ensure { warm: true },
+            },
+        })
+    ));
 }
 
 #[test]
@@ -5024,6 +5060,48 @@ fn test_pool_warm_parses_optional_count() {
         Commands::Pool(pool::Args {
             action: pool::PoolAction::Warm { count, .. },
         }) => assert_eq!(count, Some(3)),
+        _ => panic!("Expected Pool Warm command"),
+    }
+}
+
+#[test]
+fn test_pool_warm_default_flag_parses_and_conflicts_with_image() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "--default"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action:
+                pool::PoolAction::Warm {
+                    image,
+                    default_image,
+                    ..
+                },
+        }) => {
+            assert!(default_image);
+            assert_eq!(image, None);
+        }
+        _ => panic!("Expected Pool Warm command"),
+    }
+    assert!(
+        Cli::try_parse_from(["mvmctl", "pool", "warm", "--default", "--image", "alpine"]).is_err(),
+        "--default and --image name different images"
+    );
+}
+
+#[test]
+fn test_pool_warm_without_an_image_selects_neither_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action:
+                pool::PoolAction::Warm {
+                    image,
+                    default_image,
+                    ..
+                },
+        }) => {
+            assert_eq!(image, None);
+            assert!(!default_image);
+        }
         _ => panic!("Expected Pool Warm command"),
     }
 }

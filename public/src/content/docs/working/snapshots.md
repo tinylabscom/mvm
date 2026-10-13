@@ -64,8 +64,9 @@ one:
   `0400`, readable by the user that runs `mvmctl`.
 - `~/.mvm/keys/local.key` (under `MVM_HOME` when that is set), the same format.
 
-A host with none of them gets one: `mvmctl bootstrap`, and the first
-`mvmctl pool warm`, write 32 random bytes to `~/.mvm/keys/local.key` at mode
+A host with none of them gets one: `mvmctl bootstrap`, the first
+`mvmctl pool warm`, and a `mvmctl machine prompt` that captures a step
+checkpoint write 32 random bytes to `~/.mvm/keys/local.key` at mode
 `0600` and record the creation in the local audit log. They never replace a
 file that is already there, and a key file another user could read is refused
 rather than rewritten. `mvmctl doctor` reports which source the key came from
@@ -173,7 +174,7 @@ machine or the next state-touching command's reconcile pass removes them.
 
 This affects images built before the reseed helper existed: they cannot be
 resumed from a sealed snapshot until they are rebuilt. A snapshot taken from
-such an image keeps the old `/init` and can never reseed, so after you rebuild,
+such an image keeps the old guest runtime and can never reseed, so after you rebuild,
 boot the machine fresh before you pause it again.
 
 List and remove local sealed snapshots:

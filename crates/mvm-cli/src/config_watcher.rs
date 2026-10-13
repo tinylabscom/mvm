@@ -9,7 +9,7 @@ use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 
 /// Events sent from the background watcher thread.
 pub enum ConfigReloadEvent {
-    Reloaded(MvmConfig),
+    Reloaded(Box<MvmConfig>),
     ParseError(String),
 }
 
@@ -84,7 +84,7 @@ impl ConfigWatcher {
                             }
                             let reload = match std::fs::read_to_string(&watch_file) {
                                 Ok(text) => match toml::from_str::<MvmConfig>(&text) {
-                                    Ok(cfg) => ConfigReloadEvent::Reloaded(cfg),
+                                    Ok(cfg) => ConfigReloadEvent::Reloaded(Box::new(cfg)),
                                     Err(e) => ConfigReloadEvent::ParseError(e.to_string()),
                                 },
                                 Err(e) => ConfigReloadEvent::ParseError(e.to_string()),
@@ -123,7 +123,7 @@ pub fn apply_pending_reloads(cfg: MvmConfig, rx: &mpsc::Receiver<ConfigReloadEve
                     path = %mvm_core::user_config::config_path().display(),
                     "Config reloaded"
                 );
-                current = new_cfg;
+                current = *new_cfg;
             }
             ConfigReloadEvent::ParseError(msg) => {
                 tracing::warn!("Config reload failed: {msg}; keeping previous config");
@@ -231,7 +231,8 @@ mod tests {
             dev_vm_cpus: 12,
             ..MvmConfig::default()
         };
-        tx.send(ConfigReloadEvent::Reloaded(new_cfg)).unwrap();
+        tx.send(ConfigReloadEvent::Reloaded(Box::new(new_cfg)))
+            .unwrap();
 
         cfg = apply_pending_reloads(cfg, &rx);
         assert_eq!(cfg.dev_vm_cpus, 12);

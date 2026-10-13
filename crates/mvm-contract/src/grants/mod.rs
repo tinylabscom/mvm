@@ -12,12 +12,17 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::policy::network_policy::HostPort;
 
+pub mod application_terminal;
 pub mod budget;
 pub mod ceiling;
 pub mod display;
 pub mod projection;
 pub mod subset;
 
+pub use application_terminal::{
+    ApplicationTerminalBinding, ApplicationTerminalGrant, ApplicationTerminalGrantError,
+    ApplicationTerminalRefusal,
+};
 pub use display::{
     DisplayClipboardGrant, DisplayGrantViolation, DisplayInputGrant, DisplayTier,
     HumanCredentialGrant,
@@ -42,6 +47,12 @@ pub struct Grants {
     /// only. Absent means no input path exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_input: Option<DisplayInputGrant>,
+    /// The one application a development terminal may attach to. Absent means
+    /// the console keeps its ordinary development behaviour. Present, every
+    /// terminal must run exactly this argv as the workload user; it never
+    /// opens the console on a sealed image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_terminal: Option<ApplicationTerminalGrant>,
 }
 
 /// CPU bound. The two variants are different units, not different precisions,
@@ -349,6 +360,7 @@ mod tests {
             }),
             drive: Some(drive_grant()),
             display_input: None,
+            application_terminal: None,
         };
         let json = serde_json::to_string(&g).expect("serializes");
         let back: Grants = serde_json::from_str(&json).expect("deserializes");
