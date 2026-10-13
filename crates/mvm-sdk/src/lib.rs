@@ -97,6 +97,11 @@ pub mod decorator;
 #[cfg(feature = "deploy")]
 pub mod deploy;
 
+/// Rust authoring for `mvm.pack-spec/v1`: a fluent builder over the contract's
+/// closed PackSpec that emits the same canonical JSON as every other language
+/// SDK. Resolution, locking and compilation stay in the shared Rust path.
+pub mod pack;
+
 /// Runtime record-mode core — recording shape + lowering. The host
 /// SDKs (Python, TypeScript) build a `RuntimeRecording` from
 /// imperative `Sandbox` calls; this module lowers it into the same

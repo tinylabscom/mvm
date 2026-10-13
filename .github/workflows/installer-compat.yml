@@ -241,6 +241,7 @@ jobs:
       - name: Run the page's install and verify commands
         env:
           INSTALLER_URL: ${{ github.event_name == 'pull_request' && format('file://{0}/install.sh', github.workspace) || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: sh scripts/installer-compat/docs-install-smoke.sh public/src/content/docs/install/linux.md "$INSTALLER_URL"
 
   report:

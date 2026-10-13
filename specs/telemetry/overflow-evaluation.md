@@ -1,16 +1,100 @@
-# Offline overflow-policy evaluation
+# Overflow policy: evaluation and decision
 
 Backing: preview
 Validation: `cargo test -p xtask telemetry_baseline`
 
-This is the **evaluation-only** portion of
-[#3942](https://github.com/tinylabscom/mvm/issues/3942). It does not change
-production `Outbox`, agent capture, loss summaries or defaults.
-**Retain drop-newest.** Policy simulation is useful for retention semantics,
-but cannot satisfy the issue's actual admission-cost or reference-hardware
-fairness criteria.
+[#3942](https://github.com/tinylabscom/mvm/issues/3942) asked which record a
+full capture queue should shed when a noisy producer floods it, and whether
+per-source quotas should protect quiet producers.
 
-## Reproduce
+**Decision: keep drop-newest, and add no per-source quotas.** A full queue
+refuses the arriving record; queued history is never evicted. The decision
+rests on the fixed-storage measurement in
+[the decision measurement](#decision-measurement-fixed-storage-noisy-producer)
+below, not on the metadata models that follow it.
+
+## Decision measurement: fixed storage, noisy producer
+
+`cargo xtask telemetry-baseline --noisy` runs both rules on the production
+storage shape: 128 slots of 32 KiB (the guest agent's capture queue), the
+payload copy under the one `try_lock`, zeroing a slot when its record leaves,
+per-source loss counters as single atomic adds, and a worker that copies
+records out under the lock on the capture session's 25 ms cadence. The
+drop-newest arm is the production admission rule; the drop-oldest arm differs
+only in evicting the head until the arrival fits. A noisy producer offers a
+701-byte log record back to back, a quiet producer offers one every
+millisecond, and each round runs 1 s live, 500 ms with the worker stalled
+(an unreachable host) and 500 ms of recovery. After the final drain the
+harness asserts, per source, `attempted = queued + shed + contended` and
+`queued = evicted + delivered`.
+
+Host: AMD Ryzen 5 3600 (12 logical cores), Linux 6.1, the Firecracker KVM
+reference host, shared with other work (load average 18–28 during the runs);
+Rust 1.98.1, release profile; source
+`b45a7f794650e274592eb4067902bcf6fe2dd64c`. Five runs of
+`telemetry-baseline --noisy --rounds 5 --samples 100000`; raw reports with
+SHA-256 sums are in
+[`baselines/2026-10-12-kvm-ryzen5-3600-noisy/`](baselines/2026-10-12-kvm-ryzen5-3600-noisy/).
+Ranges are across the five runs. Every latency includes one `Instant::now()` pair.
+
+| Measure | Drop-newest | Drop-oldest |
+|---|---|---|
+| Uncontended full-queue offer, 701 B, p50 / p99.9 | 30–70 / 50–90 ns | 50–100 / 80–150 ns |
+| Uncontended full-queue offer, 32 KiB, p50 / p99.9 | 30–70 / 50–110 ns | **990–1,190 / 1,340–2,220 ns** |
+| Noisy producer offer under flood, p50 / p99 | 40 / 50–300 ns | 50–70 / 100–310 ns |
+| Quiet producer offer under flood, p50 / p99 | 110–150 / 650–820 ns | 280–530 / 1,150–1,550 ns |
+| Quiet attempts lost to lock contention | 11.7–18.5% | 32.0–36.2% |
+| Quiet records delivered | 0.1–7.0% per round | 0.1–7.8% per round |
+| Quiet records lost after admission (evicted by the noisy source) | 0 | 5,421–6,387 per run |
+| Age of a record when the worker takes it, live, p99 | 0.1–27 ms (25–27 ms in four runs) | 0.05–0.1 ms |
+| Oldest record in the first drain after a 500 ms outage | 501–526 ms | 0 ms |
+| Most records evicted by one admission | — | 1 |
+
+What the numbers say:
+
+- **Cost.** Drop-oldest must copy the arrival (and zero the victim) on every
+  full-queue offer, which is exactly when a flood is running. For a
+  maximum-size record that is about 1 µs at p50 and 2 µs at p99.9 — over
+  twenty times the drop-newest cost and far outside the committed 63 ns offer
+  budget. Drop-newest's full-queue path is a length check.
+- **Fairness gets worse, not better.** Holding the lock for a copy on every
+  flood offer more than doubles the quiet producer's contention losses, and
+  each noisy admission evicts whatever is oldest — usually someone else's
+  record. Neither rule protects the quiet source (both deliver well under
+  10% of its records under this flood); drop-oldest additionally charges
+  the noisy source's overflow to the quiet source.
+- **Attribution.** Under drop-newest the producer whose record is refused is
+  the one told, at offer time, so per-producer loss counters and sequence
+  gaps stay exact with no per-slot owner metadata. Drop-oldest would have to
+  record the owner of every slot and charge losses to a producer that did
+  not overflow.
+- **Recency is the one thing drop-oldest buys,** and it is bounded. While the
+  worker is draining, a drop-newest record waits at most one drain interval
+  (about 25 ms at p99) — invisible at UI scale. After an outage, drop-newest first
+  delivers the 128 records queued when the outage began; the session sends
+  them in two capped turns and is back to live records within one drain
+  interval of reconnecting. The staleness is one queue's worth, once, and it
+  is marked by the sequence gap and loss summary that follow it.
+
+Per-source quotas were evaluated with the metadata models below: a
+reservation in the shared queue strands unused capacity and does nothing for
+lock contention, which is the larger quiet-source loss in the measurement
+above; a queue per source changes the worker's scheduling contract and was
+not measured. Neither is adopted. Quiet-source starvation under a flood
+remains the documented deficiency recorded in [the baselines](baselines.md),
+made visible to consumers by per-producer loss summaries rather than hidden.
+
+The rule a consumer can rely on is recorded in the
+[studio data contract](studio-contract.md#semantics-the-ui-must-respect).
+
+## Metadata models (earlier evaluation)
+
+The rest of this document is the earlier, metadata-only evaluation. It
+changed no production behavior and established neither a production cost nor
+compliance with the offer budget; the measurement above supersedes it for
+the decision.
+
+### Reproduce
 
 From this checkout in Bash:
 

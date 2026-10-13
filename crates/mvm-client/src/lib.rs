@@ -67,6 +67,7 @@ pub mod local;
 pub mod manifest;
 pub mod notices;
 pub mod oci_bundle;
+pub mod pack_scenario;
 pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
@@ -74,6 +75,7 @@ pub mod registration;
 pub mod replay;
 pub mod secret;
 pub mod snapshot;
+pub mod standby;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;

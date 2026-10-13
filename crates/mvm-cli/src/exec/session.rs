@@ -25,6 +25,7 @@ pub fn dispatch_in_session(
     let req = ExecRequest {
         name: None,
         warm_pool_size: 0,
+        standby_refill: None,
         image: ImageSource::Template(String::new()),
         cpus: 0,
         memory_mib: 0,

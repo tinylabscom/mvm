@@ -335,7 +335,7 @@ pub(crate) fn token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.+".contains(&b))
 }
 
-fn release_version(value: &str) -> bool {
+pub(crate) fn release_version(value: &str) -> bool {
     if value.len() > 128 {
         return false;
     }
@@ -373,7 +373,7 @@ fn version_identifier(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-fn relative_path(value: &str, allow_root: bool) -> Result<(), PackSpecError> {
+pub(crate) fn relative_path(value: &str, allow_root: bool) -> Result<(), PackSpecError> {
     if allow_root && value == "." {
         return Ok(());
     }

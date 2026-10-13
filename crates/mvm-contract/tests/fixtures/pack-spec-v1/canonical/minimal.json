@@ -1,0 +1,1 @@
+{"copy":[{"destination":"/app/hello.txt","source":"hello.txt"}],"dependencies":[],"entrypoint":["cat","/app/hello.txt"],"identity":{"name":"acme/hello","version":"1.0.0"},"packages":[{"name":"busybox","scope":"runtime"}],"resources":{"cpu_cores":1,"memory_mb":128},"schema":"mvm.pack-spec/v1","source":{"kind":"local","path":"."},"target":"aarch64-linux"}

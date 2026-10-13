@@ -307,17 +307,56 @@ user (mode `0600` or stricter), and its directory must be private (mode `0700`
 or stricter). When this file exists, pull, installed-pack verification, and host
 admission require a fresh signed feed in the private revocation cache and
 reject a revoked signer or manifest digest. A missing, expired, corrupt, or
-rolled-back feed fails closed. Built-image packs require this independently
-anchored trust and a fresh feed at pull and every installed-pack reopen;
-removing the trust file refuses them. Policy-only and source-image packs retain
+rolled-back feed fails closed. Built-image packs outside `mvm/` require this independently
+anchored operator trust and a fresh feed at pull and every installed-pack reopen.
+Removing the operator trust file refuses those packs. Legacy policy-only and source-image packs retain
 the legacy publisher-only behavior when no trust file is configured. After
 obtaining the signed JSON document and its
 signature bundle through an operator-controlled channel, run
 `mvmctl pack registry revocations update --document ./revocations.json
 --bundle ./revocations.sigstore.json`. The command verifies the exact
 document bytes under `trust.toml` before advancing the durable checkpoint.
-There is no built-in revocation identity or automatic feed fetch yet. This
-operator path does not confer official status on a pack.
+This operator path does not confer official status on a pack.
+
+Every `mvm/` pack instead requires a fresh feed signed by the separate,
+built-in MVM release identity
+`https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
+under the GitHub OIDC issuer. Download
+`revocations.json` and
+`revocations.sigstore.json` from the `tinylabscom/mvm-packs` repository's
+`registry-pack-revocations` release, then run
+`mvmctl pack registry revocations update --official --document ./revocations.json --bundle ./revocations.sigstore.json`.
+The CLI verifies the exact document bytes against the built-in identity and
+advances a private, rollback-resistant checkpoint. It refuses a missing,
+expired, corrupt, revoked or rolled-back feed at pull and every subsequent
+installed-pack open, including execution. Feed retrieval is manual in this
+release; downloading the files does not establish trust until the update
+command succeeds. The verifier permits an official feed validity
+interval of at most 30 days, but always rejects it at its signed `not_after`;
+the operator-configured feed maximum remains 48 hours. If publication or
+retrieval fails, official packs stop working when that cached feed expires. A
+release-identity change requires an explicit client trust update; an operator
+file cannot replace this root. The rotation contract requires a client that
+trusts both exact identities and at least 14 days of overlapping publication
+of the same feed document and sequence with a separately verifiable bundle
+from each identity, annually and on compromise. This dual-signed publication
+is not yet available; do not
+retire the current identity on the assumption that clients can verify a new
+one.
+The two current release assets are replaced separately. If publication stops
+between uploads, clients reject the mismatched pair. Recovery must authenticate
+the immutable sequence history before restoring the current assets.
+
+The dedicated feed starts at sequence 1 rather than inheriting the
+publisher-signed `packs/` feed. Complete the cutover in this order: merge the
+dedicated producer, explicitly bootstrap and verify its first signed feed,
+release a client that trusts the new identity, then retire the legacy producer
+in a separate reviewed change. Until the matching client release is available,
+keep the legacy producer running for existing clients, which reject the new
+identity and fail closed when their cached legacy feed expires. If the two
+producers cannot overlap through the client rollout, treat the resulting
+fail-closed outage as an explicit release decision; never disable revocation
+checks or import one feed in place of the other.
 
 `pull` downloads the manifest and bundle, verifies the signature against the
 publisher trust policy, then downloads and checks every declared file against the
@@ -387,9 +426,15 @@ https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/head
 
 under the issuer `https://token.actions.githubusercontent.com`. The former
 `mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
-UTC, after which its bundles fail under built-in trust. There is no default
-trust for `mvm/` or community namespaces. To make your own decision, write
-`$MVM_HOME/registry/publishers.toml`. It replaces the default wholesale. This
+UTC, after which its bundles fail under built-in trust. The `mvm/` namespace
+is reserved to the exact current workflow identity. An operator policy may
+exclude `mvm`, but its wildcard or explicit `mvm` entry cannot assign a
+different identity. Official status requires both full pack verification and
+the independently signed fresh MVM revocation feed. A signature proves
+identity and integrity, not safety. There is no
+default trust for community namespaces. To configure other namespaces, write
+`$MVM_HOME/registry/publishers.toml`. It replaces the default for those
+namespaces. This
 one keeps the former workflow for `runtime` packs only:
 
 ```toml
@@ -469,6 +514,49 @@ The index is a small JSON document, and unknown fields in it are refused:
   ]
 }
 ```
+
+## Optional scenarios
+
+A scenario is a graded task that travels beside a published environment. It
+is never required to run a pack, and it is never a second runnable archive:
+the document names the environment by the SHA-256 of its `.mvmpkg` and carries
+no kernel, filesystem or image of its own.
+
+```text
+scenario/
+├── scenario.json   mvm.pack-scenario/v1
+├── public/         initial files staged into every fresh run
+└── private/        expected answers and verifier inputs
+```
+
+`scenario.json` binds `environment.bundle_sha256`, the instructions handed to
+the workload, the initial files to stage, the workspace paths to collect after
+the run, the limits (`wall_clock_secs`, `max_output_bytes`,
+`max_output_files`) and the checks:
+
+- `file_exists`: a collected regular file is present.
+- `file_matches`: a collected file is byte-identical to a file in `private/`.
+- `json_matches`: the value at an RFC 6901 pointer in a collected JSON file
+  equals a JSON document in `private/`.
+- `command`: literal argv run in a separate verifier instance of the same
+  environment, which sees the collected outputs and `private/`, and must exit
+  with the declared code.
+
+A check may only read a path the scenario collects, and every path is relative
+and free of `..`. The host refuses to run a scenario against any archive but
+the one it names, including a rebuild of the same version. Each run starts
+from a workspace created empty for that run and deleted before the next.
+Staging and collection never follow a symbolic link or open a FIFO or device,
+and are bounded while they read: collection stops at the byte limit and at
+`max_output_files` entries (directories count), staging at the schema's
+ceilings, and both at 32 levels of nesting, failing that run rather than
+truncating. Every command check of a run shares one wall clock, and a failure
+reason is cut to 1 KiB. `private/` is never staged
+into the workload's instance, and a verifier starts only after that instance
+is gone. Reports name what differed, never the expected value.
+
+The runner lives in `mvm_client::pack_scenario`. A scenario publishes as its
+own document and asset trees; it is not signed into the environment archive.
 
 ## Limits
 

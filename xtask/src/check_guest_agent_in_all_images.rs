@@ -1,110 +1,282 @@
-//! `xtask check-guest-agent-in-all-images`
+//! Static tripwire for the universal-agent ownership boundary.
 //!
-//! The universal-agent invariant. Every
-//! bootable mvm image must fork `mvm-guest-agent` in its launch path, so
-//! the *same* agent runs in every VM type (workload, dev, builder). This
-//! gate is the tripwire: if a launcher's agent-fork is deleted, the
-//! corresponding marker vanishes and CI fails here.
-//!
-//! There are two distinct launch mechanisms:
-//!   1. **mkGuest `/init`** (`nix/lib/mk-guest.nix`) — the workload and
-//!      interactive images. Forks the agent via `setpriv … -- "$MVM_AGENT_BIN"`.
-//!   2. **`mvm-host-vm-init`** — PID 1 of the libkrun builder VM. Forks
-//!      the agent via `fork_guest_agent()`.
-//!
-//! Source-grep, not a build: the launch paths are a Nix shell script and
-//! a `cfg(linux)` Rust binary, neither of which this gate can execute on
-//! a contributor host. Same shape as `check-claim-catalog` (witness must
-//! exist) and `check-guest-agent-runtime-free`.
+//! Linux bases and application root filesystems do not launch an mvm runtime.
+//! Workload/dev boots use the CLI's verified runtime agent as initramfs PID 1;
+//! builder PID 1 launches the agent from that runtime's overlay. Source wiring
+//! is not boot evidence; completeness and privilege tests remain separate.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
 
-/// `(image launch path, file relative to workspace, marker proving the
-/// agent is forked there)`. The marker is chosen to be specific to the
-/// fork mechanism — removing the fork removes the marker.
-const AGENT_LAUNCHERS: &[(&str, &str, &str)] = &[
-    // mkGuest's /init resolves the agent into `$MVM_AGENT_BIN` and execs
-    // it under setpriv; the var exists only in the agent-fork block.
-    (
-        "workload + interactive microVM (mkGuest /init)",
-        "nix/lib/mk-guest.nix",
-        "MVM_AGENT_BIN",
-    ),
-    // The builder VM's PID 1 forks the agent via this fn.
-    (
-        "builder VM PID 1 (mvm-host-vm-init)",
-        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
-        "fork_guest_agent",
-    ),
-];
-
-pub fn run(workspace: &Path) -> Result<()> {
-    let mut missing: Vec<String> = Vec::new();
-
-    for (desc, rel, marker) in AGENT_LAUNCHERS {
-        let path = workspace.join(rel);
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading agent launcher {rel} ({desc})"))?;
-        if !launcher_forks_agent(&content, marker) {
-            missing.push(format!("{desc} — `{rel}` no longer contains `{marker}`"));
-        }
-    }
-
-    if !missing.is_empty() {
-        bail!(
-            "check-guest-agent-in-all-images: a bootable image's launch path no longer forks \
-             mvm-guest-agent (ADR-022 §6 universal-agent invariant):\n  - {}\n\
-             Every VM type (workload, dev, builder) must run the agent — restore the fork or \
-             update this gate's marker if the launch mechanism was deliberately rewritten.",
-            missing.join("\n  - ")
-        );
-    }
-
-    eprintln!(
-        "check-guest-agent-in-all-images: clean ({} launch paths fork mvm-guest-agent)",
-        AGENT_LAUNCHERS.len()
-    );
-    Ok(())
+struct Boundary {
+    path: &'static str,
+    required: &'static [&'static str],
+    forbidden: &'static [&'static str],
 }
 
-/// A launcher forks the agent iff its source carries the fork marker.
-fn launcher_forks_agent(content: &str, marker: &str) -> bool {
-    content.contains(marker)
+const BOUNDARIES: &[Boundary] = &[
+    Boundary {
+        path: "crates/mvm-core/src/image_set/validate.rs",
+        required: &[
+            "if !legacy",
+            ".find(|member| member.role.is_retired())",
+            "ImageSetError::RetiredRuntimeInLinuxSet",
+            "super::BuilderBootAbi::NO_MVM_BINARY",
+        ],
+        forbidden: &[],
+    },
+    Boundary {
+        path: "nix/lib/mk-guest.nix",
+        required: &[
+            "initSystem = \"initramfs-agent\";",
+            "overlayAware = true;",
+            "runtimeLean = true;",
+            "cp ${baseImageContractFile} \"$out/etc/mvm/base-image-contract\"",
+        ],
+        forbidden: &[
+            "MVM_AGENT_BIN",
+            "$out/init",
+            "${guestAgentPkg}/bin/mvm-guest-agent",
+            "${guestAgentPkg}/bin/mvm-guest-netinit",
+            "${guestAgentPkg}/bin/mvm-egress-client",
+        ],
+    },
+    Boundary {
+        path: "crates/mvm-build/src/runtime_pieces.rs",
+        required: &[
+            "runtime: &GuestRuntime",
+            "crate::guest_runtime::install_release_guest_runtime(cache_root, archive, version, arch)?",
+            "crate::runtime_overlay::build_runtime_overlay_from_guest_runtime(",
+            "crate::initramfs::build_initramfs_from_guest_runtime(",
+            "pack_sdk_sidecars(cache_root, version, arch, runtime)?",
+        ],
+        forbidden: &["resolve_image_set_initramfs("],
+    },
+    Boundary {
+        path: "crates/mvm-build/src/initramfs.rs",
+        required: &[
+            "runtime: &crate::guest_runtime::GuestRuntime",
+            "format!(\"{arch}/initramfs/mvm-guest-agent\")",
+            "runtime.manifest.files.get(&member)",
+            "sha256_hex(&agent_bytes) != *expected_digest",
+            "assemble_initramfs_artifact(&agent_bytes, version, staging.path())?",
+            "CpioEntry::file(\"./init\", 0o755, agent_bytes.to_vec())",
+        ],
+        forbidden: &[],
+    },
+    Boundary {
+        path: "crates/mvm-build/src/guest_runtime.rs",
+        required: &[
+            "guest_agent_build::RUNTIME_OVERLAY_SEALED_BINS",
+            ".chain(guest_agent_build::RUNTIME_OVERLAY_ADDON_BINS)",
+            "required.insert(GuestBinsMember::InitramfsAgent { arch }.path());",
+            "GuestRuntimeError::MissingRequired",
+        ],
+        forbidden: &[],
+    },
+    Boundary {
+        path: "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        required: &[
+            "fork_guest_agent();",
+            "fn fork_guest_agent()",
+            "crate::resolve_agent_binary(is_executable)",
+            "crate::agent_spawn_command(&setpriv, &agent_bin, agent_uid)",
+            "let candidates: &[&str] = &AGENT_BIN_CANDIDATES[..1];",
+            ".arg(format!(\"--reuid={agent_uid}\"))",
+            ".arg(format!(\"--regid={agent_uid}\"))",
+            ".arg(\"--clear-groups\")",
+            ".arg(\"--no-new-privs\")",
+        ],
+        forbidden: &[],
+    },
+    Boundary {
+        path: "crates/mvm-agentd/src/bin/mvm-guest-agent.rs",
+        required: &[
+            "init::early_setup();",
+            "bind_listener(cfg.port)",
+            "init::apply_activation(&env, boot_state)",
+        ],
+        forbidden: &[],
+    },
+];
+
+fn production_source(boundary: &Boundary, content: &str) -> String {
+    use crate::rust_source::{CommentSyntax, blank_comments};
+    if boundary.path.ends_with(".rs") {
+        let blanked = crate::rust_source::blank_comments_and_strings(content);
+        let ranges = crate::rust_source::cfg_test_item_ranges(&blanked);
+        blank_comments(
+            &crate::rust_source::blank_ranges(content, &ranges),
+            CommentSyntax::Rust,
+        )
+    } else {
+        blank_comments(content, CommentSyntax::NixShell)
+    }
+}
+
+fn violations(boundary: &Boundary, content: &str) -> Vec<String> {
+    let source = production_source(boundary, content);
+    let mut errors = Vec::new();
+    for marker in boundary.required {
+        if !source.contains(marker) {
+            errors.push(format!(
+                "{} missing runtime witness `{marker}`",
+                boundary.path
+            ));
+        }
+    }
+    for marker in boundary.forbidden {
+        if source.contains(marker) {
+            errors.push(format!(
+                "{} couples base/application to runtime: `{marker}`",
+                boundary.path
+            ));
+        }
+    }
+    errors
+}
+
+pub fn run(workspace: &Path) -> Result<()> {
+    let mut errors = Vec::new();
+    for boundary in BOUNDARIES {
+        let content = std::fs::read_to_string(workspace.join(boundary.path))
+            .with_context(|| format!("reading universal-agent boundary {}", boundary.path))?;
+        errors.extend(violations(boundary, &content));
+    }
+    if !errors.is_empty() {
+        bail!(
+            "check-guest-agent-in-all-images: universal-agent ownership drift:\n  - {}\n\
+             Bases carry Linux/workload files; the CLI-selected runtime supplies the \
+             universal initramfs agent and builder overlay agent. Restore that wiring, \
+             not a baked runtime or shell /init.",
+            errors.join("\n  - ")
+        );
+    }
+    eprintln!(
+        "check-guest-agent-in-all-images: clean ({} split-runtime boundaries)",
+        BOUNDARIES.len()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn present_marker_passes() {
-        let src = r#"MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
-            setpriv --reuid=990 -- "$MVM_AGENT_BIN" &"#;
-        assert!(launcher_forks_agent(src, "MVM_AGENT_BIN"));
+    fn fixture(boundary: &Boundary) -> String {
+        boundary.required.join("\n")
     }
 
     #[test]
-    fn missing_marker_is_flagged() {
-        // A launcher that boots straight to the entrypoint, no agent fork.
-        let src = "exec /usr/bin/myapp";
-        assert!(!launcher_forks_agent(src, "fork_guest_agent"));
-    }
-
-    #[test]
-    fn every_declared_launcher_has_a_distinct_marker() {
-        // Guards the table itself: no copy-paste duplicate (file, marker).
-        let mut seen = std::collections::HashSet::new();
-        for (_, rel, marker) in AGENT_LAUNCHERS {
-            assert!(
-                seen.insert((*rel, *marker)),
-                "duplicate launcher ({rel}, {marker})"
-            );
+    fn proper_split_passes_without_shell_init_or_baked_agent() {
+        for boundary in BOUNDARIES {
+            assert!(violations(boundary, &fixture(boundary)).is_empty());
         }
-        assert_eq!(
-            AGENT_LAUNCHERS.len(),
-            2,
-            "workload/interactive + builder VM"
-        );
+    }
+
+    #[test]
+    fn each_runtime_witness_is_required() {
+        for boundary in BOUNDARIES {
+            for marker in boundary.required {
+                let changed = fixture(boundary).replace(marker, "");
+                assert!(
+                    !violations(boundary, &changed).is_empty(),
+                    "{}: {marker}",
+                    boundary.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accidental_base_runtime_coupling_fails() {
+        for boundary in BOUNDARIES {
+            for marker in boundary.forbidden {
+                let changed = format!("{}\n{marker}", fixture(boundary));
+                assert!(
+                    !violations(boundary, &changed).is_empty(),
+                    "{}: {marker}",
+                    boundary.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn comments_and_tests_cannot_replace_production_wiring() {
+        for boundary in BOUNDARIES {
+            let markers = fixture(boundary);
+            let prefix = if boundary.path.ends_with(".rs") {
+                "//"
+            } else {
+                "#"
+            };
+            let comments = markers
+                .lines()
+                .map(|line| format!("{prefix} {line}\n"))
+                .collect::<String>();
+            assert!(!violations(boundary, &comments).is_empty());
+            if boundary.path.ends_with(".rs") {
+                let tests = format!("#[cfg(test)]\nmod tests {{\n{markers}\n}}");
+                assert!(!violations(boundary, &tests).is_empty());
+            }
+            for marker in boundary.required {
+                let missing = markers.replace(marker, "");
+                let comments = [
+                    format!("/* {marker} */"),
+                    format!("/* outer /* {marker} */ still a comment */"),
+                    format!("unrelated(); {prefix} {marker}"),
+                ];
+                for comment in comments {
+                    assert!(
+                        !violations(boundary, &format!("{missing}\n{comment}")).is_empty(),
+                        "{} comment supplied witness {marker}",
+                        boundary.path
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn literal_arguments_survive_comment_blanking() {
+        for boundary in BOUNDARIES {
+            assert!(violations(boundary, &fixture(boundary)).is_empty());
+            for marker in boundary.forbidden {
+                let quoted = format!("{}\n\"# {marker}\"", fixture(boundary));
+                assert!(!violations(boundary, &quoted).is_empty());
+                let commented = format!("{}\n/* {marker} */", fixture(boundary));
+                assert!(violations(boundary, &commented).is_empty());
+            }
+        }
+        let boundary = &BOUNDARIES[1];
+        let source = "value = \"# not a comment\"; # actual comment\n";
+        assert!(production_source(boundary, source).contains("\"# not a comment\""));
+        assert!(!production_source(boundary, source).contains("actual comment"));
+    }
+
+    #[test]
+    fn nix_delimiters_inside_shell_comments_cannot_supply_missing_witnesses() {
+        let boundary = &BOUNDARIES[1];
+        let missing = fixture(boundary).replace("runtimeLean = true;", "");
+        for script in [
+            "script = ''# a shell comment'';",
+            "script = ''# escaped ''${unfinished'';",
+            "script = ''# escaped ''${unfinished\n'';",
+            "script = ''# ${\"interpolation\"} shell comment'';",
+        ] {
+            let source = format!("{missing}\n{script}\n/* runtimeLean = true; */");
+            assert!(
+                !violations(boundary, &source).is_empty(),
+                "comment supplied missing runtimeLean witness: {script}"
+            );
+            let live = format!("{source}\nruntimeLean = true;");
+            assert!(violations(boundary, &live).is_empty(), "{script}");
+        }
+    }
+
+    #[test]
+    fn current_workspace_has_the_split_runtime_boundary() {
+        run(Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap()).unwrap();
     }
 }

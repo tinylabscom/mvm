@@ -25,6 +25,9 @@ pub struct FirecrackerIO {
     /// already-running Firecracker, and on a same-identity restore, which
     /// scopes the VMM by its directory instead.
     restore_bound: Option<RestoreBound>,
+    /// A forked child's own devices, which its snapshot load is pointed at in
+    /// place of the parent's. `None` on every handle but a fork's.
+    fork_devices: Option<super::ForkDevices>,
 }
 
 /// The admitted child a restore-launched Firecracker is scoped as, and the CPU
@@ -44,7 +47,15 @@ impl FirecrackerIO {
         Self {
             socket_path,
             restore_bound: None,
+            fork_devices: None,
         }
+    }
+
+    /// Point this handle's fork load at the child's own devices.
+    #[must_use]
+    pub fn forking_onto(mut self, devices: super::ForkDevices) -> Self {
+        self.fork_devices = Some(devices);
+        self
     }
 
     /// Carry the identity and CPU bound the restored child's plan was admitted
@@ -103,15 +114,20 @@ impl FirecrackerIO {
 
     /// Load a sealed snapshot into a fresh VMM, leaving vCPUs paused.
     ///
-    /// `clean_vsock` selects the launcher: a plain instance restore starts a
-    /// VMM that re-creates the host vsock socket, while a fork restore keeps
-    /// the paths its private mount namespace already remapped.
-    fn load_snapshot_inner(&self, dir: &Path, clean_vsock: bool) -> Result<()> {
+    /// `fork` carries a forked child's own devices: the load binds the
+    /// child's vsock socket instead of the recorded one, and every drive the
+    /// parent owned is reopened from the child's copy before this returns.
+    fn load_snapshot_inner(&self, dir: &Path, fork: Option<&super::ForkDevices>) -> Result<()> {
         let vm_dir = self
             .socket_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Firecracker socket path has no parent directory"))?;
         let socket_str = self.socket_path.to_string_lossy();
+        if let Some(devices) = fork {
+            devices
+                .ensure_recorded_drives_exist()
+                .context("preparing the parent's recorded drive paths for a fork load")?;
+        }
 
         // Firecracker refuses `/snapshot/load` on a VMM that has already
         // started a microVM. If a previous pause left the process alive, stop
@@ -124,7 +140,6 @@ impl FirecrackerIO {
         super::start_vm_firecracker_scoped(
             &vm_dir.to_string_lossy(),
             &socket_str,
-            clean_vsock,
             &self.restore_scope_prefix(vm_dir, snapshot_guest_memory_mib(dir)),
         )
         .with_context(|| "starting fresh Firecracker for snapshot restore")?;
@@ -132,16 +147,20 @@ impl FirecrackerIO {
         // `resume_vm: false` — vCPUs stay paused so the device-model guard in
         // `verify_and_resume_from_dir` can inspect `GET /vm/config` before
         // anything executes.
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "snapshot_path": format!("{}/{}", dir.display(), VMSTATE_FILENAME),
             "mem_backend": {
                 "backend_type": "File",
                 "backend_path": format!("{}/{}", dir.display(), MEM_FILENAME),
             },
             "resume_vm": false,
-        })
-        .to_string();
-        if let Err(e) = super::api_put_socket(&socket_str, "/snapshot/load", &body) {
+        });
+        if let (Some(devices), Some(fields)) = (fork, body.as_object_mut())
+            && let serde_json::Value::Object(overrides) = devices.load_overrides()
+        {
+            fields.extend(overrides);
+        }
+        if let Err(e) = super::api_put_socket(&socket_str, "/snapshot/load", &body.to_string()) {
             let state_file = dir.join(VMSTATE_FILENAME);
             // Firecracker has already refused before any guest code ran; this
             // only names the refusal when the state itself could not be decoded.
@@ -151,6 +170,26 @@ impl FirecrackerIO {
                 return Err(e.context(undecodable));
             }
             return Err(e).context("PUT /snapshot/load");
+        }
+        if let Some(devices) = fork {
+            self.retarget_fork_drives(devices)?;
+        }
+        Ok(())
+    }
+
+    /// Reopen every drive the parent owned from the child's copy. The vCPUs
+    /// are still paused, so the child has done no I/O through the parent's.
+    fn retarget_fork_drives(&self, devices: &super::ForkDevices) -> Result<()> {
+        let config = super::call(&self.socket_path, "GET", "/vm/config", None)
+            .context("GET /vm/config to find a fork's restored drives")?;
+        for (drive_id, body) in devices.drive_patches(&config)? {
+            super::call(
+                &self.socket_path,
+                "PATCH",
+                &format!("/drives/{drive_id}"),
+                Some(&body),
+            )
+            .with_context(|| format!("pointing forked drive '{drive_id}' at the child's copy"))?;
         }
         Ok(())
     }
@@ -197,11 +236,15 @@ impl SnapshotIO for FirecrackerIO {
     }
 
     fn load_snapshot_paused(&self, dir: &Path) -> Result<()> {
-        self.load_snapshot_inner(dir, true)
+        self.load_snapshot_inner(dir, None)
     }
 
     fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()> {
-        self.load_snapshot_inner(dir, false)
+        let devices = self
+            .fork_devices
+            .as_ref()
+            .context("a fork load needs the child's own devices to point the snapshot at")?;
+        self.load_snapshot_inner(dir, Some(devices))
     }
 
     fn restored_network_interface_count(&self) -> Result<usize> {

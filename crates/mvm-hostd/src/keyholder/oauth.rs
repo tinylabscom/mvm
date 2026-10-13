@@ -1088,6 +1088,40 @@ mod tests {
             .collect()
     }
 
+    /// Drive `refresh_loop` until `settled` holds, then a little longer, then
+    /// drop it.
+    ///
+    /// After a successful exchange the loop re-arms and sleeps toward a
+    /// deadline about an hour away, so it never returns on its own. Waiting
+    /// for the state the test asserts on, instead of a fixed window, keeps the
+    /// test as long as the exchange takes. The grace window after it is what
+    /// still catches a loop that exchanges again at once instead of re-arming:
+    /// that second request would land within milliseconds. A loop that ends
+    /// on its own (a refusal, exhausted retries) ends this too, and the
+    /// caller's assertions report what it recorded.
+    async fn drive_refresh_loop_until(
+        refresh: impl std::future::Future<Output = ()>,
+        settled: impl Fn() -> bool,
+    ) {
+        const POLL: StdDuration = StdDuration::from_millis(5);
+        const BACK_TO_BACK_GRACE: StdDuration = StdDuration::from_millis(250);
+        const CEILING: StdDuration = StdDuration::from_secs(30);
+        let watch = async {
+            while !settled() {
+                tokio::time::sleep(POLL).await;
+            }
+            tokio::time::sleep(BACK_TO_BACK_GRACE).await;
+        };
+        tokio::time::timeout(CEILING, async {
+            tokio::select! {
+                () = refresh => {}
+                () = watch => {}
+            }
+        })
+        .await
+        .expect("the refresh loop neither ended nor reached the asserted state");
+    }
+
     /// A loop over `fixture` that reports to `recorder` and retries fast.
     fn audited_driver(fixture: &StoreFixture, recorder: Arc<Recorder>) -> OAuthRefreshDriver {
         OAuthRefreshDriver::new(resolver_over(fixture), vec![])
@@ -1828,12 +1862,12 @@ mod tests {
             &token_url,
         );
         let (recorder, signer) = capturing_recorder();
-        let _ = tokio::time::timeout(
-            StdDuration::from_secs(5),
+        drive_refresh_loop_until(
             refresh_loop(
                 audited_driver(&fixture, recorder).settings,
                 binding_for(&token_url),
             ),
+            || !refresh_outcomes(&signer).is_empty(),
         )
         .await;
         assert_eq!(refresh_outcomes(&signer), ["refreshed"]);
@@ -1944,12 +1978,9 @@ mod tests {
         );
         let (recorder, signer) = capturing_recorder();
         let driver = audited_driver(&fixture, recorder);
-        // The loop re-arms after the exchange and sleeps toward the new
-        // deadline; the timeout cancels that sleep — the assertions below
-        // are what matters.
-        let _ = tokio::time::timeout(
-            StdDuration::from_secs(5),
+        drive_refresh_loop_until(
             refresh_loop(driver.settings, binding_for(&token_url)),
+            || !refresh_outcomes(&signer).is_empty(),
         )
         .await;
         assert_eq!(
@@ -1991,14 +2022,12 @@ mod tests {
         assert!(matches!(err, ResolveError::OAuthRefreshRequired { .. }));
 
         let (recorder, signer) = capturing_recorder();
-        // The loop re-arms and sleeps toward the new deadline; the timeout
-        // cancels that sleep.
-        let _ = tokio::time::timeout(
-            StdDuration::from_secs(5),
+        drive_refresh_loop_until(
             refresh_loop(
                 audited_driver(&fixture, recorder).settings,
                 binding_for(&token_url),
             ),
+            || !refresh_outcomes(&signer).is_empty(),
         )
         .await;
 
@@ -2117,9 +2146,9 @@ mod tests {
         );
         let driver = OAuthRefreshDriver::new(resolver_over(&fixture), vec![])
             .with_retry_policy(StdDuration::from_millis(10), 3);
-        let _ = tokio::time::timeout(
-            StdDuration::from_secs(5),
+        drive_refresh_loop_until(
             refresh_loop(driver.settings, binding_for(&token_url)),
+            || stored_token_set(&fixture).access_token.expose_secret() == "fresh-access-token",
         )
         .await;
         assert_eq!(

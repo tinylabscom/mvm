@@ -53,19 +53,38 @@ fn prompt_agent_machines_are_removed(_world: &mut CliWorld) {
     clear_stale_prompt_sessions(journey_home()).expect("remove completed prompt sessions");
 }
 
+/// Both streams of the last run, as one string.
+fn combined_output(world: &CliWorld) -> String {
+    let output = world.last_output();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
 /// Status lines go to whichever stream the CLI's chrome uses, so this reads
 /// both; the agent's own answers are asserted on stdout with
 /// `the output contains`.
 #[then(expr = "the prompt agent reports {string}")]
 fn prompt_agent_reports(world: &mut CliWorld, needle: String) {
-    let output = world.last_output();
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let combined = combined_output(world);
     assert!(
         combined.contains(needle.as_str()),
         "expected {needle:?} in the output:\n{combined}"
+    );
+}
+
+/// A prompt whose step checkpoint failed still exits 0, because the agent
+/// answered; the warning is the only sign the session can no longer be
+/// replayed past it. Asserting its absence at the prompt names the failure
+/// and its reason here, instead of at the replay that cannot find a resume
+/// point.
+#[then(expr = "the prompt agent does not report {string}")]
+fn prompt_agent_does_not_report(world: &mut CliWorld, needle: String) {
+    let combined = combined_output(world);
+    assert!(
+        !combined.contains(needle.as_str()),
+        "unexpected {needle:?} in the output:\n{combined}"
     );
 }

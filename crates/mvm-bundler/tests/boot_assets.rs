@@ -126,7 +126,7 @@ fn manifest() -> ImageSetManifest {
         })
         .collect();
     ImageSetManifest {
-        schema_version: IMAGE_SET_SCHEMA_VERSION,
+        schema_version: mvm_core::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION,
         set_version: ImageSetVersion::new("1.0.0").unwrap(),
         issued_at: "2026-09-23T00:00:00Z".parse().unwrap(),
         producer: ImageSetProducer::Release(ReleaseProducer {
@@ -135,7 +135,7 @@ fn manifest() -> ImageSetManifest {
             release_tag: ReleaseTag::new("v1.0.0").unwrap(),
             source_commit: GitCommit::new("a".repeat(40)).unwrap(),
         }),
-        mvm_source_commit: GitCommit::new("b".repeat(40)).unwrap(),
+        mvm_source_commit: Some(GitCommit::new("b".repeat(40)).unwrap()),
         compatibility: ImageSetCompatibility {
             guest_agent_protocol: Some(ProtocolRange::new(2, 2).unwrap()),
             builder_cache_contract: 4,

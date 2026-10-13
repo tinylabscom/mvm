@@ -34,6 +34,9 @@ pub(crate) mod update_notice;
 pub mod watch;
 pub(crate) use mvm_build::workspace_graph;
 
+#[cfg(test)]
+pub(crate) mod test_boot_payload;
+
 pub use commands::run;
 
 /// Launch-budget contract consumed by external validation harnesses.

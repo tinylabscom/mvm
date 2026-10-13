@@ -25,8 +25,10 @@
 //!
 //! ## Output
 //!
-//! Single line to stdout: the marker
-//! [`mvm_agentd::netinit::REPORT_MARKER`] (`__MVM_NETINIT_REPORT__`)
+//! Nothing, when every route installed: a healthy boot writes the same
+//! report every time, and on Firecracker each console byte is a VM exit
+//! on the launch path. When a route failed, a single line to stdout: the
+//! marker [`mvm_agentd::netinit::REPORT_MARKER`] (`__MVM_NETINIT_REPORT__`)
 //! followed by a space and the JSON-encoded [`Report`]. The
 //! kernel console captures stdout; the host scrape
 //! (`firecracker.log`, libkrun console output) greps for the
@@ -76,12 +78,8 @@ fn main() {
         // the guest is "continuing" past described a healthy sealed workload
         // as a degraded one, and sent people looking for broken networking
         // that was working as designed.
-        Ok(mvm_agentd::guest_net::GuestNetwork::NoInterface) => {
-            eprintln!(
-                "mvm-guest-netinit: no eth0 — this guest is NIC-less by design; \
-                 egress leaves over vsock"
-            );
-        }
+        // It is not narrated either: it is true of every workload boot.
+        Ok(mvm_agentd::guest_net::GuestNetwork::NoInterface) => {}
         Err(e) => {
             eprintln!(
                 "mvm-guest-netinit: guest network bring-up failed: {e} \
@@ -102,13 +100,13 @@ fn main() {
         }
     };
 
-    // Write the report as a single line to stdout, prefixed with
-    // the canonical marker so the host-side console-scrape can
-    // grep for it. The marker + JSON shape is the contract every
-    // audit consumer parses; see `mvm_agentd::netinit::REPORT_MARKER`
-    // for the load-bearing string.
-    match serde_json::to_string(&report) {
-        Ok(json) => println!("{} {json}", mvm_agentd::netinit::REPORT_MARKER),
+    // A failed install is written as a single line to stdout, prefixed with
+    // the canonical marker so the host-side console scrape can grep for it.
+    // The marker + JSON shape is the contract every audit consumer parses;
+    // see `mvm_agentd::netinit::REPORT_MARKER` for the load-bearing string.
+    match mvm_agentd::netinit::console_report_line(&report) {
+        Ok(Some(line)) => println!("{line}"),
+        Ok(None) => {}
         Err(e) => {
             // serializing a `Report` from our own types shouldn't
             // fail in practice; if it does the binary still needs

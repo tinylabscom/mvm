@@ -773,6 +773,63 @@ note = "standing endpoint"
     }
 
     #[test]
+    fn migrated_launch_edges_follow_runtime_not_application_composition() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let sources: Sources =
+            toml::from_str(&std::fs::read_to_string(root.join(SOURCES)).unwrap()).unwrap();
+        let expected = [
+            (
+                "mvm-agentd/mvm-guest-agent",
+                "crates/mvm-build/src/initramfs.rs",
+                "CpioEntry::file(\"./init\", 0o755, agent_bytes.to_vec())",
+            ),
+            (
+                "mvm-agentd/mvm-guest-agent",
+                "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+                "fork_guest_agent();",
+            ),
+            (
+                "mvm-agentd/mvm-guest-netinit",
+                "crates/mvm-agentd/src/guest_bootstrap.rs",
+                "run_one(resolve_exec([NETINIT_OVERLAY]), \"netinit\");",
+            ),
+            (
+                "mvm-agentd/mvm-guest-netinit",
+                "crates/mvm-agentd/src/bin/mvm-guest-agent/init.rs",
+                "mvm_agentd::guest_bootstrap::provision_guest_environment()",
+            ),
+            (
+                "mvm-agentd/mvm-addon-dns",
+                "crates/mvm-agentd/src/guest_bootstrap.rs",
+                "start_addon_dns(vsock_egress);",
+            ),
+        ];
+        for (producer, launcher, anchor) in expected {
+            let edge = sources
+                .launch_edge
+                .iter()
+                .find(|edge| {
+                    edge.producer == producer
+                        && edge.launcher == Path::new(launcher)
+                        && edge.anchor == anchor
+                })
+                .unwrap_or_else(|| panic!("missing runtime launch edge {producer} via {launcher}"));
+            check_entry_path(root, &edge.launcher, &edge.anchor).unwrap();
+        }
+        for edge in &sources.launch_edge {
+            if [
+                "mvm-agentd/mvm-guest-agent",
+                "mvm-agentd/mvm-guest-netinit",
+                "mvm-agentd/mvm-addon-dns",
+            ]
+            .contains(&edge.producer.as_str())
+            {
+                assert_ne!(edge.launcher, Path::new("nix/lib/mk-guest.nix"));
+            }
+        }
+    }
+
+    #[test]
     fn duplicates_and_empty_evidence_fail() {
         let mut fx = fixture();
         let duplicate: SubscriberInit =
