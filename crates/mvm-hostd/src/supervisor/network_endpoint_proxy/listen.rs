@@ -264,9 +264,11 @@ mod server_tests {
         let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
         for tool in ["read", "write", "unlisted"] {
             let (mut client, server) = UnixStream::pair().expect("socket pair");
-            let service = Arc::clone(&service);
+            let decision_service = Arc::clone(&service);
             let handler =
-                tokio::spawn(async move { service.handle_connector_connection(server).await });
+                tokio::spawn(
+                    async move { decision_service.handle_connector_connection(server).await },
+                );
             let request = ToolCheckRequest {
                 tool: tool.into(),
                 executable: Some(format!("/bin/{tool}")),
