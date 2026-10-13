@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-use cucumber::given;
+use cucumber::{given, then};
 use ed25519_dalek::{Signer as _, SigningKey};
 use mvm_agentd::telemetry_capture::session::{SessionDeadlines, serve_capture_session};
 use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, offer_stdio_to};
@@ -247,4 +247,90 @@ async fn guest_flooded_with_no_reader(world: &mut CliWorld, machine: String) {
     })
     .await
     .unwrap();
+}
+
+#[given(expr = "a machine {string} whose guest agent emitted an event inside a child span")]
+async fn guest_emitted_nested_spans(world: &mut CliWorld, machine: String) {
+    let home = home(world);
+    tokio::task::spawn_blocking(move || {
+        collect(&home, &machine, false, || {
+            let parent = tracing::info_span!("bdd-parent", step = "outer");
+            let _in_parent = parent.enter();
+            let child = tracing::info_span!("bdd-child", step = "inner");
+            let _in_child = child.enter();
+            tracing::info!("bdd event in child");
+        });
+    })
+    .await
+    .unwrap();
+}
+
+fn stdout(world: &CliWorld) -> String {
+    String::from_utf8_lossy(&world.last_output().stdout).into_owned()
+}
+
+/// The line `machine telemetry` printed for the span opened as `name`.
+fn span_open_line<'a>(stdout: &'a str, name: &str) -> &'a str {
+    let marker = format!("span open {name} ");
+    stdout
+        .lines()
+        .find(|line| line.contains(&marker))
+        .unwrap_or_else(|| panic!("no span open line for {name}; stdout:\n{stdout}"))
+}
+
+/// The (trace id, span id) of the traceparent printed after the span's name.
+fn printed_ids(stdout: &str, name: &str) -> (String, String) {
+    let marker = format!("span open {name} ");
+    let line = span_open_line(stdout, name);
+    let traceparent = line[line.find(&marker).unwrap_or_default() + marker.len()..]
+        .split_whitespace()
+        .next()
+        .unwrap_or_default();
+    let mut fields = traceparent.split('-').skip(1);
+    match (fields.next(), fields.next()) {
+        (Some(trace), Some(span)) => (trace.to_string(), span.to_string()),
+        _ => panic!("no traceparent after {name}: {line}"),
+    }
+}
+
+#[then(expr = "the span {string} is shown as the parent of span {string}")]
+fn span_is_shown_as_parent(world: &mut CliWorld, parent: String, child: String) {
+    let stdout = stdout(world);
+    let (parent_trace, parent_span) = printed_ids(&stdout, &parent);
+    let (child_trace, _) = printed_ids(&stdout, &child);
+    let child_line = span_open_line(&stdout, &child);
+    assert!(
+        child_line.contains(&format!(" parent={parent_span}")),
+        "{child} must name {parent} ({parent_span}) as its parent: {child_line}"
+    );
+    assert_eq!(
+        parent_trace, child_trace,
+        "{child} must share {parent}'s trace"
+    );
+}
+
+#[then(expr = "the event {string} is shown inside span {string}")]
+fn event_is_shown_inside_span(world: &mut CliWorld, message: String, span: String) {
+    let stdout = stdout(world);
+    let (_, span_id) = printed_ids(&stdout, &span);
+    let event_line = stdout
+        .lines()
+        .find(|line| line.contains(" event ") && line.contains(&message))
+        .unwrap_or_else(|| panic!("no event line for {message:?}; stdout:\n{stdout}"));
+    assert!(
+        event_line.contains(&format!(" span={span_id}")),
+        "{message:?} must be correlated with {span} ({span_id}): {event_line}"
+    );
+}
+
+#[then(expr = "the span {string} is shown closed")]
+fn span_is_shown_closed(world: &mut CliWorld, span: String) {
+    let stdout = stdout(world);
+    let (_, span_id) = printed_ids(&stdout, &span);
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains(&format!("span close {span_id} "))),
+        "{span} ({span_id}) must be shown closed; stdout:\n{stdout}"
+    );
 }
