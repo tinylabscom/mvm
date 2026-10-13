@@ -1,9 +1,10 @@
 //! Pure PackSpec -> Workload IR lowering. No filesystem access.
 
 use super::PackError;
+use super::python::{Interpreter, PythonEnvironment, PythonError, UV_LOCKFILE, UV_MANIFEST};
 use mvm_contract::ir::{
-    App, Dependencies, Entrypoint, IR_MAJOR, IR_MINOR, Image, NodeTool, Resources, Source,
-    Workload, validate,
+    App, Dependencies, Entrypoint, IR_MAJOR, IR_MINOR, Image, NodeTool, PythonTool, Resources,
+    Source, Workload, validate,
 };
 use mvm_contract::pack_spec::{DependencyFiles, PackSource, PackSpec, PackageScope};
 use std::collections::BTreeMap;
@@ -30,18 +31,27 @@ pub const APP_TREE: &str = ".mvm-pack-app";
 pub const NPM_MANIFEST: &str = "package.json";
 pub const NPM_LOCKFILE: &str = "package-lock.json";
 
+/// Key under [`PACK_EXTENSION`] holding the resolved Python environment, so
+/// the workload digest a lock records covers every wheel's URL and hash.
+pub const PACK_PYTHON_KEY: &str = "python";
+
 /// Lower a validated spec into a single-app, command-entrypoint Workload and
 /// validate the result.
 ///
 /// Copy operations select what lands in the application tree at [`APP_DIR`];
 /// without any, the whole source tree does. An npm lockfile lowers to the IR's
 /// Node dependency declaration, which the Nix factory installs at build time.
+/// A uv lockfile lowers to the IR's Python declaration; which wheels it
+/// installs is decided when the lockfile is read from the source snapshot,
+/// and recorded with [`record_python_environment`].
 ///
 /// Requests the current IR and Nix factories cannot honor are refused rather
 /// than dropped: build-scoped packages (the IR has one unscoped package list),
 /// exact package versions (nixpkgs is pinned only through the mvm revision),
-/// Python dependency files and non-npm Node lockfiles (nothing installs them
-/// for a command workload yet), and copies outside the application tree.
+/// Python dependency files other than a uv lockfile at the source root, uv
+/// dependencies without exactly one `python3NN` interpreter package, non-npm
+/// Node lockfiles (nothing installs them for a command workload yet), and
+/// copies outside the application tree.
 pub fn lower(spec: &PackSpec) -> Result<Workload, PackError> {
     spec.validate()?;
     let packages = runtime_packages(spec)?;
@@ -107,8 +117,8 @@ fn runtime_packages(spec: &PackSpec) -> Result<Vec<String>, PackError> {
         .collect()
 }
 
-/// At most one dependency declaration, and only an npm lockfile at the source
-/// root: that is the one shape the factory installs for a command workload.
+/// At most one dependency declaration: an npm lockfile or a uv lockfile at
+/// the source root, the shapes the factory installs for a command workload.
 fn lower_dependencies(spec: &PackSpec) -> Result<Option<Dependencies>, PackError> {
     match spec.dependencies.as_slice() {
         [] => Ok(None),
@@ -123,9 +133,54 @@ fn lower_dependencies(spec: &PackSpec) -> Result<Option<Dependencies>, PackError
             tool: NodeTool::Npm,
         })),
         [DependencyFiles::Node { .. }] => Err(PackError::UnsupportedNodeDependencies),
-        [DependencyFiles::Python { .. }] => Err(PackError::UnsupportedDependencies),
+        [
+            DependencyFiles::Python {
+                tool: PythonTool::Uv,
+                manifest,
+                lockfile,
+            },
+        ] if manifest == UV_MANIFEST && lockfile == UV_LOCKFILE => {
+            Interpreter::from_spec(spec)?;
+            Ok(Some(Dependencies::Python {
+                lockfile: UV_LOCKFILE.to_string(),
+                tool: PythonTool::Uv,
+            }))
+        }
+        [
+            DependencyFiles::Python {
+                tool,
+                manifest,
+                lockfile,
+            },
+        ] => Err(PythonError::UnsupportedShape {
+            tool: python_tool_name(*tool).to_string(),
+            manifest: manifest.clone(),
+            lockfile: lockfile.clone(),
+        }
+        .into()),
         _ => Err(PackError::MultipleDependencies),
     }
+}
+
+fn python_tool_name(tool: PythonTool) -> &'static str {
+    match tool {
+        PythonTool::Uv => "uv",
+        PythonTool::PipTools => "pip_tools",
+    }
+}
+
+/// Record the environment resolved from the pack's uv lockfile in the
+/// workload's pack extension. The extension is part of the workload digest,
+/// so a lock taken over this workload binds the exact wheel set.
+pub(super) fn record_python_environment(
+    workload: &mut Workload,
+    environment: &PythonEnvironment,
+) -> Result<(), PackError> {
+    let value = serde_json::to_value(environment).map_err(PackError::Digest)?;
+    if let Some(serde_json::Value::Object(pack)) = workload.extensions.get_mut(PACK_EXTENSION) {
+        pack.insert(PACK_PYTHON_KEY.to_string(), value);
+    }
+    Ok(())
 }
 
 /// The tree the compiler reads: the authored source, or the tree assembled
@@ -177,7 +232,7 @@ fn pack_extension(spec: &PackSpec) -> BTreeMap<String, serde_json::Value> {
 mod tests {
     use super::*;
     use crate::pack::test_support::spec;
-    use mvm_contract::ir::{ErrorCode, PythonTool, ir_hash};
+    use mvm_contract::ir::{ErrorCode, ir_hash};
     use mvm_contract::pack_spec::{CopyOperation, PackageRequest};
 
     #[test]
@@ -303,17 +358,92 @@ mod tests {
         );
     }
 
-    #[test]
-    fn python_dependency_files_are_refused_rather_than_declared() {
-        let spec = with_dependencies(vec![DependencyFiles::Python {
+    fn uv(manifest: &str, lockfile: &str) -> DependencyFiles {
+        DependencyFiles::Python {
             tool: PythonTool::Uv,
-            manifest: "pyproject.toml".into(),
-            lockfile: "uv.lock".into(),
-        }]);
+            manifest: manifest.into(),
+            lockfile: lockfile.into(),
+        }
+    }
+
+    fn with_python(dependency: DependencyFiles) -> PackSpec {
+        let mut spec = with_dependencies(vec![dependency]);
+        spec.packages.push(PackageRequest {
+            name: "python312".into(),
+            version: None,
+            scope: PackageScope::Runtime,
+        });
+        spec
+    }
+
+    #[test]
+    fn a_uv_lockfile_lowers_to_python_dependencies() {
+        let workload = lower(&with_python(uv("pyproject.toml", "uv.lock"))).unwrap();
+        assert_eq!(
+            workload.apps[0].dependencies,
+            Some(Dependencies::Python {
+                lockfile: "uv.lock".into(),
+                tool: PythonTool::Uv,
+            })
+        );
+        assert!(
+            workload.extensions[PACK_EXTENSION]
+                .get(PACK_PYTHON_KEY)
+                .is_none(),
+            "lowering reads no lockfile; the environment is recorded after resolution"
+        );
+    }
+
+    #[test]
+    fn python_dependency_shapes_other_than_uv_at_the_root_are_refused() {
+        for dependency in [
+            uv("app/pyproject.toml", "app/uv.lock"),
+            uv("pyproject.toml", "requirements.lock"),
+            DependencyFiles::Python {
+                tool: PythonTool::PipTools,
+                manifest: "requirements.in".into(),
+                lockfile: "requirements.txt".into(),
+            },
+        ] {
+            assert!(
+                matches!(
+                    lower(&with_python(dependency.clone())),
+                    Err(PackError::Python(PythonError::UnsupportedShape { .. }))
+                ),
+                "{dependency:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uv_dependencies_without_an_interpreter_package_are_refused() {
+        let spec = with_dependencies(vec![uv("pyproject.toml", "uv.lock")]);
         assert!(matches!(
             lower(&spec),
-            Err(PackError::UnsupportedDependencies)
+            Err(PackError::Python(PythonError::NoInterpreter))
         ));
+    }
+
+    #[test]
+    fn a_recorded_environment_changes_the_workload_digest() {
+        let mut workload = lower(&with_python(uv("pyproject.toml", "uv.lock"))).unwrap();
+        let before = ir_hash(&workload).unwrap();
+        let environment = PythonEnvironment {
+            interpreter: "python312".into(),
+            wheels: vec![crate::pack::python::LockedWheel {
+                name: "a".into(),
+                version: "1.0".into(),
+                filename: "a-1.0-py3-none-any.whl".into(),
+                url: "https://files.example/a-1.0-py3-none-any.whl".into(),
+                sha256: "0".repeat(64),
+            }],
+        };
+        record_python_environment(&mut workload, &environment).unwrap();
+        assert_eq!(
+            workload.extensions[PACK_EXTENSION][PACK_PYTHON_KEY]["wheels"][0]["name"],
+            "a"
+        );
+        assert_ne!(ir_hash(&workload).unwrap(), before);
     }
 
     #[test]
