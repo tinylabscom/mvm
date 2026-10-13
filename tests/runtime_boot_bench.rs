@@ -18,6 +18,27 @@
 //! - `MVM_RUNTIME_BOOT_CONCURRENT=3` for fan-out width.
 //! - `MVM_RUNTIME_BOOT_BUDGET_MS=200` for the per-VM max budget.
 //! - `MVM_RUNTIME_BOOT_READY=start-return|guest-agent`.
+//! - `MVM_RUNTIME_BOOT_REPORT=/new/path/report.json` (or
+//!   `[evidence] report-path` in TOML) retains raw monotonic samples before
+//!   budget assertions. The path must not exist; its parent must exist.
+//!   Hashing is outside boot timers and warms artifact caches when enabled.
+//! - Optional `[evidence]` fields: `host-tag`, `source-tag` (runtime/harness
+//!   revision), `kernel-source`, `guest-profile`, `kernel-config` (file to hash).
+//!   Tags are operator-supplied nonsecret identifiers, not verified provenance.
+//!   Use immutable artifacts and identical host setup for A/B runs.
+//! - Native comparison (no boots): set `MVM_RUNTIME_BOOT_COMPARE_BASELINE` and
+//!   `MVM_RUNTIME_BOOT_COMPARE_CANDIDATE` to reports, then run
+//!   `cargo test --test runtime_boot_bench compare_runtime_boot_reports -- --exact --nocapture`.
+//!   Reports deltas only, never relative thresholds. Host/source/profile tags
+//!   are required for comparison; only kernel/config/source may differ.
+//!
+//! The guest-agent gate is agent-ready only, not attribution activation or
+//! first-tool latency. HVF guest-agent readiness negotiates Ping capability;
+//! other supported guest-agent paths additionally require Pong. Start-return
+//! does not measure agent readiness. The configured absolute max gate is unchanged.
+//! Measurement errors mark the phase failed; the existing fail-fast loops
+//! cannot retain partial samples from that phase. Earlier phases are retained.
+//!
 //! - `MVM_RUNTIME_BOOT_INITRD`, `MVM_RUNTIME_BOOT_ROOTFS_VERITY`, and
 //!   `MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH` to exercise a sealed rootfs boot.
 //! - `MVM_RUNTIME_BOOT_GRANT=1` (or `grant = true` in the TOML config) to
@@ -38,6 +59,9 @@ use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
+
+#[path = "runtime_boot_evidence/mod.rs"]
+mod evidence;
 
 const ENABLE_VAR: &str = "MVM_RUNTIME_BOOT_BENCH";
 const CONFIG_VAR: &str = "MVM_RUNTIME_BOOT_CONFIG";
@@ -230,9 +254,14 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
 
     // After the skip check on purpose: a bench that is not running must not
     // leave a signing key behind on a developer's machine.
+    let mut evidence = BootEvidence::open(&spec)?;
     ensure_host_signer_key()?;
 
-    let serial = measure_serial(&spec)?;
+    let serial_result = measure_serial(&spec);
+    if let Some(evidence) = &mut evidence {
+        evidence.record(false, &serial_result)?;
+    }
+    let serial = serial_result?;
     let serial_summary = summarize(&serial);
     eprintln!(
         "[runtime_boot_bench] serial backend={} ready={:?} runs={} p50={}ms p95={}ms max={}ms budget={}ms",
@@ -248,7 +277,11 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
     report_stop_summary("serial", &spec, &serial);
     assert_graceful_stops("serial", spec.grant, &serial)?;
 
-    let concurrent = measure_concurrent(&spec)?;
+    let concurrent_result = measure_concurrent(&spec);
+    if let Some(evidence) = &mut evidence {
+        evidence.record(true, &concurrent_result)?;
+    }
+    let concurrent = concurrent_result?;
     let concurrent_summary = summarize(&concurrent);
     eprintln!(
         "[runtime_boot_bench] concurrent backend={} ready={:?} count={} p50={}ms p95={}ms max={}ms budget={}ms",
@@ -324,6 +357,7 @@ struct BenchSpec {
     /// carries, so the guest agent authorizes the stop-time flush verb and
     /// the stop distribution measures the graceful path. Off by default.
     grant: bool,
+    evidence: evidence::Options,
 }
 
 /// The initramfs and both dm-verity inputs are one boot mode. Supplying only
@@ -354,6 +388,8 @@ impl BenchSpec {
         }
         let config = config.unwrap_or_default();
 
+        let mut evidence = config.evidence.clone();
+        evidence.report_path = env_path_opt("MVM_RUNTIME_BOOT_REPORT", evidence.report_path);
         let overlay = overlay_spec(&config)?;
         let rootfs_integrity = rootfs_integrity_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
@@ -380,6 +416,7 @@ impl BenchSpec {
             overlay,
             rootfs_integrity,
             grant: env_bool(GRANT_VAR, config.grant, false)?,
+            evidence,
         }))
     }
 }
@@ -409,6 +446,8 @@ struct RawBenchConfig {
     #[serde(alias = "overlay_roothash")]
     overlay_roothash: Option<String>,
     grant: Option<bool>,
+    #[serde(default)]
+    evidence: evidence::Options,
 }
 
 impl RawBenchConfig {
@@ -461,6 +500,243 @@ struct Summary {
     p50: Duration,
     p95: Duration,
     max: Duration,
+}
+
+struct BootEvidence {
+    file: std::fs::File,
+    report: evidence::Report,
+}
+
+fn nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).expect("benchmark duration fits nanoseconds in u64")
+}
+
+impl BootEvidence {
+    fn open(spec: &BenchSpec) -> Result<Option<Self>> {
+        let Some(path) = &spec.evidence.report_path else {
+            return Ok(None);
+        };
+        let mut file = evidence::create(path)?;
+        let rootfs_integrity = spec
+            .rootfs_integrity
+            .as_ref()
+            .map(|r| -> Result<_> {
+                Ok(evidence::Integrity {
+                    initramfs: evidence::artifact(&r.initrd)?,
+                    verity: evidence::artifact(&r.verity)?,
+                    roothash: r.roothash.clone(),
+                })
+            })
+            .transpose()?;
+        let overlay = spec
+            .overlay
+            .as_ref()
+            .map(|o| -> Result<_> {
+                Ok(evidence::Overlay {
+                    artifact: evidence::artifact(&o.path)?,
+                    verity: evidence::artifact(&o.verity)?,
+                    roothash: o.roothash.clone(),
+                })
+            })
+            .transpose()?;
+        let report = evidence::Report {
+            schema: 1,
+            scope: evidence::SCOPE.into(),
+            shared_identity: evidence::Identity {
+                host_os: std::env::consts::OS.into(),
+                host_arch: std::env::consts::ARCH.into(),
+                host_tag: spec.evidence.host_tag.clone(),
+                source_tag: spec.evidence.source_tag.clone(),
+                guest_profile: spec.evidence.guest_profile.clone(),
+                backend: spec.backend.clone(),
+                ready: spec.ready.as_str().into(),
+                cpus: spec.cpus,
+                memory_mib: spec.memory_mib,
+                grant: spec.grant,
+                runs: spec.runs,
+                concurrent: spec.concurrent,
+                rootfs: evidence::artifact(&spec.rootfs)?,
+                rootfs_integrity,
+                overlay,
+                ready_timeout_ns: nanos(READY_TIMEOUT),
+                ready_poll_ns: nanos(READY_POLL),
+            },
+            kernel: evidence::artifact(&spec.kernel)?,
+            kernel_config: spec
+                .evidence
+                .kernel_config
+                .as_deref()
+                .map(evidence::artifact)
+                .transpose()?,
+            kernel_source: spec.evidence.kernel_source.clone(),
+            budget_ns: nanos(spec.budget),
+            serial: evidence::Phase::default(),
+            concurrent: evidence::Phase::default(),
+        };
+        evidence::persist(&mut file, &report)?;
+        Ok(Some(Self { file, report }))
+    }
+
+    fn record(&mut self, concurrent: bool, result: &Result<Vec<BootMeasurement>>) -> Result<()> {
+        let phase = if concurrent {
+            &mut self.report.concurrent
+        } else {
+            &mut self.report.serial
+        };
+        *phase = match result {
+            Ok(samples) => evidence::Phase {
+                status: evidence::Status::Measured,
+                samples: samples
+                    .iter()
+                    .map(|m| evidence::Sample {
+                        elapsed_ns: nanos(m.elapsed),
+                        stop_ns: m.stop.map(nanos),
+                        within_budget: nanos(m.elapsed) <= self.report.budget_ns,
+                    })
+                    .collect(),
+            },
+            Err(_) => evidence::Phase {
+                status: evidence::Status::MeasurementFailed,
+                samples: Vec::new(),
+            },
+        };
+        let persisted = evidence::persist(&mut self.file, &self.report);
+        if result.is_err() {
+            // Preserve the original runtime error; never serialize it (it may
+            // carry host paths or guest output). Report I/O is secondary here.
+            if let Err(error) = persisted {
+                eprintln!("[runtime_boot_bench] also failed to persist evidence: {error}");
+            }
+            Ok(())
+        } else {
+            persisted
+        }
+    }
+}
+
+#[test]
+fn compare_runtime_boot_reports() -> Result<()> {
+    let baseline = std::env::var_os("MVM_RUNTIME_BOOT_COMPARE_BASELINE");
+    let candidate = std::env::var_os("MVM_RUNTIME_BOOT_COMPARE_CANDIDATE");
+    let (baseline, candidate) = match (baseline, candidate) {
+        (None, None) => return Ok(()),
+        (Some(a), Some(b)) => (a, b),
+        _ => bail!("comparison requires both BASELINE and CANDIDATE report paths"),
+    };
+    let read = |path| -> Result<evidence::Report> {
+        Ok(serde_json::from_slice(&std::fs::read(PathBuf::from(
+            path,
+        ))?)?)
+    };
+    let deltas = evidence::compare(&read(baseline)?, &read(candidate)?)?;
+    eprintln!("{}", serde_json::to_string_pretty(&deltas)?);
+    Ok(())
+}
+
+#[test]
+fn evidence_survives_the_existing_budget_assertion_and_measurement_error() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let artifact = dir.path().join("fake-artifact");
+    std::fs::write(&artifact, b"fake")?;
+    let path = dir.path().join("report.json");
+    let mut spec = prod_shaped_spec(None);
+    spec.kernel = artifact.clone();
+    spec.rootfs = artifact;
+    spec.evidence.report_path = Some(path.clone());
+    let mut writer = BootEvidence::open(&spec)?.expect("report requested");
+    let samples = Ok(vec![BootMeasurement {
+        elapsed: spec.budget + Duration::from_nanos(1),
+        stop: None,
+    }]);
+    writer.record(false, &samples)?;
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_within_budget(
+                "serial max",
+                samples.as_ref().unwrap()[0].elapsed,
+                spec.budget,
+            );
+        })
+        .is_err()
+    );
+    let report: evidence::Report = serde_json::from_slice(&std::fs::read(&path)?)?;
+    assert!(!report.serial.samples[0].within_budget);
+    assert_eq!(report.concurrent.status, evidence::Status::NotRun);
+    let failed = Err(anyhow::anyhow!("sensitive runtime detail"));
+    writer.record(true, &failed)?;
+    assert_eq!(
+        failed.as_ref().err().map(ToString::to_string),
+        Some("sensitive runtime detail".into())
+    );
+    let bytes = std::fs::read(&path)?;
+    assert!(!String::from_utf8_lossy(&bytes).contains("sensitive"));
+    let report: evidence::Report = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        report.concurrent.status,
+        evidence::Status::MeasurementFailed
+    );
+    assert_eq!(report.serial.samples.len(), 1);
+    assert!(
+        BootEvidence::open(&spec).is_err(),
+        "existing output refused before boot"
+    );
+    Ok(())
+}
+
+#[test]
+fn evidence_write_failure_does_not_mask_measurement_failure() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let artifact = dir.path().join("fake-artifact");
+    std::fs::write(&artifact, b"fake")?;
+    let path = dir.path().join("report.json");
+    let mut spec = prod_shaped_spec(None);
+    spec.kernel = artifact.clone();
+    spec.rootfs = artifact;
+    spec.evidence.report_path = Some(path.clone());
+    let mut writer = BootEvidence::open(&spec)?.expect("report requested");
+    let reserved = std::fs::read(&path)?;
+    writer.file = std::fs::File::open(&path)?; // Read-only, independent of host uid.
+    let failed = Err(anyhow::anyhow!("original measurement failure"));
+    writer.record(false, &failed)?;
+    assert_eq!(
+        failed.as_ref().err().map(ToString::to_string),
+        Some("original measurement failure".into())
+    );
+    assert_eq!(
+        std::fs::read(&path)?,
+        reserved,
+        "failed write changed report"
+    );
+    assert!(
+        writer.record(true, &Ok(Vec::new())).is_err(),
+        "persistence failure must surface when measurement did not fail"
+    );
+    Ok(())
+}
+
+#[test]
+fn evidence_config_is_explicit_and_disabled_by_default() -> Result<()> {
+    let config: RawBenchConfig = toml::from_str(
+        r#"
+[evidence]
+report-path = "/tmp/new-report.json"
+host-tag = "nonsecret-host-config"
+source-tag = "runtime-revision"
+kernel-source = "kernel-revision"
+guest-profile = "default-tenant"
+kernel-config = "/tmp/kernel.config"
+"#,
+    )?;
+    assert_eq!(
+        config.evidence.guest_profile.as_deref(),
+        Some("default-tenant")
+    );
+    assert_eq!(
+        config.evidence.kernel_source.as_deref(),
+        Some("kernel-revision")
+    );
+    assert!(BootEvidence::open(&prod_shaped_spec(None))?.is_none());
+    Ok(())
 }
 
 fn measure_serial(spec: &BenchSpec) -> Result<Vec<BootMeasurement>> {
@@ -1231,6 +1507,7 @@ fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
         overlay,
         rootfs_integrity: None,
         grant: false,
+        evidence: evidence::Options::default(),
     }
 }
 

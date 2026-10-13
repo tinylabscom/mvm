@@ -446,8 +446,7 @@ pub(crate) fn setup_dev_fd_symlinks(dev_root: &std::path::Path) -> Result<(), St
 // `entrypoint.shell = "/bin/sh"` → interactive build) but PID 1 here never
 // forked it, so vsock port 5252 stayed unbound on builder/dev VMs — only
 // workload VMs ran the agent. This init forks the agent under
-// setpriv exactly as the workload `/init` does (nix/lib/mk-guest.nix), so
-// the *same* agent runs in every VM type. The argv construction + binary
+// setpriv, so the *same* agent runs in every VM type. The argv construction + binary
 // resolution are pure (cross-platform-testable); the spawn itself is in
 // `linux::run`.
 
@@ -643,8 +642,7 @@ fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
 const SETPRIV: &str = "mvm-setpriv";
 
 /// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
-/// `agent_uid` (see `mvm_build::builder_agent_uid`). Mirrors the workload `/init` invocation in
-/// `nix/lib/mk-guest.nix`. `setpriv` is the helper resolved through
+/// `agent_uid` (see `mvm_build::builder_agent_uid`). `setpriv` is the helper resolved through
 /// `guest_host_binary`: the boot payload's copy, or on an image booted without
 /// one, the copy it bakes at `/sbin`.
 /// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
@@ -1503,8 +1501,7 @@ mod linux {
     /// don't carry an install_spec.json.
     const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
-    /// Fork `mvm-guest-agent` under setpriv to the agent uid,
-    /// mirroring the workload `/init` (`nix/lib/mk-guest.nix`). Best
+    /// Fork `mvm-guest-agent` under setpriv to the agent uid. Best
     /// effort: a missing binary or spawn error logs and returns so PID 1
     /// proceeds to the builder dispatch loop. The agent supervises vsock
     /// RPC on port 5252; without it the host can boot the builder VM but
@@ -3076,8 +3073,7 @@ mod linux {
         // calls `posix_openpt` which opens `/dev/ptmx`, and that
         // requires devpts to be mounted at `/dev/pts`. Without it
         // nix bails with `error: opening pseudoterminal master:
-        // No such file or directory`. The dev image flake's
-        // mkGuest /init mounts this; we replicate it here.
+        // No such file or directory`.
         let _ = std::fs::create_dir_all("/dev/pts");
         mount_fs_idempotent("devpts", "/dev/pts", "devpts")?;
         // `/dev/fd → /proc/self/fd` is what bash process substitution

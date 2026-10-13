@@ -57,8 +57,7 @@ compatibility alias, but `-v` is global verbosity.
 
 `GUEST` must sit under **`/data` or `/work`** — those are the only two
 allow-roots. Anything else is refused, including `/mnt/*`, which is excluded
-so a share cannot shadow the runtime's own `/mnt/config` and `/mnt/secrets`
-drives.
+so a share cannot shadow the reserved `/mnt/config` and `/mnt/secrets` paths.
 
 ### Read-only (default)
 

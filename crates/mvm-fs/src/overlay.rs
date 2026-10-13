@@ -96,6 +96,10 @@ pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/egress-client",
     "/addon-dns",
     "/exit-report",
+    // Declared-command mediation: without these a [tools] plan is refused at
+    // activation, so their absence must fail at resolve time, not boot time.
+    "/tool-shim",
+    "/tool-helper",
     "/VERSION",
 ];
 

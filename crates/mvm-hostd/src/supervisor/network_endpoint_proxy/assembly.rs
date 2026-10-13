@@ -179,7 +179,12 @@ impl SubstitutionService {
             .tool_gate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate.decide(request).await?)
+        Ok(gate
+            .decide(
+                request,
+                mvm_contract::protocol::network_flow::tool::ToolOrigin::GuestFlowMux,
+            )
+            .await?)
     }
 
     /// Decide one host-started invocation through this VM's admitted gate,
@@ -188,12 +193,13 @@ impl SubstitutionService {
     pub async fn decide_tool_invocation(
         &self,
         request: &mvm_contract::protocol::network_flow::tool::ToolCheckRequest,
+        origin: mvm_contract::protocol::network_flow::tool::ToolOrigin,
     ) -> anyhow::Result<crate::supervisor::tool_decision::InvocationVerdict> {
         let gate = self
             .tool_gate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate.decide_invocation(request).await?)
+        Ok(gate.decide_invocation(request, origin).await?)
     }
 
     /// Retire a binding once its invocation has finished.

@@ -445,8 +445,10 @@ mod tests {
             &plan.nonce,
             plan.valid_until,
             Vec::new(),
-            plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
-            None,
+            crate::host_signer::VerbGrantAuthority {
+                drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
         let envelope = VerbGrantEnvelope {

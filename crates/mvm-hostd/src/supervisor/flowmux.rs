@@ -2497,11 +2497,14 @@ mod tests {
         ));
         let binding = match tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(tool_gate.decide_invocation(&ToolCheckRequest {
-                tool: "fetch".into(),
-                executable: Some("/bin/fetch".into()),
-                argv: "fetch it".into(),
-            }))
+            .block_on(tool_gate.decide_invocation(
+                &ToolCheckRequest {
+                    tool: "fetch".into(),
+                    executable: Some("/bin/fetch".into()),
+                    argv: "fetch it".into(),
+                },
+                mvm_contract::protocol::network_flow::tool::ToolOrigin::GuestFlowMux,
+            ))
             .expect("audited decision")
         {
             InvocationVerdict::Allow {

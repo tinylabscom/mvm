@@ -44,6 +44,7 @@
 
 pub mod admission;
 pub mod agent_prompt;
+pub mod application_terminal;
 pub mod approval_broker;
 pub mod audit;
 pub mod boot;

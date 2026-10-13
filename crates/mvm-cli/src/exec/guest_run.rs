@@ -351,6 +351,7 @@ mod tests {
                 verbs: Vec::new(),
                 drive: None,
                 tool_mediation,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         }

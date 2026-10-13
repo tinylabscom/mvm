@@ -837,9 +837,15 @@ mod tests {
         collector.join().unwrap();
         let received = received.load(Ordering::Relaxed);
         assert_eq!(end, SessionEnd::PeerClosed);
-        // One capped turn at most separates the stop from the return.
+        // The flood never ends on its own, so the session returning at all is
+        // the property: stop is checked between capped turns, not only once
+        // the queue runs dry. The wait between the stop and the return is one
+        // turn of at most `RECORDS_PER_TURN` frame writes, whose wall-clock
+        // length depends on how fast the host reads; on a loaded runner that
+        // has been seen at 650 ms. The ceiling here only catches a stop that
+        // is never observed, without timing the runner.
         assert!(
-            returned.duration_since(stopped) < Duration::from_millis(500),
+            returned.duration_since(stopped) < Duration::from_secs(10),
             "stop observed {:?} after it was set",
             returned.duration_since(stopped)
         );

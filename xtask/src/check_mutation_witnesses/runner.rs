@@ -230,6 +230,59 @@ impl MutationIsolation {
     }
 }
 
+/// `cargo mutants` selecting exactly the mutants a run of `file` tests: its
+/// package, the file, the features it must build with, and its claim scope.
+/// Listing and mutating share it, so the count a shard is packed by is the
+/// count the shard then runs.
+fn mutants_command_for(workspace: &Path, file: &SurfaceFile) -> std::process::Command {
+    let mut cmd = std::process::Command::new("cargo");
+    cmd.current_dir(workspace)
+        .arg("mutants")
+        .args(["-p", &file.package])
+        .args(["--file", &file.path]);
+    if !file.features.is_empty() {
+        cmd.args(["--features", &file.features.join(",")]);
+    }
+    if let Some(scope) = &file.scope {
+        cmd.args(["--re", &scope.examine_re]);
+    }
+    cmd
+}
+
+/// How many mutants a run of `file` would test, from `cargo mutants --list`.
+///
+/// Listing parses source and builds nothing, so it costs seconds where the
+/// run costs hours.
+pub(crate) fn listed_mutant_count(workspace: &Path, file: &SurfaceFile) -> Result<u64> {
+    let output = mutants_command_for(workspace, file)
+        .arg("--list")
+        .stderr(std::process::Stdio::inherit())
+        .output()
+        .context("spawning `cargo mutants --list`")?;
+    if !output.status.success() {
+        bail!(
+            "`cargo mutants --list` failed for {} (exit {:?})",
+            file.path,
+            output.status.code()
+        );
+    }
+    Ok(count_listed_mutants(
+        &String::from_utf8_lossy(&output.stdout),
+        &file.path,
+    ))
+}
+
+/// Count the `<path>:<line>:<col>: <description>` lines `--list` prints for
+/// `path`.
+fn count_listed_mutants(listing: &str, path: &str) -> u64 {
+    let prefix = format!("{path}:");
+    let count = listing
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .count();
+    u64::try_from(count).unwrap_or(u64::MAX)
+}
+
 fn run_mutants_for_file(
     workspace: &Path,
     file: &SurfaceFile,
@@ -237,12 +290,17 @@ fn run_mutants_for_file(
     isolation: &MutationIsolation,
     pinned: &str,
 ) -> Result<()> {
-    let mut cmd = std::process::Command::new("cargo");
-    cmd.current_dir(workspace)
-        .arg("mutants")
-        .args(["-p", &file.package])
-        .args(["--file", &file.path])
-        .args(["--test-tool", "nextest"])
+    if !file.features.is_empty() {
+        eprintln!("      features {}", file.features.join(","));
+    }
+    if let Some(scope) = &file.scope {
+        eprintln!(
+            "      scoped to /{}/ — {}",
+            scope.examine_re, scope.excluded_tracked_by
+        );
+    }
+    let mut cmd = mutants_command_for(workspace, file);
+    cmd.args(["--test-tool", "nextest"])
         .args([
             "--timeout-multiplier",
             &MUTANT_TIMEOUT_MULTIPLIER.to_string(),
@@ -253,18 +311,6 @@ fn run_mutants_for_file(
         ])
         .arg("--output")
         .arg(out_dir);
-    if !file.features.is_empty() {
-        let joined = file.features.join(",");
-        eprintln!("      features {joined}");
-        cmd.args(["--features", &joined]);
-    }
-    if let Some(scope) = &file.scope {
-        eprintln!(
-            "      scoped to /{}/ — {}",
-            scope.examine_re, scope.excluded_tracked_by
-        );
-        cmd.args(["--re", &scope.examine_re]);
-    }
     isolation.apply(&mut cmd);
     let status = cmd.status().context("spawning `cargo mutants`")?;
 
@@ -367,7 +413,7 @@ fn ensure_mutants_actually_ran(outcomes_json: &str, path: &str) -> Result<u64> {
 }
 
 /// Refuse to mutate with anything but the pinned cargo-mutants.
-fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
+pub(crate) fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
     let install = format!("`cargo install --locked cargo-mutants@{pinned}`");
     let output = std::process::Command::new("cargo")
         .args(["mutants", "--version"])
@@ -388,6 +434,33 @@ fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
             "could not read a version from `cargo mutants --version` ({:?}) — {install}",
             stdout.trim()
         ),
+    }
+}
+
+#[cfg(test)]
+mod listing_tests {
+    use super::*;
+
+    /// `--list` output as cargo-mutants 27.1 prints it. A line for another
+    /// file, or one that merely mentions the path, is not this file's mutant.
+    #[test]
+    fn only_this_files_listed_mutants_are_counted() {
+        let listing = "\
+crates/mvm-hostd/src/admission_budget.rs:46:5: replace charge_path_at -> PathBuf with Default::default()
+crates/mvm-hostd/src/admission_budget.rs:57:5: replace charge_for -> MachineCharge with Default::default()
+crates/mvm-hostd/src/admission_budget.rs.bak:1:1: replace x with y
+crates/mvm-hostd/src/audit/session.rs:80:9: replace SealReason::as_str -> &'static str with \"\"
+note: crates/mvm-hostd/src/admission_budget.rs:1:1: not a mutant line
+";
+        assert_eq!(
+            count_listed_mutants(listing, "crates/mvm-hostd/src/admission_budget.rs"),
+            2
+        );
+        assert_eq!(
+            count_listed_mutants(listing, "crates/mvm-hostd/src/audit/session.rs"),
+            1
+        );
+        assert_eq!(count_listed_mutants("", "crates/a.rs"), 0);
     }
 }
 
