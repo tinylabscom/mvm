@@ -1393,9 +1393,14 @@ At launch of an installed bundle:
   value stays on the host and is substituted at the endpoint, as for any
   binding;
 - an image whose recorded entrypoint differs from the descriptor's refuses the
-  launch; an ad-hoc command replaces the entrypoint explicitly and is not
-  compared;
+  launch; missing, malformed, or empty entrypoint metadata also refuses an
+  ordinary launch. An ad-hoc command replaces the entrypoint explicitly and is
+  not compared, but remains subject to the launch's posture and command rules;
 - a capability beyond a posture the launch is held to refuses the launch.
+
+Transient and persistent starts use the same entrypoint checks. Checkpoint and
+fork paths that cannot establish the image entrypoint refuse a descriptor-bearing
+bundle rather than treating failed resolution as an explicit override.
 
 These refusals are recorded as `plan.failed` with class
 `bundle-environment-refused`. Application `services` are guest processes,

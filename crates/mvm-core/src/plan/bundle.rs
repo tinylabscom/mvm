@@ -99,7 +99,9 @@ mod lookup;
 mod signer;
 mod stream;
 mod verify_error;
-pub use declarations::{BundleSizeBudget, forbidden_capabilities};
+pub use declarations::{
+    BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
+};
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
 pub use stream::{

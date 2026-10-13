@@ -423,7 +423,8 @@ pub fn admit_plan_for_boot_configured_ingress(
             // Fail closed. The alternative — admit and hope — is what leaves a
             // refusal that reports present and can never fire, which is worse
             // than no refusal at all because it is believed.
-            ResolvedEntrypoint::Unresolved { because } => anyhow::bail!(
+            ResolvedEntrypoint::Unresolved { because }
+            | ResolvedEntrypoint::AdHocOverride { because } => anyhow::bail!(
                 "refusing the workload input grant: this launch cannot say what the \
                  workload runs ({because}), so it cannot rule out a shell — and under \
                  a sealed production posture streaming stdin to a shell is interactive \
@@ -792,7 +793,22 @@ pub fn admit_plan_for_boot_configured_ingress(
             Some(kind) => RunPosture::on_backend(variant, kind),
             None => RunPosture::without_backend(variant),
         },
-    )?;
+    )
+    .or_else(|err| -> Result<_> {
+        if let Some(refused) =
+            err.downcast_ref::<mvm_hostd::plan_admission::BundleEnvironmentRefused>()
+        {
+            let signer = match p.keys_dir {
+                Some(dir) => load_or_init_at(dir),
+                None => mvm_hostd::audit::host_keypair::load_or_init(),
+            }
+            .context("loading host signer for the environment refusal")?;
+            let emitter = build_default_audit_emitter(signer.signing, p.audit_dir)
+                .context("opening audit chain emitter for the environment refusal")?;
+            emit_bundle_environment_refused(refused.plan(), &emitter, &err);
+        }
+        Err(err)
+    })?;
     let t_signed = std::time::Instant::now();
     tracing::debug!(
         ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
@@ -2950,6 +2966,24 @@ pub(crate) mod admit_plan_tests {
         assert!(
             rendered.contains("shell-shaped"),
             "the refusal must name the reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_ad_hoc_override_does_not_bypass_the_sealed_input_grant_gate() {
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unit-only rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.restrict_agent_verbs = true;
+        params.services = vec![stream_grant_service()];
+        params.entrypoint = ResolvedEntrypoint::ad_hoc_override();
+
+        let err = admit_plan_for_boot(params)
+            .expect_err("an explicit override is not evidence for a sealed input grant");
+        assert!(
+            format!("{err:#}").contains("cannot say what the workload runs"),
+            "{err:#}"
         );
     }
 
