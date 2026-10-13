@@ -776,6 +776,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     /// A child standing in for a pool process: `sh -c 'sleep 30'` in its own
     /// session, its argv naming `entry` the way a reaper's does.
     fn session_child(entry: &Path) -> std::process::Child {
@@ -786,10 +787,12 @@ mod tests {
             .expect("spawn a stand-in process")
     }
 
+    #[cfg(target_os = "linux")]
     fn alive(child: &mut std::process::Child) -> bool {
         child.try_wait().expect("try_wait").is_none()
     }
 
+    #[cfg(target_os = "linux")]
     fn wait_gone(child: &mut std::process::Child) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while std::time::Instant::now() < deadline {
@@ -801,6 +804,7 @@ mod tests {
         false
     }
 
+    #[cfg(target_os = "linux")]
     fn record(child: &std::process::Child) -> EndpointPid {
         EndpointPid::of_child(child.id())
     }
@@ -890,6 +894,7 @@ mod tests {
         let _ = child.wait();
     }
 
+    #[cfg(target_os = "linux")]
     fn entry_dir_for_claim(root: &Path) -> PathBuf {
         let dir = root.join(format!("claimed-idle-a-{}", entry_id()));
         std::fs::create_dir_all(&dir).unwrap();
