@@ -391,6 +391,9 @@ mod tests {
 
     #[test]
     fn selected_external_runtime_without_proof_cannot_resolve_another_initramfs() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
         let mut config = VmStartConfig {
             kernel_path: Some("/mock/kernel".into()),
             runtime_overlay_path: Some("/mock/overlay".into()),
@@ -403,6 +406,9 @@ mod tests {
 
     #[test]
     fn selected_runtime_wrong_version_or_architecture_refuses_before_initramfs_resolution() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
         for (version, arch) in [
             ("stale", GuestArch::host()),
             (

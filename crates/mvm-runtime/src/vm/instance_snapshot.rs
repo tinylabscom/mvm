@@ -56,8 +56,9 @@ use anyhow::{Context, Result, bail};
 
 use mvm_core::crypto::snapshot_encryption;
 use mvm_core::crypto::snapshot_hmac::{
-    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles, VMSTATE_FILENAME,
-    VerifyError, files_in, load_or_init_key, seal_with_runtime, verify,
+    EpochStore, IntegritySidecar, MEM_FILENAME, SIDECAR_FILENAME, SnapshotFiles,
+    SnapshotIntegrityParams, VMSTATE_FILENAME, VerifyError, files_in, load_or_init_key, seal,
+    verify,
 };
 
 use secrecy::ExposeSecret;
@@ -185,13 +186,10 @@ fn seal_into<IO: SnapshotIO + ?Sized>(
         .advance(next_epoch)
         .with_context(|| format!("recording epoch {next_epoch} in {}", staged.display()))?;
 
-    seal_with_runtime(
+    seal(
         staged,
-        &files,
-        next_epoch,
-        mvmctl_version,
-        hmac_key.expose_secret(),
-        runtime,
+        &SnapshotIntegrityParams::new(&files, next_epoch, mvmctl_version, hmac_key.expose_secret())
+            .with_runtime_binding(runtime),
     )
     .with_context(|| format!("sealing instance snapshot at {}", staged.display()))
 }
@@ -1220,10 +1218,12 @@ mod tests {
         let epoch = EpochStore::new(dir.join(EPOCH_FILENAME)).next().unwrap();
         mvm_core::crypto::snapshot_hmac::seal(
             &dir,
-            &files_in(&dir),
-            epoch,
-            env!("CARGO_PKG_VERSION"),
-            key.expose_secret(),
+            &SnapshotIntegrityParams::new(
+                &files_in(&dir),
+                epoch,
+                env!("CARGO_PKG_VERSION"),
+                key.expose_secret(),
+            ),
         )
         .unwrap();
     }

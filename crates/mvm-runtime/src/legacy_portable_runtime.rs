@@ -734,9 +734,12 @@ mod tests {
         std::fs::write(&files.vmstate, b"state").unwrap();
         std::fs::write(&files.mem, b"memory").unwrap();
         let key = [19; 32];
-        let sidecar =
-            snapshot_hmac::seal_with_runtime(home.path(), &files, 1, "1", &key, Some(&binding))
-                .unwrap();
+        let sidecar = snapshot_hmac::seal(
+            home.path(),
+            &snapshot_hmac::SnapshotIntegrityParams::new(&files, 1, "1", &key)
+                .with_runtime_binding(Some(&binding)),
+        )
+        .unwrap();
         snapshot_hmac::verify(home.path(), &files, 1, "1", &key, false).unwrap();
         let encoded = serde_json::to_value(&binding).unwrap();
         for pointer in [

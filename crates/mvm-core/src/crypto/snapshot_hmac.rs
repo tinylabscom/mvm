@@ -214,6 +214,45 @@ fn load_existing_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
 // HMAC computation
 // ============================================================================
 
+/// Borrowed inputs for computing or sealing snapshot integrity.
+///
+/// Deliberately does not implement `Debug`: the key must never be logged.
+pub struct SnapshotIntegrityParams<'a> {
+    files: &'a SnapshotFiles,
+    epoch: u64,
+    mvmctl_version: &'a str,
+    key: &'a [u8; HMAC_KEY_BYTES],
+    runtime: Option<&'a crate::protocol::runtime_release::RuntimeLaunchBinding>,
+}
+
+impl<'a> SnapshotIntegrityParams<'a> {
+    /// Construct a request without a runtime binding, preserving legacy HMAC bytes.
+    pub fn new(
+        files: &'a SnapshotFiles,
+        epoch: u64,
+        mvmctl_version: &'a str,
+        key: &'a [u8; HMAC_KEY_BYTES],
+    ) -> Self {
+        Self {
+            files,
+            epoch,
+            mvmctl_version,
+            key,
+            runtime: None,
+        }
+    }
+
+    /// Authenticate the optional inherited runtime in the same HMAC envelope.
+    #[must_use]
+    pub fn with_runtime_binding(
+        mut self,
+        runtime: Option<&'a crate::protocol::runtime_release::RuntimeLaunchBinding>,
+    ) -> Self {
+        self.runtime = runtime;
+        self
+    }
+}
+
 /// Compute the snapshot integrity tag over the two snapshot files
 /// plus the mvmctl version + epoch. The HMAC input is laid out as:
 ///
@@ -229,25 +268,19 @@ fn load_existing_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
 /// between `vmstate` and `mem` without detection. The epoch is
 /// inside the HMAC so an attacker can't fabricate a fresh-looking
 /// envelope by editing only the JSON sidecar.
-pub fn compute_tag(
-    files: &SnapshotFiles,
-    epoch: u64,
-    mvmctl_version: &str,
-    key: &[u8; HMAC_KEY_BYTES],
-) -> Result<(IntegritySidecar, [u8; 32])> {
-    compute_tag_with_runtime(files, epoch, mvmctl_version, key, None)
-}
-
-/// Authenticate the runtime generation with the snapshot rather than relying
-/// on an independently replaceable runtime metadata file. The absent case
-/// retains the original byte encoding for legacy baked-runtime snapshots.
-pub fn compute_tag_with_runtime(
-    files: &SnapshotFiles,
-    epoch: u64,
-    mvmctl_version: &str,
-    key: &[u8; HMAC_KEY_BYTES],
-    runtime: Option<&crate::protocol::runtime_release::RuntimeLaunchBinding>,
-) -> Result<(IntegritySidecar, [u8; 32])> {
+///
+/// When the request includes a runtime binding, append the domain separator
+/// `mvm.snapshot.runtime-binding.v1\0`, the binding JSON's `be_u64` length,
+/// and the JSON bytes. Without a binding, append nothing, preserving the
+/// original encoding for baked-runtime snapshots.
+pub fn compute_tag(params: &SnapshotIntegrityParams<'_>) -> Result<(IntegritySidecar, [u8; 32])> {
+    let SnapshotIntegrityParams {
+        files,
+        epoch,
+        mvmctl_version,
+        key,
+        runtime,
+    } = *params;
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(&SIDECAR_SCHEMA_VERSION.to_be_bytes());
     mac.update(&epoch.to_be_bytes());
@@ -323,27 +356,9 @@ fn stream_into_mac(mac: &mut HmacSha256, path: &Path) -> Result<u64> {
 // ============================================================================
 
 /// Compute and write the integrity sidecar atomically next to the
-/// snapshot files.
-pub fn seal(
-    snap_dir: &Path,
-    files: &SnapshotFiles,
-    epoch: u64,
-    mvmctl_version: &str,
-    key: &[u8; HMAC_KEY_BYTES],
-) -> Result<IntegritySidecar> {
-    seal_with_runtime(snap_dir, files, epoch, mvmctl_version, key, None)
-}
-
-/// Seal a snapshot and its exact inherited runtime in one HMAC envelope.
-pub fn seal_with_runtime(
-    snap_dir: &Path,
-    files: &SnapshotFiles,
-    epoch: u64,
-    mvmctl_version: &str,
-    key: &[u8; HMAC_KEY_BYTES],
-    runtime: Option<&crate::protocol::runtime_release::RuntimeLaunchBinding>,
-) -> Result<IntegritySidecar> {
-    let (sidecar, _tag) = compute_tag_with_runtime(files, epoch, mvmctl_version, key, runtime)?;
+/// snapshot files, including any runtime binding in the request.
+pub fn seal(snap_dir: &Path, params: &SnapshotIntegrityParams<'_>) -> Result<IntegritySidecar> {
+    let (sidecar, _tag) = compute_tag(params)?;
     let json = serde_json::to_vec_pretty(&sidecar).context("serialize sidecar")?;
 
     let final_path = snap_dir.join(SIDECAR_FILENAME);
@@ -432,12 +447,9 @@ pub fn verify(
         });
     }
 
-    let (recomputed, tag_bytes) = compute_tag_with_runtime(
-        files,
-        sidecar.epoch,
-        &sidecar.mvmctl_version,
-        key,
-        sidecar.runtime_launch_binding.as_ref(),
+    let (recomputed, tag_bytes) = compute_tag(
+        &SnapshotIntegrityParams::new(files, sidecar.epoch, &sidecar.mvmctl_version, key)
+            .with_runtime_binding(sidecar.runtime_launch_binding.as_ref()),
     )
     .map_err(|e| VerifyError::Io(e.to_string()))?;
     let _ = recomputed; // we return the original sidecar for the caller's audit
@@ -603,13 +615,33 @@ mod tests {
     }
 
     #[test]
+    fn absent_runtime_binding_preserves_legacy_hmac_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = make_snap(dir.path());
+        let key = [7; HMAC_KEY_BYTES];
+        let params = SnapshotIntegrityParams::new(&files, 5, "1.2.3", &key);
+        let (sidecar, tag) = compute_tag(&params).unwrap();
+        // Fixed vector from the original schema/epoch/files/version encoding.
+        let expected = "8edf814973be917c187e5fae6a9f7bd6a2b8c9b4ed96d9febd34b2400c15c647";
+        assert_eq!(hex_encode(&tag), expected);
+        assert_eq!(sidecar.tag_hex, expected);
+        assert!(sidecar.runtime_launch_binding.is_none());
+        assert_eq!(seal(dir.path(), &params).unwrap().tag_hex, expected);
+        assert!(verify(dir.path(), &files, 5, "1.2.3", &key, false).is_ok());
+    }
+
+    #[test]
     fn runtime_binding_is_authenticated_with_the_snapshot_not_a_self_hash() {
         let dir = tempfile::tempdir().unwrap();
         let files = make_snap(dir.path());
         let key = [7; HMAC_KEY_BYTES];
         let runtime = runtime_binding();
-        let sidecar =
-            seal_with_runtime(dir.path(), &files, 5, "1.2.3", &key, Some(&runtime)).unwrap();
+        let sidecar = seal(
+            dir.path(),
+            &SnapshotIntegrityParams::new(&files, 5, "1.2.3", &key)
+                .with_runtime_binding(Some(&runtime)),
+        )
+        .unwrap();
         let verified = verify(dir.path(), &files, 5, "1.2.3", &key, false).unwrap();
         assert_eq!(verified.runtime_launch_binding.as_ref(), Some(&runtime));
         let value = serde_json::to_value(&sidecar).unwrap();
@@ -662,7 +694,12 @@ mod tests {
         let old_key = [7; HMAC_KEY_BYTES];
         let new_key = [8; HMAC_KEY_BYTES];
         let runtime = runtime_binding();
-        seal_with_runtime(dir.path(), &files, 5, "1.2.3", &old_key, Some(&runtime)).unwrap();
+        seal(
+            dir.path(),
+            &SnapshotIntegrityParams::new(&files, 5, "1.2.3", &old_key)
+                .with_runtime_binding(Some(&runtime)),
+        )
+        .unwrap();
         EpochStore::new(dir.path().join(".epoch"))
             .advance(5)
             .unwrap();
@@ -730,7 +767,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        let sealed = seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        let sealed = seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let verified = verify(tmp.path(), &files, 1, "1.2.3", key.expose_secret(), false).unwrap();
         assert_eq!(sealed, verified);
         assert_eq!(verified.epoch, 1);
@@ -743,7 +784,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         // Tamper: replace one byte but keep the same length.
         let mut bytes = std::fs::read(&files.vmstate).unwrap();
         bytes[0] ^= 0xff;
@@ -760,7 +805,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let mut bytes = std::fs::read(&files.mem).unwrap();
         bytes[0] ^= 0xff;
         std::fs::write(&files.mem, &bytes).unwrap();
@@ -776,7 +825,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         // Truncate vmstate — caught by the fast-fail size check
         // before we stream the file.
         std::fs::write(&files.vmstate, b"shorter").unwrap();
@@ -797,7 +850,11 @@ mod tests {
 
         let key_path = tmp.path().join("snapshot.key");
         let key1 = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 1, "1.2.3", key1.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key1.expose_secret()),
+        )
+        .unwrap();
 
         // Replace the key on disk to simulate a fresh host or rotation.
         std::fs::remove_file(&key_path).unwrap();
@@ -815,7 +872,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let err = verify(tmp.path(), &files, 1, "1.2.4", key.expose_secret(), false).unwrap_err();
         match err {
             VerifyError::VersionMismatch { sealed, current } => {
@@ -833,7 +894,11 @@ mod tests {
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
 
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         verify(tmp.path(), &files, 1, "9.9.9", key.expose_secret(), true).expect("should accept");
     }
 
@@ -853,7 +918,11 @@ mod tests {
         let files = make_snap(tmp.path());
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let path = tmp.path().join(SIDECAR_FILENAME);
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -869,7 +938,11 @@ mod tests {
         let files = make_snap(tmp.path());
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let mode = std::fs::metadata(tmp.path().join(SIDECAR_FILENAME))
             .unwrap()
             .permissions()
@@ -884,7 +957,11 @@ mod tests {
         let files = make_snap(tmp.path());
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         assert!(!tmp.path().join(format!("{SIDECAR_FILENAME}.tmp")).exists());
         assert!(tmp.path().join(SIDECAR_FILENAME).exists());
     }
@@ -908,8 +985,10 @@ mod tests {
         };
 
         let raw_key = [0u8; HMAC_KEY_BYTES];
-        let (_, tag1) = compute_tag(&files1, 1, "1", &raw_key).unwrap();
-        let (_, tag2) = compute_tag(&files2, 1, "1", &raw_key).unwrap();
+        let (_, tag1) =
+            compute_tag(&SnapshotIntegrityParams::new(&files1, 1, "1", &raw_key)).unwrap();
+        let (_, tag2) =
+            compute_tag(&SnapshotIntegrityParams::new(&files2, 1, "1", &raw_key)).unwrap();
         assert_ne!(tag1, tag2, "splice across vmstate/mem must change the tag");
     }
 
@@ -918,8 +997,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
         let raw_key = [0u8; HMAC_KEY_BYTES];
-        let (_, tag1) = compute_tag(&files, 1, "1", &raw_key).unwrap();
-        let (_, tag2) = compute_tag(&files, 2, "1", &raw_key).unwrap();
+        let (_, tag1) =
+            compute_tag(&SnapshotIntegrityParams::new(&files, 1, "1", &raw_key)).unwrap();
+        let (_, tag2) =
+            compute_tag(&SnapshotIntegrityParams::new(&files, 2, "1", &raw_key)).unwrap();
         assert_ne!(tag1, tag2, "epoch must be inside the HMAC envelope");
     }
 
@@ -932,7 +1013,11 @@ mod tests {
 
         // Seal at epoch 3, then ask the verifier for "current
         // high-water mark = 5". The verifier must refuse.
-        seal(tmp.path(), &files, 3, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 3, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         let err = verify(tmp.path(), &files, 5, "1.2.3", key.expose_secret(), false).unwrap_err();
         match err {
             VerifyError::EpochRollback { got, expected } => {
@@ -949,7 +1034,11 @@ mod tests {
         let files = make_snap(tmp.path());
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 1, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 1, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         verify(tmp.path(), &files, 99, "1.2.3", key.expose_secret(), true)
             .expect("stale flag bypasses epoch");
     }
@@ -962,7 +1051,11 @@ mod tests {
         let files = make_snap(tmp.path());
         let key_path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&key_path).unwrap();
-        seal(tmp.path(), &files, 7, "1.2.3", key.expose_secret()).unwrap();
+        seal(
+            tmp.path(),
+            &SnapshotIntegrityParams::new(&files, 7, "1.2.3", key.expose_secret()),
+        )
+        .unwrap();
         verify(tmp.path(), &files, 7, "1.2.3", key.expose_secret(), false)
             .expect("equal epoch verifies");
     }

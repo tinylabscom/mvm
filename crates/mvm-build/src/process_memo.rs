@@ -44,6 +44,14 @@ impl<K: Eq + Hash, V: Clone> ProcessMemo<K, V> {
         }
     }
 
+    /// Forget `key`, as a later process would never have seen it.
+    #[cfg(test)]
+    pub(crate) fn remove(&self, key: &K) {
+        if let Ok(mut entries) = self.entries.get_or_init(Default::default).lock() {
+            entries.remove(key);
+        }
+    }
+
     /// The stored value for `key`, or the result of `compute`, which is
     /// recorded only when it succeeds.
     pub(crate) fn get_or_try_insert<E>(

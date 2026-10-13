@@ -19,10 +19,21 @@ pub(super) struct BootAttempt<'a> {
     pub(super) user_named: bool,
 }
 
-/// Claim a warm standby for this attempt, or `None` when its shape keeps the
-/// cold path.
-fn claim_warm_standby(attempt: &BootAttempt<'_>) -> Result<Option<VmId>> {
+/// Claim a warm standby for this attempt, or learn why it boots cold.
+fn claim_warm_standby(
+    attempt: &BootAttempt<'_>,
+) -> Result<crate::commands::pool::WarmClaimOutcome> {
     crate::commands::pool::try_warm_claim(attempt.backend, attempt.start_config, attempt.user_named)
+}
+
+/// The VM a transient boot produced.
+pub(super) struct BootedVm {
+    /// The effective VM name — a claimed standby runs under its own standby
+    /// id, not the requested name.
+    pub(super) name: String,
+    pub(super) launch_mode: crate::commands::vm::phase_timing::LaunchMode,
+    /// Why the launch booted cold, or `None` when it claimed a standby.
+    pub(super) cold_reason: Option<crate::commands::pool::ColdStartReason>,
 }
 
 /// Boot the transient VM: try to claim a warm standby first, then a
@@ -30,16 +41,17 @@ fn claim_warm_standby(attempt: &BootAttempt<'_>) -> Result<Option<VmId>> {
 /// `attempt.start_config`. Reaps expired standbys first — best-effort TTL
 /// housekeeping since there is no daemon to do it between invocations.
 ///
-/// Returns the effective VM name — a claimed standby runs under its own
-/// standby id, not `vm_name`. A cold-boot failure returns the error after
-/// the normal transient state cleanup path.
+/// Returns the booted VM — a claimed standby runs under its own standby id,
+/// not `vm_name` — and, for a cold boot, the reason no standby served it. A
+/// cold-boot failure returns the error after the normal transient state
+/// cleanup path.
 pub(super) fn boot_transient_vm(
     vm_name: String,
     use_snapshot: bool,
     attempt: &BootAttempt<'_>,
     mut warm_claim_marks: Option<&mut crate::commands::vm::phase_timing::WarmClaimMarks>,
     sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
-) -> Result<(String, crate::commands::vm::phase_timing::LaunchMode)> {
+) -> Result<BootedVm> {
     use crate::commands::vm::phase_timing::SubPhase;
 
     let phase_timing = warm_claim_marks.is_some();
@@ -84,22 +96,29 @@ pub(super) fn boot_transient_vm(
     // pre-booted to agent-ready and runs under its own standby-id, so the
     // returned name diverges from `vm_name` — the caller rebinds it for the
     // Ctrl-C handler, run_in_guest, and teardown. try_warm_claim gates
-    // internally (warm_pool_size > 0, admitted tenant + signed plan threaded
-    // into start_config, a launch shape a shared parent can serve, backend
-    // supports the pool). An explicitly configured but unsupported standby pool
-    // is returned as an actionable error; only an ineligible launch shape
-    // proceeds cold.
-    let (vm_name, warm_claimed) = match claim_warm_standby(attempt) {
-        Ok(Some(id)) => {
+    // internally (an auto-named launch of a shape a shared parent can serve,
+    // a non-zero standby target, admitted tenant + signed plan threaded into
+    // start_config, backend supports the pool). Finding no standby is not an
+    // error: the launch boots cold, and says so when a standby could have
+    // served it. Only a residency the operator set by name on a backend with
+    // no pool is returned as an actionable error.
+    let (vm_name, cold_reason) = match claim_warm_standby(attempt) {
+        Ok(crate::commands::pool::WarmClaimOutcome::Claimed(id)) => {
             ui::info(&format!(
                 "Claimed a warm standby ({}) — skipping cold boot.",
                 id.0
             ));
-            (id.0, true)
+            (id.0, None)
         }
-        Ok(None) => (vm_name, false),
+        Ok(crate::commands::pool::WarmClaimOutcome::Cold(reason)) => {
+            if let Some(declaration) = reason.declaration() {
+                ui::notice(declaration);
+            }
+            (vm_name, Some(reason))
+        }
         Err(e) => return Err(e).context("claiming configured warm standby"),
     };
+    let warm_claimed = cold_reason.is_none();
     report_phase("warm_claim");
 
     let booted = warm_claimed
@@ -151,7 +170,66 @@ pub(super) fn boot_transient_vm(
     } else {
         crate::commands::vm::phase_timing::LaunchMode::Cold
     };
-    Ok((vm_name, launch_mode))
+    Ok(BootedVm {
+        name: vm_name,
+        launch_mode,
+        cold_reason,
+    })
+}
+
+/// The start mode a launch records, from why it booted cold (`None` when it
+/// claimed a standby).
+pub(super) fn start_mode(
+    cold_reason: Option<crate::commands::pool::ColdStartReason>,
+) -> mvm_client::admission::StartMode {
+    match cold_reason {
+        None => mvm_client::admission::StartMode::Warm,
+        Some(reason) => mvm_client::admission::StartMode::Cold {
+            reason: reason.label(),
+        },
+    }
+}
+
+/// The standby this run leaves behind, if any: a run that claimed one replaces
+/// it, and a run a standby could have served but did not prepares one. Any
+/// other cold boot — a named run, a shape a shared parent cannot serve, a host
+/// that keeps no standbys — leaves nothing, since nothing could claim it.
+pub(super) fn standby_to_leave(
+    refill: Option<&crate::commands::pool::StandbyRefill>,
+    cold_reason: Option<crate::commands::pool::ColdStartReason>,
+) -> Option<&crate::commands::pool::StandbyRefill> {
+    match cold_reason {
+        None => refill,
+        Some(reason) if reason.leaves_a_standby() => refill,
+        Some(_) => None,
+    }
+}
+
+/// The point in a run at which [`leave_standby_when`] is called.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LeaveAt {
+    AfterBoot,
+    AfterWorkload,
+}
+
+/// Start the refill for `refill` if this is the point the run's launch mode
+/// starts it at. A cold boot is already past the startup ceiling's concern,
+/// so its replacement starts right after boot and is ready that much sooner.
+/// A warm claim's replacement waits for the workload, so it never competes
+/// with the launch it is measured against.
+pub(super) fn leave_standby_when(
+    refill: Option<&crate::commands::pool::StandbyRefill>,
+    launch_mode: crate::commands::vm::phase_timing::LaunchMode,
+    at: LeaveAt,
+) {
+    use crate::commands::vm::phase_timing::LaunchMode;
+    let due = matches!(
+        (launch_mode, at),
+        (LaunchMode::Cold, LeaveAt::AfterBoot) | (LaunchMode::Warm, LeaveAt::AfterWorkload)
+    );
+    if due && let Some(refill) = refill {
+        crate::commands::pool::schedule_standby_refill(refill);
+    }
 }
 
 /// Arm the Ctrl-C handler for this transient run: on interrupt, flag the
@@ -450,6 +528,45 @@ mod tests {
     }
 
     #[test]
+    fn a_run_leaves_a_standby_only_where_a_later_run_could_claim_it() {
+        use crate::commands::pool::{ColdStartReason, StandbyRefill};
+        let refill = StandbyRefill {
+            image: Some("alpine".into()),
+            cpus: 2,
+            memory_mib: 512,
+        };
+        // A claim replaces what it took; a launch that found none prepares one.
+        assert_eq!(standby_to_leave(Some(&refill), None), Some(&refill));
+        assert_eq!(
+            standby_to_leave(Some(&refill), Some(ColdStartReason::NoStandbyReady)),
+            Some(&refill)
+        );
+        for reason in [
+            ColdStartReason::Named,
+            ColdStartReason::IneligibleShape,
+            ColdStartReason::StandbysDisabled,
+            ColdStartReason::BackendUnsupported,
+            ColdStartReason::Unadmitted,
+        ] {
+            assert_eq!(standby_to_leave(Some(&refill), Some(reason)), None);
+        }
+        // A source the refill cannot resolve leaves nothing either way.
+        assert_eq!(standby_to_leave(None, None), None);
+    }
+
+    #[test]
+    fn the_recorded_start_mode_names_the_cold_reason() {
+        use crate::commands::pool::ColdStartReason;
+        assert_eq!(start_mode(None), mvm_client::admission::StartMode::Warm);
+        assert_eq!(
+            start_mode(Some(ColdStartReason::NoStandbyReady)),
+            mvm_client::admission::StartMode::Cold {
+                reason: "no_standby_ready"
+            }
+        );
+    }
+
+    #[test]
     fn a_named_transient_run_keeps_its_cold_path_without_a_standby() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
@@ -460,11 +577,52 @@ mod tests {
             resolved: &resolved,
             user_named: true,
         };
-        assert!(claim_warm_standby(&attempt).unwrap().is_none());
+        assert_eq!(
+            claim_warm_standby(&attempt).unwrap(),
+            crate::commands::pool::WarmClaimOutcome::Cold(
+                crate::commands::pool::ColdStartReason::Named
+            )
+        );
+    }
+
+    /// The strict-startup refusal is gone: the first unnamed run of an image
+    /// on a host with an empty pool boots cold rather than failing and
+    /// telling the operator to prepare a standby first.
+    #[test]
+    fn an_unnamed_run_with_no_standby_ready_boots_cold_instead_of_refusing() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(tmp.path());
+        env.remove("MVM_RESIDENCY");
+        env.remove("MVM_HVF_WARM_REQUIRE_CLAIM");
+        let kernel = tmp.path().join("vmlinux");
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&kernel, b"kernel").expect("write kernel");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        let start_config = VmStartConfig {
+            warm_pool_size: 1,
+            kernel_path: Some(kernel.display().to_string()),
+            rootfs_path: rootfs.display().to_string(),
+            ..claimable_config_without_a_pool()
+        };
+        let resolved = resolved_image();
+        let attempt = BootAttempt {
+            backend: &backend,
+            start_config: &start_config,
+            resolved: &resolved,
+            user_named: false,
+        };
+        assert_eq!(
+            claim_warm_standby(&attempt).unwrap(),
+            crate::commands::pool::WarmClaimOutcome::Cold(
+                crate::commands::pool::ColdStartReason::NoStandbyReady
+            )
+        );
     }
 
     #[test]
-    fn an_unnamed_transient_run_still_requires_a_prepared_standby() {
+    fn a_host_keeping_no_standbys_boots_cold_without_looking() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let start_config = claimable_config_without_a_pool();
         let resolved = resolved_image();
@@ -474,10 +632,11 @@ mod tests {
             resolved: &resolved,
             user_named: false,
         };
-        let error = claim_warm_standby(&attempt).unwrap_err().to_string();
-        assert!(
-            error.contains("strict startup requires a prepared warm standby"),
-            "{error}"
+        assert_eq!(
+            claim_warm_standby(&attempt).unwrap(),
+            crate::commands::pool::WarmClaimOutcome::Cold(
+                crate::commands::pool::ColdStartReason::StandbysDisabled
+            )
         );
     }
 

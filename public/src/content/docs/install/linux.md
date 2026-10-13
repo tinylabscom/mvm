@@ -80,13 +80,10 @@ mvmctl doctor
 mkdir my-app && cd my-app
 mvmctl init .
 mvmctl machine build
-mvmctl machine run --name my-app --manifest .
+mvmctl machine run --manifest .
 ```
 
-The run is named because an unnamed run must claim a prepared warm standby,
-and `pool warm` prepares only OCI and default images; a named run boots cold.
-
-`mvmctl init` scaffolds an `mvm.toml` + `flake.nix` in your project. `mvmctl machine build` reads `mvm.toml` and builds the rootfs via Nix (using your flake's `mvm.lib.x86_64-linux.mkGuest` call); `mvmctl machine run --name my-app --manifest .` boots it on Firecracker. Expected cold boot: ≤ 200ms.
+`mvmctl init` scaffolds an `mvm.toml` + `flake.nix` in your project. `mvmctl machine build` reads `mvm.toml` and builds the rootfs via Nix (using your flake's `mvm.lib.x86_64-linux.mkGuest` call); `mvmctl machine run --manifest .` boots it on Firecracker. Expected cold boot: ≤ 200ms.
 
 (Bare `mvmctl run` is the *transient* verb and needs a command — `mvmctl run --image alpine -- uname -a`. Without one it exits with an error rather than booting your project.)
 

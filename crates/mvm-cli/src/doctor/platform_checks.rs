@@ -251,11 +251,13 @@ pub(super) fn residency_check() -> Check {
         category: "platform",
         ok: true,
         info: format!(
-            "{} — {} — warm_target={}{}",
+            "{} — {} — warm_target={}{} — standbys_per_run_image={}, released after {}m idle",
             policy.label(),
             source_str,
             policy.warm_target(),
-            idle
+            idle,
+            policy.standby_target(),
+            policy.standby_idle_timeout().as_secs() / 60,
         ),
     }
 }

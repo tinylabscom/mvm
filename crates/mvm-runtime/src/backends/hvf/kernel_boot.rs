@@ -15,17 +15,19 @@
 //! It then panics mounting the root fs because none is supplied — providing a
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "kernel_boot_image.rs"]
+mod image;
+use image::KernelImageSource;
+
 use super::HvfError;
+use super::guest_ram::GuestRam;
 #[cfg(test)]
-use super::guest_ram::HVF_PAGE_SIZE;
-use super::guest_ram::{GuestRam, page_rounded_len};
+use super::guest_ram::{HVF_PAGE_SIZE, page_rounded_len};
 pub use super::host_channels::HostChannels;
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::mmio_layout::{
@@ -39,13 +41,13 @@ use super::vcpu::esr_ec;
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
+use crate::vmm::fdt;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::{DiskImage, VirtioBlk};
 use crate::vmm::virtio_balloon::VirtioBalloon;
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
-use crate::vmm::{fdt, kernel_image};
 use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 use mvm_core::vcpu_quota::VcpuQuotaRecord;
 use mvm_vmm::host::process_usage;
@@ -460,76 +462,6 @@ pub fn boot_kernel_until(params: KernelBootUntilParams<'_>) -> Result<KernelBoot
     boot_kernel_impl(params)
 }
 
-#[derive(Clone, Copy)]
-enum KernelImageSource<'a> {
-    Bytes(&'a [u8]),
-    File(&'a Path),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct KernelImageMeta {
-    file_len: usize,
-    reserved_len: usize,
-}
-
-impl KernelImageMeta {
-    fn new(file_len: usize, image_size: u64, file_backed: bool) -> Result<Self, HvfError> {
-        let image_size =
-            usize::try_from(image_size).map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
-        let mapped_len = if file_backed {
-            page_rounded_len(file_len)?
-        } else {
-            file_len
-        };
-        Ok(Self {
-            file_len,
-            reserved_len: mapped_len.max(image_size),
-        })
-    }
-}
-
-impl KernelImageSource<'_> {
-    fn metadata(self) -> Result<KernelImageMeta, HvfError> {
-        match self {
-            Self::Bytes(image) => {
-                let hdr = kernel_image::parse(image)
-                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
-                KernelImageMeta::new(image.len(), hdr.image_size, false)
-            }
-            Self::File(path) => {
-                let mut file = File::open(path)
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?;
-                let mut header = [0_u8; 64];
-                file.read_exact(&mut header)
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelRead(e.kind())))?;
-                let hdr = kernel_image::parse(&header)
-                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
-                let len = file
-                    .metadata()
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
-                    .len()
-                    .try_into()
-                    .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
-                KernelImageMeta::new(len, hdr.image_size, true)
-            }
-        }
-    }
-
-    fn load_into(self, ram: &mut GuestRam, offset: usize) -> Result<usize, HvfError> {
-        match self {
-            Self::Bytes(image) => {
-                ram.copy_at(offset, image)?;
-                Ok(image.len())
-            }
-            Self::File(path) => {
-                let meta = self.metadata()?;
-                ram.map_private_file_at(offset, path, meta.file_len)?;
-                Ok(meta.file_len)
-            }
-        }
-    }
-}
-
 fn initrd_load_offset(
     kernel_end: usize,
     initrd_len: usize,
@@ -690,17 +622,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
 
     if restore_frame.is_none() {
         let loaded_len = kernel.load_into(&mut guest_ram, load_off)?;
-        if let (KernelImageSource::File(path), Some(observer)) =
-            (kernel, &mut channels.runtime_observer)
+        if let Some(observer) = &mut channels.runtime_observer
+            && let Some(artifact) = kernel.loaded_artifact(&guest_ram, load_off, loaded_len)?
         {
-            // SAFETY: load_into validated and populated this range; no vCPU
-            // exists yet, and guest_ram outlives this immediate measurement.
-            let loaded =
-                unsafe { std::slice::from_raw_parts(guest_ram.as_ptr().add(load_off), loaded_len) };
-            observer.set_loaded_kernel(
-                mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(path.to_path_buf(), loaded)
-                    .map_err(|_| HvfError::SnapshotState("kernel evidence measurement failed"))?,
-            );
+            observer.set_loaded_kernel(artifact);
         }
         guest_ram.copy_at(dtb_off, &dtb)?;
         if let Some(rd) = initramfs {
@@ -2609,11 +2534,10 @@ mod tests {
         assert_eq!(loaded_len, image.len());
         std::fs::rename(&kernel, dir.path().join("original")).unwrap();
         std::fs::write(&kernel, b"replacement").unwrap();
-        // SAFETY: load_into populated this bounded range, and no vCPU exists.
-        let loaded =
-            unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), loaded_len) };
-        let observation =
-            mvm_vmm::runtime_artifacts::RuntimeArtifact::loaded(kernel.clone(), loaded).unwrap();
+        let observation = KernelImageSource::File(&kernel)
+            .loaded_artifact(&ram, HVF_PAGE_SIZE, loaded_len)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             observation.sha256,
             mvm_core::plan::bundle::sha256_hex(&image)

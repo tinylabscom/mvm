@@ -57,3 +57,16 @@ Feature: the launch budget stays observable on every run
   Scenario: repeated warm launches each meet the documented start budget
     Given an Alpine warm parent is ready
     Then each of 3 repeated launches of "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm" meets its hard dispatch ceiling
+
+  # Nothing prepared by hand: the first unnamed run of an image leaves a
+  # standby behind, and the next run of the same image claims it and is held
+  # to the same ceiling as a run whose standby `pool warm` prepared.
+  @live @perf_budget
+  Scenario: a second run of an image claims the standby the first run left
+    When I launch "machine run --image alpine -- true"
+    Then the launch succeeds
+    And a standby left by that run is ready within 180 seconds
+    When I launch "machine run --image alpine -- true"
+    Then the launch succeeds
+    And the launch claimed a standby
+    And the warm launch meets its hard dispatch ceiling

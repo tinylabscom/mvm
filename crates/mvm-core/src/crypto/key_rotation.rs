@@ -427,13 +427,15 @@ pub fn reseal_snapshot(
     let next_epoch = epoch_store
         .next()
         .with_context(|| format!("advancing epoch for {}", snapshot_dir.display()))?;
-    crate::crypto::snapshot_hmac::seal_with_runtime(
+    crate::crypto::snapshot_hmac::seal(
         snapshot_dir,
-        &files,
-        next_epoch,
-        mvmctl_version,
-        new_key,
-        verified.runtime_launch_binding.as_ref(),
+        &crate::crypto::snapshot_hmac::SnapshotIntegrityParams::new(
+            &files,
+            next_epoch,
+            mvmctl_version,
+            new_key,
+        )
+        .with_runtime_binding(verified.runtime_launch_binding.as_ref()),
     )
     .with_context(|| {
         format!(
@@ -815,7 +817,13 @@ mod tests {
         // Initial seal under old_key.
         let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
+        crate::crypto::snapshot_hmac::seal(
+            tmp.path(),
+            &crate::crypto::snapshot_hmac::SnapshotIntegrityParams::new(
+                &files, e0, "1.2.3", &old_key,
+            ),
+        )
+        .unwrap();
 
         // Reseal.
         reseal_snapshot(tmp.path(), &old_key, &new_key, "1.2.3").unwrap();
@@ -840,7 +848,13 @@ mod tests {
 
         let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &old_key).unwrap();
+        crate::crypto::snapshot_hmac::seal(
+            tmp.path(),
+            &crate::crypto::snapshot_hmac::SnapshotIntegrityParams::new(
+                &files, e0, "1.2.3", &old_key,
+            ),
+        )
+        .unwrap();
 
         // Tamper.
         let mut bytes = fs::read(&files.vmstate).unwrap();
@@ -869,7 +883,13 @@ mod tests {
 
         let store = crate::crypto::snapshot_hmac::EpochStore::new(tmp.path().join(".epoch"));
         let e0 = store.next().unwrap();
-        crate::crypto::snapshot_hmac::seal(tmp.path(), &files, e0, "1.2.3", &real_old).unwrap();
+        crate::crypto::snapshot_hmac::seal(
+            tmp.path(),
+            &crate::crypto::snapshot_hmac::SnapshotIntegrityParams::new(
+                &files, e0, "1.2.3", &real_old,
+            ),
+        )
+        .unwrap();
 
         let err = reseal_snapshot(tmp.path(), &wrong_old, &new_key, "1.2.3").unwrap_err();
         assert!(err.to_string().contains("verifying snapshot"));
