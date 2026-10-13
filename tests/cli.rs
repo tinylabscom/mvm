@@ -2588,3 +2588,64 @@ fn image_revocations_fail_closed_without_an_applied_signed_list() {
         "a refused list must not advance the checkpoint"
     );
 }
+
+/// The optional pre-warm path: `image pull --warm` and `image dev ensure
+/// --warm` are advertised, and `pool warm --help` says which images a bare
+/// `pool warm` picks and that a run already leaves a standby behind.
+#[test]
+fn warm_path_flags_are_advertised() {
+    let pull = help_text(&["image", "pull", "--help"]);
+    assert!(pull.contains("--warm"), "{pull}");
+
+    let ensure = help_text(&["image", "dev", "ensure", "--help"]);
+    assert!(ensure.contains("--warm"), "{ensure}");
+
+    let short = help_text(&["pool", "warm", "--help"]);
+    for needle in [
+        "--default",
+        "--image",
+        "with neither, of the most recently pulled images",
+        "(the default image when nothing was pulled)",
+    ] {
+        assert!(
+            short.contains(needle),
+            "pool warm --help missing {needle:?}: {short}"
+        );
+    }
+    let warm = help_text(&["help", "pool", "warm"]);
+    for needle in [
+        "most recently pulled",
+        "residency standby target",
+        "With no pulled images, the default image.",
+        "Every unnamed run already leaves one standby",
+    ] {
+        assert!(
+            warm.contains(needle),
+            "pool warm help missing {needle:?}: {warm}"
+        );
+    }
+}
+
+#[test]
+fn pool_warm_refuses_default_together_with_an_image() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["pool", "warm", "--default", "--image", "alpine"])
+        .output()
+        .expect("run pool warm");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+/// The refill a run starts in the background is an internal verb: it parses,
+/// but `pool --help` does not list it.
+#[test]
+fn pool_refill_is_hidden_from_help() {
+    let pool = help_text(&["pool", "--help"]);
+    assert!(pool.contains("warm"), "{pool}");
+    assert!(!pool.contains("refill"), "{pool}");
+    let refill = help_text(&["pool", "refill", "--help"]);
+    for flag in ["--cpus", "--memory-mib", "--image"] {
+        assert!(refill.contains(flag), "{refill}");
+    }
+}

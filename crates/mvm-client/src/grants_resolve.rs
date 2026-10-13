@@ -71,6 +71,7 @@ pub struct GrantProvenance {
     pub egress: Option<GrantSurface>,
     pub drive: Option<GrantSurface>,
     pub display_input: Option<GrantSurface>,
+    pub application_terminal: Option<GrantSurface>,
 }
 
 impl GrantProvenance {
@@ -89,6 +90,7 @@ impl GrantProvenance {
             "egress" => self.egress,
             "drive" => self.drive,
             "display_input" => self.display_input,
+            "application_terminal" => self.application_terminal,
             _ => None,
         }
     }
@@ -172,6 +174,12 @@ pub fn resolve_grants(layers: &[GrantLayer]) -> ResolvedGrants {
         {
             resolved.grants.display_input = Some(display_input.clone());
             resolved.provenance.display_input = Some(layer.surface);
+        }
+        if resolved.grants.application_terminal.is_none()
+            && let Some(terminal) = layer.grants.application_terminal.as_ref()
+        {
+            resolved.grants.application_terminal = Some(terminal.clone());
+            resolved.provenance.application_terminal = Some(layer.surface);
         }
     }
     resolved
@@ -318,6 +326,7 @@ mod tests {
             egress: None,
             drive: Some(GrantSurface::GrantsFile),
             display_input: Some(GrantSurface::GrantsFile),
+            application_terminal: None,
         };
         assert_eq!(
             provenance.surface_for_dimension("cpu.share_millicores"),
@@ -346,6 +355,34 @@ mod tests {
         assert_eq!(grant.program_id.as_str(), "reviewer");
         assert_eq!(grant.workspace_roots[0].as_str(), "/review");
         assert_eq!(resolved.provenance().drive, Some(GrantSurface::GrantsFile));
+    }
+
+    #[test]
+    fn a_grants_file_authors_an_application_terminal() {
+        let file: Grants =
+            serde_json::from_str(r#"{"application_terminal":{"argv":["/usr/bin/claude"]}}"#)
+                .expect("grants file");
+        let resolved = resolve_grants(&[
+            GrantLayer::new(GrantSurface::Cli, cpu(500)),
+            GrantLayer::new(GrantSurface::GrantsFile, file),
+        ]);
+        assert_eq!(
+            resolved
+                .grants()
+                .application_terminal
+                .as_ref()
+                .map(|terminal| terminal.argv.clone()),
+            Some(vec!["/usr/bin/claude".to_string()])
+        );
+        assert_eq!(
+            resolved.provenance().application_terminal,
+            Some(GrantSurface::GrantsFile)
+        );
+        assert!(
+            serde_json::from_str::<Grants>(r#"{"application_terminal":{"argv":["claude"]}}"#)
+                .is_err(),
+            "a bare program name is refused, not resolved on the guest"
+        );
     }
 
     #[test]

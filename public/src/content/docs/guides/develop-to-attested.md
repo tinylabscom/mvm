@@ -13,16 +13,12 @@ parts that are designed but not yet built.
 ## 1. Pick a base — OCI or Nix, both are first class
 
 ```bash
-# OCI: fastest start, no flake and no host Nix. An unnamed run claims a
-# prepared warm standby of the same image and refuses without one.
+# OCI: fastest start, no flake and no host Nix
 mvmctl image pull python:3.12
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image python:3.12
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
-# Nix flake: reproducible, minimal, carries only what you declare. Named, so it
-# boots cold: `pool warm` prepares only OCI and default images.
-mvmctl machine run --name app --flake . -- ./app
+# Nix flake: reproducible, minimal, carries only what you declare
+mvmctl machine run --flake . -- ./app
 ```
 
 Both compile to the same thing — a signed image plus a launch plan — and boot

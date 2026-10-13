@@ -45,6 +45,7 @@
 pub mod admission;
 pub mod agent_prompt;
 pub mod agent_sessions;
+pub mod application_terminal;
 pub mod approval_broker;
 pub mod artifact;
 pub mod audit;
@@ -90,11 +91,15 @@ pub mod resolve;
 pub mod sdk_plan;
 pub mod secret;
 pub mod snapshot;
+pub mod standby;
 pub mod storage;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
 pub mod telemetry;
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub mod test_boot_payload;
 pub mod tool_mediation;
 pub mod transcript;
 pub mod volume;

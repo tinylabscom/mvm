@@ -80,12 +80,33 @@ in
   metadata_propagates = (meta shellGuest).name == "shell-test"
     && (meta shellGuest).hypervisor == "firecracker";
 
-  # ── busybox-as-PID-1 invariants ───────────────────────────────
+  # ── Universal initramfs contract ──────────────────────────────
   #
-  # The boot-time budget pins the init system. Asserting it here so a
-  # future change that swaps back to NixOS+systemd (e.g., because it's
-  # "easier") fails this gate before merge.
-  init_system_is_busybox = (meta shellGuest).initSystem == "busybox";
+  # Workload roots carry metadata and mount targets, not a second PID 1.
+  init_system_is_the_initramfs_agent =
+    (meta shellGuest).initSystem == "initramfs-agent"
+    && (meta commandGuest).initSystem == "initramfs-agent";
+
+  base_image_contract_is_integer_one =
+    (meta shellGuest).baseImageContract == 1
+    && builtins.isInt (meta commandGuest).baseImageContract;
+
+  declared_command_argv_is_preserved =
+    (meta commandGuest).entrypointArgv == [ "/usr/local/bin/serve" ];
+
+  base_image_contract_cannot_be_overridden =
+    rejects (meta (mkGuest {
+      name = "contract-override";
+      entrypoint.command = [ "/bin/x" ];
+      extraFiles."/etc/mvm/base-image-contract".content = "0\n";
+    })).baseImageContract;
+
+  rootfs_evaluation_also_rejects_service_uid_collisions =
+    rejects (mkGuest {
+      name = "rootfs-collision";
+      entrypoint.command = [ "/bin/x" ];
+      uids.entrypoint = 989;
+    }).rootfsTree.drvPath;
 
   # Floor: every backend ≤ 300 ms cold p50. The metadata surfaces the
   # budget on every derivation; CI's xtask perf enforces. Guarding it
@@ -105,13 +126,11 @@ in
 
   # ── Privilege model invariants (rootless) ─────────────────────
   #
-  # Defaults: dev image runs entrypoint as root (debug-friendly
-  # shell); prod image runs entrypoint as uid 901, the uid the
-  # universal initramfs agent drops every workload to; the agent
-  # runs as 901 too.
+  # The universal runtime dispatches both dev and prod workloads as 901.
 
-  dev_default_entrypoint_is_root = (meta shellGuest).uids.entrypoint == 0
-    && (meta shellGuest).rootlessEntrypoint == false;
+  dev_default_entrypoint_is_the_workload_uid = (meta shellGuest).uids.entrypoint == 901
+    && (meta shellGuest).rootlessEntrypoint == true
+    && (meta shellGuest).declaredUids.entrypoint == 901;
 
   prod_default_entrypoint_is_the_workload_uid = (meta commandGuest).uids.entrypoint == 901
     && (meta commandGuest).rootlessEntrypoint == true;
@@ -196,7 +215,7 @@ in
     && (meta g).accessible == true   # still dev mode
     && (meta g).uids.entrypoint == 901;
 
-  rootful_prod_via_uids_override =
+  account_override_does_not_grant_rootful_runtime =
     let
       g = mkGuest {
         name = "rootful-prod";
@@ -204,9 +223,10 @@ in
         uids = { entrypoint = 0; };
       };
     in
-    (meta g).rootlessEntrypoint == false
+    (meta g).rootlessEntrypoint == true
     && (meta g).sealed == true
-    && (meta g).uids.entrypoint == 0;
+    && (meta g).declaredUids.entrypoint == 0
+    && (meta g).uids.entrypoint == 901;
 
   custom_agent_uid_round_trips =
     let
@@ -216,7 +236,8 @@ in
         uids = { agent = 5000; };
       };
     in
-    (meta g).uids.agent == 5000
+    (meta g).declaredUids.agent == 5000
+    && (meta g).uids.agent == 901
     && (meta g).uids.entrypoint == 901;  # default unaffected
 
   builder_uid_round_trips =
@@ -243,7 +264,7 @@ in
 
   # ── Privilege-drop binary provenance ─────────────────────────
   #
-  # The generated init must use the dedicated static-musl helper rather than
+  # Generated workload scripts use the dedicated static-musl helper rather than
   # busybox's reduced applet or the much larger util-linux package.
   setpriv_is_custom_static_musl =
     (meta shellGuest).setprivHelperName == "mvm-setpriv"
@@ -252,12 +273,8 @@ in
   # ── Runtime overlay awareness ─────────────────────────────────
   #
   # Every image built by mkGuest must advertise that its rootfs
-  # carries the `/mvm/runtime` bind-mount target and that the
-  # init script prefers the overlay-provided agent. A future change
-  # that drops the overlay-aware code path (e.g. reverting the
-  # /init agent-resolution block) flips this metadata to `false`
-  # before the boot regression surfaces, giving CI a tight signal
-  # for the load-bearing invariant.
+  # carries the `/mvm/runtime` bind-mount target. The universal
+  # initramfs agent mounts and starts the runtime, never a rootfs script.
 
   overlay_aware_metadata_set_on_shell = (meta shellGuest).overlayAware == true;
   overlay_aware_metadata_set_on_command = (meta commandGuest).overlayAware == true;

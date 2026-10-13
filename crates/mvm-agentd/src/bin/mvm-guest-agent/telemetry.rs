@@ -22,7 +22,6 @@
 //! endpoint asserts nothing, and the guest launches no thread and holds no
 //! port for it.
 
-use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -30,7 +29,9 @@ use std::sync::{Arc, OnceLock};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_agentd::flowmux_sync::{load_guest_signing_key, load_host_anchor};
-use mvm_agentd::telemetry_capture::session::serve_capture_session;
+use mvm_agentd::telemetry_capture::session::{
+    SessionDeadlines, TimedStream, serve_capture_session,
+};
 use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, ProducerId};
 use mvm_agentd::telemetry_service::SessionEnd;
 use mvm_core::net::telemetry::outbox::Outbox;
@@ -199,43 +200,15 @@ fn accept_loop(listener_fd: RawFd, capture: &CaptureState) {
         // SAFETY: `cfd` is the just-accepted connection fd, owned here for
         // the session's lifetime and closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
-        // The liveness probe needs bounded reads, but only after the
-        // handshake — installed earlier the timeout races a slow dialer
-        // and fails the session spuriously (session module docs). The
-        // serve hook runs it at exactly the right moment.
-        let bound = |stream: &mut std::fs::File| {
-            use std::os::fd::AsRawFd as _;
-            set_read_timeout(stream.as_raw_fd());
-        };
         let keys = match SESSION_KEYS.get() {
             Some(keys) => Ok(keys.clone()),
             None => SessionKeys::load(Path::new(KEY_DIR)),
         };
-        if serve_accepted(&mut stream, keys, capture, bound) == Some(SessionEnd::Failed) {
+        if serve_accepted(&mut stream, keys, capture, SessionDeadlines::AGENT)
+            == Some(SessionEnd::Failed)
+        {
             eprintln!("mvm-guest-agent: telemetry session failed");
         }
-    }
-}
-
-/// Bound reads on the accepted connection so the session's peer probe can
-/// distinguish an idle live host from a dead one. Best-effort: a socket that
-/// refuses the option still serves, with peer death observed at the next
-/// write instead.
-fn set_read_timeout(fd: RawFd) {
-    let timeout = libc::timeval {
-        tv_sec: 0,
-        tv_usec: 25_000,
-    };
-    // SAFETY: fd is the just-accepted connection; the timeval is a local,
-    // correctly-sized value read once by the kernel.
-    unsafe {
-        libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_RCVTIMEO,
-            &timeout as *const libc::timeval as *const libc::c_void,
-            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
-        );
     }
 }
 
@@ -243,11 +216,11 @@ fn set_read_timeout(fd: RawFd) {
 /// boot's keys. `None` means the keys were unavailable and the connection was
 /// dropped before any handshake byte; the listener keeps serving either way.
 /// Split from [`accept_loop`] so a test can drive it over a socket pair.
-fn serve_accepted<S: Read + Write>(
+fn serve_accepted<S: TimedStream>(
     stream: &mut S,
     keys: Result<SessionKeys, String>,
     capture: &CaptureState,
-    bound_reads: impl FnOnce(&mut S),
+    deadlines: SessionDeadlines,
 ) -> Option<SessionEnd> {
     let keys = match keys {
         Ok(keys) => keys,
@@ -262,7 +235,7 @@ fn serve_accepted<S: Read + Write>(
         &keys.anchor,
         capture,
         &SHUTDOWN_REQUESTED,
-        bound_reads,
+        deadlines,
     ))
 }
 
@@ -274,6 +247,7 @@ mod tests {
     use mvm_agentd::telemetry_service::AGENT_COVERAGE_CODE;
     use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
     use mvm_core::protocol::telemetry::{CoverageState, RecordBody, TelemetryRecord};
+    use std::io::Read as _;
     use std::os::unix::net::UnixStream;
 
     #[test]
@@ -294,13 +268,11 @@ mod tests {
         CaptureState::new(outbox).unwrap()
     }
 
-    /// The probe contract: reads become bounded after the handshake, via
-    /// the serve hook.
-    fn bound(stream: &mut UnixStream) {
-        stream
-            .set_read_timeout(Some(std::time::Duration::from_millis(10)))
-            .unwrap();
-    }
+    /// Agent limits with a short probe so idle tests see the host close fast.
+    const BOUNDS: SessionDeadlines = SessionDeadlines {
+        probe: std::time::Duration::from_millis(10),
+        ..SessionDeadlines::AGENT
+    };
 
     fn provision_keys(dir: &Path) -> (SigningKey, SigningKey) {
         let guest_key = SigningKey::from_bytes(&[21; 32]);
@@ -348,7 +320,7 @@ mod tests {
         let (mut guest, host) = UnixStream::pair().unwrap();
         let collector = host_side(host, anchor_key, guest_key.verifying_key());
         let capture = test_capture();
-        let end = serve_accepted(&mut guest, SessionKeys::load(dir.path()), &capture, bound);
+        let end = serve_accepted(&mut guest, SessionKeys::load(dir.path()), &capture, BOUNDS);
         assert_eq!(end, Some(SessionEnd::PeerClosed));
         let record = collector.join().unwrap().expect("coverage record");
         match *record.body() {
@@ -373,7 +345,7 @@ mod tests {
 
         let (mut guest, host) = UnixStream::pair().unwrap();
         let collector = host_side(host, anchor_key, guest_key.verifying_key());
-        let end = serve_accepted(&mut guest, Ok(captured), &test_capture(), bound);
+        let end = serve_accepted(&mut guest, Ok(captured), &test_capture(), BOUNDS);
         assert_eq!(end, Some(SessionEnd::PeerClosed));
         assert!(collector.join().unwrap().is_some(), "coverage record");
     }
@@ -387,7 +359,7 @@ mod tests {
                 &mut guest,
                 SessionKeys::load(dir.path()),
                 &test_capture(),
-                bound
+                BOUNDS
             ),
             None
         );
@@ -413,7 +385,7 @@ mod tests {
                 &mut guest,
                 SessionKeys::load(dir.path()),
                 &test_capture(),
-                bound
+                BOUNDS
             ),
             None
         );
@@ -433,7 +405,7 @@ mod tests {
                 &mut guest,
                 SessionKeys::load(dir.path()),
                 &test_capture(),
-                bound
+                BOUNDS
             ),
             None
         );

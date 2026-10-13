@@ -151,7 +151,7 @@ x86_64 = "x86_64-unknown-linux-musl"
         }
         let manifest = serde_json::json!({
             "schema_version": 2, "set_version": "0.0.0-local", "issued_at": "2026-01-01T00:00:00Z",
-            "producer": {"local_checkouts": checkouts}, "mvm_source_commit": checkouts.mvm.commit,
+            "producer": {"local_checkouts": checkouts}, "mvm_source_commit": checkouts.mvm.as_ref().unwrap().commit,
             "compatibility": {
                 "guest_agent_protocol": {"min": 2, "max": 2}, "builder_cache_contract": 1, "builder_boot_abi": 0
             },

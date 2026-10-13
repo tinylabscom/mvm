@@ -11,8 +11,15 @@ use super::Cli;
 use mvm_client::audit::host_keypair as host_signer;
 use mvm_client::pool::{SupervisorStandbyPool, WarmParams, warm_to_target};
 
+mod refill;
+mod select;
 mod status;
 
+pub use mvm_client::pool::{ColdStartReason, WarmClaimOutcome};
+pub use refill::{StandbyRefill, schedule_standby_refill};
+use select::{
+    WarmSelection, announce_recent_selection, images_to_warm, recent_image_limit, warm_each,
+};
 use status::{PoolStatus, PoolStatusEntry};
 
 // ── `mvmctl pool` command ───────────────────────────────────────────────────────────
@@ -25,21 +32,42 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum PoolAction {
-    /// Sweep the standby pool toward a target count, warming parents that boot
-    /// the shape a matching launch will claim.
+    /// Prepare standbys ahead of a run: of `--image REF`, of the image a bare
+    /// run boots with `--default`, or with neither, of the most recently
+    /// pulled images (the default image when nothing was pulled).
     ///
-    /// The shape is resolved the same way a real launch resolves it — same
-    /// image, kernel, verity sidecars, runtime overlay and cmdline tokens — so a
-    /// later `mvmctl machine run` with the same image and sizing claims what
-    /// this spawned. A launch that differs in image, kernel, vCPUs, memory or
-    /// egress enablement is refused until that shape is warmed. Default count 1.
+    /// Optional. Every unnamed run already leaves one standby of the image it
+    /// booted, so the second run of an image starts warm without this verb;
+    /// warming ahead makes the first one warm too, or keeps more than one.
+    ///
+    /// The pool is swept toward a target count of standbys per image. The
+    /// shape is resolved the same way a real launch resolves it — same image,
+    /// kernel, verity sidecars, runtime overlay and cmdline tokens — so a later
+    /// run with the same image and sizing claims what this prepared. A launch
+    /// that differs in image, kernel, vCPUs, memory or egress enablement boots
+    /// cold instead. Default count 1.
+    ///
+    /// Which images are warmed:
+    ///
+    ///   --image REF   that OCI image.
+    ///   --default     the image a bare `machine run` boots.
+    ///   neither       the images most recently pulled into the local OCI
+    ///                 cache (by `image pull`, or by a `machine run --image`
+    ///                 that fetched one), newest first, at most as many as the
+    ///                 residency standby target and never fewer than one. With
+    ///                 no pulled images, the default image.
+    #[command(verbatim_doc_comment)]
     Warm {
-        /// How many idle standbys to warm the pool toward (default 1).
+        /// How many idle standbys to warm each image toward (default 1).
         count: Option<u32>,
         /// OCI image the warmed parents boot, matching the `--image` the launch
-        /// will pass. Omit to warm the image a bare `machine run` boots.
-        #[arg(long)]
+        /// will pass.
+        #[arg(long, conflicts_with = "default_image")]
         image: Option<String>,
+        /// Warm the image a bare `machine run` boots, whatever was pulled
+        /// recently.
+        #[arg(long = "default")]
+        default_image: bool,
         /// vCPUs the warmed parents boot with; must match the launch's `--cpus`
         /// (default: the configured `default_cpus`).
         #[arg(long)]
@@ -55,14 +83,47 @@ pub(in crate::commands) enum PoolAction {
         #[arg(long)]
         json: bool,
     },
+    /// Prepare the standby a run leaves behind, then release idle standbys
+    /// on time. Started detached by the run itself; not meant to be typed.
+    #[command(hide = true)]
+    Refill {
+        /// The OCI image the run named; omit for the image a bare run boots.
+        #[arg(long)]
+        image: Option<String>,
+        /// The run's vCPUs.
+        #[arg(long)]
+        cpus: u32,
+        /// The run's memory, in MiB.
+        #[arg(long)]
+        memory_mib: u32,
+    },
 }
 
 /// What `pool warm` warms toward, expressed as the launch it must mirror.
-struct WarmRequest {
-    image: Option<String>,
-    cpus: u32,
-    memory_mib: u32,
-    target: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct WarmRequest {
+    /// The OCI image, or `None` for the image a bare `machine run` boots.
+    pub(in crate::commands) image: Option<String>,
+    pub(in crate::commands) cpus: u32,
+    pub(in crate::commands) memory_mib: u32,
+    pub(in crate::commands) target: u32,
+}
+
+impl WarmRequest {
+    /// One standby of `image` at the configured default sizing — the shape a
+    /// `machine run` that passes no `--cpus` or `--memory` claims.
+    pub(in crate::commands) fn one_at_default_sizing(image: Option<&str>, cfg: &MvmConfig) -> Self {
+        Self {
+            image: image.map(str::to_string),
+            cpus: cfg.default_cpus,
+            memory_mib: cfg.default_memory_mib,
+            target: 1,
+        }
+    }
+
+    fn label(&self) -> &str {
+        self.image.as_deref().unwrap_or("the default image")
+    }
 }
 
 /// Resolve the launch shape a warm parent must boot, without booting one.
@@ -118,12 +179,25 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
-    let pool = SupervisorStandbyPool::open()?;
     match args.action {
-        PoolAction::Status { json } => run_status(&pool, json),
+        PoolAction::Status { json } => run_status(&SupervisorStandbyPool::open()?, json),
+        PoolAction::Refill {
+            image,
+            cpus,
+            memory_mib,
+        } => refill::run_refill(
+            &SupervisorStandbyPool::open()?,
+            cfg,
+            &StandbyRefill {
+                image,
+                cpus,
+                memory_mib,
+            },
+        ),
         PoolAction::Warm {
             count,
             image,
+            default_image,
             cpus,
             memory,
         } => {
@@ -131,17 +205,35 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
                 None => cfg.default_memory_mib,
             };
-            run_warm(
-                &pool,
-                &WarmRequest {
+            let selection = WarmSelection::from_flags(image, default_image);
+            let recent = match selection {
+                WarmSelection::Recent => {
+                    super::image::recent_image_references(&super::image::oci_cache_root())?
+                }
+                _ => Vec::new(),
+            };
+            let images = images_to_warm(selection.clone(), &recent, recent_image_limit());
+            if selection == WarmSelection::Recent {
+                announce_recent_selection(&images);
+            }
+            let requests: Vec<WarmRequest> = images
+                .into_iter()
+                .map(|image| WarmRequest {
                     image,
                     cpus: cpus.unwrap_or(cfg.default_cpus),
                     memory_mib,
                     target: count.unwrap_or(1),
-                },
-            )
+                })
+                .collect();
+            warm_each(&requests, warm_request)
         }
     }
+}
+
+/// Warm toward `req` — the one path `pool warm`, `image pull --warm` and
+/// `image dev ensure --warm` all take.
+pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
+    run_warm(&SupervisorStandbyPool::open()?, req)
 }
 
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
@@ -180,17 +272,20 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
             result.failed,
         ));
     } else if result.spawned == 0 && result.failed == 0 {
-        crate::ui::info(&format!("Pool already at or above target {target}."));
+        crate::ui::info(&format!(
+            "Pool already at or above target {target} for {}.",
+            req.label()
+        ));
     } else {
         crate::ui::success(&format!(
-            "Warmed {} standby(s) toward target {target}.",
+            "Warmed {} standby(s) of {} toward target {target}.",
             result.spawned,
+            req.label(),
         ));
     }
     crate::ui::info(
-        "A launch claims one of these only if it matches on image, kernel, vCPUs, memory and \
-         egress enablement, is auto-named, and runs with a non-zero warm pool size \
-         (MVM_RESIDENCY=warm on hosts whose default is parked).",
+        "A run claims one of these when it matches on image, kernel, vCPUs, memory and \
+         egress enablement and is not given a --name.",
     );
     Ok(())
 }

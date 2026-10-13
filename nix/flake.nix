@@ -313,13 +313,25 @@
           functionGuest = (libFor { inherit system; }).mkGuest {
             name = "sealed-app-probe";
             packages = [ functionApp ] ++ functionService.servicePackages;
-            uids.entrypoint = 0;
-            entrypoint.command = functionService.bootCommand;
-            bootCommand = functionService.bootCommand;
+            entrypoint.command = [ "/usr/lib/mvm/wrappers/runner" ];
             extraFiles = functionService.extraFiles;
           };
         in
         {
+          guest-initramfs-contract = pkgs.runCommand "guest-initramfs-contract" { } ''
+            test ! -e ${functionGuest.rootfsTree}/init
+            test ! -L ${functionGuest.rootfsTree}/init
+            test ! -e ${functionGuest.rootfsTree}/sbin/init
+            test ! -L ${functionGuest.rootfsTree}/sbin/init
+            test ! -e ${functionGuest.rootfsTree}/etc/mvm/boot
+            printf '1\n' > expected-contract
+            cmp expected-contract ${functionGuest.rootfsTree}/etc/mvm/base-image-contract
+            test -f ${functionGuest.rootfsTree}/etc/mvm/entrypoint
+            test -f ${functionGuest.rootfsTree}/etc/mvm/wrapper.json
+            test -f ${functionGuest.rootfsTree}/etc/mvm/runtime.json
+            test -f ${functionGuest.rootfsTree}/etc/mvm/hooks/before_start.sh
+            touch "$out"
+          '';
           guest-function-app-path = pkgs.runCommand "guest-function-app-path" { } ''
             ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /app' ${functionGuest} > app-stat.txt 2>&1
             ${pkgs.gnugrep}/bin/grep -Eq 'Type: *symlink' app-stat.txt

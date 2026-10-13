@@ -2,12 +2,18 @@
 
 use std::path::Path;
 
-use anyhow::Result;
-use mvm_client::image_admin::{PrepareImageRequest, TransferProgress, prepare_image};
+use anyhow::{Result, bail};
+use mvm_client::image_admin::{
+    PreparationVerification, PrepareImageRequest, TransferProgress, prepare_image,
+};
 
 use crate::ui;
 
-pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()> {
+pub(super) fn run(
+    cache_root: &Path,
+    reference: String,
+    prod: bool,
+) -> Result<PreparationVerification> {
     let phase = ui::activity::start(format!("Preparing {reference}"));
     let progress = TransferProgress::default();
     let tracked = progress.clone();
@@ -38,7 +44,31 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()
         report.resolved_digest
     ));
     ui::info(&format!("Rootfs: {}", report.rootfs_path.display()));
-    Ok(())
+    Ok(report.verification)
+}
+
+/// Run `warm` once for `reference` when `--warm` was passed and the pull both
+/// succeeded and verified what it cached. A failed pull is returned as it was;
+/// an unverified one is refused, because `--warm` promises a standby of a
+/// verified image and a rootfs directory has nothing to verify.
+pub(super) fn warm_after_pull(
+    pulled: Result<PreparationVerification>,
+    reference: &str,
+    warm_requested: bool,
+    warm: impl FnOnce(&str) -> Result<()>,
+) -> Result<()> {
+    let verification = pulled?;
+    if !warm_requested {
+        return Ok(());
+    }
+    if verification == PreparationVerification::Unverified {
+        bail!(
+            "{reference} was prepared but not warmed: a rootfs directory carries no digest or \
+             signature for --warm to verify. Warm it explicitly with \
+             `mvmctl pool warm --image {reference}` if that is intended."
+        );
+    }
+    warm(reference)
 }
 
 /// `12.3 MiB of 45.6 MiB (27%)` — the pull line's detail while layers stream.
@@ -59,6 +89,68 @@ fn pull_progress_detail(received: u64, total: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn counting_warm(calls: &Cell<u32>) -> impl FnOnce(&str) -> Result<()> + '_ {
+        move |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn warm_runs_once_after_a_verified_pull() {
+        let calls = Cell::new(0);
+        warm_after_pull(
+            Ok(PreparationVerification::Verified),
+            "alpine",
+            true,
+            counting_warm(&calls),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn warm_never_runs_after_a_failed_pull() {
+        let calls = Cell::new(0);
+        let err = warm_after_pull(
+            Err(anyhow::anyhow!("manifest digest mismatch")),
+            "alpine",
+            true,
+            counting_warm(&calls),
+        )
+        .unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert_eq!(err.to_string(), "manifest digest mismatch");
+    }
+
+    #[test]
+    fn warm_never_runs_after_an_unverified_pull() {
+        let calls = Cell::new(0);
+        let err = warm_after_pull(
+            Ok(PreparationVerification::Unverified),
+            "./rootfs",
+            true,
+            counting_warm(&calls),
+        )
+        .unwrap_err();
+        assert_eq!(calls.get(), 0);
+        assert!(err.to_string().contains("not warmed"), "{err}");
+    }
+
+    #[test]
+    fn warm_never_runs_without_the_flag() {
+        let calls = Cell::new(0);
+        warm_after_pull(
+            Ok(PreparationVerification::Verified),
+            "alpine",
+            false,
+            counting_warm(&calls),
+        )
+        .unwrap();
+        assert_eq!(calls.get(), 0);
+    }
 
     #[test]
     fn pull_progress_reads_as_bytes_of_total_with_a_percentage() {

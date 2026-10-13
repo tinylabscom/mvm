@@ -20,6 +20,7 @@ mod ingest;
 mod materialize;
 mod oci_types;
 mod pull_core;
+mod recent;
 mod signature_legacy;
 mod signature_registry;
 mod source;
@@ -34,6 +35,7 @@ pub use oci_types::{
 pub use pull_core::{
     ensure_prod_digest_pin, ensure_prod_registry_allowed, require_prod_digest_pin,
 };
+pub use recent::recent_image_references;
 pub use source::ImageSource;
 pub use trust::{OciRegistryAuthDecision, registry_auth_for, registry_auth_from_lookup};
 
@@ -59,6 +61,16 @@ pub struct PreparationReport {
     pub provenance: OciProvenance,
     pub auth_source: String,
     pub local: bool,
+    pub verification: PreparationVerification,
+}
+
+/// What a successful preparation established about the image it cached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparationVerification {
+    /// Content digests (and, under production policy, signatures) were checked.
+    Verified,
+    /// A rootfs directory: there is no digest or signature to check.
+    Unverified,
 }
 
 /// Observable transfer counters, independent of any terminal or renderer.
@@ -121,9 +133,14 @@ pub fn prepare_image(
                 resolved_digest: image.resolved_digest,
                 auth_source,
                 local: false,
+                verification: PreparationVerification::Verified,
             }
         }
         source => {
+            let verification = match source {
+                ImageSource::RootfsDir(_) => PreparationVerification::Unverified,
+                _ => PreparationVerification::Verified,
+            };
             crate::launch::runtime_overlay::prepare_oci_guest_runtime(cache_root)?;
             let resolved = match source {
                 ImageSource::OciArchive(path) => {
@@ -148,6 +165,7 @@ pub fn prepare_image(
                 provenance: resolved.provenance,
                 auth_source: "local".to_owned(),
                 local: true,
+                verification,
             }
         }
     };

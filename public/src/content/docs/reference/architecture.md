@@ -98,15 +98,22 @@ What is installed where:
 ### Residency: how warm the standby pool is kept
 
 The standby pool is governed by a single residency policy, surfaced on `mvmctl
-doctor`'s `residency` line as `<policy> — <source> — warm_target=N[, idle=Nm]`.
+doctor`'s `residency` line as `<policy> — <source> — warm_target=N[, idle=Nm] —
+standbys_per_run_image=N, released after Nm idle`.
 
 - `MVM_RESIDENCY=warm|always-warm|parked|cold` overrides the policy. Unset, it resolves
   by host tier: **`always-warm` on the HVF default tier (macOS 26+ Apple Silicon)**, where
   one authority-free paused standby parent is kept so unnamed transient runs can take the
-  live-handoff path, and `parked` (nothing held warm) everywhere else. An explicit `warm`
+  live-handoff path, and `parked` (no warm target) everywhere else. An explicit `warm`
   request is accepted only when the selected backend advertises that capability.
-- The trade-off is resource cost vs. first-command latency: `warm` keeps a standby ready,
-  `parked`/`cold` hold none.
+- Independently of that target, every policy but `cold` keeps one standby per run image:
+  an unnamed run that boots an image leaves one standby of it prepared afterwards, so the
+  next matching run claims it instead of cold-booting. Implicit standbys are held within
+  the `standby_memory_mib` cap and released after 20 idle minutes. A run that finds no
+  standby boots cold; a standby that exists but cannot be claimed fails the run with the
+  refusal rather than falling back to a cold boot.
+- The trade-off is resource cost vs. first-command latency: `warm` keeps a standby ready
+  ahead of the first run, `cold` holds none.
 - Standby and snapshot capabilities are separate axes. The authoritative per-backend
   matrix is exposed by `mvmctl doctor`; unsupported recovery requests fail with a typed
   error instead of silently changing to another tier. `mvmctl pool status` reports `idle`,

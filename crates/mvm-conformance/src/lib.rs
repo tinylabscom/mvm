@@ -19,6 +19,8 @@ pub mod page_merge;
 pub mod prompt_fixture;
 pub mod sharding;
 pub mod source_commands;
+/// Stops host processes a scenario left running against a home it owned.
+pub mod vmm_reaper;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
 pub const PENDING_TAG: &str = "wip";

@@ -66,7 +66,7 @@ fn independently_admitted_identical_grants_cannot_exchange_output_images() {
         .close_run(
             &RefCell::new(Some(ctx_b)),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            crate::admission::BootPosture::block(),
             Ok(7),
             &mut |_| panic!("cross-context output must not be observed"),
         )
@@ -90,7 +90,7 @@ fn independently_admitted_identical_grants_cannot_exchange_output_images() {
         .close_run(
             &RefCell::new(Some(ctx_a)),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            crate::admission::BootPosture::block(),
             Ok(7),
             &mut |output| observed.push(output),
         )
@@ -147,7 +147,7 @@ fn admitted_bounds_and_run_failure_keep_their_refusal_tags() {
         .close_run::<()>(
             &RefCell::new(Some(ctx)),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            crate::admission::BootPosture::block(),
             Err(anyhow::anyhow!("original run failure")),
             &mut |_| panic!("failed run must not collect"),
         )

@@ -278,6 +278,7 @@ fn seed_grant(vm: &str) -> mvm_core::protocol::vm_backend::VerbGrantEnvelope {
             verbs: Vec::new(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![0; 64],
         },
     };

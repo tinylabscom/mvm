@@ -133,7 +133,14 @@ unbounded line.
 4. **Loss summaries arrive even when data sheds.** They travel a reserved
    path, so "the feed is quiet but losses are climbing" is a real state the
    UI can and should distinguish from "nothing is happening".
-5. **Coverage drives health.** `started` → collecting; `degraded`/`
+5. **A full guest queue sheds the newest record, never queued history.**
+   When a producer outruns delivery, records already queued are kept and
+   the arriving one is refused and counted against the producer that sent
+   it. Expect the gap after the last record a producer got through, not
+   holes punched into older ranges; after a collection outage the first
+   records to arrive are the ones queued when it began, followed by a gap,
+   a `loss` summary and then live records.
+6. **Coverage drives health.** `started` → collecting; `degraded`/`
    unavailable` → show the code; `stopped` → clean end. Absence of records
    is not evidence of health — the status snapshot is.
 

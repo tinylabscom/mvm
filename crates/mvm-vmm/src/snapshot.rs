@@ -44,9 +44,9 @@ pub trait SnapshotIO {
     ///
     /// Same contract as
     /// [`load_snapshot_paused`](Self::load_snapshot_paused) — the guard still
-    /// has to run before [`resume`](Self::resume) — but the child's device
-    /// paths are already bind-mounted into its private mount namespace, so
-    /// this variant must not re-create the host vsock socket underneath them.
+    /// has to run before [`resume`](Self::resume) — but the snapshot names the
+    /// parent's devices, so this variant points the load at the child's own
+    /// before it returns.
     fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()>;
 
     /// How many network interfaces the restored VM's device model carries,
@@ -111,9 +111,8 @@ pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Resu
 
 /// Fork variant of [`guarded_load_resume`].
 ///
-/// A forked child's device paths are already bind-mounted into its private
-/// mount namespace, so its load must not re-create the host vsock socket the
-/// way a plain instance restore does. Only the load differs — the guard and the
+/// A forked child's load is pointed at the child's own devices rather than the
+/// parent's its snapshot names. Only the load differs — the guard and the
 /// resume are the same, so a fork cannot reach userspace unchecked or stay
 /// paused forever.
 pub fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {

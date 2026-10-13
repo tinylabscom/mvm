@@ -52,11 +52,11 @@ impl PreparedOutputs {
         &self,
         admitted: &std::cell::RefCell<Option<AdmissionContext>>,
         backend: &str,
-        strategy: mvm_build::run_image::RootStrategy,
+        posture: mvm_client::admission::BootPosture,
         result: Result<T>,
     ) -> Result<T> {
         self.0
-            .close_run(admitted, backend, strategy, result, &mut |collected| {
+            .close_run(admitted, backend, posture, result, &mut |collected| {
                 ui::info(&format!(
                     "Collected {} entries ({} bytes) from {} into {}; manifest {} (sha256 {})",
                     collected.entry_count,

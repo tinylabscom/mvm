@@ -160,7 +160,7 @@ impl PreparedOutputs {
         &self,
         admitted: &RefCell<Option<AdmissionContext>>,
         backend: &str,
-        strategy: mvm_build::run_image::RootStrategy,
+        posture: crate::admission::BootPosture,
         result: Result<T>,
         observer: &mut dyn FnMut(CollectedOutput),
     ) -> Result<T> {
@@ -169,7 +169,7 @@ impl PreparedOutputs {
             result?;
             return Err(error);
         }
-        crate::admission::record_transient_outcome(admitted.as_ref(), backend, strategy, &result);
+        crate::admission::record_transient_outcome(admitted.as_ref(), backend, posture, &result);
         let collected = self.collect(admitted.as_ref(), result.is_ok(), observer);
         let value = result?;
         collected?;
@@ -420,7 +420,7 @@ mod tests {
             .close_run::<()>(
                 &RefCell::new(None),
                 "test",
-                mvm_build::run_image::RootStrategy::BlockExt4,
+                crate::admission::BootPosture::block(),
                 Err(anyhow::anyhow!("original run failure")),
                 &mut |_| panic!("not collected"),
             )
@@ -431,7 +431,7 @@ mod tests {
             .close_run(
                 &RefCell::new(None),
                 "test",
-                mvm_build::run_image::RootStrategy::BlockExt4,
+                crate::admission::BootPosture::block(),
                 Ok(7),
                 &mut |_| panic!("no output"),
             )

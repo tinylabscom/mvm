@@ -4020,6 +4020,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             }),
             drive: None,
             display_input: None,
+            application_terminal: None,
         })
     );
 }

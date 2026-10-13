@@ -319,12 +319,33 @@ impl Drop for ConsoleSession {
     }
 }
 
+/// Hold a console to the application terminal the machine's plan admits, if
+/// it admits one: the granted argv and the host-provisioned environment
+/// replace the defaults, and another program or caller variables are refused
+/// before anything reaches the guest.
+fn with_application_terminal(
+    name: &str,
+    mut options: ConsoleSessionOptions,
+) -> Result<ConsoleSessionOptions> {
+    let resolved = crate::application_terminal::resolve_terminal_request(
+        name,
+        crate::application_terminal::TerminalRequest {
+            argv: std::mem::take(&mut options.argv),
+            env: std::mem::take(&mut options.env),
+        },
+    )?;
+    options.argv = resolved.argv;
+    options.env = resolved.env;
+    Ok(options)
+}
+
 pub fn open(
     name: &str,
     options: ConsoleSessionOptions,
     (cols, rows): (u16, u16),
 ) -> Result<ConsoleSession> {
     enforce_accessible_gate(name, options.take_over)?;
+    let options = with_application_terminal(name, options)?;
     crate::touch_activity(name);
     let transport = pick_console_transport(name)?;
     let running = if options.needs_dedicated_session() {

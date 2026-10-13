@@ -670,6 +670,10 @@ pub struct ManifestGrants {
     /// and workspace roots are plan-authored; a caller may select neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<mvm_contract::grants::DriveGrant>,
+    /// The one application a development terminal attaches to, by exact
+    /// argv. It never opens a terminal on a sealed image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_terminal: Option<mvm_contract::grants::ApplicationTerminalGrant>,
 }
 
 impl ManifestGrants {
@@ -679,6 +683,7 @@ impl ManifestGrants {
             && self.wall_clock_secs.is_none()
             && self.allow_hosts.is_empty()
             && self.drive.is_none()
+            && self.application_terminal.is_none()
     }
 
     /// Convert to the typed permission set the plan carries.
@@ -739,6 +744,7 @@ impl ManifestGrants {
             egress,
             drive: self.drive.clone(),
             display_input: None,
+            application_terminal: self.application_terminal.clone(),
         })
     }
 }

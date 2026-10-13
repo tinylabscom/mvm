@@ -14,8 +14,8 @@
 //! absent egress grant is deny-all, so a child that drops one has narrowed.
 
 use crate::grants::{
-    CpuGrant, DisplayInputGrant, DriveGrant, DriveProgramId, EgressGrant, Grants, WallClockGrant,
-    WorkspaceRoot,
+    ApplicationTerminalGrant, CpuGrant, DisplayInputGrant, DriveGrant, DriveProgramId, EgressGrant,
+    Grants, WallClockGrant, WorkspaceRoot,
 };
 use crate::policy::network_policy::HostPort;
 
@@ -66,19 +66,38 @@ pub enum GrantWidening {
     DisplayClipboardNotAdmitted,
     #[error("child changes the parent's human-credential destinations")]
     HumanCredentialChanged,
+    #[error("child carries an application terminal the parent did not admit")]
+    ApplicationTerminalNotAdmitted,
 }
 
 /// Whether `child` asks for no more than `parent` holds, in every dimension.
 ///
 /// Dimensions are checked in a fixed order — CPU, wall clock, egress, drive,
-/// display input — so a child that widens in more than one reports a stable
+/// display input, application terminal — so a child that widens in more than one reports a stable
 /// reason rather than one that depends on evaluation order.
 pub fn grants_are_subset(child: &Grants, parent: &Grants) -> Result<(), GrantWidening> {
     cpu_is_subset(child.cpu, parent.cpu)?;
     wall_clock_is_subset(child.wall_clock, parent.wall_clock)?;
     egress_is_subset(child.egress.as_ref(), parent.egress.as_ref())?;
     drive_is_subset(child.drive.as_ref(), parent.drive.as_ref())?;
-    display_input_is_subset(child.display_input.as_ref(), parent.display_input.as_ref())
+    display_input_is_subset(child.display_input.as_ref(), parent.display_input.as_ref())?;
+    application_terminal_is_subset(
+        child.application_terminal.as_ref(),
+        parent.application_terminal.as_ref(),
+    )
+}
+
+/// An application terminal is one exact argv, so a child may drop it or keep
+/// it unchanged, never add or alter it.
+fn application_terminal_is_subset(
+    child: Option<&ApplicationTerminalGrant>,
+    parent: Option<&ApplicationTerminalGrant>,
+) -> Result<(), GrantWidening> {
+    match (child, parent) {
+        (None, _) => Ok(()),
+        (Some(child), Some(parent)) if child == parent => Ok(()),
+        (Some(_), _) => Err(GrantWidening::ApplicationTerminalNotAdmitted),
+    }
 }
 
 fn cpu_is_subset(child: Option<CpuGrant>, parent: Option<CpuGrant>) -> Result<(), GrantWidening> {
@@ -274,6 +293,7 @@ mod tests {
             egress: egress(&[("api.example.com", 443), ("pypi.org", 443)]),
             drive: drive("/workspace", "agent", 1_000, 2_000, 300),
             display_input: None,
+            application_terminal: None,
         };
         let child = Grants {
             cpu: share(1000),
@@ -281,6 +301,7 @@ mod tests {
             egress: egress(&[("api.example.com", 443)]),
             drive: drive("/workspace/src", "agent", 500, 1_000, 60),
             display_input: None,
+            application_terminal: None,
         };
         assert_eq!(grants_are_subset(&child, &parent), Ok(()));
     }
@@ -293,6 +314,7 @@ mod tests {
             egress: egress(&[("api.example.com", 443)]),
             drive: drive("/workspace", "agent", 1_000, 2_000, 300),
             display_input: None,
+            application_terminal: None,
         };
         assert_eq!(grants_are_subset(&g, &g), Ok(()));
     }
@@ -534,6 +556,7 @@ mod tests {
             egress: None,
             drive: None,
             display_input: None,
+            application_terminal: None,
         };
         let child = Grants {
             cpu: share(2000),
@@ -541,6 +564,7 @@ mod tests {
             egress: egress(&[("evil.example.com", 443)]),
             drive: drive("/workspace", "agent", 1, 1, 1),
             display_input: None,
+            application_terminal: None,
         };
         assert_eq!(
             grants_are_subset(&child, &parent),
@@ -704,5 +728,28 @@ mod tests {
             Err(GrantWidening::HumanCredentialChanged)
         );
         assert!(grants_are_subset(&parent, &parent).is_ok());
+    }
+
+    #[test]
+    fn an_application_terminal_is_kept_or_dropped_never_added_or_changed() {
+        let claude = ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()]).unwrap();
+        let shell = ApplicationTerminalGrant::new(vec!["/opt/other/bin/app".into()]).unwrap();
+        let with = |grant: &ApplicationTerminalGrant| Grants {
+            application_terminal: Some(grant.clone()),
+            ..Grants::default()
+        };
+        assert_eq!(grants_are_subset(&with(&claude), &with(&claude)), Ok(()));
+        assert_eq!(
+            grants_are_subset(&Grants::default(), &with(&claude)),
+            Ok(())
+        );
+        assert_eq!(
+            grants_are_subset(&with(&claude), &Grants::default()),
+            Err(GrantWidening::ApplicationTerminalNotAdmitted)
+        );
+        assert_eq!(
+            grants_are_subset(&with(&shell), &with(&claude)),
+            Err(GrantWidening::ApplicationTerminalNotAdmitted)
+        );
     }
 }

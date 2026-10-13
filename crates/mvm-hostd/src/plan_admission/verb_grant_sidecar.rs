@@ -6,8 +6,8 @@ use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant, Ver
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use std::path::Path;
 
-/// Mint a signed `VerbGrantEnvelope` when the plan carries agent or drive
-/// authority and write it to `<state_dir>/verb-grant.json` at mode 0600.
+/// Mint a signed `VerbGrantEnvelope` when the plan carries agent, drive,
+/// tool-mediation or application-terminal authority and write it to `<state_dir>/verb-grant.json` at mode 0600.
 ///
 /// The sidecar is consumed by the backend's `verb_grant_cmdline_token` at
 /// launch time and carried to the guest on the kernel command line.
@@ -40,7 +40,14 @@ pub(super) fn mint_verb_grant_sidecar(
     refuse_expired_plan(&plan, chrono::Utc::now())?;
     let tool_mediation = tool_mediation_for(&plan)?;
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
-    let Some(verbs) = granted_verbs(&plan, drive.is_some() || tool_mediation.is_some()) else {
+    let application_terminal = plan
+        .grants
+        .as_ref()
+        .and_then(|grants| grants.application_terminal.as_ref())
+        .map(mvm_contract::grants::ApplicationTerminalBinding::from);
+    let other_authority =
+        drive.is_some() || tool_mediation.is_some() || application_terminal.is_some();
+    let Some(verbs) = granted_verbs(&plan, other_authority) else {
         return Ok(None);
     };
 
@@ -55,8 +62,11 @@ pub(super) fn mint_verb_grant_sidecar(
         &plan.nonce,
         plan.valid_until,
         verbs,
-        drive,
-        tool_mediation,
+        crate::host_signer::VerbGrantAuthority {
+            drive,
+            tool_mediation,
+            application_terminal,
+        },
     )
     .context("mint verb grant")?;
 
@@ -295,5 +305,54 @@ mod tests {
                 .is_ok()
         );
         assert!(state_dir.join("verb-grant.json").is_file());
+    }
+
+    #[test]
+    fn an_application_terminal_plan_mints_a_grant_bound_to_its_argv() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let state_dir = home.path().join("terminal-guest");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let mut plan = plan_valid(5, 600);
+        let terminal =
+            mvm_contract::grants::ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()])
+                .expect("valid argv");
+        plan.grants = Some(mvm_contract::grants::Grants {
+            application_terminal: Some(terminal.clone()),
+            ..Default::default()
+        });
+        let signed = serde_json::to_string(&SignedExecutionPlan(
+            mvm_core::protocol::signing::SignedPayload {
+                payload: serde_json::to_vec(&plan).expect("plan payload"),
+                signature: vec![],
+                signer_id: "test".into(),
+            },
+        ))
+        .expect("signed plan envelope");
+        let envelope = mint_verb_grant_sidecar(&signed, "terminal-guest", &state_dir)
+            .expect("terminal plan")
+            .expect("an application terminal requires a grant");
+        let binding = envelope
+            .grant
+            .application_terminal
+            .as_ref()
+            .expect("binding carried");
+        assert_eq!(binding.argv_digest, terminal.argv_digest());
+        assert!(envelope.grant.permits("console-open"));
+        assert!(!envelope.grant.permits("exec"));
+        let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())
+            .expect("host signer");
+        assert!(
+            envelope
+                .grant
+                .verify(
+                    &key.verifying,
+                    "terminal-guest",
+                    &plan.nonce,
+                    chrono::Utc::now()
+                )
+                .is_ok()
+        );
     }
 }

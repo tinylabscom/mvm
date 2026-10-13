@@ -409,7 +409,48 @@ fn verify_member_artifact(
     dir: &Path,
 ) -> Result<VerifiedArtifact, ImageSetError> {
     let path = dir.join(artifact.name.as_str());
-    let size = artifact_size(member, artifact, &path)?;
+    verify_member_artifact_at_path(member, artifact, &path)
+}
+
+pub(super) fn verify_artifacts_at_paths(
+    manifest: &ImageSetManifest,
+    paths: &std::collections::BTreeMap<String, PathBuf>,
+) -> Result<Vec<VerifiedArtifact>, ImageSetError> {
+    let mut verified = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut seen_paths = std::collections::BTreeSet::new();
+    for member in &manifest.members {
+        for artifact in &member.artifacts {
+            if !seen.insert(artifact.name.as_str()) {
+                return Err(ImageSetError::DuplicateSelectedArtifact {
+                    name: artifact.name.clone(),
+                });
+            }
+            let path = paths.get(artifact.name.as_str()).ok_or_else(|| {
+                ImageSetError::ArtifactUnreadable {
+                    role: member.role,
+                    target: member.target,
+                    name: artifact.name.clone(),
+                    reason: "no installed path was supplied for the declared artifact".into(),
+                }
+            })?;
+            if !seen_paths.insert(path) {
+                return Err(ImageSetError::DuplicateSelectedArtifact {
+                    name: artifact.name.clone(),
+                });
+            }
+            verified.push(verify_member_artifact_at_path(member, artifact, path)?);
+        }
+    }
+    Ok(verified)
+}
+
+fn verify_member_artifact_at_path(
+    member: &ImageSetMember,
+    artifact: &MemberArtifact,
+    path: &Path,
+) -> Result<VerifiedArtifact, ImageSetError> {
+    let size = artifact_size(member, artifact, path)?;
     if size != artifact.size {
         return Err(ImageSetError::ArtifactSizeMismatch {
             role: member.role,
@@ -419,7 +460,7 @@ fn verify_member_artifact(
             actual: size,
         });
     }
-    let sha256 = artifact_digest(member, artifact, &path)?;
+    let sha256 = artifact_digest(member, artifact, path)?;
     if sha256 != artifact.sha256 {
         return Err(ImageSetError::ArtifactDigestMismatch {
             role: member.role,
@@ -433,7 +474,7 @@ fn verify_member_artifact(
         role: member.role,
         target: member.target,
         name: artifact.name.clone(),
-        path,
+        path: path.to_path_buf(),
         sha256,
         size,
     })

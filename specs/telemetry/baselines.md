@@ -78,6 +78,11 @@ in [Overflow-policy evaluation](overflow-evaluation.md). These metadata-only
 models do not change the production outbox or establish its admission cost;
 the existing baseline schema, measurements and budgets remain unchanged.
 
+`telemetry-baseline --noisy` measures drop-newest against drop-oldest on the
+production storage shape under a noisy producer. Those measurements decided
+the overflow rule — drop-newest stays, with no per-source quotas — and are
+recorded with their raw reports in the same document.
+
 ## Regression budgets
 
 Rule: budget = worst observed value of that statistic across the five runs,

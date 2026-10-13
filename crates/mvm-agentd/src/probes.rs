@@ -73,11 +73,10 @@ pub struct ProbeResult {
 /// Load probe entries from a drop-in directory.
 ///
 /// Reads all `*.json` files in `dir`, parsing each as a [`ProbeEntry`].
-/// Invalid files are logged to stderr and skipped. Returns an empty vec
-/// if the directory does not exist.
+/// Invalid files are logged to stderr and skipped. Returns an empty vec,
+/// silently, if the directory does not exist: most images declare no probes.
 pub fn load_probe_dropin_dir(dir: &str) -> Vec<ProbeEntry> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        eprintln!("mvm-guest-agent: probes dir {} not found, no probes", dir);
         return vec![];
     };
     let mut result = Vec::new();

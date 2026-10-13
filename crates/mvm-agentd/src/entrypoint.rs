@@ -1268,6 +1268,8 @@ mod tests {
 
     #[test]
     fn sealed_script_policy_accepts_immutable_executable_and_rejects_writable_script() {
+        use std::os::unix::fs::MetadataExt;
+
         let tmp = tempfile::tempdir().expect("tempdir");
         let etc_mvm = tmp.path().join("etc/mvm");
         std::fs::create_dir_all(&etc_mvm).expect("marker directory");

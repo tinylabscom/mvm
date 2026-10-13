@@ -1716,6 +1716,13 @@ mod tests {
 
     #[test]
     fn download_kernel_refuses_a_manifest_digest_that_does_not_match() {
+        if !crate::test_boot_payload::in_payload_capable_test_process(
+            module_path!(),
+            "download_kernel_refuses_a_manifest_digest_that_does_not_match",
+        ) {
+            return;
+        }
+        crate::test_boot_payload::register_fixture_payload();
         // The workload kernel publishes as the default-microvm image's vmlinux.
         let asset = "default-microvm-vmlinux-aarch64";
         let server = loopback_release_server(1, move |line| {
