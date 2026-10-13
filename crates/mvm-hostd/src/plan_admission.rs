@@ -88,8 +88,8 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
-mod bundle_environment;
 mod assurance_runtime;
+mod bundle_environment;
 mod display_grants;
 mod host_trust;
 mod registry_pack;

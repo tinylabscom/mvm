@@ -280,14 +280,10 @@ pub(crate) mod fixtures {
 
     /// Signed original portable inputs, not a verified capability.
     pub fn signed_legacy_portable_runtime_fixture(home: &Path) -> VmStartConfig {
-        fixture(home, Some(2), false)
+        fixture(home, Some(2), false, 4)
     }
 
-    pub(super) fn fixture(home: &Path, protocol: Option<u32>, wrong_role: bool) -> VmStartConfig {
-        fixture_with_schema(home, protocol, wrong_role, 4)
-    }
-
-    pub(super) fn fixture_with_schema(
+    pub(super) fn fixture(
         home: &Path,
         protocol: Option<u32>,
         wrong_role: bool,
@@ -480,7 +476,7 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             let mut env = mvm_core::util::test_env::TestEnv::new();
             env.isolate_mvm_home(home.path());
-            let config = super::fixtures::fixture_with_schema(home.path(), Some(2), false, schema);
+            let config = super::fixtures::fixture(home.path(), Some(2), false, schema);
             if schema == 6 {
                 assert!(verify_runtime_for_launch(&config, 2).is_err());
                 continue;
@@ -507,7 +503,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false);
+        let config = fixture(home.path(), Some(2), false, 4);
         assert!(matches!(
             verify_runtime_for_launch(&config, 2).unwrap(),
             Some(crate::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_))
@@ -637,7 +633,7 @@ mod tests {
             (Some(2), true),
         ] {
             let source = tempfile::tempdir().unwrap();
-            let config = fixture(source.path(), protocol, wrong_role);
+            let config = fixture(source.path(), protocol, wrong_role, 4);
             assert!(
                 verify_runtime_for_launch(&config, 2).is_err(),
                 "{protocol:?} {wrong_role}"
@@ -671,7 +667,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false);
+        let config = fixture(home.path(), Some(2), false, 4);
         let bound = RuntimeLifecycleLease::acquire(&config.name)
             .unwrap()
             .bind(&config)
