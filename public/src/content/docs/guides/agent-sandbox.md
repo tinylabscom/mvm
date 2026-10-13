@@ -409,6 +409,58 @@ mvmctl trust audit verify
 including across rotated segments. It cannot detect entries removed from the
 end of the log.
 
+## Application terminals
+
+An interactive agent such as Claude Code runs in a terminal. A plan can admit
+exactly one such program with an `application_terminal` grant, in a
+`--grants-file` or the manifest's `[grants]`:
+
+```json
+{ "application_terminal": { "argv": ["/usr/bin/claude"] } }
+```
+
+`argv[0]` must be an absolute, normalised path of printable ASCII; it is not
+resolved on the guest. It may not name a shell, an interpreter or a launcher
+that runs another program (`sh`, `bash`, `env`, `busybox`, `python3`, `node`,
+`sudo`, `xargs` and the like, matched exactly on the file name), so the grant
+cannot become a shell under another name. The grant is carried in the signed
+plan and, as a length-framed digest of the whole argv, in the host-signed verb
+grant the guest agent pins at boot.
+
+`mvmctl machine attach <name>` then opens that program rather than a shell.
+It runs as the workload user under the workload's seccomp tier, with the
+image's declared environment plus the environment the host provisioned for
+the machine: the egress proxy, the CA bundle and the `--secret` placeholders.
+Raw credentials stay on the host and are substituted on the way out, exactly
+as for an entrypoint call, and every request is audited the same way. Resize,
+detach and reattach, `--detach-timeout`, and the exit code work as they do for
+the shell.
+
+What it refuses:
+
+- A different argv, an empty argv (the default shell), and `--env`, on the
+  host before anything is sent.
+- In the guest agent, against the host-signed grant rather than the request:
+  any argv but the granted one, compared byte for byte; any variable that is
+  not the host-provisioned set (the proxy variables naming the guest loopback,
+  the fixed CA bundle paths, and secret variables whose value is a minted
+  placeholder, never under a name a loader or interpreter reads, such as
+  `LD_*`, `NODE_OPTIONS` or `PYTHON*`); and a program path that is reached
+  through a symbolic link, is not an executable regular file, or sits where
+  anyone but root could replace it.
+- Any terminal at all on a sealed production image. The console verbs remain
+  development-only; the grant narrows what a development terminal may run and
+  opens nothing on a sealed one.
+
+A plan with an application terminal gets a closed verb grant, as a drive
+grant does: name any other agent verbs the run needs with `--agent-verb`.
+
+Whether a given agent can authenticate this way depends on it honouring the
+proxy environment and reading its key from the placeholder variable. An
+`x-api-key` request through the substitution path is covered above; a
+subscription sign-in flow is not, and no interactive Claude session is
+claimed by these tests.
+
 ## What this does not protect against
 
 - **Use of the credential through the placeholder.** A compromised agent can

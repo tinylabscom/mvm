@@ -466,6 +466,43 @@ fn rollback_and_wrong_signer_leave_the_store_untouched() {
 }
 
 #[test]
+fn an_old_unexpired_list_cannot_undo_an_applied_image_set_revocation() {
+    // This test uses the module's explicitly synthetic signer, not publisher
+    // signature evidence. It exercises only the persisted monotonicity rule.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let store = store_in(&dir);
+    let old_bytes = document(&list(at(4), at(20)));
+    store
+        .update(&old_bytes, &bundle_for_publication(1), at(5))
+        .expect("apply the earlier list");
+
+    let signer = image_set_signer_key_id();
+    let mut revoked = list(at(5), at(20));
+    revoked.revocations.push(RevokedPack {
+        key_id: signer.clone(),
+        pack_hash: None,
+        reason: "image-set signer revoked".to_string(),
+    });
+    store
+        .update(&document(&revoked), &bundle_for_publication(2), at(6))
+        .expect("apply the newer revocation");
+
+    assert!(matches!(
+        store.update(&old_bytes, &bundle_for_publication(1), at(7)),
+        Err(ImageSetRevocationStoreError::Verification(
+            ImageSetRevocationError::Rollback { .. }
+        ))
+    ));
+    assert!(matches!(
+        store
+            .load(at(7))
+            .expect("the applied revocation remains current")
+            .status(&signer, &Sha256Hex::from_bytes(b"previously accepted set")),
+        RevocationStatus::Revoked { .. }
+    ));
+}
+
+#[test]
 fn deleting_the_checkpoint_does_not_reopen_rollback() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = store_in(&dir);

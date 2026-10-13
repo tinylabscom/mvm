@@ -210,8 +210,7 @@ mod tests {
                 .iter()
                 .map(|verb| mvm_contract::plan::VerbId::new(verb).unwrap())
                 .collect(),
-            None,
-            None,
+            crate::host_signer::VerbGrantAuthority::default(),
         )
         .unwrap();
         let envelope = VerbGrantEnvelope {

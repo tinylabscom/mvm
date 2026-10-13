@@ -99,7 +99,7 @@ allowed to run inside those layers at all.
 | 12  | Every broker service is bound to a signed plan binding                     | admission                | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls                                   |
 | 13  | Managed substitution hands the guest placeholders, never raw secret values | data containment         | The host-side substitution endpoint mints the guest environment and resolves credentials only while preparing an admitted outbound request              |
 | 14  | Every OCI image admission records provenance in the audit log              | supply chain             | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference                     |
-| 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
+| 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only a dev image is served a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
 
 Three further claims — 16 (egress substitution keeps a raw secret off the
 guest), 17 (workload stdin is grant-gated and secret-scanned), and 18 (workload

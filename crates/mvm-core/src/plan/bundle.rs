@@ -76,9 +76,14 @@ use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleMember, BundleResources, BundleSecurityPosture, KeyId, MANIFEST_FILENAME,
-    MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
-    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
+    BundleMember, BundleResources, BundleSecurityPosture, ENVIRONMENT_MEMBER_MIN_SCHEMA, KeyId,
+    MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES,
+    PlanArtifact, SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
+};
+pub use mvm_contract::plan::environment::{
+    ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
+    EnvironmentDescriptor, EnvironmentDescriptorError, EnvironmentEntrypoint, EnvironmentVolume,
+    SecretSlot,
 };
 
 use crate::arch::GuestArch;
@@ -94,7 +99,9 @@ mod lookup;
 mod signer;
 mod stream;
 mod verify_error;
-pub use declarations::BundleSizeBudget;
+pub use declarations::{
+    BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
+};
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
 pub use stream::{
@@ -1059,7 +1066,8 @@ fn verify_embedded_image_sets(
             BundleMember::KernelCmdline { .. }
             | BundleMember::EmbeddedBootAssets { .. }
             | BundleMember::SecurityPosture(_)
-            | BundleMember::BuildProvenance(_) => None,
+            | BundleMember::BuildProvenance(_)
+            | BundleMember::Environment(_) => None,
         })
         .map(|manifest_artifact| {
             verify_embedded_image_set(bundle, artifacts, manifest_artifact, None)
@@ -1076,7 +1084,8 @@ fn verify_boot_assets(
         BundleMember::EmbeddedImageSet { .. }
         | BundleMember::KernelCmdline { .. }
         | BundleMember::SecurityPosture(_)
-        | BundleMember::BuildProvenance(_) => None,
+        | BundleMember::BuildProvenance(_)
+        | BundleMember::Environment(_) => None,
     }) else {
         return Ok(None);
     };
@@ -3021,6 +3030,17 @@ mod tests {
     /// without going through [`write_bundle`]'s refusal — what a publisher
     /// with other tooling could hand a consumer.
     fn hand_sealed_bundle(sk: &SigningKey, members: Vec<BundleMember>) -> Vec<u8> {
+        hand_sealed_bundle_with(sk, |manifest| manifest.members = members, |_| {})
+    }
+
+    /// [`hand_sealed_bundle`], with the manifest edited first as a typed value
+    /// and then as signed JSON, so a test can seal what this build's types
+    /// cannot express (a capability or field a newer publisher wrote).
+    fn hand_sealed_bundle_with(
+        sk: &SigningKey,
+        edit: impl FnOnce(&mut BundleManifest),
+        edit_json: impl FnOnce(&mut serde_json::Value),
+    ) -> Vec<u8> {
         let payload = [
             ("artifacts/vmlinux", ArtifactRole::Kernel, b"k".as_slice()),
             ("artifacts/rootfs.ext4", ArtifactRole::Rootfs, b"r"),
@@ -3043,8 +3063,10 @@ mod tests {
             roothash: "a".repeat(64),
             sidecar_artifact: "rootfs.verity".to_string(),
         });
-        manifest.members = members;
-        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
+        edit(&mut manifest);
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        edit_json(&mut value);
+        let manifest_bytes = serde_json::to_vec(&value).unwrap();
         let sig = sk.sign(&manifest_bytes).to_bytes();
         let mut tar = tar::Builder::new(Vec::new());
         append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
@@ -3053,6 +3075,178 @@ mod tests {
             append_bytes(&mut tar, path, bytes).unwrap();
         }
         tar.into_inner().unwrap()
+    }
+
+    /// A sealed-prod posture that allows egress and volumes, verity-bound.
+    fn open_sealed_posture() -> BundleSecurityPosture {
+        BundleSecurityPosture {
+            allows_egress: true,
+            allows_volumes: true,
+            ..sealed_posture()
+        }
+    }
+
+    fn environment_descriptor() -> EnvironmentDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "pack": { "name": "acme/agent", "version": "1.2.3" },
+            "target": "aarch64-linux",
+            "entrypoint": { "argv": ["/usr/bin/agent", "--serve"], "working_dir": "/srv" },
+            "resources": { "cpu_cores": 2, "memory_mb": 1024 },
+            "volumes": [{ "name": "workspace", "guest_path": "/workspace" }],
+            "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+            "capabilities": ["egress", "host_volumes"],
+            "services": [{ "name": "indexer", "argv": ["/usr/bin/indexer"] }],
+        }))
+        .expect("environment fixture")
+    }
+
+    fn with_environment(manifest: &mut BundleManifest) {
+        manifest.members = vec![
+            BundleMember::SecurityPosture(open_sealed_posture()),
+            BundleMember::Environment(environment_descriptor()),
+        ];
+    }
+
+    #[test]
+    fn an_environment_survives_sign_verify_and_install() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |_| {});
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("coherent bundle");
+        assert_eq!(
+            verified.manifest.environment(),
+            Some(&environment_descriptor())
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+        let manifest = registry
+            .verified_manifest(&installed.sha256, &trust(&sk))
+            .unwrap()
+            .expect("installed");
+        assert_eq!(manifest.environment(), Some(&environment_descriptor()));
+    }
+
+    #[test]
+    fn tampering_with_a_signed_environment_breaks_the_signature() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |_| {});
+        let needle = br#""/usr/bin/agent""#;
+        let at = archive
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("entrypoint is in the manifest bytes");
+        let mut tampered = archive.clone();
+        tampered[at..at + needle.len()].copy_from_slice(br#""/usr/bin/shell""#);
+        assert!(matches!(
+            read_and_verify_bundle(&tampered, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn a_signed_capability_this_reader_does_not_know_is_refused() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |value| {
+            value["members"][1]["capabilities"] = serde_json::json!(["raw_network"]);
+        });
+        let err = read_and_verify_bundle(&archive, &trust(&sk)).unwrap_err();
+        assert!(
+            matches!(&err, BundleVerifyError::ManifestParse(reason) if reason.contains("raw_network")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_signed_secret_value_in_a_slot_is_refused() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |value| {
+            value["members"][1]["secret_slots"][0]["value"] = serde_json::json!("tok-123");
+        });
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::ManifestParse(_))
+        ));
+    }
+
+    #[test]
+    fn an_unsupported_descriptor_version_is_refused_at_verify() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |value| {
+            value["members"][1]["descriptor_version"] = serde_json::json!(2);
+        });
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::MalformedEnvironment(
+                EnvironmentDescriptorError::UnsupportedVersion { found: 2, .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn an_environment_for_another_arch_is_refused_at_verify() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(&sk, with_environment, |value| {
+            value["members"][1]["target"] = serde_json::json!("x86_64-linux");
+        });
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::EnvironmentRefused { .. })
+        ));
+    }
+
+    #[test]
+    fn an_environment_beyond_its_posture_is_refused_at_verify() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(
+            &sk,
+            |manifest| {
+                with_environment(manifest);
+                manifest.members[0] = BundleMember::SecurityPosture(sealed_posture());
+            },
+            |_| {},
+        );
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::EnvironmentRefused { reason }) if reason.contains("egress")
+        ));
+    }
+
+    #[test]
+    fn an_environment_stamped_with_an_older_schema_is_refused() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(
+            &sk,
+            |manifest| {
+                with_environment(manifest);
+                manifest.schema_version = 4;
+            },
+            |_| {},
+        );
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::EnvironmentRefused { reason }) if reason.contains("schema 5")
+        ));
+    }
+
+    /// The old-reader fixture: a schema-4 bundle written before the
+    /// environment member existed still verifies, carries no descriptor, and
+    /// reads exactly as it did.
+    #[test]
+    fn a_schema_four_bundle_without_an_environment_still_verifies() {
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle_with(
+            &sk,
+            |manifest| {
+                manifest.schema_version = 4;
+                manifest.members = vec![BundleMember::SecurityPosture(sealed_posture())];
+            },
+            |_| {},
+        );
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("v4 still verifies");
+        assert_eq!(verified.manifest.schema_version, 4);
+        assert!(verified.manifest.environment().is_none());
     }
 
     #[test]

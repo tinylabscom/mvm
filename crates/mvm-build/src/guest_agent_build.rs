@@ -120,6 +120,8 @@ pub struct RuntimeOverlayGuestBinaries {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub tool_shim: PathBuf,
+    pub tool_helper: PathBuf,
 }
 
 impl RuntimeOverlayGuestBinaries {
@@ -128,7 +130,7 @@ impl RuntimeOverlayGuestBinaries {
     /// The overlay itself stages these under short names (`agent`,
     /// `netinit`, …); a consumer that builds images from the binaries knows
     /// them by their Cargo names, so that is the name an exported set uses.
-    pub fn artifacts(&self) -> [(&'static str, &Path); 9] {
+    pub fn artifacts(&self) -> [(&'static str, &Path); 11] {
         [
             ("mvm-guest-agent", self.agent.as_path()),
             ("mvm-guest-netinit", self.netinit.as_path()),
@@ -139,6 +141,8 @@ impl RuntimeOverlayGuestBinaries {
             ("mvm-addon-dns", self.addon_dns.as_path()),
             ("mvm-exit-report", self.exit_report.as_path()),
             ("mvm-ping", self.ping.as_path()),
+            ("mvm-tool-shim", self.tool_shim.as_path()),
+            ("mvm-tool-helper", self.tool_helper.as_path()),
         ]
     }
 }
@@ -155,6 +159,8 @@ pub struct RuntimeOverlayGuestLayout {
     pub addon_dns: PathBuf,
     pub exit_report: PathBuf,
     pub ping: PathBuf,
+    pub tool_shim: PathBuf,
+    pub tool_helper: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -174,6 +180,8 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: dir.join("addon-dns"),
             exit_report: dir.join("exit-report"),
             ping: dir.join("ping"),
+            tool_shim: dir.join("tool-shim"),
+            tool_helper: dir.join("tool-helper"),
             dir,
         }
     }
@@ -188,6 +196,8 @@ impl RuntimeOverlayGuestLayout {
             && self.addon_dns.is_file()
             && self.exit_report.is_file()
             && self.ping.is_file()
+            && self.tool_shim.is_file()
+            && self.tool_helper.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -201,6 +211,8 @@ impl RuntimeOverlayGuestLayout {
             addon_dns: self.addon_dns.clone(),
             exit_report: self.exit_report.clone(),
             ping: self.ping.clone(),
+            tool_shim: self.tool_shim.clone(),
+            tool_helper: self.tool_helper.clone(),
         }
     }
 }
@@ -419,6 +431,37 @@ pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> 
     }
 }
 
+/// The workspace inputs [`guest_source_fingerprint`] hashes.
+pub(crate) const GUEST_SOURCE_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/mvm-contract/Cargo.toml",
+    "crates/mvm-contract/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
+    "crates/mvm-setpriv/Cargo.toml",
+    "crates/mvm-setpriv/src",
+    "crates/mvm-build/src/guest_agent_build.rs",
+];
+
+/// The workspace inputs [`sdk_cdylib_source_fingerprint`] hashes.
+pub(crate) const SDK_CDYLIB_SOURCE_INPUTS: &[&str] = &[
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/mvm-contract/Cargo.toml",
+    "crates/mvm-contract/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
+    "crates/mvm-host-services/Cargo.toml",
+    "crates/mvm-host-services/src",
+    "crates/mvm-setpriv/Cargo.toml",
+    "crates/mvm-setpriv/src",
+];
+
 /// Fingerprints already computed in this process, by workspace root.
 static GUEST_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
 /// [`sdk_cdylib_source_fingerprint`] answers, by workspace root.
@@ -439,16 +482,24 @@ pub enum Freshness {
 /// Answer `compute(workspace_root)` from `memo` unless `freshness` asks for a
 /// new walk. A new walk does not replace the memoized answer: the memo is what
 /// every other call site of this command has already acted on.
+///
+/// A memoized lookup that misses in this process may still be answered from
+/// a record an earlier process left for exactly this state of the guest
+/// inputs ([`crate::source_stamp`]); `fingerprint` names which one it is and
+/// what it reads.
 pub(crate) fn memoized_fingerprint<E>(
     memo: &ProcessMemo<PathBuf, String>,
+    fingerprint: &crate::source_stamp::Fingerprint<'_>,
     workspace_root: &Path,
     freshness: Freshness,
     compute: impl FnOnce(&Path) -> Result<String, E>,
 ) -> Result<String, E> {
     match freshness {
-        Freshness::Memoized => {
-            memo.get_or_try_insert(workspace_root.to_path_buf(), || compute(workspace_root))
-        }
+        Freshness::Memoized => memo.get_or_try_insert(workspace_root.to_path_buf(), || {
+            crate::source_stamp::stamped_fingerprint(fingerprint, workspace_root, || {
+                compute(workspace_root)
+            })
+        }),
         Freshness::Rewalk => compute(workspace_root),
     }
 }
@@ -481,6 +532,10 @@ pub fn guest_source_fingerprint_with(
 ) -> Result<String, GuestAgentBuildError> {
     memoized_fingerprint(
         &GUEST_SOURCE_FINGERPRINTS,
+        &crate::source_stamp::Fingerprint {
+            kind: "guest-source",
+            roots: GUEST_SOURCE_INPUTS,
+        },
         workspace_root,
         freshness,
         compute_guest_source_fingerprint,
@@ -517,6 +572,10 @@ pub fn sdk_cdylib_source_fingerprint_with(
 ) -> Result<String, GuestAgentBuildError> {
     memoized_fingerprint(
         &SDK_CDYLIB_SOURCE_FINGERPRINTS,
+        &crate::source_stamp::Fingerprint {
+            kind: "sdk-cdylib-source",
+            roots: SDK_CDYLIB_SOURCE_INPUTS,
+        },
         workspace_root,
         freshness,
         compute_sdk_cdylib_source_fingerprint,
@@ -528,24 +587,7 @@ fn compute_sdk_cdylib_source_fingerprint(
 ) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-host-services-cdylib-input-v1\0");
-    hash_inputs(
-        &mut hasher,
-        workspace_root,
-        &[
-            "Cargo.lock",
-            "Cargo.toml",
-            "crates/mvm-contract/Cargo.toml",
-            "crates/mvm-contract/src",
-            "crates/mvm-core/Cargo.toml",
-            "crates/mvm-core/src",
-            "crates/mvm-agentd/Cargo.toml",
-            "crates/mvm-agentd/src",
-            "crates/mvm-host-services/Cargo.toml",
-            "crates/mvm-host-services/src",
-            "crates/mvm-setpriv/Cargo.toml",
-            "crates/mvm-setpriv/src",
-        ],
-    )?;
+    hash_inputs(&mut hasher, workspace_root, SDK_CDYLIB_SOURCE_INPUTS)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -589,23 +631,7 @@ pub(crate) fn hash_inputs(
 fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-oci-guest-build-input-v1\0");
-    hash_inputs(
-        &mut hasher,
-        workspace_root,
-        &[
-            "Cargo.lock",
-            "Cargo.toml",
-            "crates/mvm-contract/Cargo.toml",
-            "crates/mvm-contract/src",
-            "crates/mvm-core/Cargo.toml",
-            "crates/mvm-core/src",
-            "crates/mvm-agentd/Cargo.toml",
-            "crates/mvm-agentd/src",
-            "crates/mvm-setpriv/Cargo.toml",
-            "crates/mvm-setpriv/src",
-            "crates/mvm-build/src/guest_agent_build.rs",
-        ],
-    )?;
+    hash_inputs(&mut hasher, workspace_root, GUEST_SOURCE_INPUTS)?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -741,7 +767,7 @@ pub fn runtime_overlay_source_checkout_fingerprint(
 
 /// Runtime-overlay binaries built without `mvm-agentd/addons`: the sealed
 /// agent and the helpers it launches, none of which may link an async runtime.
-pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
+pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 9] = [
     "mvm-guest-agent",
     "mvm-guest-netinit",
     "mvm-seccomp-apply",
@@ -749,6 +775,8 @@ pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
     "mvm-ping",
     "mvm-runner",
     "mvm-exit-report",
+    "mvm-tool-shim",
+    "mvm-tool-helper",
 ];
 
 /// Runtime-overlay binaries that need `mvm-agentd/addons`: the async loopback
@@ -821,6 +849,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         &layout.display_bridge,
     )?;
     install_one(&output_dir.join("mvm-ping"), &layout.ping)?;
+    install_one(&output_dir.join("mvm-tool-shim"), &layout.tool_shim)?;
+    install_one(&output_dir.join("mvm-tool-helper"), &layout.tool_helper)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
     install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
@@ -1454,6 +1484,8 @@ mod tests {
                 "mvm-ping",
                 "mvm-runner",
                 "mvm-exit-report",
+                "mvm-tool-shim",
+                "mvm-tool-helper",
             ]
         );
         assert!(features_of(&sealed).is_empty(), "{sealed:?}");
@@ -1894,6 +1926,48 @@ rust = "1.91.1"
             guest_source_fingerprint(dir.path()).unwrap(),
             first,
             "a second ask in the same process must not re-walk the tree"
+        );
+    }
+
+    /// Every launch is a new process, so the memo above never helps the next
+    /// one. A later process reuses the answer an earlier one recorded for the
+    /// same, settled tree, without walking it, and any edit to an input is
+    /// seen before a record could be reused.
+    #[test]
+    #[cfg(unix)]
+    fn a_later_process_reuses_a_recorded_fingerprint_until_an_input_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let records = tempfile::tempdir().unwrap();
+        make_fake_checkout(dir.path(), "fn main() { println!(\"v1\"); }");
+        crate::source_stamp::record_fingerprints_in(Some(records.path().to_path_buf()));
+        // A stamp vouches only for entries older than the settle window.
+        std::thread::sleep(crate::source_stamp::SETTLE + std::time::Duration::from_millis(200));
+        let as_a_new_process = || {
+            GUEST_SOURCE_FINGERPRINTS.remove(&dir.path().to_path_buf());
+            guest_source_fingerprint(dir.path()).unwrap()
+        };
+
+        let first = as_a_new_process();
+        let walks = source_input_walks_on_this_thread();
+        assert_eq!(as_a_new_process(), first);
+        assert_eq!(
+            source_input_walks_on_this_thread(),
+            walks,
+            "the second process answers from the record without walking"
+        );
+
+        // Same length as before, so only the bytes and timestamps move.
+        std::fs::write(
+            dir.path().join("crates/mvm-agentd/src/main.rs"),
+            "fn main() { println!(\"v2\"); }",
+        )
+        .unwrap();
+        let after_edit = as_a_new_process();
+        crate::source_stamp::record_fingerprints_in(None);
+        assert_ne!(after_edit, first, "an edited input must reach the answer");
+        assert_eq!(
+            after_edit,
+            compute_guest_source_fingerprint(dir.path()).unwrap()
         );
     }
 

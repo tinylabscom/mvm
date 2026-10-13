@@ -139,9 +139,8 @@ The share flag is `--mount` (alias `--volume`); there is no short form — `-v` 
 the global verbosity counter.
 
 A guest mount path must live under `/data` or `/work`. `/mnt/config` and
-`/mnt/secrets` are runtime-owned: `/init` mounts mvm's own read-only config and
-secret drives there before any user volume is attached, and the mount policy
-refuses a share that would sit inside or shadow them. Mounts are read-only by
+`/mnt/secrets` are reserved runtime paths, and the mount policy refuses a share
+that would sit inside or shadow them. Mounts are read-only by
 default; a transient run is read-only under every profile.
 
 Inside the guest, the files appear at the path you asked for — `/data/config/`

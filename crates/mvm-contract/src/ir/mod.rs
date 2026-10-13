@@ -16,6 +16,7 @@ mod error_codes;
 mod hash;
 mod hooks;
 mod validate;
+pub(crate) use validate::is_secret_field_name;
 mod version;
 mod workload;
 

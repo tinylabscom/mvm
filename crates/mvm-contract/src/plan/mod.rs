@@ -4,6 +4,7 @@
 //! existing paths.
 
 pub mod bundle;
+pub mod environment;
 pub mod execution_plan;
 pub mod output_grant;
 pub mod sdk_sidecar;
@@ -34,5 +35,7 @@ pub use types::{
 pub use types::{AssetIdentity, AssetKind};
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};
-pub use verb_grant::{ToolMediationGrant, VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
+pub use verb_grant::{
+    APPLICATION_TERMINAL_VERBS, ToolMediationGrant, VERB_GRANT_BASELINE, VerbGrant, VerbGrantError,
+};
 pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

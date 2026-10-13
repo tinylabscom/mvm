@@ -1,7 +1,17 @@
 use crate::host_signer::keystore::Keystore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use mvm_contract::grants::{ApplicationTerminalBinding, DriveGrant};
 use mvm_core::plan::{Nonce, ToolMediationGrant, VerbGrant, VerbId};
+
+/// The plan-derived authority a verb grant carries beside its verb list.
+/// Every part is absent by default.
+#[derive(Debug, Clone, Default)]
+pub struct VerbGrantAuthority {
+    pub drive: Option<DriveGrant>,
+    pub tool_mediation: Option<ToolMediationGrant>,
+    pub application_terminal: Option<ApplicationTerminalBinding>,
+}
 
 /// Mint a session-bound verb grant signed by the host-signer authority.
 pub fn mint_verb_grant(
@@ -10,16 +20,16 @@ pub fn mint_verb_grant(
     plan_nonce: &Nonce,
     not_after: DateTime<Utc>,
     verbs: Vec<VerbId>,
-    drive: Option<mvm_contract::grants::DriveGrant>,
-    tool_mediation: Option<ToolMediationGrant>,
+    authority: VerbGrantAuthority,
 ) -> Result<VerbGrant> {
     let mut grant = VerbGrant {
         session_id: session_id.to_string(),
         plan_nonce: plan_nonce.clone(),
         not_after,
         verbs,
-        drive,
-        tool_mediation,
+        drive: authority.drive,
+        tool_mediation: authority.tool_mediation,
+        application_terminal: authority.application_terminal,
         sig: vec![],
     };
     let result = signer.sign(&grant.signing_bytes());
@@ -49,8 +59,7 @@ mod tests {
             &nonce,
             now + Duration::minutes(5),
             vec![VerbId::new("run-entrypoint").unwrap()],
-            None,
-            None,
+            VerbGrantAuthority::default(),
         )
         .unwrap();
 

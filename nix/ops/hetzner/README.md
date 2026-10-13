@@ -48,14 +48,16 @@ the last six hours. It never kills a process: a VMM that outlived its job is
 logged as `leaked-vmm` for a person to decide. Every removal is logged to the
 journal and to `/var/log/mvm-disk-sweep.log`. It does not touch `/srv/mvm`.
 
-Install or update it from a checkout of `main`:
+Install or update it on the box, from a checkout of `main` in your private
+directory there:
 
 ```sh
-scp nix/ops/hetzner/disk-sweep.sh root@<box>:/usr/local/sbin/mvm-disk-sweep
-scp nix/ops/hetzner/mvm-disk-sweep.{service,timer} root@<box>:/etc/systemd/system/
-ssh root@<box> 'chmod 755 /usr/local/sbin/mvm-disk-sweep &&
-  DRY_RUN=1 /usr/local/sbin/mvm-disk-sweep | tail &&
-  systemctl daemon-reload && systemctl enable --now mvm-disk-sweep.timer'
+cd /srv/mvm/<name>/mvm
+install -m 755 nix/ops/hetzner/disk-sweep.sh /usr/local/sbin/mvm-disk-sweep
+install -m 644 nix/ops/hetzner/mvm-disk-sweep.service \
+  nix/ops/hetzner/mvm-disk-sweep.timer /etc/systemd/system/
+DRY_RUN=1 /usr/local/sbin/mvm-disk-sweep | tail
+systemctl daemon-reload && systemctl enable --now mvm-disk-sweep.timer
 ```
 
 `journalctl -u mvm-disk-sweep` shows each run.

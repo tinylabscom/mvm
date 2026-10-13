@@ -53,12 +53,25 @@ ensure_private_home() {
   chmod 700 "$1"
 }
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
-MVMCTL="$TARGET_DIR/debug/mvmctl"
+# The cargo profile every binary under test is built with: `mvmctl`, the
+# per-VM helpers it launches, and the SDK host library. The scenarios enforce
+# the 300 ms warm-start ceiling on each launch, and that ceiling is a property
+# of an optimized build; an unoptimized `mvmctl` spends most of it on plan
+# admission alone. A lane that enforces the ceiling sets
+# `MVM_E2E_PROFILE=release-witness`. Every binary uses the one profile, because
+# `mvmctl` launches the helpers that sit beside it.
+E2E_PROFILE="${MVM_E2E_PROFILE:-dev}"
+case "$E2E_PROFILE" in
+  dev) E2E_PROFILE_DIR=debug ;;
+  *) E2E_PROFILE_DIR="$E2E_PROFILE" ;;
+esac
+MVMCTL="$TARGET_DIR/$E2E_PROFILE_DIR/mvmctl"
 UNEMBEDDED_MVMCTL="$E2E_HOME/mvmctl-unembedded-e2e"
 
 echo "==> e2e documented surface"
 echo "    repo: $REPO"
 echo "    home: $E2E_HOME"
+echo "    profile: $E2E_PROFILE"
 
 # ---------------------------------------------------------------------------
 # Cleanup.
@@ -272,16 +285,16 @@ just payload::refresh
 E2E_FEATURES="${MVM_E2E_FEATURES-user}"
 if [[ -n "$E2E_FEATURES" ]]; then
   echo "==> building unembedded mvmctl (--features $E2E_FEATURES)"
-  cargo build --bin mvmctl --features "$E2E_FEATURES"
+  cargo build --profile "$E2E_PROFILE" --bin mvmctl --features "$E2E_FEATURES"
   cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
   echo "==> building mvmctl (--features $E2E_FEATURES,embed-host-bins)"
-  cargo build --bin mvmctl --features "$E2E_FEATURES,embed-host-bins"
+  cargo build --profile "$E2E_PROFILE" --bin mvmctl --features "$E2E_FEATURES,embed-host-bins"
 else
   echo "==> building unembedded mvmctl"
-  ./scripts/cargo-fast.sh build --bin mvmctl
+  ./scripts/cargo-fast.sh build --profile "$E2E_PROFILE" --bin mvmctl
   cp "$MVMCTL" "$UNEMBEDDED_MVMCTL"
   echo "==> building mvmctl"
-  ./scripts/cargo-fast.sh build --bin mvmctl --features embed-host-bins
+  ./scripts/cargo-fast.sh build --profile "$E2E_PROFILE" --bin mvmctl --features embed-host-bins
 fi
 
 # Always rebuild the per-VM helpers, never just check they exist.
@@ -297,7 +310,7 @@ fi
 # cargo makes this a no-op when they are already current, so the cost of always
 # doing it is a fingerprint check.
 echo "==> building the per-VM host helpers"
-just payload::supervisors
+just payload::supervisors --profile "$E2E_PROFILE"
 
 # The language SDKs drive machines in-process through the host library and find
 # it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
@@ -305,7 +318,7 @@ just payload::supervisors
 # with "the host library ... was not found" before a machine is asked for.
 # Export the exact path because the runtime-SDK scenarios cross the
 # `mvmctl run --mode live` boundary.
-build_sdk_hostlib "$MVMCTL"
+build_sdk_hostlib "$MVMCTL" "$E2E_PROFILE"
 
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"

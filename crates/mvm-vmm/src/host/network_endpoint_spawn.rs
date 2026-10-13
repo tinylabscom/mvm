@@ -25,7 +25,9 @@ use mvm_core::atomic_io::write_private;
 mod owned;
 use owned::endpoint_command;
 pub use owned::{OwnedEndpoint, OwnedEndpointSpawnError, spawn_network_endpoint_owned};
+mod endpoint_identity;
 mod stderr_log;
+pub use endpoint_identity::EndpointPid;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
@@ -1262,8 +1264,13 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
         },
     )?;
 
-    std::fs::write(&pid_file, child.id().to_string())
-        .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    // The start time beside the pid is what lets a later reap tell this
+    // process from whatever is handed its pid after it exits.
+    mvm_core::atomic_io::write_private_ephemeral(
+        &pid_file,
+        EndpointPid::of_child(child.id()).render().as_bytes(),
+    )
+    .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
     process_guard.mark_pid_written();
     if let Some(parent) = env_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| anyhow!("create {}: {e}", parent.display()))?;
@@ -1274,7 +1281,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     // the input gate.
     let env_json = serde_json::to_vec(&handshake.env)
         .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
-    std::fs::write(&env_path, &env_json)
+    mvm_core::atomic_io::write_private_ephemeral(&env_path, &env_json)
         .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
     record_secret_fingerprints(vm_name, handshake.input_fingerprints);
     process_guard.mark_env_written();
@@ -1440,13 +1447,16 @@ impl Drop for EndpointGuard {
 
 /// Reap the per-VM substitution endpoint (if this VM spawned one) so its
 /// decrypted secrets don't outlive the guest, and drop the pid + env sidecars.
-/// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op. The
-/// liveness guard prevents signalling a recycled PID from a stale pidfile.
+/// Best-effort + idempotent: a VM with no endpoint (no secrets) is a no-op.
+/// The pid file is only trusted as far as the live process confirms it: a pid
+/// is signalled only while the process holding it started when the spawn
+/// recorded, so a recycled pid or an edited file never sends a signal to
+/// anything else.
 pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
-    if let Some(spid) = read_pid(&state_dir.join(SUBST_PID_FILE))
-        && pid_alive(spid)
+    if let Some(recorded) = read_endpoint_pid(&state_dir.join(SUBST_PID_FILE))
+        && recorded.is_live_and_ours()
     {
-        kill(spid, libc::SIGTERM);
+        kill(recorded.pid, libc::SIGTERM);
     }
     let _ = std::fs::remove_file(state_dir.join(SUBST_PID_FILE));
     let _ = std::fs::remove_file(session_ready_socket_path(state_dir));
@@ -1466,8 +1476,12 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
 
 // ── pid helpers (local copies — backend modules keep theirs private) ──
 
+fn read_endpoint_pid(path: &Path) -> Option<EndpointPid> {
+    EndpointPid::parse(&std::fs::read_to_string(path).ok()?)
+}
+
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
-    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+    read_endpoint_pid(path).map(|recorded| recorded.pid)
 }
 
 fn pid_alive(pid: libc::pid_t) -> bool {
@@ -2244,6 +2258,35 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// A pid file names a process only as far as that process confirms it.
+    /// An unrelated process under a pid written by hand, or under a pid whose
+    /// recorded start time is not its own, is never signalled.
+    #[test]
+    fn a_reap_never_signals_a_process_the_pid_file_does_not_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut foreign = Command::new("sleep").arg("30").spawn().unwrap();
+        let real = EndpointPid::of_child(foreign.id());
+        let impostors = [
+            foreign.id().to_string(),
+            EndpointPid {
+                started: real.started.map(|started| started + 1),
+                ..real
+            }
+            .render(),
+        ];
+        for impostor in impostors {
+            std::fs::write(dir.path().join(SUBST_PID_FILE), &impostor).unwrap();
+            reap_network_endpoint(dir.path(), "vm-foreign-pid");
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(
+                foreign.try_wait().unwrap().is_none(),
+                "pid file {impostor:?} must not get its process signalled"
+            );
+        }
+        foreign.kill().unwrap();
+        let _ = foreign.wait();
+    }
+
     #[test]
     fn endpoint_guard_reaps_armed_endpoint_and_sidecars() {
         let _g = HOME_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -2256,7 +2299,11 @@ mod tests {
         let env_path = mvm_core::config::vm_substitution_env_path(vm);
         std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
         let mut child = Command::new("sleep").arg("30").spawn().unwrap();
-        std::fs::write(state_dir.join(SUBST_PID_FILE), child.id().to_string()).unwrap();
+        std::fs::write(
+            state_dir.join(SUBST_PID_FILE),
+            EndpointPid::of_child(child.id()).render(),
+        )
+        .unwrap();
         std::fs::write(&env_path, b"sidecar").unwrap();
 
         {

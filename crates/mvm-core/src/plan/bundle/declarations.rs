@@ -8,9 +8,11 @@
 //! refuses to accept one.
 
 use mvm_contract::plan::bundle::{
-    ArtifactRole, BundleManifest, BundleMember, BundleSecurityPosture, MAX_BUNDLE_ENTRY_BYTES,
-    MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES,
+    ArtifactRole, BundleManifest, BundleMember, BundleSecurityPosture,
+    ENVIRONMENT_MEMBER_MIN_SCHEMA, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES,
+    MAX_KERNEL_CMDLINE_BYTES,
 };
+use mvm_contract::plan::environment::{EnvironmentCapability, EnvironmentDescriptor};
 use mvm_contract::plan::types::BuildProvenance;
 use mvm_contract::policy::security::AgentProfile;
 
@@ -90,6 +92,9 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
     if let Some(provenance) = manifest.build_provenance() {
         validate_provenance(provenance, manifest)?;
     }
+    if let Some(environment) = manifest.environment() {
+        validate_environment(environment, manifest)?;
+    }
     Ok(())
 }
 
@@ -100,6 +105,7 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
+        BundleMember::Environment(_) => Some("environment"),
     }
 }
 
@@ -159,6 +165,88 @@ fn validate_posture(
         }
     }
     Ok(())
+}
+
+/// The environment descriptor relates to the rest of the manifest in three
+/// ways, each checked here because the descriptor alone cannot see them: it
+/// needs the schema that introduced it, its target must be the manifest's
+/// architecture, and every capability it requires must be one the bundle's
+/// signed posture permits. A descriptor that requires any capability without a
+/// posture to measure it against is refused: there is nothing to say the
+/// publisher permitted it.
+fn validate_environment(
+    environment: &EnvironmentDescriptor,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    if manifest.schema_version < ENVIRONMENT_MEMBER_MIN_SCHEMA {
+        return Err(BundleVerifyError::EnvironmentRefused {
+            reason: format!(
+                "the environment member requires bundle schema {ENVIRONMENT_MEMBER_MIN_SCHEMA}, \
+                 but the manifest declares schema {}",
+                manifest.schema_version
+            ),
+        });
+    }
+    environment.validate()?;
+    let target = environment.target.arch_label();
+    if target != manifest.arch {
+        return Err(BundleVerifyError::EnvironmentRefused {
+            reason: format!(
+                "the environment targets {target}, but the bundle is built for {}",
+                manifest.arch
+            ),
+        });
+    }
+    let forbidden = forbidden_capabilities(environment, manifest.security_posture());
+    if !forbidden.is_empty() {
+        return Err(BundleVerifyError::EnvironmentRefused {
+            reason: format!(
+                "the environment requires {}, which the bundle's security posture does not \
+                 permit",
+                forbidden.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Required descriptor slots not bound by the signed plan. This checks names,
+/// not secret values or endpoint substitution, which remain broker-owned.
+pub fn unbound_environment_secret_slots(
+    environment: &EnvironmentDescriptor,
+    secrets: &[crate::plan::SecretBinding],
+) -> Vec<String> {
+    environment
+        .required_secret_slots()
+        .filter(|slot| !secrets.iter().any(|binding| binding.name == *slot))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Every capability `environment` requires that `posture` does not permit,
+/// by wire name. With no posture, every required capability is forbidden.
+///
+/// Shared with launch admission, which measures the same descriptor against
+/// the posture the launch is held to.
+pub fn forbidden_capabilities(
+    environment: &EnvironmentDescriptor,
+    posture: Option<&BundleSecurityPosture>,
+) -> Vec<&'static str> {
+    environment
+        .capabilities
+        .iter()
+        .copied()
+        .filter(|capability| !posture.is_some_and(|p| posture_permits(p, *capability)))
+        .map(EnvironmentCapability::as_str)
+        .collect()
+}
+
+fn posture_permits(posture: &BundleSecurityPosture, capability: EnvironmentCapability) -> bool {
+    match capability {
+        EnvironmentCapability::Egress => posture.allows_egress,
+        EnvironmentCapability::HostVolumes => posture.allows_volumes,
+        EnvironmentCapability::InteractiveTerminal => posture.profile != AgentProfile::SealedProd,
+    }
 }
 
 /// The provenance's artifact digests describe what the build produced; the
@@ -469,6 +557,152 @@ mod tests {
         assert!(matches!(
             validate_declarations(&m),
             Err(BundleVerifyError::ProvenanceMismatch { .. })
+        ));
+    }
+    fn environment(capabilities: &[&str]) -> EnvironmentDescriptor {
+        serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": "x86_64-linux",
+            "entrypoint": { "argv": ["/usr/bin/app"] },
+            "capabilities": capabilities,
+        }))
+        .expect("environment fixture")
+    }
+
+    fn open_dev_posture() -> BundleSecurityPosture {
+        BundleSecurityPosture {
+            profile: AgentProfile::Dev,
+            verity_protected: false,
+            requires_auth: true,
+            allows_volumes: true,
+            allows_egress: true,
+        }
+    }
+
+    #[test]
+    fn environment_inside_its_posture_is_accepted() {
+        let m = manifest(
+            Vec::new(),
+            vec![
+                BundleMember::SecurityPosture(open_dev_posture()),
+                BundleMember::Environment(environment(&[
+                    "egress",
+                    "host_volumes",
+                    "interactive_terminal",
+                ])),
+            ],
+        );
+        validate_declarations(&m).expect("every capability is permitted");
+    }
+
+    #[test]
+    fn environment_without_capabilities_needs_no_posture() {
+        let m = manifest(
+            Vec::new(),
+            vec![BundleMember::Environment(environment(&[]))],
+        );
+        validate_declarations(&m).expect("nothing required, nothing to permit");
+    }
+
+    #[test]
+    fn environment_requires_schema_five() {
+        let mut m = manifest(
+            Vec::new(),
+            vec![BundleMember::Environment(environment(&[]))],
+        );
+        m.schema_version = 4;
+        let err = validate_declarations(&m).unwrap_err();
+        assert!(
+            matches!(&err, BundleVerifyError::EnvironmentRefused { reason } if reason.contains("schema 5")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn environment_for_another_arch_is_refused() {
+        let mut m = manifest(
+            Vec::new(),
+            vec![BundleMember::Environment(environment(&[]))],
+        );
+        m.arch = "aarch64".to_string();
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::EnvironmentRefused { reason }) if reason.contains("aarch64")
+        ));
+    }
+
+    #[test]
+    fn capability_beyond_the_posture_is_refused() {
+        let closed = BundleSecurityPosture {
+            allows_egress: false,
+            ..open_dev_posture()
+        };
+        let m = manifest(
+            Vec::new(),
+            vec![
+                BundleMember::SecurityPosture(closed),
+                BundleMember::Environment(environment(&["egress"])),
+            ],
+        );
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::EnvironmentRefused { reason }) if reason.contains("egress")
+        ));
+    }
+
+    #[test]
+    fn interactive_terminal_under_sealed_prod_is_refused() {
+        let m = with_verity(manifest(
+            Vec::new(),
+            vec![
+                BundleMember::SecurityPosture(sealed()),
+                BundleMember::Environment(environment(&["interactive_terminal"])),
+            ],
+        ));
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::EnvironmentRefused { reason })
+                if reason.contains("interactive_terminal")
+        ));
+    }
+
+    #[test]
+    fn a_required_capability_without_any_posture_is_refused() {
+        let m = manifest(
+            Vec::new(),
+            vec![BundleMember::Environment(environment(&["egress"]))],
+        );
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::EnvironmentRefused { .. })
+        ));
+    }
+
+    #[test]
+    fn a_structurally_invalid_environment_is_malformed() {
+        let mut env = environment(&[]);
+        env.descriptor_version = 2;
+        let m = manifest(Vec::new(), vec![BundleMember::Environment(env)]);
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::MalformedEnvironment(_))
+        ));
+    }
+
+    #[test]
+    fn a_second_environment_is_refused() {
+        let m = manifest(
+            Vec::new(),
+            vec![
+                BundleMember::Environment(environment(&[])),
+                BundleMember::Environment(environment(&[])),
+            ],
+        );
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::DuplicateMember {
+                class: "environment"
+            })
         ));
     }
 }

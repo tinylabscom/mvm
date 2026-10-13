@@ -1289,6 +1289,15 @@ mod linux {
             std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
             bind_mount(&source.to_string_lossy(), target)?;
         }
+        // The egress client is executed from `/mvm-bins` under its own uid, and
+        // the host's 0700 payload cache mode rode in with the archive.
+        let bins = input_stage.join("mvm-bins");
+        mvm_build::builder_disk_transport::grant_search(&[
+            Path::new(STAGE0_NIX_STORE_MOUNT),
+            input_stage,
+            &bins,
+        ])
+        .map_err(|e| format!("open the Stage 0 helper path to the egress client: {e:#}"))?;
         let output_stage = Path::new(STAGE0_OUTPUT_STAGE);
         reset_stage_dir(output_stage)?;
         std::fs::create_dir_all("/out").map_err(|e| format!("create /out: {e}"))?;
@@ -1813,5 +1822,19 @@ mod egress_identity_tests {
             .expect("the client is started");
         assert!(provision < fork, "{body}");
         assert!(body.contains("EGRESS_CLIENT_IDENTITY.uid()"), "{body}");
+    }
+
+    /// The client runs as a non-root uid from the unpacked `mvm-bins`, which
+    /// arrives at the host cache's 0700. Without search permission on that
+    /// tree the exec fails with `EACCES` and Stage 0 refuses to build.
+    #[test]
+    fn the_unpacked_bins_tree_is_searchable_by_the_egress_client() {
+        let body = body_of("stage_disk_transport_input");
+        let grant = body
+            .find("grant_search(")
+            .expect("search is granted on the unpacked tree");
+        assert!(body[grant..].contains("&bins"), "{body}");
+        assert!(body[grant..].contains("input_stage"), "{body}");
+        assert!(body[grant..].contains("STAGE0_NIX_STORE_MOUNT"), "{body}");
     }
 }
