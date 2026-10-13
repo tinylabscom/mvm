@@ -4,6 +4,61 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn env_verify_runtime_missing_proof_emits_no_success_json() {
+    let directory = tempfile::tempdir().expect("runtime verifier input directory");
+    let config = directory.path().join("launch.json");
+    std::fs::write(&config, b"{}").expect("write missing-proof config");
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "verify-runtime", "--config"])
+        .arg(config)
+        .args(["--version", "1.2.3", "--arch", "x86_64", "--json"])
+        .output()
+        .expect("run runtime verifier without proof");
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("runtime_release_proof is required"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn env_verify_runtime_help_and_parser_require_explicit_release_inputs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "verify-runtime", "--help"])
+        .output()
+        .expect("run runtime verifier help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in ["--config", "--version", "--arch", "--json"] {
+        assert!(help.contains(flag), "{help}");
+    }
+    for missing in ["--config", "--version", "--arch", "--json"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        command.args(["env", "verify-runtime"]);
+        for (flag, value) in [
+            ("--config", Some("/does/not/exist.json")),
+            ("--version", Some("1.2.3")),
+            ("--arch", Some("x86_64")),
+            ("--json", None),
+        ] {
+            if flag != missing {
+                command.arg(flag);
+                if let Some(value) = value {
+                    command.arg(value);
+                }
+            }
+        }
+        let out = command.output().expect("run incomplete runtime verifier");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(missing), "{stderr}");
+    }
+}
+
+#[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["build", "compile", "--help"])

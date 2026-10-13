@@ -49,6 +49,11 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn terminate_with_timing(&self, id: &VmId, prepare_guest: bool) -> Result<StopTiming> {
+        mvm_core::naming::validate_vm_name(&id.0)?;
+        let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&id.0)?;
+        // Measurement is diagnostic, never permission to terminate or delete.
+        // Keep the lifecycle lease even if retention accounting fails.
+        lifecycle.report_retained_best_effort();
         let total_started = Instant::now();
         let attach_started = Instant::now();
         let vm = match self.driver.attach(id) {
@@ -174,11 +179,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         ClaimGuards::new(&self.spawner)
             .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
         refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
-        crate::base::runtime_meta::record_from_start_config(
-            &config.name,
-            StartMode::Detached,
-            config,
-        )?;
 
         let default_redaction = RedactionPolicy::default();
         let decoded = decode_plan_secrets_from_state(&state_dir)?;

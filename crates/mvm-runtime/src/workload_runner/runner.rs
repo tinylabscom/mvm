@@ -59,6 +59,7 @@ mod backend;
 mod broker;
 mod claim_lease;
 mod console_boot;
+mod preload;
 mod refusal;
 mod sockets;
 mod spawner;
@@ -323,6 +324,34 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        let lifecycle =
+            crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
+        let bound_config = lifecycle.bind(inputs.config)?;
+        let bound_cmdline = if bound_config.runtime_release_proof.is_some()
+            || bound_config.unsigned_runtime_development
+        {
+            cmdline::runner_cmdline(
+                &bound_config,
+                &vm_state_dir(&bound_config.name),
+                |has_disk| self.driver.workload_base_bootargs(has_disk),
+            )
+        } else {
+            inputs.cmdline.clone()
+        };
+        let inputs = &WorkloadLaunchInputs {
+            config: &bound_config,
+            tenant: inputs.tenant,
+            secrets: inputs.secrets,
+            redaction: inputs.redaction,
+            network_policy: inputs.network_policy,
+            cmdline: bound_cmdline,
+        };
+        self.boot_bound_workload(inputs)
+    }
+
+    /// Maps an already-bound configuration into a backend boot. Production
+    /// callers must hold the lifecycle lease and pass the verifier's paths.
+    fn boot_bound_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -332,6 +361,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
+        crate::base::runtime_meta::record_from_start_config(
+            &inputs.config.name,
+            StartMode::Detached,
+            inputs.config,
+        )?;
         let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
         let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
         let tools = admitted_tool_rules(inputs.config.plan_json.as_deref())?;
@@ -509,6 +543,31 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // capacity) and removes a partial child dir. Only a booted child commits.
         let preloaded_child_name = handle.preloaded_child_vm_name.clone();
         let mut cleanup = WarmClaimLease::new(ctx.pool, handle.id.as_str(), &self.driver);
+        if parent.class != mvm_core::checkpoint::CheckpointClass::VmFull {
+            return Err(StandbyError::ClaimFailed(
+                "warm memory restore requires a vm_full checkpoint".into(),
+            ));
+        }
+        let runtime_verified = if let Some(name) = &preloaded_child_name {
+            verify_preloaded_child_name_is_available(ctx, name)?;
+            crate::checkpoint::verify_checkpoint_runtime_at(
+                ctx.checkpoints,
+                &parent,
+                &vm_state_dir(name),
+            )
+        } else {
+            crate::checkpoint::verify_checkpoint_runtime(ctx.checkpoints, &parent)
+        };
+        runtime_verified.map_err(|error| {
+            StandbyError::ClaimFailed(format!("verify paused runtime: {error:#}"))
+        })?;
+        crate::runtime_evidence::verify_runtime_for_claim(
+            parent.runtime_launch_binding.as_ref(),
+            claim.start_config.as_ref(),
+        )
+        .map_err(|error| {
+            StandbyError::ClaimFailed(format!("verify inherited runtime: {error:#}"))
+        })?;
 
         // (2) + (4) Bind the admitted plan's image digest to the verified parent.
         // A missing plan or a digest mismatch refuses before any child side effect.
@@ -618,7 +677,12 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // (8) The runner-side host gates a cold boot runs, before the child boots:
         // the overlay contract, then the child's own 0700 substitution endpoint
         // keyed on its fresh id (never a sibling's; the factory parent has none).
-        let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        let mut child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        if let Some(binding) = &parent.runtime_launch_binding {
+            // The parent record and these retained bytes were verified above.
+            // A restored child inherits the parent's generation, not cache paths.
+            binding.apply_to_config(&mut child_cfg);
+        }
         let guards = ClaimGuards::new(&self.spawner);
         // Gate the image the claim was admitted for, not the clone the child
         // boots: the sidecar describes how the image was built and is not part
@@ -707,9 +771,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
         let genid = fresh_generation_token(content_hash);
         let token = genid.token;
+        let runtime_digest = crate::checkpoint::metadata_blob_sha256(
+            ctx.checkpoints,
+            &parent,
+            "runtime-artifacts.json",
+        )
+        .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
+        let anchors_digest = crate::checkpoint::metadata_blob_sha256(
+            ctx.checkpoints,
+            &parent,
+            "device-anchors.json",
+        )
+        .map_err(|_| refuse(ClaimRefusal::ParentTampered))?;
         let fork_request = ChildForkRequest {
             child_vm_name: &child.0,
             child_dir: &child_dir,
+            runtime_artifacts_sha256: Some(&runtime_digest),
+            device_anchors_sha256: Some(&anchors_digest),
             // A resident HVF claim addresses the paused parent by its stable
             // pool identity. Saved-state drivers receive no parent name and
             // restore from the materialized child directory instead.
@@ -859,6 +937,21 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             ))
         })?;
         let parent_config = factory_parent_config(launch, spec)?;
+        let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&spec.id)
+            .map_err(|e| StandbyError::SpawnFailed(format!("lock runtime lifecycle: {e:#}")))?;
+        let parent_config = lifecycle.bind(&parent_config).map_err(|e| {
+            StandbyError::SpawnFailed(format!("bind standby runtime artifacts: {e:#}"))
+        })?;
+        self.spawn_bound_standby_captured(ctx, spec, &parent_config)
+    }
+
+    /// Maps an already-bound parent while its caller holds the lifecycle lease.
+    fn spawn_bound_standby_captured(
+        &self,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+        parent_config: &VmStartConfig,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
         let state_dir = PathBuf::from(&spec.vm_state_dir);
 
         // Written before boot, exactly as `start` does for a workload, so a
@@ -867,7 +960,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         crate::base::runtime_meta::record_from_start_config(
             &spec.id,
             StartMode::Detached,
-            &parent_config,
+            parent_config,
         )
         .map_err(|e| {
             StandbyError::SpawnFailed(format!(
@@ -876,7 +969,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             ))
         })?;
 
-        let boot = factory_parent_spec(&parent_config, &state_dir, |has_disk| {
+        let boot = factory_parent_spec(parent_config, &state_dir, |has_disk| {
             self.driver.workload_base_bootargs(has_disk)
         });
         // The same truncation refusal a workload boot gets, for the same reason
@@ -900,14 +993,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // and fall back to a cold boot. The parent shares only its rootfs device
         // and verity environment; factory_parent_config has already removed all
         // workload identity, secrets, plan, and grant authority.
-        if crate::microvm::booted_with_universal_initramfs(&parent_config) {
+        if crate::microvm::booted_with_universal_initramfs(parent_config) {
             let parent = self.driver.attach(&VmId(spec.id.clone())).map_err(|e| {
                 StandbyError::SpawnFailed(format!(
                     "attach standby parent '{}' for activation: {e:#}",
                     spec.id
                 ))
             })?;
-            crate::microvm::activate_workload(parent.as_ref(), &parent_config).map_err(|e| {
+            crate::microvm::activate_workload(parent.as_ref(), parent_config).map_err(|e| {
                 StandbyError::SpawnFailed(format!(
                     "activate standby parent '{}' before capture: {e:#}",
                     spec.id
@@ -930,6 +1023,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             vm_name: spec.id.clone(),
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
+            runtime_launch_binding: crate::base::runtime_meta::read(&spec.id)
+                .map_err(|e| {
+                    StandbyError::SpawnFailed(format!("read bound standby runtime metadata: {e:#}"))
+                })?
+                .and_then(|meta| meta.runtime_launch_binding),
             // Firecracker keeps no supervisor-config blob; its presence is
             // what marks a checkpoint as originating from a backend that does.
             supervisor_config_src: control.supervisor_config_path().map_err(|e| {
@@ -1008,94 +1106,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         }
         handle.parent_checkpoint = Some(meta.id.as_str().to_string());
         Ok(handle)
-    }
-
-    /// Materialize and load one saved-state child while the pool is being
-    /// refilled, leaving its VMM paused for a later claim. The child is not
-    /// reachable by a workload yet: claim-time endpoint, broker, identity,
-    /// and authenticated-vsock gates still run before resume.
-    pub fn preload_standby_child(
-        &self,
-        ctx: &PreloadContext<'_>,
-        handle: &mut StandbyHandle,
-    ) -> std::result::Result<(), StandbyError> {
-        if !self.driver.supports_preloaded_standby() {
-            return Err(StandbyError::Unsupported {
-                backend: self.driver.name().to_string(),
-            });
-        }
-        if handle.preloaded_child_vm_name.is_some() {
-            return Err(StandbyError::SpawnFailed(format!(
-                "standby '{}' already owns a preloaded child",
-                handle.id
-            )));
-        }
-        let checkpoint = handle.parent_checkpoint.as_deref().ok_or_else(|| {
-            StandbyError::SpawnFailed(format!(
-                "standby '{}' has no checkpoint for child preload",
-                handle.id
-            ))
-        })?;
-        let checkpoint_id = CheckpointId::new(checkpoint.to_string());
-        let _registry_lock = acquire_registry_lock(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("acquire VM name registry: {e:#}")))?;
-        let registry = VmNameRegistry::load(ctx.registry_path)
-            .map_err(|e| StandbyError::SpawnFailed(format!("load VM name registry: {e:#}")))?;
-        let (child_name, child_dir) = (0..MAX_CHILD_NAME_ATTEMPTS)
-            .map(|_| generate_vm_name())
-            .find_map(|name| {
-                let dir = vm_state_dir(&name);
-                (registry.lookup(&name).is_none() && !dir.exists()).then_some((name, dir))
-            })
-            .ok_or_else(|| {
-                StandbyError::SpawnFailed("could not reserve a unique preloaded child name".into())
-            })?;
-
-        let materialized = if is_trusted_snapshot_id(checkpoint) {
-            let backend = mvm_fs::trusted_snapshot::platform_backend(ctx.snapshots.root())
-                .map_err(|e| {
-                    StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e:#}"))
-                })?;
-            materialize_child_from_trusted_parent(
-                ctx.checkpoints,
-                backend.as_ref(),
-                &checkpoint_id,
-                ctx.anchor,
-                &child_dir,
-            )
-        } else {
-            materialize_child_from_parent(
-                ctx.checkpoints,
-                ctx.snapshots,
-                &checkpoint_id,
-                ctx.anchor,
-                &child_dir,
-            )
-        };
-        if let Err(error) = materialized {
-            let _ = std::fs::remove_dir_all(&child_dir);
-            return Err(StandbyError::SpawnFailed(format!(
-                "materialize preloaded child '{}': {error}",
-                child_name
-            )));
-        }
-
-        let loaded = self.driver.preload_standby_child(&PreloadChildRequest {
-            child_vm_name: &child_name,
-            child_dir: &child_dir,
-        });
-        let loaded = match loaded {
-            Ok(value) => value,
-            Err(error) => {
-                self.force_stop(&child_name, "failed preloaded standby child");
-                let _ = std::fs::remove_dir_all(&child_dir);
-                return Err(error);
-            }
-        };
-        handle.preloaded_child_vm_name = Some(child_name);
-        handle.pid = loaded.pid;
-        handle.control_socket = loaded.control_socket;
-        Ok(())
     }
 
     /// Force-stop a VM the warm-pool path is done with, naming its `role` for the
@@ -1511,12 +1521,15 @@ mod tests {
             &self,
             req: &NetworkEndpointSpawnRequest<'_>,
         ) -> Result<Option<PathBuf>> {
-            Ok(
-                matches!(req.identity, FlowMuxIdentitySource::Mint).then(|| {
-                    req.state_dir
-                        .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE)
-                }),
-            )
+            if !matches!(req.identity, FlowMuxIdentitySource::Mint) {
+                return Ok(None);
+            }
+            std::fs::create_dir_all(req.state_dir)?;
+            let path = req
+                .state_dir
+                .join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
+            std::fs::write(&path, b"mock-identity-drive")?;
+            Ok(Some(path))
         }
 
         fn spawn(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<SpawnedEndpoint> {
@@ -1680,11 +1693,200 @@ mod tests {
         assert_eq!(booted, 7);
     }
 
+    fn isolated_runtime_home() -> (TestEnv, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        (env, home)
+    }
+
     fn config(name: &str) -> VmStartConfig {
         VmStartConfig {
             name: name.into(),
             rootfs_path: "/img/rootfs.ext4".into(),
             ..Default::default()
+        }
+    }
+
+    // These adapters exercise post-admission mapping with synthetic artifacts,
+    // not launch authorization. Public entrypoint tests below separately
+    // exercise refusal and checked-source verification.
+    fn mapping_start<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar>(
+        runner: &WorkloadRunner<D, S, B>,
+        config: &VmStartConfig,
+    ) -> Result<VmId> {
+        let state_dir = vm_state_dir(&config.name);
+        std::fs::create_dir_all(&state_dir)?;
+        let default_redaction = RedactionPolicy::default();
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let (secrets, redaction, tenant): (&[SecretBinding], &RedactionPolicy, &str) =
+            match &decoded {
+                Some((secrets, redaction, tenant)) => {
+                    (secrets.as_slice(), redaction, tenant.as_str())
+                }
+                None => (
+                    &[],
+                    &default_redaction,
+                    config.tenant_id.as_deref().unwrap_or("local"),
+                ),
+            };
+        let cmdline = cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+            runner.driver.workload_base_bootargs(has_disk)
+        });
+        runner
+            .boot_bound_workload(&WorkloadLaunchInputs {
+                config,
+                tenant,
+                secrets,
+                redaction,
+                network_policy: &config.network_policy,
+                cmdline,
+            })
+            .map(|vm| vm.id().clone())
+    }
+
+    fn mapping_standby<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar>(
+        runner: &WorkloadRunner<D, S, B>,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+    ) -> std::result::Result<StandbyHandle, StandbyError> {
+        let config =
+            factory_parent_config(ctx.launch.expect("mapping fixture has a launch"), spec)?;
+        runner.spawn_bound_standby_captured(ctx, spec, &config)
+    }
+
+    fn checked_source_config(name: &str, rootfs_path: String) -> VmStartConfig {
+        let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let workspace = mvm_build::image_source::guest_runtime_source_checkout()
+            .expect("source-channel test checkout");
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = mvm_core::arch::GuestArch::host();
+        let runtime = mvm_build::guest_runtime::test_support::write_source_cache_fixture(
+            &cache, &workspace, version, arch,
+        )
+        .unwrap();
+        let overlay = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+            &cache, version, arch, &runtime,
+        )
+        .unwrap();
+        let initramfs = mvm_build::initramfs::build_initramfs_from_guest_runtime(
+            &cache, version, arch, &runtime,
+        )
+        .unwrap();
+        VmStartConfig {
+            name: name.into(),
+            rootfs_path,
+            kernel_path: Some("/img/kernel".into()),
+            initrd_path: Some(initramfs.image_path.display().to_string()),
+            runtime_overlay_path: Some(overlay.overlay_ext4.display().to_string()),
+            runtime_overlay_verity_path: Some(overlay.sidecar.display().to_string()),
+            runtime_overlay_roothash: Some(overlay.roothash),
+            runtime_overlay_version: Some(version.into()),
+            unsigned_runtime_development: true,
+            cpus: 1,
+            memory_mib: 64,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn checked_source_cold_and_standby_boot_private_bytes_and_keep_them_after_stop() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let (_image, rootfs) = overlay_aware_rootfs("checked-source");
+        let config = checked_source_config("checked-source", rootfs.clone());
+        let checked = crate::runtime_evidence::verify_runtime_for_launch(
+            &config,
+            crate::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            !checked.is_release(),
+            "synthetic source bytes are not signed release evidence"
+        );
+        let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
+        let guest = spawn_activation_guest(driver.clone(), "checked-source");
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        runner.start(&config).unwrap();
+        guest.join().unwrap();
+        let parent_guest = spawn_activation_guest(runner.driver.clone(), "checked-parent");
+        let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let spec = standby_spec_for("checked-parent", &vm_state_dir("checked-parent"), &config);
+        runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&config),
+                },
+                &spec,
+            )
+            .unwrap();
+        parent_guest.join().unwrap();
+        let boots = runner.driver.booted_specs();
+        assert_eq!(boots.len(), 2);
+        let mut retained = Vec::new();
+        for (boot, name) in boots.iter().zip(["checked-source", "checked-parent"]) {
+            let binding = crate::base::runtime_meta::read(name)
+                .unwrap()
+                .unwrap()
+                .runtime_launch_binding
+                .unwrap();
+            crate::runtime_evidence::verify_runtime_binding(&binding).unwrap();
+            let mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(binding) =
+                binding
+            else {
+                panic!("source assembly fixture");
+            };
+            assert!(binding.release_proof().is_none());
+            assert_eq!(
+                Some(binding.overlay_roothash.as_str()),
+                config.runtime_overlay_roothash.as_deref()
+            );
+            assert_eq!(boot.initramfs.as_ref(), Some(&binding.initramfs_path));
+            assert!(
+                boot.blocks
+                    .iter()
+                    .any(|disk| disk.source == binding.overlay_path)
+            );
+            assert!(
+                boot.blocks
+                    .iter()
+                    .any(|disk| disk.source == binding.overlay_verity_path)
+            );
+            assert_ne!(
+                binding.overlay_path,
+                PathBuf::from(config.runtime_overlay_path.as_ref().unwrap())
+            );
+            retained.push(binding);
+        }
+        assert_ne!(retained[0].overlay_path, retained[1].overlay_path);
+        runner.stop(&VmId("checked-source".into())).unwrap();
+        runner.stop(&VmId("checked-parent".into())).unwrap();
+        std::fs::write(
+            config.runtime_overlay_path.as_ref().unwrap(),
+            b"changed cache output",
+        )
+        .unwrap();
+        let before = runner.driver.booted_specs().len();
+        assert!(
+            runner.start(&config).is_err(),
+            "changed selection must fail before spawn"
+        );
+        assert_eq!(runner.driver.booted_specs().len(), before);
+        for binding in retained {
+            crate::runtime_evidence::verify_runtime_binding(
+                &mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(binding),
+            )
+            .unwrap();
         }
     }
 
@@ -1775,6 +1977,229 @@ mod tests {
             non_empty, "root=/dev/vda mvm.telemetry=1",
             "a non-empty cmdline gets exactly one space separator"
         );
+    }
+
+    #[test]
+    fn universal_activation_keeps_substitution_values_off_the_boot_cmdline() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        let verity = rootfs_dir.path().join("rootfs.verity");
+        let initrd = rootfs_dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+        mvm_build::builder_vm::GuestSidecar::for_oci_run(
+            "runner-secret-env-cmdline-spacing",
+            false,
+            true,
+        )
+        .write_to_dir(rootfs_dir.path())
+        .unwrap();
+
+        let vm_name = "runner-secret-env-cmdline-spacing";
+        seed_grant_sidecar_and_key(vm_name);
+        // Substitution values belong to the host's per-entrypoint environment
+        // synthesis, never the globally readable kernel command line.
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("substitution-env.json"),
+            br#"[["API_KEY","mvm-secret-test"]]"#,
+        )
+        .unwrap();
+
+        let cfg = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: rootfs.display().to_string(),
+            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
+                home.path(),
+            )),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            network_policy: NetworkPolicy::preset(mvm_core::network_policy::NetworkPreset::Dev),
+            ..Default::default()
+        };
+
+        let driver = MockDriver::default();
+        let guest = spawn_activation_guest(driver.clone(), vm_name);
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        mapping_start(&runner, &cfg).expect("start succeeds");
+        guest.join().expect("guest thread");
+
+        let specs = runner.driver.booted_specs();
+        assert_eq!(specs.len(), 1);
+        let cmdline = &specs[0].cmdline;
+        assert!(!cmdline.contains("mvm.secret_env="), "{cmdline}");
+        assert!(!cmdline.contains("mvm-secret-test"), "{cmdline}");
+        assert!(!cmdline.contains(&hex::encode("API_KEY=")), "{cmdline}");
+    }
+
+    #[test]
+    fn stops_and_dropped_handles_never_reap_unproven_runtime_generations() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = config("retained-generations");
+        let redaction = RedactionPolicy::default();
+        let vm = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &cfg.network_policy,
+                cmdline: String::new(),
+            })
+            .unwrap();
+        // Synthetic retained bytes test lifecycle deletion only, not signature
+        // verification. Both an older launch and a newer launch must survive.
+        let root = mvm_core::config::runtime_evidence_root().join(&cfg.name);
+        let generations = ["runtime-old", "runtime-new"].map(|name| {
+            let directory = root.join(name);
+            std::fs::create_dir(&directory).unwrap();
+            let artifact = directory.join("overlay.ext4");
+            std::fs::write(&artifact, name).unwrap();
+            artifact
+        });
+        drop(vm);
+        for artifact in &generations {
+            assert!(artifact.exists());
+        }
+        let id = VmId(cfg.name.clone());
+        runner.stop(&id).expect("mock stop succeeds");
+        for artifact in &generations {
+            assert!(
+                artifact.exists(),
+                "PID-only success cannot authorize deletion"
+            );
+        }
+        // A subsequent/stale stop may fail attachment, but is equally unable
+        // to delete either generation.
+        let _ = runner.stop(&id);
+        let mut missing_proof = cfg;
+        missing_proof.runtime_overlay_path = Some("/untrusted/overlay".into());
+        assert!(
+            runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &missing_proof,
+                    tenant: "local",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &missing_proof.network_policy,
+                    cmdline: String::new(),
+                })
+                .is_err()
+        );
+        for artifact in &generations {
+            assert!(
+                artifact.exists(),
+                "failed replacement cannot delete retained bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_proof_rejection_precedes_every_backend_spawn() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let mut cfg = config("proof-refused");
+        cfg.runtime_overlay_path = Some("/runtime/overlay".into());
+        let redaction = RedactionPolicy::default();
+        for forged_development_flag in [false, true] {
+            cfg.unsigned_runtime_development = forged_development_flag;
+            let outcome = runner.start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &cfg.network_policy,
+                cmdline: "mvm.runtime_roothash=untrusted".into(),
+            });
+            assert!(outcome.is_err());
+            assert!(runner.driver.booted_specs().is_empty());
+            assert!(runner.spawner.seen.lock().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn retention_diagnostics_do_not_block_stop_but_invalid_leases_do() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let id = VmId("broken-retention".into());
+        let lease = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&id.0).unwrap();
+        let root = mvm_core::config::runtime_evidence_root();
+        let unreadable = root.join(&id.0).join("runtime-unreadable");
+        std::fs::create_dir(&unreadable).unwrap();
+        mvm_core::private_fs::set_mode(&unreadable, 0).unwrap();
+        // Root bypasses directory DAC. Non-root host runs exercise the actual
+        // diagnostic failure; both must still exercise driver termination.
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(lease.report_retained().is_err());
+        }
+        drop(lease);
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let result = runner.stop(&id);
+        mvm_core::private_fs::set_mode(&unreadable, 0o700).unwrap();
+        result.expect("diagnostic failure must not block stop");
+        assert_eq!(runner.driver.killed_vms(), vec![id.0.clone()]);
+
+        let original = root.with_extension("retained");
+        std::fs::rename(&root, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &root).unwrap();
+        assert!(runner.abort_start(&id).is_err());
+        assert_eq!(runner.driver.killed_vms().len(), 1);
+        for invalid in ["../bad", "x/y", ""] {
+            assert!(runner.stop(&VmId(invalid.into())).is_err());
+        }
+        assert_eq!(runner.driver.killed_vms().len(), 1);
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&original, &root).unwrap();
+        let refusing = WorkloadRunner::new(
+            MockDriver::default().refusing_attach(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let expected_error = refusing.driver.attach(&id).err().unwrap().to_string();
+        let error = refusing.stop(&id).unwrap_err();
+        assert_eq!(error.to_string(), expected_error);
     }
 
     #[test]
@@ -1996,6 +2421,7 @@ mod tests {
 
     #[test]
     fn a_kill_that_fails_still_releases_the_console_capture() {
+        let (_env, _home) = isolated_runtime_home();
         // The property the old ordering bought and this one must not lose: a
         // VM that will not die cannot strand its follower, or leave its
         // transcript unsealed.
@@ -2016,6 +2442,7 @@ mod tests {
 
     #[test]
     fn every_cold_boot_mints_an_identity_whether_or_not_it_carries_secrets() {
+        let (_env, _home) = isolated_runtime_home();
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
 
@@ -2084,6 +2511,7 @@ mod tests {
 
     #[test]
     fn start_workload_passes_the_network_policy_and_tenant_to_the_spawner() {
+        let (_env, _home) = isolated_runtime_home();
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -2173,6 +2601,7 @@ mod tests {
 
     #[test]
     fn start_workload_broker_is_a_defused_no_op_when_unadmitted() {
+        let (_env, _home) = isolated_runtime_home();
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -2266,7 +2695,7 @@ mod tests {
             rootfs_path: rootfs,
             ..Default::default()
         };
-        let id = runner.start(&cfg).expect("start succeeds");
+        let id = mapping_start(&runner, &cfg).expect("start succeeds");
         assert_eq!(id.0, "w");
 
         // attach hands back a MockRunningVm, so the lifecycle works with no real VM.
@@ -2358,7 +2787,7 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        runner.start(&cfg).expect("start succeeds");
+        mapping_start(&runner, &cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
@@ -2434,7 +2863,7 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        runner.start(&cfg).expect("start succeeds");
+        mapping_start(&runner, &cfg).expect("start succeeds");
         guest.join().expect("guest thread");
 
         let specs = runner.driver.booted_specs();
@@ -2487,7 +2916,7 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        runner.start(&cfg).expect("start succeeds");
+        mapping_start(&runner, &cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
@@ -2589,7 +3018,7 @@ mod tests {
         let guest = spawn_activation_guest(driver, "runner-activation");
 
         runner
-            .start_workload(&WorkloadLaunchInputs {
+            .boot_bound_workload(&WorkloadLaunchInputs {
                 config: &cfg,
                 tenant: "local",
                 secrets: &[],
@@ -2630,7 +3059,7 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         runner
-            .start_workload(&WorkloadLaunchInputs {
+            .boot_bound_workload(&WorkloadLaunchInputs {
                 config: &cfg,
                 tenant: "local",
                 secrets: &[],
@@ -2689,7 +3118,7 @@ mod tests {
             volumes: vec![disk_volume("/vol/data.img", "/data", true)],
             ..Default::default()
         };
-        runner.start(&cfg).expect("start succeeds");
+        mapping_start(&runner, &cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
         assert_eq!(specs.len(), 1);
@@ -2739,7 +3168,7 @@ mod tests {
             rootfs_path: rootfs,
             ..Default::default()
         };
-        runner.start(&cfg).expect("start succeeds");
+        mapping_start(&runner, &cfg).expect("start succeeds");
 
         let specs = runner.driver.booted_specs();
         assert!(
@@ -2798,9 +3227,10 @@ mod tests {
             rootfs_path: rootfs,
             ..Default::default()
         };
-        runner
-            .start(&admitted)
+        ClaimGuards::new(&runner.spawner)
+            .admit_overlay_contract(Path::new(&admitted.rootfs_path))
             .expect("an overlay-aware rootfs is admitted");
+        mapping_start(&runner, &admitted).expect("admitted shape maps to a boot");
         let meta = crate::base::runtime_meta::read("runner-gate-admitted")
             .expect("runtime_meta read")
             .expect("start records runtime_meta");
@@ -2857,7 +3287,7 @@ mod tests {
             ..Default::default()
         };
 
-        runner.start(&cfg).expect("a clean rootfs boots");
+        mapping_start(&runner, &cfg).expect("a clean rootfs boots");
 
         assert_eq!(
             mvm_core::crypto::image_verify::sha256_file(Path::new(&rootfs)).unwrap(),
@@ -2954,6 +3384,7 @@ mod tests {
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
         use mvm_agentd::vsock::CONSOLE_PORT_BASE;
+        let (_env, _home) = isolated_runtime_home();
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -3008,6 +3439,7 @@ mod tests {
 
     #[test]
     fn start_workload_without_dev_console_carries_only_four_vsock_entries() {
+        let (_env, _home) = isolated_runtime_home();
         let policy = egress_allowing_policy();
         let redaction = RedactionPolicy::default();
         let runner = WorkloadRunner::new(
@@ -3065,9 +3497,9 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        let launch = standby_launch_config(&rootfs);
+        let launch = checked_source_config("workload-a", rootfs.display().to_string());
         let spec = standby_spec_for("parent-a", tmp.path(), &launch);
-
+        let guest = spawn_activation_guest(runner.driver.clone(), &spec.id);
         let handle = runner
             .spawn_standby_captured(
                 &SpawnContext {
@@ -3077,6 +3509,7 @@ mod tests {
                 &spec,
             )
             .unwrap();
+        guest.join().unwrap();
 
         let id = handle
             .parent_checkpoint
@@ -3182,9 +3615,9 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        let launch = standby_launch_config(&rootfs);
+        let launch = checked_source_config("workload-a", rootfs.display().to_string());
         let spec = standby_spec_for("standby-test", &tmp.path().join("vm"), &launch);
-
+        let guest = spawn_activation_guest(runner.driver.clone(), &spec.id);
         let handle = runner
             .spawn_standby_captured(
                 &SpawnContext {
@@ -3194,6 +3627,7 @@ mod tests {
                 &spec,
             )
             .expect("spawn_standby_captured succeeds through the mock driver");
+        guest.join().unwrap();
 
         let pool = crate::standby_pool::SupervisorStandbyPool::at(tmp.path().join("pool"));
         pool.record(&handle).unwrap();
@@ -3257,15 +3691,15 @@ mod tests {
             RealNetworkEndpointSpawner,
             RecordingBrokerRegistrar::new(),
         );
-        let error = runner
-            .spawn_standby_captured(
-                &SpawnContext {
-                    checkpoints: &store,
-                    launch: Some(&launch),
-                },
-                &spec,
-            )
-            .unwrap_err();
+        let error = mapping_standby(
+            &runner,
+            &SpawnContext {
+                checkpoints: &store,
+                launch: Some(&launch),
+            },
+            &spec,
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
@@ -3338,15 +3772,15 @@ mod tests {
         // this test is about.
         let spec = standby_spec_for("parent-oversized", tmp.path(), &launch);
 
-        let err = runner
-            .spawn_standby_captured(
-                &SpawnContext {
-                    checkpoints: &store,
-                    launch: Some(&launch),
-                },
-                &spec,
-            )
-            .expect_err("an oversized parent cmdline must be refused before the boot");
+        let err = mapping_standby(
+            &runner,
+            &SpawnContext {
+                checkpoints: &store,
+                launch: Some(&launch),
+            },
+            &spec,
+        )
+        .expect_err("an oversized parent cmdline must be refused before the boot");
 
         assert!(
             matches!(err, StandbyError::SpawnFailed(ref m) if m.contains("command line")),
@@ -3412,25 +3846,16 @@ mod tests {
 
         let (dir, rootfs) = overlay_aware_rootfs("shape-parity");
         std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-
+        let source = checked_source_config("shape-parity", rootfs.clone());
+        let lease =
+            crate::runtime_evidence::RuntimeLifecycleLease::acquire("shape-parity").unwrap();
+        let bound = lease.bind(&source).unwrap();
         let launch = VmStartConfig {
-            name: "shape-parity".into(),
-            rootfs_path: rootfs.clone(),
-            kernel_path: Some("/img/kernel".into()),
-            initrd_path: Some(mvm_vmm::host::cmdline::seed_universal_initramfs(
-                home.path(),
-            )),
             verity_path: Some(dir.path().join("rootfs.verity").display().to_string()),
             roothash: Some("a".repeat(64)),
-            runtime_overlay_path: Some(dir.path().join("overlay.ext4").display().to_string()),
-            runtime_overlay_verity_path: Some(
-                dir.path().join("overlay.verity").display().to_string(),
-            ),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            runtime_overlay_version: Some("0.18.0".into()),
             cpus: 2,
             memory_mib: 512,
-            ..Default::default()
+            ..bound
         };
 
         let store = CheckpointStore::at(home.path().join("checkpoints"));
@@ -3443,22 +3868,22 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
 
-        runner.start(&launch).expect("workload boots");
+        mapping_start(&runner, &launch).expect("workload boots");
         guest.join().expect("guest thread");
         let spec = standby_spec_for(
             "standby-parity",
             &home.path().join("standby-parity"),
             &launch,
         );
-        runner
-            .spawn_standby_captured(
-                &SpawnContext {
-                    checkpoints: &store,
-                    launch: Some(&launch),
-                },
-                &spec,
-            )
-            .expect("warm parent spawns for that launch");
+        mapping_standby(
+            &runner,
+            &SpawnContext {
+                checkpoints: &store,
+                launch: Some(&launch),
+            },
+            &spec,
+        )
+        .expect("warm parent spawns for that launch");
         parent_guest.join().expect("parent guest thread");
 
         let booted = runner.driver.booted_specs();
@@ -3504,27 +3929,29 @@ mod tests {
 
         // `_dir` holds the rootfs's temp dir alive for the whole test.
         let (_dir, rootfs) = overlay_aware_rootfs("egress-parity");
+        let source = checked_source_config("egress-parity", rootfs.clone());
+        let lease =
+            crate::runtime_evidence::RuntimeLifecycleLease::acquire("egress-parity").unwrap();
+        let bound = lease.bind(&source).unwrap();
         let launch = VmStartConfig {
-            name: "egress-parity".into(),
-            rootfs_path: rootfs.clone(),
-            kernel_path: Some("/img/kernel".into()),
             network_policy: NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
             cpus: 2,
             memory_mib: 512,
-            runtime_overlay_path: Some("/img/runtime.ext4".into()),
-            runtime_overlay_verity_path: Some("/img/runtime.verity".into()),
-            runtime_overlay_roothash: Some("b".repeat(64)),
-            ..Default::default()
+            ..bound
         };
 
         let store = CheckpointStore::at(home.path().join("checkpoints"));
+        let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
+        let guest = spawn_activation_guest(driver.clone(), "egress-parity");
+        let parent_guest = spawn_activation_guest(driver.clone(), "standby-egress-parity");
         let runner = WorkloadRunner::new(
-            MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs)),
+            driver,
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
 
-        runner.start(&launch).expect("workload boots");
+        mapping_start(&runner, &launch).expect("workload boots");
+        guest.join().unwrap();
         let spec = standby_spec_for(
             "standby-egress-parity",
             &home.path().join("standby-egress-parity"),
@@ -3534,15 +3961,16 @@ mod tests {
             spec.vsock_egress,
             "the compat key for this launch must ask for an egress-enabled parent"
         );
-        runner
-            .spawn_standby_captured(
-                &SpawnContext {
-                    checkpoints: &store,
-                    launch: Some(&launch),
-                },
-                &spec,
-            )
-            .expect("warm parent spawns for an egress-allowing launch");
+        mapping_standby(
+            &runner,
+            &SpawnContext {
+                checkpoints: &store,
+                launch: Some(&launch),
+            },
+            &spec,
+        )
+        .expect("warm parent spawns for an egress-allowing launch");
+        parent_guest.join().unwrap();
 
         let booted = runner.driver.booted_specs();
         assert_eq!(booted.len(), 2, "one workload boot, then one parent boot");
@@ -3610,7 +4038,7 @@ mod tests {
     use mvm_core::crypto::vmgenid::GENID_BYTES;
     use mvm_core::vm_backend::StandbyState;
 
-    use crate::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
+    use crate::checkpoint::capture_vm_full;
 
     /// A `CheckpointChainAnchor` double: reports the parent as audited (echoing
     /// its own recomputed creation digest) so the lineage gate passes, and every
@@ -3745,21 +4173,48 @@ mod tests {
                 .unwrap();
         }
 
+        // The synthetic parent carries checked-source evidence. Only execution
+        // and the audit anchor are mocked; runtime verification is not.
+        let runtime_config = checked_source_config("warm-parent", rootfs.display().to_string());
+        let lease = crate::runtime_evidence::RuntimeLifecycleLease::acquire("warm-parent").unwrap();
+        let bound = lease.bind(&runtime_config).unwrap();
+        crate::base::runtime_meta::record_from_start_config(
+            "warm-parent",
+            StartMode::Detached,
+            &bound,
+        )
+        .unwrap();
+        let runtime_binding = crate::base::runtime_meta::read("warm-parent")
+            .unwrap()
+            .unwrap()
+            .runtime_launch_binding;
+        drop(lease);
         let parent_id = CheckpointId::new("warm-parent-cp");
-        let parent_meta = capture_fs_quick(
+        let driver = MockDriver::default().with_vm_full_rootfs(&rootfs);
+        let boot = factory_parent_spec(&bound, &vm_state_dir("warm-parent"), |has_disk| {
+            driver.workload_base_bootargs(has_disk)
+        });
+        driver.boot(&boot).unwrap();
+        let control = driver.vm_full_control("warm-parent").unwrap();
+        let parent_meta = capture_vm_full(
             &checkpoints,
-            CaptureFsQuickParams {
+            CaptureVmFullParams {
                 id: parent_id.clone(),
                 vm_name: "warm-parent".into(),
-                rootfs,
                 supervisor_config_digest: "d".into(),
-                runtime_overlay_version: None,
+                runtime_overlay_version: bound.runtime_overlay_version,
+                runtime_launch_binding: runtime_binding,
+                supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
-                quiesced: true,
+                retain_paused: false,
                 grants,
+                parent: None,
+                session: None,
+                workspace_volumes: Vec::new(),
                 key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
+            control.as_ref(),
         )
         .unwrap();
         let snapshot_id = format!(
@@ -3939,6 +4394,29 @@ mod tests {
         assert_eq!(runner.driver.forked_children().len(), 1);
     }
 
+    #[test]
+    fn a_warm_claim_refuses_changed_materialized_runtime_evidence_without_decrypting() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let runner = claim_runner();
+        let parent = ProtectedPreloadedParent::seed(&runner);
+        let child = parent.handle.preloaded_child_vm_name.as_ref().unwrap();
+        std::fs::write(vm_state_dir(child).join("runtime-artifacts.json"), b"{}").unwrap();
+        let before = crate::checkpoint::chunk_opens::under(parent.store_root.path());
+
+        let error = parent.claim(&runner).expect_err("changed child evidence");
+        assert!(
+            error.to_string().contains("evidence digest mismatch"),
+            "{error}"
+        );
+        assert_eq!(
+            crate::checkpoint::chunk_opens::under(parent.store_root.path()),
+            before
+        );
+        assert!(runner.driver.forked_children().is_empty());
+    }
+
     /// Not decrypting is not trusting: a sealed object changed after the
     /// standby was prepared still refuses the claim and quarantines the parent.
     #[test]
@@ -3970,6 +4448,125 @@ mod tests {
             "a tampered parent is quarantined, never returned to the pool"
         );
         assert!(runner.driver.forked_children().is_empty());
+    }
+
+    #[test]
+    fn public_claim_requires_authenticated_vm_full_runtime_observation_before_child_effects() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for failure in [
+            "filesystem-only",
+            "missing-observation",
+            "wrong-initramfs",
+            "reordered-disks",
+            "reforged-metadata",
+        ] {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.set("MVM_HOME", home.path());
+            let source = tempfile::tempdir().unwrap();
+            let (checkpoints, snapshots, parent_id, mut parent) =
+                seed_audited_parent(home.path(), source.path(), true);
+            let rootfs_digest = materialized_parent_rootfs_digest(&checkpoints, &parent);
+            let original_anchor = ClaimTestAnchor::audited(&parent);
+            match failure {
+                "filesystem-only" => parent.class = mvm_core::checkpoint::CheckpointClass::FsQuick,
+                "missing-observation" => {
+                    parent
+                        .content
+                        .retain(|blob| blob.name != "runtime-artifacts.json");
+                }
+                "wrong-initramfs" | "reordered-disks" => {
+                    let path = checkpoints
+                        .content_dir(&parent_id)
+                        .join("runtime-artifacts.json");
+                    let mut observed: mvm_vmm::runtime_artifacts::RuntimeArtifacts =
+                        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    if failure == "wrong-initramfs" {
+                        observed.initramfs.as_mut().unwrap().path =
+                            source.path().join("other-initramfs");
+                    } else {
+                        observed.disks.reverse();
+                    }
+                    std::fs::write(&path, serde_json::to_vec(&observed).unwrap()).unwrap();
+                    parent
+                        .content
+                        .iter_mut()
+                        .find(|blob| blob.name == "runtime-artifacts.json")
+                        .unwrap()
+                        .sha256 = mvm_core::crypto::image_verify::sha256_file(&path).unwrap();
+                }
+                "reforged-metadata" => {
+                    let mvm_core::protocol::runtime_release::RuntimeLaunchBinding::CliAssembly(
+                        binding,
+                    ) = parent.runtime_launch_binding.as_mut().unwrap()
+                    else {
+                        panic!("source assembly fixture");
+                    };
+                    binding.overlay_path = source.path().join("unauthenticated-overlay");
+                }
+                _ => unreachable!(),
+            }
+            parent.meta_digest = parent.compute_meta_digest();
+            checkpoints.write_meta(&parent).unwrap();
+            // The first four cases are honestly recorded invalid captures. The
+            // last re-seals changed metadata without changing its audit witness.
+            let anchor = if failure == "reforged-metadata" {
+                original_anchor
+            } else {
+                ClaimTestAnchor::audited(&parent)
+            };
+            let pool = SupervisorStandbyPool::at(home.path().join("pool"));
+            let handle = idle_parent_handle("warm-parent", &home.path().join("control.sock"));
+            pool.record(&handle).unwrap();
+            let registry_path = home.path().join("vm-names.json");
+            let claim = admitted_child_claim(
+                &source.path().join("rootfs.ext4"),
+                signed_child_plan_json(&rootfs_digest),
+            );
+            let runner = WorkloadRunner::new(
+                MockDriver::default(),
+                KeyingSpawner::default(),
+                RecordingBrokerRegistrar::new(),
+            );
+            let error = runner
+                .claim_standby(
+                    &ClaimContext {
+                        pool: &pool,
+                        checkpoints: &checkpoints,
+                        snapshots: &snapshots,
+                        anchor: &anchor,
+                        parent_checkpoint: &parent_id,
+                        registry_path: &registry_path,
+                        grant_issuer: None,
+                    },
+                    &handle,
+                    &claim,
+                )
+                .expect_err(failure);
+            if failure == "reforged-metadata" {
+                assert!(pool.load("warm-parent").is_err(), "{failure}: {error}");
+            } else {
+                let message = error.to_string();
+                assert!(
+                    message.contains(if failure == "filesystem-only" {
+                        "requires a vm_full"
+                    } else {
+                        "verify paused runtime"
+                    }),
+                    "{failure}: {message}"
+                );
+                assert!(pool.load("warm-parent").unwrap().state.is_claimable());
+            }
+            assert!(runner.driver.forked_children().is_empty(), "{failure}");
+            assert!(
+                runner.spawner.seen_vm.lock().unwrap().is_none(),
+                "{failure}"
+            );
+            assert!(runner.broker.seen.lock().unwrap().is_none(), "{failure}");
+            assert_eq!(orphan_child_dirs(), 0, "{failure}");
+        }
     }
 
     #[test]
@@ -4247,7 +4844,7 @@ mod tests {
                 name: "unused-cold".into(),
                 rootfs_path: rootfs.display().to_string(),
                 tenant_id: Some("tenant-x".into()),
-                ..Default::default()
+                ..checked_source_config("unused-cold", rootfs.display().to_string())
             }),
             rootfs_path: rootfs.display().to_string(),
             tenant_id: "tenant-x".into(),
@@ -4555,8 +5152,9 @@ mod tests {
         // The cold boot: an admitted launch (tenant set), so it carries the
         // broker channel a claimed child must also get.
         let cold_vm = "cold-admitted-workload".to_string();
-        runner
-            .start(&VmStartConfig {
+        mapping_start(
+            &runner,
+            &VmStartConfig {
                 name: cold_vm.clone(),
                 rootfs_path: rootfs.display().to_string(),
                 kernel_path: Some("/img/kernel".into()),
@@ -4565,8 +5163,9 @@ mod tests {
                 cpus: 2,
                 memory_mib: 512,
                 ..Default::default()
-            })
-            .expect("the cold admitted workload boots");
+            },
+        )
+        .expect("the cold admitted workload boots");
 
         let pool = SupervisorStandbyPool::at(store_root.path().join("pool"));
         let handle = idle_parent_handle("warm-parent", &store_root.path().join("control.sock"));
@@ -5138,9 +5737,16 @@ mod tests {
         handle.preloaded_child_vm_name = Some(child_name.clone());
         handle.pid = std::process::id();
         pool.record(&handle).unwrap();
-        std::fs::create_dir_all(vm_state_dir(&child_name)).unwrap();
         let registry_path = store_root.path().join("vm-names.json");
         let anchor = ClaimTestAnchor::audited(&parent_meta);
+        materialize_child_from_parent(
+            &checkpoints,
+            &snapshots,
+            &parent_id,
+            &anchor,
+            &vm_state_dir(&child_name),
+        )
+        .unwrap();
 
         let claim = admitted_child_claim(
             &src.path().join("rootfs.ext4"),
@@ -5926,9 +6532,8 @@ mod tests {
             rootfs_path: rootfs,
             ..Default::default()
         };
-        let started = runner
-            .start(&cfg)
-            .expect("start is an ordinary cold boot, not a claim");
+        let started =
+            mapping_start(&runner, &cfg).expect("start is an ordinary cold boot, not a claim");
         assert_eq!(started.0, "warm-parent");
 
         // `start` never reads or mutates the standby pool — the parent's

@@ -121,7 +121,15 @@ impl MarkedControl {
     fn new(dir: &Path) -> Self {
         let rootfs = write_rootfs(dir, 1);
         let config = dir.join("supervisor-config.json");
-        std::fs::write(&config, [MARKER, b"config"].concat()).unwrap();
+        std::fs::write(
+            &config,
+            serde_json::to_vec(&serde_json::json!({
+                "disks": [{"path": rootfs, "read_only": true}],
+                "marker": String::from_utf8([MARKER, b"config"].concat()).unwrap(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         Self {
             rootfs,
             config,
@@ -131,6 +139,19 @@ impl MarkedControl {
 }
 
 impl VmFullControl for MarkedControl {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+            kernel: None,
+            firecracker_drives: None,
+            initramfs: None,
+            disks: vec![mvm_vmm::runtime_artifacts::RuntimeArtifact {
+                path: self.rootfs.clone(),
+                sha256: sha256_file_hex(&self.rootfs)?,
+            }],
+            kernel_cmdline: String::new(),
+        })
+    }
+
     fn pause(&self) -> Result<()> {
         self.events.borrow_mut().push("pause");
         Ok(())
@@ -180,6 +201,7 @@ fn vm_full_params(id: &str, domain: CheckpointKeyDomain, config: &Path) -> Captu
         vm_name: format!("vm-{id}"),
         supervisor_config_digest: "cfg".into(),
         runtime_overlay_version: None,
+        runtime_launch_binding: None,
         supervisor_config_src: Some(config.to_path_buf()),
         tag: None,
         created_unix: 1,
@@ -207,6 +229,37 @@ fn regular_files(root: &Path) -> Vec<PathBuf> {
         return Vec::new();
     }
     chunks::regular_files_recursive(root).unwrap()
+}
+
+#[test]
+fn sealed_runtime_evidence_verifies_without_leaving_plaintext_and_refuses_tampering() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = protected_store(&tmp.path().join("store"));
+    let meta = capture_full(&store, &tmp.path().join("vm"), "runtime-evidence");
+    let content = store.content_dir(&meta.id);
+    let before = regular_files(store.root());
+    verify_checkpoint_runtime(&store, &meta).unwrap();
+    assert_eq!(regular_files(store.root()), before);
+    assert!(!content.join(runtime_binding::EVIDENCE_BLOB).exists());
+    assert_no_plaintext(store.root());
+
+    let mut changed = meta.clone();
+    changed
+        .content
+        .iter_mut()
+        .find(|blob| blob.name == runtime_binding::EVIDENCE_BLOB)
+        .unwrap()
+        .sha256 = "0".repeat(64);
+    assert!(verify_checkpoint_runtime(&store, &changed).is_err());
+
+    let index = sealed::index_path(&content, runtime_binding::EVIDENCE_BLOB);
+    let mut bytes = std::fs::read(&index).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(index, bytes).unwrap();
+    assert!(verify_checkpoint_runtime(&store, &meta).is_err());
+    assert_eq!(regular_files(store.root()), before);
+    assert!(!content.join(runtime_binding::EVIDENCE_BLOB).exists());
 }
 
 fn assert_no_plaintext(root: &Path) {
@@ -711,9 +764,13 @@ impl VmFullRestore for SeenRestore {
             std::fs::read(machine_id).unwrap(),
             [MARKER, b"machine-id"].concat()
         );
+        let config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(config_src.expect("the launch config is staged")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
-            std::fs::read(config_src.expect("the launch config is staged")).unwrap(),
-            [MARKER, b"config"].concat()
+            config["marker"].as_str().unwrap().as_bytes(),
+            [MARKER, b"config"].concat().as_slice()
         );
         {
             use std::os::unix::fs::PermissionsExt as _;

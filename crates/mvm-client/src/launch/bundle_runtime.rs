@@ -1,7 +1,7 @@
 //! Offline runtime selection from a signed, installed bundle.
 //!
-//! Schema 5 uses retained release proofs and prepared bytes without reassembly,
-//! runtime-cache lookup or downloads. Schema 4 preserves the original explicit
+//! Schema 6 uses retained release proofs and prepared bytes without reassembly,
+//! runtime-cache lookup or downloads. Schemas 4 and 5 preserve the original explicit
 //! image-set runtime selection; it is never reinterpreted as a CLI runtime.
 use std::path::{Path, PathBuf};
 
@@ -68,7 +68,9 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         return Ok(false);
     };
     ensure!(
-        config.legacy_bundle_runtime.is_none() && !config.unsigned_runtime_development,
+        config.legacy_bundle_runtime.is_none()
+            && config.source_runtime_archive_sha256.is_none()
+            && !config.unsigned_runtime_development,
         "portable bundle conflicts with baked or unsigned runtime selection"
     );
     if boot.cli_runtime.is_some() {
@@ -81,6 +83,12 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             config.runtime_release_proof.is_none(),
             "legacy portable bundle conflicts with CLI release runtime selection"
         );
+    }
+    if config.legacy_portable_runtime.is_some() {
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            config,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
     }
     ensure!(
         boot.arch == GuestArch::host(),
@@ -181,6 +189,10 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
     config.unsigned_runtime_development = false;
     config.legacy_bundle_runtime = None;
     config.legacy_portable_runtime = Some(portable_proof);
+    mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+        config,
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+    )?;
     Ok(true)
 }
 
@@ -222,6 +234,11 @@ fn attach_cli_runtime(
             existing == &proof,
             "CLI portable runtime proof conflicts with the signed bundle"
         );
+        mvm_runtime::runtime_evidence::verify_release_runtime_for_launch(
+            config,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )
+        .context("verifying existing explicit portable CLI runtime selection")?;
     }
     // Retain the complete published quartet. The archive bundle is the
     // authentication authority; every retained input is also bundle-bound.
@@ -234,7 +251,8 @@ fn attach_cli_runtime(
     let overlay_path = artifact(&runtime.overlay_artifact)?;
     let overlay_verity_path = artifact(&runtime.overlay_verity_artifact)?;
     let initramfs_path = artifact(&runtime.initramfs_artifact)?;
-    let verified = verify_runtime_release_proof(&proof, &runtime.version, proof.arch)?;
+    let verified = verify_runtime_release_proof(&proof, &runtime.version, proof.arch)
+        .context("verifying retained portable CLI runtime release proof")?;
     let declaration = verified.declaration(proof.arch)?;
     ensure!(
         declaration.protocol_version == runtime.protocol_version
@@ -322,7 +340,10 @@ fn verify_installed_artifact(
 ) -> Result<PathBuf> {
     let path = root.join(&artifact.path);
     ensure!(
-        std::fs::symlink_metadata(&path)?.file_type().is_file(),
+        std::fs::symlink_metadata(&path)
+            .with_context(|| format!("reading installed bundle artifact {}", artifact.path))?
+            .file_type()
+            .is_file(),
         "installed bundle artifact is not a regular file: {}",
         artifact.path
     );
@@ -400,6 +421,79 @@ mod tests {
         }
     }
 
+    fn assert_retained_portable_reentry(selected: &VmStartConfig) {
+        use mvm_core::protocol::runtime_release::RuntimeLaunchBinding;
+
+        let retained = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::set_mode(retained.path(), 0o700).unwrap();
+        let copy = |source: &Path, name: &str| {
+            let path = retained.path().join(name);
+            std::fs::copy(source, &path).unwrap();
+            mvm_core::private_fs::set_mode(&path, 0o400).unwrap();
+            path
+        };
+        let mut proof = selected.legacy_portable_runtime.clone().unwrap();
+        proof.archive = copy(&proof.archive, "bundle.mvmpkg");
+        let binding = RuntimeLaunchBinding::LegacyPortable {
+            proof,
+            rootfs_path: copy(Path::new(&selected.rootfs_path), "rootfs"),
+            kernel_path: copy(
+                Path::new(selected.kernel_path.as_deref().unwrap()),
+                "kernel",
+            ),
+            overlay_path: copy(
+                Path::new(selected.runtime_overlay_path.as_deref().unwrap()),
+                "overlay.ext4",
+            ),
+            overlay_verity_path: copy(
+                Path::new(selected.runtime_overlay_verity_path.as_deref().unwrap()),
+                "overlay.verity",
+            ),
+            initramfs_path: copy(
+                Path::new(selected.initrd_path.as_deref().unwrap()),
+                "initramfs.cpio.gz",
+            ),
+            overlay_roothash: selected.runtime_overlay_roothash.clone().unwrap(),
+            version: selected.runtime_overlay_version.clone().unwrap(),
+        };
+        let mut reapplied = selected.clone();
+        binding.apply_to_config(&mut reapplied);
+        assert!(reapplied.bundle_boot_assets.is_none());
+        assert!(
+            installed_archive_for_rootfs(Path::new(&reapplied.rootfs_path))
+                .unwrap()
+                .is_none()
+        );
+        // There is no ambient cache entry for this version. Reentry must use
+        // the original portable proof and never resolve the caller's CLI hint.
+        let before = format!("{reapplied:?}");
+        super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+            &mut reapplied,
+            "qemu",
+            Some("absent-ambient-version"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(format!("{reapplied:?}"), before);
+
+        reapplied
+            .legacy_portable_runtime
+            .as_mut()
+            .unwrap()
+            .manifest_sha256 = "0".repeat(64);
+        let before = format!("{reapplied:?}");
+        assert!(
+            super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+                &mut reapplied,
+                "qemu",
+                Some("absent-ambient-version"),
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(format!("{reapplied:?}"), before);
+    }
+
     #[test]
     fn checksum_bundle_pairing_uses_the_release_verifier_rule() {
         for (checksum, bundle) in [
@@ -417,7 +511,44 @@ mod tests {
     }
 
     #[test]
-    fn signed_schema5_bundle_does_not_authorize_unsigned_or_tampered_runtime_inputs() {
+    fn signed_schema6_bundle_does_not_authorize_unsigned_or_tampered_runtime_inputs() {
+        const CHILD: &str = "MVM_PORTABLE_PAYLOAD_TEST_CHILD";
+        const TEST: &str = "launch::bundle_runtime::tests::signed_schema6_bundle_does_not_authorize_unsigned_or_tampered_runtime_inputs";
+        if std::env::var(CHILD).as_deref() != Ok(TEST) {
+            let output = mvm_core::env_hygiene::helper_command(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env(CHILD, TEST)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated payload child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed"));
+            return;
+        }
+        struct FixturePayload(tempfile::TempDir);
+        impl mvm_build::builder_boot::BootPayloadSource for FixturePayload {
+            fn boot_payload(
+                &self,
+            ) -> Result<
+                mvm_build::builder_boot::BuilderBootPayload,
+                mvm_build::builder_boot::BootPayloadError,
+            > {
+                mvm_build::builder_boot::BuilderBootPayload::builder()
+                    .host_bin_dir(self.0.path())
+                    .build()
+            }
+        }
+        let payload = tempfile::tempdir().unwrap();
+        for name in mvm_build::host_payload_manifest::host_binary_names() {
+            std::fs::write(payload.path().join(name), name.as_bytes()).unwrap();
+        }
+        let source = FixturePayload(payload);
+        mvm_build::builder_boot::BootPayloadSource::boot_payload(&source).unwrap();
+        mvm_build::builder_boot::register_boot_payload_source(Box::new(source));
         use mvm_bundler::CliBootAssetsInputs;
         use mvm_core::image_set::{
             BaseImageContract, BuilderBootAbi, IMAGE_SET_SCHEMA_VERSION, ImageSetRole,
@@ -446,6 +577,11 @@ mod tests {
         linux.compatibility.base_image_contract = Some(BaseImageContract::LINUX_LAYER);
         linux.compatibility.builder_boot_abi = Some(BuilderBootAbi::NO_MVM_BINARY);
         linux.members.retain(|member| !member.role.is_retired());
+        for member in &mut linux.members {
+            if matches!(member.role, ImageSetRole::WorkloadRootfs(_)) {
+                member.artifacts[0].format = mvm_core::image_set::ArtifactFormat::Ext4;
+            }
+        }
         let manifest_bytes = serde_json::to_vec_pretty(&linux).unwrap();
         let pin = Sha256Hex::from_bytes(&manifest_bytes);
         let kernel = producer.path().join("kernel");
@@ -532,9 +668,15 @@ mod tests {
         let mut attempted = config.clone();
         attempted.verity_path = Some("/untrusted/workload-verity".into());
         attempted.roothash = Some("d".repeat(64));
-        let before = serde_json::to_value(&attempted).unwrap();
-        assert!(attach_if_installed_bundle(&mut attempted, "qemu").is_err());
-        assert_eq!(serde_json::to_value(&attempted).unwrap(), before);
+        let before = format!("{attempted:?}");
+        let error = attach_if_installed_bundle(&mut attempted, "qemu").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("verifying retained portable CLI runtime release proof"),
+            "{error:#}"
+        );
+        assert_eq!(format!("{attempted:?}"), before);
         assert!(attempted.runtime_release_proof.is_none());
         assert!(attempted.runtime_overlay_path.is_none());
         let mut mixed = config.clone();
@@ -570,6 +712,43 @@ mod tests {
         assert!(error.to_string().contains("proof conflicts"), "{error}");
         assert_eq!(conflicting.runtime_release_proof, requested);
         assert!(conflicting.runtime_overlay_path.is_none());
+
+        let mut existing = config.clone();
+        existing.runtime_release_proof =
+            Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive: installed.path_for_name(&runtime.archive_artifact).unwrap(),
+                checksum: installed.path_for_name(&runtime.checksum_artifact).unwrap(),
+                signature_bundle: installed
+                    .path_for_name(&runtime.signature_bundle_artifact)
+                    .unwrap(),
+                archive_sha256: installed
+                    .manifest
+                    .find_by_name(&runtime.archive_artifact)
+                    .unwrap()
+                    .sha256
+                    .clone(),
+                version: runtime.version.clone(),
+                arch,
+            });
+        for mutation in 0..4 {
+            let mut attempted = existing.clone();
+            match mutation {
+                0 => attempted.runtime_overlay_path = Some("/untrusted/overlay".into()),
+                1 => attempted.runtime_overlay_roothash = Some("b".repeat(64)),
+                2 => attempted.runtime_overlay_version = Some("different-version".into()),
+                3 => attempted.initrd_path = attempted.kernel_path.clone(),
+                _ => unreachable!(),
+            }
+            let before = format!("{attempted:?}");
+            let error = attach_if_installed_bundle(&mut attempted, "qemu").unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("verifying existing explicit portable CLI runtime selection"),
+                "{error:#}"
+            );
+            assert_eq!(format!("{attempted:?}"), before);
+        }
 
         // Replacing a checksum's extension must not select another sidecar or
         // make the release verifier silently treat the fourth proof as absent.
@@ -615,13 +794,13 @@ mod tests {
             roothash: Some("d".repeat(64)),
             ..VmStartConfig::default()
         };
-        let before = serde_json::to_value(&renamed_config).unwrap();
+        let before = format!("{renamed_config:?}");
         let error = attach_if_installed_bundle(&mut renamed_config, "qemu").unwrap_err();
         assert!(
             error.to_string().contains("not paired with its checksum"),
             "{error}"
         );
-        assert_eq!(serde_json::to_value(&renamed_config).unwrap(), before);
+        assert_eq!(format!("{renamed_config:?}"), before);
         for name in [
             &runtime.archive_artifact,
             &runtime.checksum_artifact,
@@ -648,9 +827,9 @@ mod tests {
         let mut missing_fourth = config.clone();
         missing_fourth.verity_path = Some("/untrusted/workload-verity".into());
         missing_fourth.roothash = Some("d".repeat(64));
-        let before = serde_json::to_value(&missing_fourth).unwrap();
+        let before = format!("{missing_fourth:?}");
         assert!(attach_if_installed_bundle(&mut missing_fourth, "qemu").is_err());
-        assert_eq!(serde_json::to_value(&missing_fourth).unwrap(), before);
+        assert_eq!(format!("{missing_fourth:?}"), before);
         std::fs::write(&fourth, fourth_bytes).unwrap();
         let proof_path = installed
             .path_for_name(&runtime.signature_bundle_artifact)
@@ -697,6 +876,8 @@ mod tests {
             )
             .into_manifest();
         // Deliberately not the running CLI's locked root or release.
+        manifest.compatibility.guest_agent_protocol =
+            Some(mvm_core::image_set::ProtocolRange::new(2, 2).unwrap());
         manifest.set_version = ImageSetVersion::new(version).unwrap();
         if let mvm_core::image_set::ImageSetProducer::Release(release) = &mut manifest.producer {
             release.release_tag =
@@ -817,14 +998,14 @@ mod tests {
                 arch,
             });
         let requested = mixed.runtime_release_proof.clone();
-        let before = serde_json::to_value(&mixed).unwrap();
+        let before = format!("{mixed:?}");
         let error = attach_if_installed_bundle(&mut mixed, "qemu").unwrap_err();
         assert!(
             error.to_string().contains("conflicts with CLI release"),
             "{error}"
         );
         assert_eq!(mixed.runtime_release_proof, requested);
-        assert_eq!(serde_json::to_value(&mixed).unwrap(), before);
+        assert_eq!(format!("{mixed:?}"), before);
         assert!(mixed.legacy_portable_runtime.is_some());
         assert_eq!(mixed.runtime_overlay_path, attached.runtime_overlay_path);
         let mut unsigned = attached.clone();
@@ -838,7 +1019,7 @@ mod tests {
             .unwrap()
             .manifest_sha256 = "c".repeat(64);
         let error = attach_if_installed_bundle(&mut changed_identity, "qemu").unwrap_err();
-        assert!(error.to_string().contains("proof conflicts"), "{error}");
+        assert!(error.to_string().contains("identity mismatch"), "{error}");
         assert_eq!(
             changed_identity
                 .legacy_portable_runtime
@@ -851,6 +1032,58 @@ mod tests {
             changed_identity.runtime_overlay_path,
             attached.runtime_overlay_path
         );
+        assert!(attached.legacy_portable_runtime.is_some());
+        assert_retained_portable_reentry(&attached);
+        let mut dispatched = config.clone();
+        super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+            &mut dispatched,
+            "qemu",
+            Some("not-the-cli-version"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatched.legacy_portable_runtime,
+            attached.legacy_portable_runtime
+        );
+        for mutation in 0..4 {
+            let mut refused = attached.clone();
+            match mutation {
+                0 => {
+                    refused
+                        .legacy_portable_runtime
+                        .as_mut()
+                        .unwrap()
+                        .manifest_sha256 = "0".repeat(64)
+                }
+                1 => {
+                    refused
+                        .legacy_portable_runtime
+                        .as_mut()
+                        .unwrap()
+                        .pin
+                        .bundle_sha256 = "0".repeat(64)
+                }
+                2 => refused.source_runtime_archive_sha256 = Some("0".repeat(64)),
+                3 => refused.initrd_path = refused.kernel_path.clone(),
+                _ => unreachable!(),
+            }
+            let original = format!("{refused:?}");
+            assert!(
+                super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+                    &mut refused,
+                    "qemu",
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                format!("{refused:?}"),
+                original,
+                "config mutation {mutation}"
+            );
+        }
         assert_eq!(attached.roothash.as_deref(), Some(workload_hash.as_str()));
         let verity_path = PathBuf::from(attached.verity_path.as_ref().unwrap());
         assert!(!verity_path.with_extension("roothash").exists());
@@ -940,6 +1173,7 @@ mod tests {
                     std::fs::write(&installed_member, corrupt).unwrap();
                 }
                 let mut refused = config.clone();
+                let original_config = format!("{refused:?}");
                 let error = super::super::runtime_source::attach_runtime_overlay_if_cached_version(
                     &mut refused,
                     "qemu",
@@ -959,6 +1193,7 @@ mod tests {
                 assert!(refused.bundle_boot_assets.is_none());
                 assert!(refused.runtime_overlay_path.is_none());
                 assert!(refused.initrd_path.is_none());
+                assert_eq!(format!("{refused:?}"), original_config);
                 std::fs::write(&installed_member, &original).unwrap();
             }
         }

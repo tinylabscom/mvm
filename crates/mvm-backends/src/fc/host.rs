@@ -558,6 +558,11 @@ impl FcVmFullControl {
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        let dir = super::resolve_running_vm_dir(&self.vm_name)?;
+        super::runtime_artifacts::query(Path::new(&super::fc_api_socket_path(&dir)))
+    }
+
     fn pause(&self) -> Result<()> {
         super::pause_vm(&self.vm_name)
             .with_context(|| format!("pausing Firecracker VM '{}'", self.vm_name))
@@ -748,10 +753,25 @@ impl FcForkRestorer {
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            runtime_evidence.reseeded_identity_sha256.is_none(),
+            "prepared children must inherit their authenticated identity"
+        );
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
         let io = self.prepare_fork_load(child_vm_name, child_dir, None)?;
-        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        if let Err(error) =
+            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        {
+            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -781,10 +801,20 @@ impl FcForkRestorer {
         child_vm_name: &str,
         child_dir: &std::path::Path,
         cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
     ) -> anyhow::Result<()> {
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
         let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
-        mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        let resumed = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+            .and_then(|()| mvm_vmm::snapshot::SnapshotIO::resume(&io));
+        if resumed.is_err() {
+            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+        }
+        resumed
     }
 }
 

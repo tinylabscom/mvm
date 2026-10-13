@@ -6262,6 +6262,7 @@ fn machine_console_refused_on_sealed_image() {
             accessible: false,
             rootfs_path: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         },
     )

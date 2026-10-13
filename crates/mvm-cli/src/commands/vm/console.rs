@@ -1486,6 +1486,7 @@ mod accessible_gate_tests {
                     accessible: true,
                     rootfs_path: None,
                     runtime_overlay_version: None,
+                    runtime_launch_binding: None,
                     observability_target: None,
                 },
             )
@@ -1533,6 +1534,7 @@ mod accessible_gate_tests {
                     accessible: false,
                     rootfs_path: None,
                     runtime_overlay_version: None,
+                    runtime_launch_binding: None,
                     observability_target: None,
                 },
             )
@@ -1560,6 +1562,7 @@ mod accessible_gate_tests {
                     accessible: false,
                     rootfs_path: None,
                     runtime_overlay_version: None,
+                    runtime_launch_binding: None,
                     observability_target: None,
                 },
             )
@@ -1580,6 +1583,7 @@ mod accessible_gate_tests {
                     accessible: false,
                     rootfs_path: None,
                     runtime_overlay_version: None,
+                    runtime_launch_binding: None,
                     observability_target: None,
                 },
             )
@@ -1669,6 +1673,7 @@ mod picker_hvf_tests {
                 accessible: false,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
             },
         )

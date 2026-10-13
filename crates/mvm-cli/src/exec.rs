@@ -1433,6 +1433,7 @@ pub fn resolve_launch(
             assets: shape.assets,
             volumes: &start_config.volumes,
             bundle_archive: bundle_archive.as_deref(),
+            runtime_config: Some(&start_config),
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);

@@ -1013,6 +1013,13 @@ impl HvfVmFullControl {
 }
 
 impl VmFullControl for HvfVmFullControl {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        let pid = hvf_backend::read_pid(&self.state_dir.join(PID_FILE_NAME))
+            .context("HVF runtime observation requires a live supervisor identity")?;
+        let pid = u32::try_from(pid).context("invalid HVF supervisor PID")?;
+        mvm_vmm::runtime_artifacts::query(&self.state_dir, pid)
+    }
+
     fn pause(&self) -> Result<()> {
         hvf_backend::signal_vm(
             &self.state_dir.join(PID_FILE_NAME),
@@ -1132,7 +1139,11 @@ impl VmFullControl for HvfVmFullControl {
 
     fn supervisor_config_path(&self) -> Result<Option<PathBuf>> {
         let path = self.state_dir.join("supervisor.json");
-        Ok(path.is_file().then_some(path))
+        anyhow::ensure!(
+            path.is_file(),
+            "HVF capture requires the supervisor configuration to validate its restore shape"
+        );
+        Ok(Some(path))
     }
 }
 
@@ -1955,6 +1966,7 @@ mod tests {
             accessible: true,
             rootfs_path: Some(rootfs.display().to_string()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         };
         mvm_vmm::host::runtime_meta::write("anchor-vm", &meta).unwrap();

@@ -121,4 +121,3 @@ witness = "suites/s29_doc_examples/documented_build_live.feature::the documented
 [[example]]
 command = "mvmctl run --mode plan ./script.py"
 witness = "suites/s31_launch_e2e/sdk_and_library_modes.feature::a runtime-SDK script admits as a signed plan without booting"
-

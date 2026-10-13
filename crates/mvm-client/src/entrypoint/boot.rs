@@ -91,6 +91,9 @@ pub struct AdmitInputs<'a> {
     /// archive, or the extracted files beside it, no longer match what the
     /// publisher signed.
     pub bundle_archive: Option<&'a std::path::Path>,
+    /// The selected runtime artifacts and their untrusted release proof.
+    /// Admission verifies this same config before the backend consumes it.
+    pub runtime_config: Option<&'a VmStartConfig>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -278,6 +281,7 @@ pub fn boot_session_vm(
         assets: &[],
         volumes: &start_config.volumes,
         bundle_archive: bundle_archive.as_deref(),
+        runtime_config: Some(&start_config),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
     start_config.tenant_id = Some(substrate.tenant_id);

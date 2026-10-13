@@ -62,6 +62,8 @@ pub struct HostChannels {
     /// write-only: the console carries guest output to the host and never the
     /// other way.
     pub console_log: Option<PathBuf>,
+    /// Local boot-input observer, serviced only by the primary vCPU loop.
+    pub runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     /// Owner-provided capture handoff. Takes precedence over `console_log`,
     /// including on failure: a protected sink must never downgrade to a file.
     /// Disables the in-memory whole-run replay buffer and result console.

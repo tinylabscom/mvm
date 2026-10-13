@@ -247,6 +247,7 @@ mod tests {
 
     #[test]
     fn none_warm_pool_size_falls_back_to_resolved_policy() {
+        let _env = crate::util::test_env::TestEnv::new();
         assert_eq!(
             effective_warm_pool_size(None),
             resolve_residency().0.standby_target()
