@@ -78,7 +78,20 @@ sink, writes where a VM's collector writes, and reads back through
 - a record carrying a secret bound to the machine is withheld, counted, and
   absent from the output;
 - a detached machine's workload stdout and stderr are readable without the
-  guest.
+  guest;
+- a child span opened inside a parent span is shown with that parent and
+  the parent's trace, an event emitted inside the child is shown correlated
+  to it, and both spans are shown closed (`span_correlation.feature`).
+
+The span capture behind that last scenario is bounded the same way as event
+capture: a preallocated 256-slot active-span table changed only by atomic
+exchange, a 32-deep per-thread entered-span stack, and ids that encode a
+slot generation so a stale id never aliases a reused slot. Its unit
+witnesses are in `crates/mvm-agentd/src/telemetry_capture/subscriber.rs`
+(`a_full_span_table_sheds_the_open_counts_it_and_never_misattributes_events`,
+`a_contended_queue_sheds_the_span_open_without_waiting_and_keeps_tracking`,
+`a_span_id_kept_past_its_close_is_ignored_once_the_slot_is_reused`,
+`each_thread_attributes_events_to_its_own_entered_span`).
 
 ## Cost
 
@@ -97,6 +110,15 @@ accumulated, independent of telemetry.
 
 ## Not certified
 
-- Spans: the contract carries them, but no guest producer emits them yet.
+- Live guest spans. The guest agent's capture subscriber records spans, with
+  parents, updates, closes and correlated events (BDD above), but no
+  production path in the guest agent opens a span today: the one span in the
+  agent crate, `vsock_handshake`, is on the host side of the control
+  handshake and runs in the host process, which does not install this
+  subscriber. The SDK adapters emit no spans either. A live machine's
+  telemetry therefore shows none, and there is no backend witness for them.
+- Follows-from links declared after a span opens: the record contract
+  carries links only on `span_open`, so each one is counted as a truncated
+  value rather than carried.
 - The interval before the guest agent starts (reported as unavailable).
 - libkrun, QEMU and `apple-container` live runs; an HVF warm-claim witness.

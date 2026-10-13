@@ -100,10 +100,18 @@ workload's pipes offers each chunk to capture as it reads it, so a detached
 machine's output is readable with `mvmctl machine telemetry` long after the
 command that started it has gone.
 
+Spans opened in the guest agent are captured as well: each one's open (with
+its parent and trace), recorded fields, and close, and every event emitted
+inside a span carries that span's context. The agent tracks at most 256 open
+spans at once; a span beyond that is counted as lost rather than waited for,
+and events inside it are kept without a span context. A follows-from link
+added after a span has opened is counted as lost, because links travel only
+with the open record.
+
 What is not collected today:
 
-- spans: the record contract carries them, with parents and links, but no
-  guest producer emits them yet;
+- spans from a running machine: capture records them, but no production path
+  in the guest agent opens one yet, and the SDKs do not emit spans;
 - the interval before the guest agent starts, which is reported as
   unavailable rather than covered.
 

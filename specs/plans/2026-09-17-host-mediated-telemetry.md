@@ -383,22 +383,34 @@ scenarios un-tag only in the joint change where guest capture through the
 authenticated collector demonstrably passes end to end — individual W3 slices
 flip their named unit regressions only.
 
+Decision (b) is superseded: the agent's capture subscriber now records spans,
+ahead of any production span producer, so a producer added later is captured
+without further capture work. What that does and does not deliver is below.
+
 - [x] Wire subscribers and adapters for all inventoried sources, including
       outside-span events and log bridges; preserve span parent/link relationships.
       Guest agent diagnostics go through the agent's capture subscriber
       (events, including outside any span); workload stdout/stderr go through
       a tap on every path that reads a workload's pipes (entrypoint pump,
       streaming exec, process control), so SDK and workload output written to
-      those streams is captured too. Span parent/links are carried by the
-      record contract and shown by the host view; the sealed agent's
-      subscriber is events-only by design, so no guest producer emits spans
-      yet. Live witness: a detached Firecracker machine's stdout and stderr
-      lines in `mvmctl machine telemetry`.
+      those streams is captured too. The subscriber also records spans: open
+      with its parent and trace, field updates, close (with an `error` outcome
+      when an `error` field was recorded), and the span context on every
+      event emitted inside one. Parent relationships are preserved; a
+      follows-from link declared after open cannot be, because links ride
+      only on `span_open`, so each is counted as a truncated value. No
+      production path in the guest agent opens a span yet — the agent
+      crate's one span, `vsock_handshake`, is on the host side of the
+      handshake — so a live machine still shows none. Live witness: a
+      detached Firecracker machine's stdout and stderr lines in
+      `mvmctl machine telemetry`.
 - [x] Bound every upstream/downstream queue and active-span/field allocation;
       remove blocking completion sends and recursive diagnostics on capture paths.
       W3a and W3b below bound the pipe handoffs and the outbox; outside-span
       event state is bounded (#3657); the session's own waits are bounded as
-      described under the next item.
+      described under the next item. Active-span state is a preallocated
+      256-slot table changed only by atomic exchange, with a 32-deep
+      per-thread entered-span stack; a full table or stack sheds and counts.
   - [x] W3a — Bound existing entrypoint pipe-reader handoffs and transfer completion
         tails without queue sends. Reuse retention rings, separate pipe-reader and
         consumer-handoff gap scopes, and mark reader failures as unknown tails.
@@ -559,9 +571,13 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       `@telemetry_collection`: detached output retrieval, standalone events,
       guest diagnostics retrieved without the guest, a guest that outruns an
       absent host losing records visibly without waiting, a withheld secret,
-      and multi-VM isolation. Span correlation is shown by the host view
-      (`records_render_one_line_each_with_their_kind`); no guest producer emits
-      spans yet, so there is no end-to-end span to correlate.
+      and multi-VM isolation. Span correlation: a parent span, a child span
+      and an event inside the child, emitted through the agent's capture
+      subscriber, are shown by `mvmctl machine telemetry` with the child
+      naming its parent, sharing its trace, the event carrying the child's
+      span, and both closed (`span_correlation.feature`). Hermetic, like the
+      rest of the suite: no production guest path opens a span yet, so no
+      live machine has one to show.
 
 ### W7 — Default-on rollout, documentation and queued delivery
 
@@ -572,9 +588,10 @@ The certification record is [`specs/telemetry/certification.md`](../telemetry/ce
       needed. Measured on the Firecracker reference host: cold-boot median
       860 ms on vs 872 ms off (15 pairs); warm launches 166 ms on vs 165 ms off
       (median startup, fresh home), since no telemetry work happens until the
-      claim succeeds. What is not collected (spans, which no guest producer
-      emits yet, and the pre-agent interval) is documented in the guest-agent
-      reference, the observability guide and the studio contract.
+      claim succeeds. What is not collected (spans, which the agent's
+      subscriber captures but no production guest path opens yet, and the
+      pre-agent interval) is documented in the guest-agent reference, the
+      observability guide and the studio contract.
 - [x] Update guest-agent/networking/observability references and CLI/help for any
       new inspection surface; remove superseded capture routes after parity tests.
       Guest-agent and networking references, the observability guide and the

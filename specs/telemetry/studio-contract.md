@@ -205,7 +205,10 @@ egress (`MVM_TELEMETRY_COLLECT=0` turns it off); an OTLP exporter endpoint is
 optional; a VM claimed from a warm standby is collected once its claim has
 succeeded. The v1 data
 is: agent diagnostics events, coverage lifecycle, loss accounting and
-workload stdout/stderr; spans wait for a real span producer. A studio v1 built around a health badge, a diagnostics feed and
+workload stdout/stderr. The agent's capture records spans (open, update,
+close, and events correlated to them), but no production guest path opens one
+yet, so live data carries none; a span view would render fixtures until a
+producer exists. A studio v1 built around a health badge, a diagnostics feed and
 loss counters matches what the pipeline emits; anything more renders
 fixtures that production will not send.
 
