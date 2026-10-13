@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
+use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
 use mvm_compiler::pack::compile_frozen;
 use mvm_contract::pack_lock::PackLock;
 use mvm_contract::pack_spec::{PackSpec, PackTarget};
@@ -27,7 +28,6 @@ use mvm_core::plan::bundle::{
 };
 use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
-use sha2::{Digest, Sha256};
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
 use crate::commands::bundle::export::{TemplateExport, export_template};
@@ -65,14 +65,9 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     let lock = read_lock(&lock_path)?;
     require_host_target(&loaded.spec)?;
 
-    // ---- 1. Frozen compile into a per-lock work directory ----
-    let work = mvm_core::config::pack_build_dir(&lock.workload_sha256);
-    let artifact = work.join("artifact");
-    if artifact.exists() {
-        fs::remove_dir_all(&artifact)
-            .with_context(|| format!("clearing {}", artifact.display()))?;
-    }
-    fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
+    // ---- 1. Frozen compile into an invocation-owned directory ----
+    let work = tempfile::TempDir::new().context("creating private pack compile directory")?;
+    let artifact = work.path().join("artifact");
     let revision = locked_revision(&lock)?;
     compile_frozen(&loaded.input(&revision), &lock, &artifact).with_context(|| {
         format!(
@@ -85,24 +80,20 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
 
     // ---- 2. Build the flake into a template slot in the builder VM ----
     eprintln!("building {} in the builder VM", pack_ref(&lock));
-    let flake_ref = artifact
-        .to_str()
-        .context("pack build directory is not valid UTF-8")?;
-    if tree_digest(&artifact)? != compiled {
-        bail!("compiled artifact changed before the build started; refusing to build it");
-    }
-    let slot = crate::commands::build::build::build_flake_to_slot(flake_ref, None)
+    let inputs = FrozenInputs::stage(&artifact, &compiled)?;
+    let owned = crate::commands::build::build::FrozenFlakeSlot::build(inputs)
         .context("building the compiled pack")?;
+    let slot = owned.slot_hash();
     // A pack ships sealed: its rootfs gets the dm-verity pair here, before the
     // health boot, so the boot checks it and the archive carries it.
-    seal_template_rootfs(&slot)?.context(
+    seal_template_rootfs(slot)?.context(
         "the built pack's image does not declare itself sealed; a pack must boot from a \
          dm-verity rootfs",
     )?;
     // The argv the image records for itself, which is what the health boot
     // runs and what a launch of the archive is measured against.
-    let image_argv = template_entrypoint(&slot)?;
-    let built = SlotDigests::read(&slot)?;
+    let image_argv = template_entrypoint(slot)?;
+    let built = SlotDigests::read(slot)?;
     if built.missing("verity") {
         bail!("the built pack has no dm-verity hash tree beside its rootfs; nothing was signed");
     }
@@ -112,14 +103,16 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         "health check: booting {} and running its entrypoint",
         pack_ref(&lock)
     );
-    let exit_code = boot_entrypoint(health_call(&slot, &loaded.spec, &args))
+    owned.verify_revision()?;
+    let exit_code = boot_entrypoint(health_call(slot, &loaded.spec, &args))
         .context("booting the built pack for its health check")?;
     if exit_code != 0 {
         bail!("health check failed: the entrypoint exited {exit_code}; nothing was signed");
     }
 
     // ---- 4. Nothing may change between the health check and signing ----
-    let checked = SlotDigests::read(&slot)?;
+    owned.verify_revision()?;
+    let checked = SlotDigests::read(slot)?;
     if checked != built {
         bail!(
             "built artifacts changed after the health check ({}); nothing was signed",
@@ -128,12 +121,17 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     }
 
     // ---- 5. Seal and sign under the host key ----
+    owned.verify_revision()?;
     let exported = export_template(
-        &slot,
+        slot,
         pack_export(&args.out, &loaded.spec, &lock, image_argv)?,
     )?;
     // The exporter re-read the slot's files; what it sealed must be what the
     // health check booted.
+    if let Err(error) = owned.verify_revision() {
+        let _ = fs::remove_file(&exported.path);
+        return Err(error.context("private build revision changed during export; archive removed"));
+    }
     let sealed = SlotDigests::sealed(&exported.path)?;
     if sealed != checked {
         let _ = fs::remove_file(&exported.path);
@@ -362,48 +360,6 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 fn file_sha256(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
         .with_context(|| format!("hashing {}", path.display()))
-}
-
-/// Digest of a directory tree: every regular file's relative path, mode and
-/// content, in sorted order. Symlinks contribute their target.
-fn tree_digest(root: &Path) -> Result<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut entries = Vec::new();
-    collect(root, root, &mut entries)?;
-    entries.sort();
-    let mut hasher = Sha256::new();
-    for relative in entries {
-        let path = root.join(&relative);
-        let metadata = fs::symlink_metadata(&path)?;
-        hasher.update(relative.to_string_lossy().as_bytes());
-        hasher.update([0]);
-        if metadata.file_type().is_symlink() {
-            hasher.update(b"link:");
-            hasher.update(fs::read_link(&path)?.to_string_lossy().as_bytes());
-        } else {
-            hasher.update(format!("{:o}:", metadata.permissions().mode() & 0o777).as_bytes());
-            hasher.update(fs::read(&path)?);
-        }
-        hasher.update([0]);
-    }
-    Ok(hex(&hasher.finalize()))
-}
-
-fn collect(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let path = entry?.path();
-        let kind = fs::symlink_metadata(&path)?.file_type();
-        if kind.is_dir() {
-            collect(root, &path, out)?;
-        } else {
-            out.push(path.strip_prefix(root)?.to_path_buf());
-        }
-    }
-    Ok(())
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

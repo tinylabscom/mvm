@@ -1901,6 +1901,31 @@ running microVM.
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+Locked `pack build` inputs never receive the contributor build's automatic
+local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
+commit even when `mvmctl` was compiled from a local checkout. Each invocation owns
+its compile directory, checked builder-input snapshot and private template slot
+until health checking and export finish. The snapshot is verified before builder
+preparation and immediately before submission to the canonical one-shot builder;
+it is verified again after builder consumption.
+The disk-input staging filter must preserve every locked file and mode or the
+build is refused. Locked builds do not reuse a resident builder's unrelated
+`/work` or the contributor-source cache. Ordinary contributor builds retain their
+automatic source overrides.
+
+The private slot retains the builder's returned revision and refuses a changed
+`current` selection at health/export boundaries. This is invocation ownership,
+not support for launching arbitrary historical revisions through public manifest
+aliases. Temporary source and slot records are removed when the invocation ends;
+the archive records the exact pack lock as provenance, not a temporary source
+path. The sealed posture, health exit requirement and before/after artifact
+digests remain mandatory.
+
+Concurrent invocations must use distinct `--out` destinations. Private build slots
+do not make archive promotion or rollback safe for a shared output path; that
+separate ownership repair is tracked in
+[#4432](https://github.com/tinylabscom/mvm/issues/4432).
+
 For a built-image pack, `pull` authenticates its descriptor before fetching the
 exact public GitHub release assets, verifies their sizes, hashes, rootfs
 signature and provenance, then publishes the complete payload atomically.
