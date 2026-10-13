@@ -2356,10 +2356,43 @@ mod tests {
     // for inspection and prints a one-line ready handshake.
     #[test]
     fn a_socket_nothing_serves_is_cleared_and_a_served_one_is_kept() {
+        use std::os::unix::fs::FileTypeExt;
+        use wait_timeout::ChildExt;
+
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("stale.sock");
-        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
-        assert!(stale.exists(), "a dropped listener leaves its socket file");
+        // Other tests fork concurrently. A listener bound in this process can
+        // survive its drop through an inherited pre-exec descriptor. Bind in
+        // an isolated single-test process and reap it before probing the path.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "host::network_endpoint_spawn::tests::stale_socket_subprocess_fixture",
+                "--test-threads=1",
+            ])
+            .env("MVM_TEST_STALE_SOCKET_PATH", &stale)
+            .spawn()
+            .unwrap();
+        let waited = child.wait_timeout(Duration::from_secs(10));
+        if !matches!(waited, Ok(Some(_))) {
+            let _ = child.kill();
+            child
+                .wait()
+                .expect("reap the socket fixture after a failed wait");
+        }
+        let status = waited
+            .expect("wait for the socket fixture")
+            .expect("socket fixture must exit within its deadline");
+        assert!(status.success(), "socket fixture failed: {status}");
+        assert!(
+            std::fs::symlink_metadata(&stale)
+                .unwrap()
+                .file_type()
+                .is_socket(),
+            "an exited listener leaves an actual socket inode"
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&stale).is_err());
         clear_stale_socket(&stale);
         assert!(!stale.exists());
         std::os::unix::net::UnixListener::bind(&stale).expect("the path binds again");
@@ -2368,8 +2401,20 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
         clear_stale_socket(&live);
         assert!(live.exists(), "a live endpoint's socket must be left alone");
+        std::os::unix::net::UnixStream::connect(&live)
+            .expect("the retained listener still accepts connections");
 
-        clear_stale_socket(&dir.path().join("absent.sock"));
+        let absent = dir.path().join("absent.sock");
+        clear_stale_socket(&absent);
+        assert!(!absent.exists(), "cleanup of an absent path is a no-op");
+    }
+
+    #[test]
+    #[ignore = "isolated socket fixture invoked by its parent test"]
+    fn stale_socket_subprocess_fixture() {
+        let path = std::env::var_os("MVM_TEST_STALE_SOCKET_PATH")
+            .expect("the parent test supplies the socket path");
+        let _listener = std::os::unix::net::UnixListener::bind(Path::new(&path)).unwrap();
     }
 
     #[test]

@@ -574,3 +574,87 @@ fn a_pinned_bundle_posture_is_enforced() {
     assert!(format!("{err:#}").contains("allows no egress"), "{err:#}");
     assert!(audit_chain(&audit_dir).contains("bundle-posture-exceeded"));
 }
+
+/// An environment requiring the `AGENT_TOKEN` slot, for this host's arch.
+fn slot_environment() -> mvm_core::plan::EnvironmentDescriptor {
+    serde_json::from_value(serde_json::json!({
+        "descriptor_version": 1,
+        "target": format!("{}-linux", mvm_core::arch::GuestArch::host()),
+        "entrypoint": { "argv": ["/usr/bin/agent"] },
+        "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+    }))
+    .expect("environment fixture")
+}
+
+/// A pinned bundle whose signed environment requires a secret slot the launch
+/// binds nothing to is refused before anything boots, and the refusal is in
+/// the chain-signed audit log against the plan that pinned it.
+#[test]
+fn an_unbound_required_secret_slot_refuses_the_launch() {
+    let fixture = InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::Environment(
+        slot_environment(),
+    )]);
+
+    let err = fixture
+        .admit()
+        .expect_err("a required slot with no binding must refuse");
+
+    let message = format!("{err:#}");
+    assert!(message.contains("AGENT_TOKEN"), "{message}");
+    let chain = fixture.chain();
+    assert!(chain.contains("plan.failed"), "{chain}");
+    assert!(
+        chain.contains(super::audit::BUNDLE_ENVIRONMENT_REFUSED_CLASS),
+        "{chain}"
+    );
+}
+
+/// The same bundle admits once the slot is bound through the ordinary secret
+/// binding, which carries a keystore address and never a value.
+#[test]
+fn a_bound_required_secret_slot_admits_the_launch() {
+    let fixture = InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::Environment(
+        slot_environment(),
+    )]);
+    let (_, kernel, _, rootfs, _) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(&fixture.sha256)
+            .expect("installed bundle resolves");
+    let archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(&fixture.sha256)
+        .expect("registry")
+        .expect("an installed bundle names its archive");
+    let (rootfs, kernel) = (
+        std::path::PathBuf::from(rootfs),
+        std::path::PathBuf::from(kernel),
+    );
+    let keys_dir = fixture.home.path().join("keys");
+    let audit_dir = fixture.audit_dir();
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.kernel_path = Some(&kernel);
+    params.keys_dir = Some(&keys_dir);
+    params.audit_dir = Some(&audit_dir);
+    params.bundle_pin = Some(BundlePin::boots(&archive));
+    // This synthetic bundle fixture declares /usr/bin/agent; it is not a
+    // native image whose entrypoint this test can discover from a sidecar.
+    params.entrypoint = ResolvedEntrypoint::Known {
+        argv: vec!["/usr/bin/agent".to_string()],
+        shebang: None,
+    };
+    params.secrets = vec![mvm_core::plan::SecretBinding {
+        name: "AGENT_TOKEN".to_string(),
+        source: mvm_core::plan::SecretSource::Keystore {
+            address: "agent-token".to_string(),
+        },
+        destinations: Vec::new(),
+        approval_required: false,
+    }];
+
+    let ctx = admit_plan_for_boot(params).expect("a bound slot admits");
+
+    assert_eq!(ctx.admitted.plan().secrets.len(), 1);
+    assert!(
+        !fixture
+            .chain()
+            .contains(super::audit::BUNDLE_ENVIRONMENT_REFUSED_CLASS)
+    );
+}

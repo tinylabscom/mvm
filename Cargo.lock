@@ -3516,6 +3516,7 @@ dependencies = [
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "wait-timeout",
  "zeroize",
 ]
 

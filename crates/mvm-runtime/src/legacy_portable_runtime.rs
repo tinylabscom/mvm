@@ -133,8 +133,14 @@ pub(crate) fn verify_retained(
     let original = OriginalArchive(std::fs::read(&proof.archive)?);
     let bundle = verify_plan_bundle(&proof.pin, &original, &FsTrustStore::default_path()?)?;
     ensure!(
-        bundle.manifest.schema_version == 4,
-        "portable runtime requires original schema-4 bundle"
+        matches!(bundle.manifest.schema_version, 4 | 5)
+            && bundle.manifest.members.iter().any(|member| {
+                matches!(
+                    member,
+                    mvm_core::plan::bundle::BundleMember::EmbeddedBootAssets { .. }
+                )
+            }),
+        "portable runtime requires original schema-4/5 legacy boot-assets bundle"
     );
     mvm_core::arch::GuestArch::require_host(&bundle.manifest.arch)?;
     let boot = bundle
@@ -270,10 +276,15 @@ pub(crate) mod fixtures {
 
     /// Signed original portable inputs, not a verified capability.
     pub fn signed_legacy_portable_runtime_fixture(home: &Path) -> VmStartConfig {
-        fixture(home, Some(2), false)
+        fixture(home, Some(2), false, 4).unwrap()
     }
 
-    pub(super) fn fixture(home: &Path, protocol: Option<u32>, wrong_role: bool) -> VmStartConfig {
+    pub(super) fn fixture(
+        home: &Path,
+        protocol: Option<u32>,
+        wrong_role: bool,
+        schema: u32,
+    ) -> std::result::Result<VmStartConfig, mvm_core::plan::BundleVerifyError> {
         let arch = GuestArch::host();
         let version = "99.2.3";
         let overlay = boot_asset_fixture::runtime_overlay_archive_bytes(
@@ -334,8 +345,8 @@ pub(crate) mod fixtures {
         ];
         let key = SigningKey::from_bytes(&[83; 32]);
         let key_id = key_id_from_pubkey(&key.verifying_key());
-        let manifest = BundleManifest {
-            schema_version: 4,
+        let mut manifest = BundleManifest {
+            schema_version: schema,
             publisher: "portable-fixture".into(),
             key_id: key_id.clone(),
             arch: arch.to_string(),
@@ -360,6 +371,17 @@ pub(crate) mod fixtures {
             verity: None,
             resources: None,
         };
+        if schema == 5 {
+            manifest.members.push(BundleMember::Environment(
+                serde_json::from_value(serde_json::json!({
+                    "descriptor_version": 1,
+                    "target": format!("{arch}-linux"),
+                    "entrypoint": { "argv": ["/usr/bin/agent"] },
+                    "capabilities": [],
+                }))
+                .unwrap(),
+            ));
+        }
         let bytes = write_bundle(
             &manifest,
             &key,
@@ -381,7 +403,7 @@ pub(crate) mod fixtures {
             key.verifying_key().as_bytes(),
         )
         .unwrap();
-        let verified = verify_bundle_file(&archive, &trust).unwrap();
+        let verified = verify_bundle_file(&archive, &trust)?;
         let overlay_stage = home.join("overlay");
         let initrd_stage = home.join("ramdisk");
         std::fs::create_dir_all(&overlay_stage).unwrap();
@@ -397,7 +419,7 @@ pub(crate) mod fixtures {
             &initrd_stage,
         )
         .unwrap();
-        VmStartConfig {
+        Ok(VmStartConfig {
             name: "portable-fixture".into(),
             rootfs_path: home.join("rootfs").display().to_string(),
             kernel_path: Some(home.join("kernel").display().to_string()),
@@ -413,7 +435,7 @@ pub(crate) mod fixtures {
                 arch,
             }),
             ..Default::default()
-        }
+        })
     }
 }
 
@@ -445,11 +467,46 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_legacy_class_accepts_environment5_but_refuses_envelope6_and_tampering() {
+        for schema in [4, 5, 6] {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            let prepared = fixture(home.path(), Some(2), false, schema);
+            if schema == 6 {
+                match prepared {
+                    Err(mvm_core::plan::BundleVerifyError::UnsupportedSchema {
+                        found: 6, ..
+                    }) => {}
+                    Ok(config) => assert!(verify_runtime_for_launch(&config, 2).is_err()),
+                    Err(error) => panic!("unexpected future-envelope refusal: {error}"),
+                }
+                continue;
+            }
+            let config = prepared.unwrap();
+            assert!(verify_runtime_for_launch(&config, 2).is_ok());
+            let mut mixed = config.clone();
+            mixed.source_runtime_archive_sha256 = Some("a".repeat(64));
+            assert!(verify_runtime_for_launch(&mixed, 2).is_err());
+            let archive = &config.legacy_portable_runtime.as_ref().unwrap().archive;
+            let mut bytes = std::fs::read(archive).unwrap();
+            let needle = format!("\"schema_version\":{schema}");
+            let offset = bytes
+                .windows(needle.len())
+                .position(|b| b == needle.as_bytes())
+                .unwrap();
+            bytes[offset + needle.len() - 1] = b'3';
+            std::fs::write(archive, bytes).unwrap();
+            assert!(verify_runtime_for_launch(&config, 2).is_err());
+        }
+    }
+
+    #[test]
     fn portable_signed_fixture_retains_original_proof_and_refuses_pin_manifest_role_bytes() {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false);
+        let config = fixture(home.path(), Some(2), false, 4).unwrap();
         assert!(matches!(
             verify_runtime_for_launch(&config, 2).unwrap(),
             Some(crate::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_))
@@ -579,7 +636,7 @@ mod tests {
             (Some(2), true),
         ] {
             let source = tempfile::tempdir().unwrap();
-            let config = fixture(source.path(), protocol, wrong_role);
+            let config = fixture(source.path(), protocol, wrong_role, 4).unwrap();
             assert!(
                 verify_runtime_for_launch(&config, 2).is_err(),
                 "{protocol:?} {wrong_role}"
@@ -613,7 +670,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
-        let config = fixture(home.path(), Some(2), false);
+        let config = fixture(home.path(), Some(2), false, 4).unwrap();
         let bound = RuntimeLifecycleLease::acquire(&config.name)
             .unwrap()
             .bind(&config)

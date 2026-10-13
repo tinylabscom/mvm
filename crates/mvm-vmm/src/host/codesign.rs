@@ -260,8 +260,43 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_distribution_signature_is_never_replaced_to_repair_an_entitlement() {
+        use wait_timeout::ChildExt;
+
+        // Keep the stub-only PATH out of the process running concurrent tests.
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "host::codesign::tests::distribution_signature_subprocess_fixture",
+                "--test-threads=1",
+            ])
+            .env("MVM_TEST_CODESIGN_DISTRIBUTION_FIXTURE", "1")
+            .spawn()
+            .unwrap();
+        let waited = child.wait_timeout(std::time::Duration::from_secs(10));
+        if !matches!(waited, Ok(Some(_))) {
+            let _ = child.kill();
+            child
+                .wait()
+                .expect("reap the codesign fixture after a failed wait");
+        }
+        let status = waited
+            .expect("wait for the codesign fixture")
+            .expect("codesign fixture must exit within its deadline");
+        assert!(status.success(), "codesign fixture failed: {status}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "isolated codesign fixture invoked by its parent test"]
+    fn distribution_signature_subprocess_fixture() {
         use std::os::unix::fs::PermissionsExt;
 
+        assert_eq!(
+            std::env::var("MVM_TEST_CODESIGN_DISTRIBUTION_FIXTURE").as_deref(),
+            Ok("1"),
+            "the parent test must authorize the PATH-mutating fixture"
+        );
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let directory = tempfile::tempdir().unwrap();
         let codesign = directory.path().join("codesign");
