@@ -100,6 +100,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
     // and the fail-fast path spawns no VM, so the temp dir can drop right after.
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let _reaper = mvm_conformance::vmm_reaper::ReapOnDrop::new(home.path());
     let mut cmd = mvmctl_command();
     let output = cmd
         .args(mvm_conformance::doc_examples::tokenize(&args))
@@ -133,6 +134,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
     }
+    mvm_conformance::vmm_reaper::register_launched_home(home.path());
     let output = cmd.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
@@ -552,6 +554,7 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
             command.pre_exec(|| nix::unistd::setsid().map(drop).map_err(Into::into));
         }
     }
+    mvm_conformance::vmm_reaper::register_launched_home(&home);
     let output = command.output().expect("failed to spawn mvmctl");
     world.last_live_home = Some(home);
     world.last_run = Some(output);

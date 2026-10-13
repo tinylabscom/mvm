@@ -2023,7 +2023,7 @@ fn volume_create_emits_volume_create_audit_entry() {
             "--root",
             root.to_str().expect("utf-8 path"),
             "--size",
-            "16M",
+            "3M",
         ])
         .output()
         .expect("spawn mvmctl volume create");
@@ -2063,7 +2063,7 @@ fn volume_unlock_and_lock_emit_audit_entries() {
             "--root",
             root.to_str().expect("utf-8 path"),
             "--size",
-            "16M",
+            "3M",
         ])
         .output()
         .expect("spawn mvmctl volume create");
@@ -2124,7 +2124,7 @@ fn volume_storage_override_emits_an_audit_entry_and_refusal_does_not() {
             "--root",
             root.to_str().expect("utf-8 path"),
             "--size",
-            "16M",
+            "3M",
         ]);
         if allow {
             command.env("MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE", "1");

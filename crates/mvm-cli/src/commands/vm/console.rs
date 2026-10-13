@@ -145,6 +145,26 @@ impl ConsoleSessionOptions {
     }
 }
 
+/// Hold a console to the application terminal the machine's plan admits, if
+/// it admits one: the granted argv and the host-provisioned environment
+/// replace the defaults, and another program or caller variables are refused
+/// before anything reaches the guest.
+fn with_application_terminal(
+    name: &str,
+    mut options: ConsoleSessionOptions,
+) -> Result<ConsoleSessionOptions> {
+    let resolved = mvm_client::application_terminal::resolve_terminal_request(
+        name,
+        mvm_client::application_terminal::TerminalRequest {
+            argv: std::mem::take(&mut options.argv),
+            env: std::mem::take(&mut options.env),
+        },
+    )?;
+    options.argv = resolved.argv;
+    options.env = resolved.env;
+    Ok(options)
+}
+
 #[derive(Debug, Clone, Default)]
 pub(in crate::commands) struct ConsoleSessionOptionsBuilder {
     env: Vec<(String, String)>,
@@ -440,6 +460,7 @@ pub(in crate::commands) fn console_interactive(
     name: &str,
     options: ConsoleSessionOptions,
 ) -> Result<i32> {
+    let options = with_application_terminal(name, options)?;
     let (cols, rows) = get_terminal_size();
     let transport = pick_console_transport(name)?;
 

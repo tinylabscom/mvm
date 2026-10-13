@@ -1,0 +1,83 @@
+name: SDK registry install evidence
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installed:
+    name: ${{ matrix.platform }} registry packages
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+            python_image: quay.io/pypa/manylinux2014_x86_64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            python_image: quay.io/pypa/manylinux2014_aarch64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-x64-musl
+            runner: ubuntu-latest
+            python_image: python:3.12-alpine
+            python: python3
+            node_image: node:22-alpine
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            python_image: python:3.12-alpine
+            python: python3
+            node_image: node:22-alpine
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - name: Install exact registry versions into empty environments and load
+        env:
+          KEY: ${{ matrix.platform }}
+          PYTHON_IMAGE: ${{ matrix.python_image }}
+          PYTHON: ${{ matrix.python }}
+          NODE_IMAGE: ${{ matrix.node_image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("crates/mvm-sdk/sdks/release.toml", "rb"))["version"])')"
+          mkdir -p "${RUNNER_TEMP}/registry-evidence"
+          for language in python node; do
+            if [ "$language" = python ]; then
+              image="$PYTHON_IMAGE"
+              smoke="crates/mvm-sdk/sdks/python/scripts/smoke_installed.py"
+            else
+              image="$NODE_IMAGE"
+              smoke="crates/mvm-sdk/sdks/typescript/scripts/smoke-installed.mjs"
+            fi
+            if [ -n "$image" ]; then
+              docker run --rm -e PYTHON \
+                -v "$PWD/scripts/sdk-registry-smoke.sh:/check.sh:ro" \
+                -v "$PWD/$smoke:/$(basename "$smoke"):ro" "$image" \
+                sh /check.sh "$language" "$version" "$KEY" "/$(basename "$smoke")" \
+                2>&1 | tee "${RUNNER_TEMP}/registry-evidence/$language.log"
+            else
+              PYTHON=python3 sh scripts/sdk-registry-smoke.sh "$language" "$version" "$KEY" "$PWD/$smoke" \
+                2>&1 | tee "${RUNNER_TEMP}/registry-evidence/$language.log"
+            fi
+          done
+          echo "Registry install/load passed for $KEY. Guest boot NOT witnessed; not end-to-end release acceptance." >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sdk-registry-${{ matrix.platform }}
+          path: ${{ runner.temp }}/registry-evidence
+          if-no-files-found: error
+          retention-days: 30

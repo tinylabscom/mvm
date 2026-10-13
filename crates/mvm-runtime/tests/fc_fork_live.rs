@@ -5,8 +5,7 @@
 //! parent boots NIC-less (the shape every child inherits), activates over
 //! vsock, is captured through the driver's own `vm_full_control` with
 //! `retain_paused: false` so it resumes, and then N children restore the same
-//! captured memory — each in its own subprocess, because each child's device
-//! remap unshares the mount namespace of the process that launches it.
+//! captured memory — each in its own subprocess, as separate launches would.
 //!
 //! The witness asserts the vsock-only per-child resource model: the parent
 //! keeps serving while every child is up, each child answers on its own
@@ -592,10 +591,7 @@ fn fc_live_fork_n_children_from_running_parent() {
         "the resumed parent must keep serving while children restore"
     );
 
-    // Each child restores in its own subprocess: the fork remap unshares the
-    // mount namespace of the process that launches the child VMM, so restoring
-    // several children in one process would stack bind mounts over the
-    // parent's recorded paths and shadow the parent for every later lookup.
+    // Each child restores in its own subprocess, as separate launches would.
     // The batch wall clock spans every child: clone through witness.
     let t_batch = Instant::now();
     let mut witnesses = Vec::new();

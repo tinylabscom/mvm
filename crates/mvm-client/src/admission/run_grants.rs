@@ -251,6 +251,7 @@ fn cli_layer(inputs: &GrantInputs<'_>) -> Result<Grants> {
         egress,
         drive: None,
         display_input: None,
+        application_terminal: None,
     })
 }
 

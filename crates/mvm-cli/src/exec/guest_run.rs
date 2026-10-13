@@ -351,6 +351,7 @@ mod tests {
                 verbs: Vec::new(),
                 drive: None,
                 tool_mediation,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         }
@@ -432,6 +433,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -467,6 +469,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -505,6 +508,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,
@@ -563,6 +567,7 @@ mod tests {
         let req = ExecRequest {
             name: None,
             warm_pool_size: 0,
+            standby_refill: None,
             image: ImageSource::Template("t".into()),
             cpus: 1,
             memory_mib: 256,

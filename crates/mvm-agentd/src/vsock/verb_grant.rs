@@ -71,6 +71,78 @@ pub fn enforce_drive_grant(
     None
 }
 
+/// Hold a terminal open to exactly the argv the signed plan admitted.
+///
+/// Runs after the profile gate, so it only ever narrows: a sealed production
+/// guest has already refused every console verb, whatever its grant carries.
+/// Under an application-terminal grant a console open must name the granted
+/// argv, gets no default shell, and may not set a dynamic-loader variable.
+/// Without one
+/// the console keeps its ordinary development behaviour.
+pub fn enforce_application_terminal_grant(
+    req: &GuestRequest,
+    grant: Option<&mvm_core::plan::VerbGrant>,
+) -> Option<GuestResponse> {
+    let GuestRequest::ConsoleOpen { argv, env, .. } = req else {
+        return None;
+    };
+    let binding = grant.and_then(|grant| grant.application_terminal.as_ref())?;
+    let refusal = match binding.admit(argv, env) {
+        Ok(()) => program_identity_refusal(std::path::Path::new(&argv[0]))?,
+        Err(refusal) => refusal.to_string(),
+    };
+    // The argv is not logged: it can carry user-typed secrets.
+    eprintln!("[audit] console-open refused under the application-terminal grant: {refusal}");
+    Some(GuestResponse::Error {
+        message: format!("application terminal refused: {refusal}"),
+    })
+}
+
+/// Why the granted program's path cannot be trusted to be the program the
+/// plan named, if it cannot.
+///
+/// The grant binds a path, so the path must be the file: no symlink anywhere
+/// along it, a regular executable file, and neither the file nor any
+/// directory above it writable by anyone but root, so the workload cannot
+/// swap or rewrite what the terminal runs.
+fn program_identity_refusal(program: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::canonicalize(program) {
+        Ok(resolved) if resolved == program => {}
+        Ok(_) => {
+            return Some(format!(
+                "{} is reached through a symbolic link; grant the path of the file itself",
+                program.display()
+            ));
+        }
+        Err(error) => return Some(format!("{}: {error}", program.display())),
+    }
+    let file = match std::fs::metadata(program) {
+        Ok(meta) => meta,
+        Err(error) => return Some(format!("{}: {error}", program.display())),
+    };
+    if !file.is_file() || file.mode() & 0o111 == 0 {
+        return Some(format!(
+            "{} is not an executable regular file",
+            program.display()
+        ));
+    }
+    for path in program.ancestors() {
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => return Some(format!("{}: {error}", path.display())),
+        };
+        if meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+            return Some(format!(
+                "{} can be changed by a user other than root, so the program it names \
+                 cannot be held to the grant",
+                path.display()
+            ));
+        }
+    }
+    None
+}
+
 fn path_is_in_drive_roots(path: &str, drive: &mvm_contract::grants::DriveGrant) -> bool {
     let Ok(path) = mvm_contract::grants::WorkspaceRoot::parse(path) else {
         return false;
@@ -472,6 +544,7 @@ mod tests {
             verbs: Vec::new(),
             drive: Some(drive_grant()),
             tool_mediation: None,
+            application_terminal: None,
             sig: Vec::new(),
         }
     }
@@ -624,6 +697,7 @@ mod tests {
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         // listed => allowed
@@ -656,6 +730,7 @@ mod tests {
             verbs: vec![VerbId::new("readiness-status").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         let request = GuestRequest::RunEntrypoint {
@@ -697,6 +772,7 @@ mod tests {
                 command_map_digest: None,
             }),
             sig: vec![],
+            application_terminal: None,
         };
         let alternate = [
             GuestRequest::Exec {
@@ -791,6 +867,7 @@ mod tests {
                 command_map_digest: None,
             }),
             sig: vec![],
+            application_terminal: None,
         };
         let mediated = GuestRequest::MediatedExec(MediatedExecCall {
             tool: "shell".into(),
@@ -819,6 +896,7 @@ mod tests {
                 .collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         let requests = [
@@ -1001,6 +1079,7 @@ mod tests {
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         good.sig = {
@@ -1088,6 +1167,7 @@ mod tests {
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1147,6 +1227,7 @@ mod tests {
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1740,6 +1821,7 @@ mod tests {
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
@@ -1966,5 +2048,176 @@ mod tests {
         let grant = result.expect("matching lineage must allow a host-signed grant rotation");
         assert_eq!(grant.session_id, "child-vm-session");
         assert!(grant.permits("run-entrypoint"));
+    }
+
+    fn verb_grant_with_terminal(argv: &[&str]) -> mvm_core::plan::VerbGrant {
+        let terminal = mvm_contract::grants::ApplicationTerminalGrant::new(
+            argv.iter().map(|arg| arg.to_string()).collect(),
+        )
+        .unwrap();
+        mvm_core::plan::VerbGrant {
+            application_terminal: Some((&terminal).into()),
+            drive: None,
+            ..verb_grant_with_drive()
+        }
+    }
+
+    fn console_open(argv: &[&str], env: Vec<(String, String)>) -> GuestRequest {
+        GuestRequest::ConsoleOpen {
+            cols: 80,
+            rows: 24,
+            env,
+            argv: argv.iter().map(|arg| arg.to_string()).collect(),
+            detach_timeout_secs: None,
+        }
+    }
+
+    fn refusal_message(response: Option<GuestResponse>) -> String {
+        match response {
+            Some(GuestResponse::Error { message }) => message,
+            other => panic!("expected an application terminal refusal, got {other:?}"),
+        }
+    }
+
+    /// A root-owned, canonical executable present on every supported host,
+    /// standing in for an application binary.
+    const ROOT_OWNED_PROGRAM: &str = "/usr/bin/id";
+
+    #[test]
+    fn an_application_terminal_grant_admits_only_its_exact_argv() {
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        assert!(
+            enforce_application_terminal_grant(
+                &console_open(&[ROOT_OWNED_PROGRAM], Vec::new()),
+                Some(&grant)
+            )
+            .is_none()
+        );
+        let shell = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(shell.contains("not a shell"), "{shell}");
+        let other = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/bin/sh"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(other.contains("application_terminal grant"), "{other}");
+        for env in [
+            ("LD_PRELOAD", "/tmp/x.so"),
+            ("NODE_OPTIONS", "--require /tmp/x.js"),
+            ("HTTPS_PROXY", "http://attacker.example:8080"),
+        ] {
+            let refused = refusal_message(enforce_application_terminal_grant(
+                &console_open(&[ROOT_OWNED_PROGRAM], vec![(env.0.into(), env.1.into())]),
+                Some(&grant),
+            ));
+            assert!(
+                refused.contains("host-provisioned environment"),
+                "{refused}"
+            );
+        }
+        assert!(
+            enforce_application_terminal_grant(
+                &console_open(
+                    &[ROOT_OWNED_PROGRAM],
+                    vec![("HTTPS_PROXY".into(), "http://127.0.0.1:1080".into())],
+                ),
+                Some(&grant)
+            )
+            .is_none(),
+            "the host-provisioned egress environment passes"
+        );
+    }
+
+    #[test]
+    fn a_granted_path_reached_through_a_symlink_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let link = dir.join("app");
+        std::os::unix::fs::symlink(ROOT_OWNED_PROGRAM, &link).unwrap();
+        let link = link.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[link]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[link], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("symbolic link"), "{refused}");
+    }
+
+    #[test]
+    fn a_granted_program_the_workload_could_rewrite_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let program = dir.join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let program = program.to_str().unwrap();
+        let grant = verb_grant_with_terminal(&[program]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&[program], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("other than root"), "{refused}");
+    }
+
+    #[test]
+    fn a_missing_or_non_executable_granted_program_is_refused() {
+        let grant = verb_grant_with_terminal(&["/nonexistent/app"]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/nonexistent/app"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("/nonexistent/app"), "{refused}");
+        let grant = verb_grant_with_terminal(&["/usr/bin"]);
+        let refused = refusal_message(enforce_application_terminal_grant(
+            &console_open(&["/usr/bin"], Vec::new()),
+            Some(&grant),
+        ));
+        assert!(refused.contains("not an executable"), "{refused}");
+    }
+
+    #[test]
+    fn without_an_application_terminal_grant_the_console_is_unchanged() {
+        let request = console_open(&[], Vec::new());
+        assert!(enforce_application_terminal_grant(&request, None).is_none());
+        assert!(
+            enforce_application_terminal_grant(&request, Some(&verb_grant_with_drive())).is_none()
+        );
+        let grant = verb_grant_with_terminal(&[ROOT_OWNED_PROGRAM]);
+        assert!(
+            enforce_application_terminal_grant(
+                &GuestRequest::ConsoleResize {
+                    session_id: 1,
+                    cols: 80,
+                    rows: 24
+                },
+                Some(&grant)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_application_terminal_grant_lets_console_verbs_past_the_verb_gate_only() {
+        let grant = verb_grant_with_terminal(&["/usr/bin/claude"]);
+        assert!(
+            enforce_verb_grant(
+                &console_open(&["/usr/bin/claude"], Vec::new()),
+                Some(&grant)
+            )
+            .is_none()
+        );
+        assert!(enforce_verb_grant(&GuestRequest::ConsoleList, Some(&grant)).is_none());
+        let exec = GuestRequest::Exec {
+            command: "id".into(),
+            stdin: None,
+            timeout_secs: None,
+        };
+        assert!(matches!(
+            enforce_verb_grant(&exec, Some(&grant)),
+            Some(GuestResponse::VerbNotAuthorized { .. })
+        ));
     }
 }

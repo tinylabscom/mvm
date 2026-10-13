@@ -32,6 +32,7 @@ pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
 mod review_source;
 mod run_mode;
+mod standby_refill;
 mod transient_mounts;
 
 use network_access::NetworkAccess;
@@ -834,7 +835,7 @@ pub(in crate::commands) fn run_secure_started(
             source_override.clone(),
             &oci_provenance,
         )?);
-        let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
+        let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
         let result =
             crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
@@ -965,7 +966,7 @@ fn run_run_args(
         source_override,
         audit.oci_provenance,
     )?);
-    let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
+    let posture = crate::exec::PostureSink::new(mvm_client::admission::BootPosture::block());
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
@@ -1174,6 +1175,7 @@ fn build_exec_request(
     // --runtime-pack is its own image source, mutually exclusive with
     // --manifest/--image at the clap layer, so it short-circuits the match
     // below entirely rather than adding a third leg to it.
+    let source_override_was_set = source_override.is_some();
     let image = if runtime_pack {
         super::runtime_pack::resolve_runtime_pack_image_source(prod)
             .context("resolving --runtime-pack image source")?
@@ -1206,6 +1208,14 @@ fn build_exec_request(
         }
     };
     let sdk_host_services = super::host_services::parse_host_service_bindings(&args.host_service)?;
+    let standby_refill = standby_refill::standby_refill_for(&standby_refill::RefillSource {
+        image_ref,
+        manifest: manifest_arg.is_some(),
+        resolved_elsewhere: runtime_pack || source_override_was_set,
+        hypervisor: args.hypervisor.as_deref(),
+        cpus: args.cpus,
+        memory_mib,
+    });
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
         image,
@@ -1222,6 +1232,7 @@ fn build_exec_request(
         pty: args.pty,
         network_policy,
         warm_pool_size: args.warm_pool_size,
+        standby_refill,
         stdin: args.stdin,
         healthcheck: args.healthcheck,
         hypervisor: args.hypervisor,

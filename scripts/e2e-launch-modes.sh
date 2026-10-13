@@ -249,7 +249,7 @@ echo "==> warming artifacts in $E2E_HOME"
 # any launch mode.
 #
 # A launch is cache-only, so the image is pulled first. The launch is named so
-# it boots cold: an unnamed one has to claim a prepared warm standby.
+# it boots cold and leaves no standby behind for the scenarios to trip over.
 MVM_HOME="$E2E_HOME" "$MVMCTL" image pull alpine
 MVM_HOME="$E2E_HOME" "$MVMCTL" machine run --name e2e-launch-warmup --image alpine -- true
 

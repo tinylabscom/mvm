@@ -24,6 +24,8 @@ use std::time::Instant;
 
 #[path = "telemetry_overflow_evaluation.rs"]
 mod overflow_evaluation;
+#[path = "telemetry_overflow_noisy.rs"]
+mod overflow_noisy;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -347,10 +349,21 @@ fn measure(samples: usize, fairness_rounds: usize) -> Report {
     }
 }
 
-/// Entry point: `cargo xtask telemetry-baseline [--samples N] [--rounds N]`.
+/// The `--noisy` report: a host descriptor around the overflow comparison.
+#[derive(Debug, Serialize)]
+struct NoisyRun {
+    schema_version: u32,
+    host: Host,
+    comparison: overflow_noisy::NoisyReport,
+}
+
+/// Entry point: `cargo xtask telemetry-baseline [--samples N] [--rounds N]
+/// [--noisy]`. `--noisy` replaces the baseline report with the drop-newest
+/// versus drop-oldest comparison under a noisy producer.
 pub fn run(args: &[String]) -> Result<()> {
     let mut samples = 100_000;
     let mut rounds = 50;
+    let mut noisy = false;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         let mut parse = |name: &str| -> Result<usize> {
@@ -362,11 +375,27 @@ pub fn run(args: &[String]) -> Result<()> {
         match flag.as_str() {
             "--samples" => samples = parse("--samples")?,
             "--rounds" => rounds = parse("--rounds")?,
+            "--noisy" => noisy = true,
             other => bail!("unknown telemetry-baseline flag {other}"),
         }
     }
     if samples == 0 || rounds == 0 {
         bail!("--samples and --rounds must be at least 1");
+    }
+    if noisy {
+        let template = typical_record().encode().context("encode typical record")?;
+        let report = NoisyRun {
+            schema_version: SCHEMA_VERSION,
+            host: host(),
+            comparison: overflow_noisy::measure(
+                &template,
+                rounds,
+                overflow_noisy::Phases::DEFAULT,
+                samples,
+            ),
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
     }
     let report = measure(samples, rounds);
     println!("{}", serde_json::to_string_pretty(&report)?);

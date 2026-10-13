@@ -27,7 +27,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 /// Start a Firecracker daemon in a per-VM directory with its own socket.
 #[instrument(skip_all)]
 pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, true, "")
+    start_vm_firecracker_inner(abs_dir, abs_socket, "")
 }
 
 /// Start a Firecracker daemon inside a scope carrying its guest's memory and
@@ -46,7 +46,7 @@ pub fn start_vm_firecracker_bounded(
     bounds: &mvm_core::spawn_scope::SpawnBounds,
 ) -> Result<()> {
     let prefix = spawn_scope_prefix(machine_id, std::path::Path::new(abs_dir), bounds);
-    start_vm_firecracker_inner(abs_dir, abs_socket, true, &prefix)
+    start_vm_firecracker_inner(abs_dir, abs_socket, &prefix)
 }
 
 /// Start Firecracker for a snapshot load, inside a scope prefix the caller has
@@ -55,15 +55,13 @@ pub fn start_vm_firecracker_bounded(
 /// The restore paths take the prefix rather than the bounds because the value
 /// that ends up on the launch line has to be the one a test can read back: an
 /// unwrapped Firecracker loads the snapshot and runs the restored guest exactly
-/// as well, and is simply unbounded. `clean_vsock` is false for a fork, whose
-/// private mount namespace has already put the child's vsock UDS in place.
+/// as well, and is simply unbounded.
 pub(crate) fn start_vm_firecracker_scoped(
     abs_dir: &str,
     abs_socket: &str,
-    clean_vsock: bool,
     scope: &str,
 ) -> Result<()> {
-    start_vm_firecracker_inner(abs_dir, abs_socket, clean_vsock, scope)
+    start_vm_firecracker_inner(abs_dir, abs_socket, scope)
 }
 
 /// The `systemd-run` scope prefix for the launch line, shell-quoted, or empty
@@ -92,23 +90,13 @@ pub(crate) fn spawn_scope_prefix(
 /// launch can fail if the service manager never creates the scope.
 const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
 
-fn start_vm_firecracker_inner(
-    abs_dir: &str,
-    abs_socket: &str,
-    clean_vsock: bool,
-    scope: &str,
-) -> Result<()> {
+fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
     ui::info("Starting Firecracker...");
     // A process started here serves the socket its own command line names, so
     // any record that this dir's VMM came from the idle pool is now stale.
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
-    run_in_vm_visible(&firecracker_launch_script(
-        abs_dir,
-        abs_socket,
-        clean_vsock,
-        scope,
-    ))?;
+    run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
     await_started_firecracker(abs_dir, abs_socket, scope)?;
     ui::info("Firecracker started.");
     Ok(())
@@ -246,23 +234,12 @@ fn effective_user_id() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-fn firecracker_launch_script(
-    abs_dir: &str,
-    abs_socket: &str,
-    clean_vsock: bool,
-    scope: &str,
-) -> String {
-    firecracker_launch_script_as(abs_dir, abs_socket, clean_vsock, scope, effective_user_id())
+fn firecracker_launch_script(abs_dir: &str, abs_socket: &str, scope: &str) -> String {
+    firecracker_launch_script_as(abs_dir, abs_socket, scope, effective_user_id())
 }
 
-fn firecracker_launch_script_as(
-    abs_dir: &str,
-    abs_socket: &str,
-    clean_vsock: bool,
-    scope: &str,
-    euid: u32,
-) -> String {
-    launch_script(abs_dir, abs_socket, clean_vsock, scope, euid, None)
+fn firecracker_launch_script_as(abs_dir: &str, abs_socket: &str, scope: &str, euid: u32) -> String {
+    launch_script(abs_dir, abs_socket, scope, euid, None)
 }
 
 /// The launch script for an idle pool process: the same line, with the
@@ -279,7 +256,6 @@ pub(crate) fn idle_firecracker_launch_script(
     launch_script(
         abs_dir,
         abs_socket,
-        false,
         scope,
         effective_user_id(),
         Some(identity_file),
@@ -289,22 +265,17 @@ pub(crate) fn idle_firecracker_launch_script(
 fn launch_script(
     abs_dir: &str,
     abs_socket: &str,
-    clean_vsock: bool,
     scope: &str,
     euid: u32,
     identity_file: Option<&str>,
 ) -> String {
     let sudo = sudo_prefix_for_euid(euid);
     let vsock = firecracker_vsock_uds_path(abs_dir);
-    let vsock_cleanup = if clean_vsock {
-        format!(
-            "rm -f {} {}",
-            shell_quote(&vsock),
-            shell_quote(&format!("{abs_dir}/v.sock"))
-        )
-    } else {
-        String::new()
-    };
+    let vsock_cleanup = format!(
+        "rm -f {} {}",
+        shell_quote(&vsock),
+        shell_quote(&format!("{abs_dir}/v.sock"))
+    );
     let q_dir = shell_quote(abs_dir);
     let q_socket = shell_quote(abs_socket);
     // The API socket's directory is the VM dir unless the socket was moved to
@@ -501,7 +472,6 @@ mod tests {
         let idle = launch_script(
             "/p/idle-1",
             "/p/idle-1/fc.socket",
-            false,
             "",
             0,
             Some("/p/idle-1/fc.identity"),
@@ -513,9 +483,9 @@ mod tests {
             idle.contains("umask 077"),
             "root keeps its records owner-only"
         );
-        let as_user = launch_script("/p/i", "/p/i/fc.socket", false, "", 1000, Some("/p/i/id"));
+        let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
         assert!(!as_user.contains("umask"), "{as_user}");
-        let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 0);
+        let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
             vm.contains(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"'"#),
@@ -604,7 +574,6 @@ mod tests {
         let script = firecracker_launch_script_as(
             "/deep/home/vms/w",
             "/tmp/mvm-sock/0123456789abcdef/fc.socket",
-            true,
             "",
             0,
         );
@@ -724,8 +693,7 @@ mod tests {
                 mvm_contract::grants::CpuGrant::Share { millicores: 1500 },
             )),
         );
-        let script =
-            firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, &prefix, 1000);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", &prefix, 1000);
 
         assert!(script.contains("CPUQuota=150%"), "{script}");
         assert!(script.contains("'MemoryMax=768M'"), "{script}");
@@ -770,7 +738,7 @@ mod tests {
 
     #[test]
     fn an_unscoped_launch_line_carries_no_scope() {
-        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
         assert!(!script.contains("systemd-run"), "{script}");
         assert!(!script.contains("scope-launcher.pid"), "{script}");
         assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
@@ -782,7 +750,7 @@ mod tests {
 
     #[test]
     fn the_launch_line_uses_virtio_mmio_instead_of_forcing_pci() {
-        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
 
         assert!(script.contains("exec firecracker --api-sock"), "{script}");
         assert!(
@@ -798,7 +766,7 @@ mod tests {
     /// liveness probe read every boot as an immediate VMM exit.
     #[test]
     fn the_pid_marker_is_written_by_the_launched_process_not_the_caller() {
-        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
 
         assert!(
             !script.contains("echo $!"),
@@ -849,7 +817,7 @@ mod sudo_elision_tests {
     #[test]
     fn a_non_root_launch_still_elevates() {
         assert_eq!(sudo_prefix_for_euid(1000), "sudo ");
-        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 1000);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 1000);
         assert!(script.contains("sudo setsid nohup sh -c"), "{script}");
         assert!(script.contains("sudo rm -f"), "{script}");
     }
@@ -859,7 +827,7 @@ mod sudo_elision_tests {
     #[test]
     fn a_root_launch_skips_sudo_entirely() {
         assert_eq!(sudo_prefix_for_euid(0), "");
-        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", 0);
+        let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(
             !script.contains("sudo"),
             "root launch must not shell out to sudo: {script}"
@@ -872,8 +840,7 @@ mod sudo_elision_tests {
     #[test]
     fn both_shapes_write_the_pid_from_inside_and_exec_firecracker() {
         for euid in [0, 1000] {
-            let script =
-                firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", true, "", euid);
+            let script = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", euid);
             assert!(
                 script.contains(r#"echo $$ > "$0""#),
                 "euid {euid} must write the pid from inside: {script}"
@@ -896,7 +863,6 @@ mod sudo_elision_tests {
             let script = firecracker_launch_script_as(
                 "/tmp/vm",
                 "/tmp/vm/fc.socket",
-                true,
                 "systemd-run --scope ",
                 euid,
             );

@@ -18,9 +18,11 @@ Feature: A machine's resident agent takes prompts, and a fork replays them
     When I run mvmctl against the prompt agent with "machine prompt bdd-prompt first"
     Then the command exits with code 0
     And the output contains "turn 1: first"
+    And the prompt agent does not report "step checkpoint failed"
     When I run mvmctl against the prompt agent with "machine prompt bdd-prompt second"
     Then the command exits with code 0
     And the output contains "turn 2: second"
+    And the prompt agent does not report "step checkpoint failed"
     When I run mvmctl against the prompt agent with "agent-session replay bdd-prompt --as bdd-prompt-replay"
     Then the command exits with code 0
     And the prompt agent reports "replayed 2 prompt(s)"

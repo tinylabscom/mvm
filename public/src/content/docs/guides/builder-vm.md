@@ -62,7 +62,7 @@ None of the following ever require or offer a shell into the builder VM:
 
 - `mvmctl machine build --flake .`;
 - `mvmctl run -- <cmd>`;
-- `mvmctl machine run --name app --flake .`;
+- `mvmctl machine run --flake .`;
 - building a registered template;
 - booting a prebuilt runtime image.
 
@@ -74,9 +74,8 @@ For an explicit two-step flow:
 # 1. Build the runtime image.
 mvmctl machine build --flake .
 
-# 2. Boot the already-built image. Named, so it boots cold: an unnamed run must
-#    claim a prepared warm standby, which `pool warm` cannot prepare for a flake.
-mvmctl machine run --name app --flake . --hypervisor hvf
+# 2. Boot the already-built image.
+mvmctl machine run --flake . --hypervisor hvf
 ```
 
 On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only). The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
@@ -95,7 +94,7 @@ through a legacy guest-NIC helper.
 For development convenience, `machine run --flake` combines the two phases:
 
 ```bash
-mvmctl machine run --name app --flake .
+mvmctl machine run --flake .
 ```
 
 That is equivalent to "build if needed, then boot." It is convenient for daily use, but it is not the right measurement point if you are trying to isolate runtime boot latency.

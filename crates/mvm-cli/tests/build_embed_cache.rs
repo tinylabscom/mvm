@@ -138,6 +138,48 @@ fn package_name_is_read_from_the_manifest() {
     assert_eq!(parse_package_name("not = valid toml ["), None);
 }
 
+#[test]
+fn graph_resolves_direct_and_inherited_dependency_aliases() {
+    let tmp = tempfile::tempdir().expect("workspace fixture");
+    std::fs::write(
+        tmp.path().join("Cargo.toml"),
+        "[workspace.dependencies]\nalias = { package = \"leaf\", path = \"crates/leaf\" }\n",
+    )
+    .expect("root manifest");
+    for (name, dependencies) in [
+        ("leaf", ""),
+        (
+            "direct",
+            "[dependencies]\nrenamed = { package = \"leaf\", path = \"../leaf\" }\n",
+        ),
+        (
+            "inherited",
+            "[build-dependencies]\nalias.workspace = true\n",
+        ),
+        (
+            "target",
+            "[target.'cfg(unix)'.dependencies]\nalias.workspace = true\n",
+        ),
+    ] {
+        let dir = tmp.path().join("crates").join(name);
+        std::fs::create_dir_all(&dir).expect("member directory");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            format!("[package]\nname = \"{name}\"\n{dependencies}"),
+        )
+        .expect("member manifest");
+    }
+    let graph = build_embed_cache::read_workspace_graph(tmp.path());
+    for name in ["direct", "inherited", "target"] {
+        assert_eq!(graph.edges[name], ["leaf"], "{name} alias edge");
+        assert!(workspace_closure(&graph, &[name]).contains(&"leaf".to_string()));
+    }
+    assert_eq!(
+        parse_manifest_deps("[dependencies]\nalias = { package = \"leaf\", version = \"1\" }\n"),
+        ["leaf"]
+    );
+}
+
 /// One named edit to a key's inputs, applied to prove the key notices it.
 type Mutation = (&'static str, Box<dyn Fn(&mut KeyInputs)>);
 
@@ -299,6 +341,7 @@ fn the_graph_reader_maps_every_workspace_member_to_its_directory() {
     // manifests rather than a fixture.
     let closure = workspace_closure(&graph, &["mvm-build"]);
     assert!(closure.contains(&"mvm-core".to_string()));
+    assert!(closure.contains(&"libkrun-sys".to_string()));
     assert!(
         !closure.contains(&"mvm-cli".to_string()),
         "mvm-cli must not be in mvm-build's closure"

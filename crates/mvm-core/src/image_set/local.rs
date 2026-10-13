@@ -20,9 +20,10 @@
 //! What comes out is a [`LocalImageSet`], whose tier is always
 //! [`ImageTrustTier::LocalDev`].
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
-use super::verify::{parse_manifest, verify_artifacts};
+use super::verify::{parse_manifest, verify_artifacts, verify_artifacts_at_paths};
 use super::{
     HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetProducer, ImageSetRequirement,
     ImageSetRole, ImageTrustTier, LocalCheckouts, MemberTarget, RepoIdentity, RequiredMember,
@@ -63,6 +64,7 @@ pub struct LocalImageSetVerification<'a> {
     roles: &'a [ImageSetRole],
     host_protocols: Option<&'a HostProtocolSupport>,
     mvm_rule: MvmCheckoutRule,
+    artifact_paths: Option<&'a BTreeMap<String, PathBuf>>,
 }
 
 impl<'a> LocalImageSetVerification<'a> {
@@ -80,6 +82,7 @@ impl<'a> LocalImageSetVerification<'a> {
             roles: &[],
             host_protocols: None,
             mvm_rule: MvmCheckoutRule::Current,
+            artifact_paths: None,
         }
     }
 
@@ -103,6 +106,15 @@ impl<'a> LocalImageSetVerification<'a> {
     #[must_use]
     pub fn with_host_protocols(mut self, host: &'a HostProtocolSupport) -> Self {
         self.host_protocols = Some(host);
+        self
+    }
+
+    /// Verify relocated installed artifacts at the exact paths the host will
+    /// boot, instead of constructing aliases under their publication names.
+    /// Every declared artifact must have a path; no missing entry defaults.
+    #[must_use]
+    pub fn with_artifact_paths(mut self, paths: &'a BTreeMap<String, PathBuf>) -> Self {
+        self.artifact_paths = Some(paths);
         self
     }
 }
@@ -147,7 +159,11 @@ pub fn verify_local_image_set(
     if let Some(host) = request.host_protocols {
         check_protocol_compatibility(&manifest, host)?;
     }
-    let artifacts = verify_artifacts(&manifest, request.artifact_dir)?;
+    let artifacts = if let Some(paths) = request.artifact_paths {
+        verify_artifacts_at_paths(&manifest, paths)?
+    } else {
+        verify_artifacts(&manifest, request.artifact_dir)?
+    };
     Ok(LocalImageSet {
         manifest,
         manifest_sha256,
@@ -176,10 +192,20 @@ fn check_fresh(
     mvm_rule: MvmCheckoutRule,
 ) -> Result<(), ImageSetError> {
     check_checkout_fresh("mvm-images", &recorded.images, &current.images)?;
-    match mvm_rule {
-        MvmCheckoutRule::Current => check_checkout_fresh("mvm", &recorded.mvm, &current.mvm),
-        MvmCheckoutRule::Provenance => Ok(()),
+    if mvm_rule == MvmCheckoutRule::Current
+        && let Some(recorded) = &recorded.mvm
+    {
+        let current =
+            current
+                .mvm
+                .as_ref()
+                .ok_or(ImageSetError::SourceProvenanceSchemaMismatch {
+                    schema: super::LEGACY_IMAGE_SET_SCHEMA_VERSION,
+                    field: "current.mvm",
+                })?;
+        check_checkout_fresh("mvm", recorded, current)?;
     }
+    Ok(())
 }
 
 fn check_checkout_fresh(

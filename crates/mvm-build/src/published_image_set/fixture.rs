@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use chrono::{TimeZone, Utc};
+use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ArtifactFormat, ArtifactName, BootProtocol, GitCommit, ImageSetManifest, ImageSetMember,
     ImageSetProducer, ImageSetRequirement, ImageSetRole, ImageTrainLock, MemberArtifact,
@@ -47,7 +48,7 @@ impl ImageSetFixture {
         compatibility.builder_cache_contract = crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION;
         compatibility.builder_boot_abi = Some(crate::builder_boot::supported_image_abis().max());
         let manifest = ImageSetManifest {
-            schema_version: mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION,
+            schema_version: mvm_core::image_set::LEGACY_IMAGE_SET_SCHEMA_VERSION,
             set_version: lock.release_tag.version().clone(),
             issued_at: Utc.with_ymd_and_hms(2026, 9, 16, 0, 0, 0).unwrap(),
             producer: ImageSetProducer::Release(ReleaseProducer {
@@ -56,7 +57,7 @@ impl ImageSetFixture {
                 release_tag: lock.release_tag.clone(),
                 source_commit: commit('a'),
             }),
-            mvm_source_commit: commit('b'),
+            mvm_source_commit: Some(commit('b')),
             compatibility,
             nix_inputs: NixInputs {
                 flake_locks: vec![FlakeLockIdentity {
@@ -85,6 +86,23 @@ impl ImageSetFixture {
         }
     }
 
+    fn primary_format(&self, role: ImageSetRole, target: MemberTarget) -> ArtifactFormat {
+        if self.manifest.schema_version != mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION {
+            return ArtifactFormat::TarGz;
+        }
+        if matches!(role, ImageSetRole::WorkloadRootfs(_)) {
+            ArtifactFormat::Ext4
+        } else if matches!(role, ImageSetRole::WorkloadKernel(_)) {
+            ArtifactFormat::Kernel(if target == MemberTarget::Arch(GuestArch::X86_64) {
+                mvm_core::kernel_format::KernelFormat::Elf
+            } else {
+                mvm_core::kernel_format::KernelFormat::Image
+            })
+        } else {
+            ArtifactFormat::TarGz
+        }
+    }
+
     /// Declare `bytes` as the only artifact of the `role` member for `target`,
     /// adding the member if the set lacks it, and serve those bytes.
     #[must_use]
@@ -97,7 +115,7 @@ impl ImageSetFixture {
     ) -> Self {
         let artifact = MemberArtifact {
             name: ArtifactName::new(name).unwrap(),
-            format: ArtifactFormat::TarGz,
+            format: self.primary_format(role, target),
             sha256: Sha256Hex::from_bytes(&bytes),
             size: u64::try_from(bytes.len()).unwrap(),
         };
@@ -151,7 +169,7 @@ impl ImageSetFixture {
     ) -> Self {
         let artifact = MemberArtifact {
             name: ArtifactName::new(name).unwrap(),
-            format: ArtifactFormat::TarGz,
+            format: self.primary_format(role, target),
             sha256: Sha256Hex::from_bytes(&bytes),
             size: u64::try_from(bytes.len()).unwrap(),
         };
@@ -234,6 +252,37 @@ impl ImageSetFixture {
         contract: Option<mvm_core::image_set::BaseImageContract>,
     ) -> Self {
         self.manifest.compatibility.base_image_contract = contract;
+        if contract.is_none() {
+            return self;
+        }
+        self.manifest.schema_version = mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION;
+        self.manifest.mvm_source_commit = None;
+        self.manifest.compatibility.builder_boot_abi =
+            Some(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY);
+        self.manifest.compatibility.guest_agent_protocol = None;
+        for index in 0..self.manifest.members.len() {
+            let member = &self.manifest.members[index];
+            if matches!(
+                member.role,
+                ImageSetRole::WorkloadRootfs(_) | ImageSetRole::WorkloadKernel(_)
+            ) {
+                let format = self.primary_format(member.role, member.target);
+                self.manifest.members[index].artifacts[0].format = format;
+            }
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_artifact_format(mut self, name: &str, format: ArtifactFormat) -> Self {
+        let artifact = self
+            .manifest
+            .members
+            .iter_mut()
+            .flat_map(|member| &mut member.artifacts)
+            .find(|artifact| artifact.name.as_str() == name)
+            .expect("the fixture artifact is declared");
+        artifact.format = format;
         self
     }
 

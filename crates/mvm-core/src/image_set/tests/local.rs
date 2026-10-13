@@ -118,7 +118,7 @@ fn dirty(seed: &str) -> WorktreeState {
 fn checkouts() -> LocalCheckouts {
     LocalCheckouts {
         images: identity('d', WorktreeState::Clean),
-        mvm: identity('e', dirty("mvm tree")),
+        mvm: Some(identity('e', dirty("mvm tree"))),
     }
 }
 
@@ -127,7 +127,7 @@ fn checkouts() -> LocalCheckouts {
 fn local_manifest() -> ImageSetManifest {
     let mut manifest = manifest();
     let local = checkouts();
-    manifest.mvm_source_commit = local.mvm.commit.clone();
+    manifest.mvm_source_commit = local.mvm.as_ref().map(|mvm| mvm.commit.clone());
     manifest.producer = ImageSetProducer::LocalCheckouts(local);
     manifest.set_version = version("0.0.0-local");
     manifest.revocation_channel = None;
@@ -144,6 +144,61 @@ fn local_manifest() -> ImageSetManifest {
 
 fn accept_signature(_: &[u8], _: &[u8], _: &KeylessTrust) -> Result<(), ImageSetError> {
     Ok(())
+}
+
+#[test]
+fn relocated_local_artifacts_verify_actual_paths_and_refuse_incomplete_or_aliased_maps() {
+    let staged = stage(local_manifest());
+    let manifest: ImageSetManifest = serde_json::from_slice(&staged.manifest_bytes).unwrap();
+    let installed = tempfile::tempdir().unwrap();
+    let mut paths = std::collections::BTreeMap::new();
+    for (index, artifact) in manifest
+        .members
+        .iter()
+        .flat_map(|member| &member.artifacts)
+        .enumerate()
+    {
+        let path = installed.path().join(format!("installed-{index}"));
+        std::fs::copy(staged.path(artifact.name.as_str()), &path).unwrap();
+        paths.insert(artifact.name.to_string(), path);
+    }
+    let current = checkouts();
+    let verify = |paths| {
+        verify_local_image_set(
+            &LocalImageSetVerification::new(
+                &staged.manifest_bytes,
+                installed.path(),
+                &current,
+                GuestArch::Aarch64,
+            )
+            .with_artifact_paths(paths),
+        )
+    };
+    let verified = verify(&paths).unwrap();
+    assert!(
+        verified
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.path.parent() == Some(installed.path()))
+    );
+    let mut absent = paths.clone();
+    absent.pop_first();
+    assert!(matches!(
+        verify(&absent),
+        Err(ImageSetError::ArtifactUnreadable { .. })
+    ));
+    let mut duplicate = paths.clone();
+    let mut names = duplicate.keys().cloned();
+    let first = names.next().unwrap();
+    let second = names.next().unwrap();
+    duplicate.insert(second, duplicate[&first].clone());
+    assert!(verify(&duplicate).is_err());
+    let path = paths.values().next().unwrap();
+    std::fs::write(path, b"changed installed bytes").unwrap();
+    assert!(
+        verify(&paths).is_err(),
+        "verification reads the installed path, not the source cache"
+    );
 }
 
 /// A set on disk: its manifest bytes and a directory of artifacts whose
@@ -367,7 +422,7 @@ mod wire {
         validate_structure(&manifest).unwrap();
         let local = manifest.producer.local_checkouts().unwrap();
         assert_eq!(local.images.worktree, WorktreeState::Clean);
-        assert!(local.mvm.worktree.is_dirty());
+        assert!(local.mvm.as_ref().unwrap().worktree.is_dirty());
         assert!(manifest.producer.release().is_none());
     }
 }
@@ -458,7 +513,7 @@ mod structure {
     #[test]
     fn a_local_set_naming_another_mvm_commit_is_refused() {
         let mut manifest = local_manifest();
-        manifest.mvm_source_commit = commit('f');
+        manifest.mvm_source_commit = Some(commit('f'));
         assert!(matches!(
             refused(&manifest),
             ImageSetError::LocalMvmCommitMismatch { declared, recorded }
@@ -637,7 +692,7 @@ mod local_path {
     fn a_set_built_before_an_mvm_edit_is_stale() {
         let set = stage(local_manifest());
         let mut current = checkouts();
-        current.mvm.worktree = dirty("mvm tree, edited since");
+        current.mvm.as_mut().unwrap().worktree = dirty("mvm tree, edited since");
         let err = set.verify(&current, GuestArch::Aarch64, &[]).unwrap_err();
         assert!(
             matches!(&err, ImageSetError::StaleLocalSet { checkout: "mvm", recorded, current }
@@ -651,8 +706,8 @@ mod local_path {
     fn an_mvm_checkout_held_as_provenance_is_not_a_freshness_condition() {
         let set = stage(local_manifest());
         let mut current = checkouts();
-        current.mvm.commit = commit('7');
-        current.mvm.worktree = dirty("mvm tree, edited since");
+        current.mvm.as_mut().unwrap().commit = commit('7');
+        current.mvm.as_mut().unwrap().worktree = dirty("mvm tree, edited since");
         let read = verify_local_image_set(
             &LocalImageSetVerification::new(
                 &set.manifest_bytes,
@@ -701,7 +756,7 @@ mod local_path {
     fn a_set_from_a_dirty_tree_is_stale_once_the_tree_is_clean() {
         let set = stage(local_manifest());
         let mut current = checkouts();
-        current.mvm.worktree = WorktreeState::Clean;
+        current.mvm.as_mut().unwrap().worktree = WorktreeState::Clean;
         let err = set.verify(&current, GuestArch::Aarch64, &[]).unwrap_err();
         assert!(
             matches!(

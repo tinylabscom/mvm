@@ -53,15 +53,19 @@ pub(crate) struct PackageInstall {
     pub(crate) format: Option<PackageFormat>,
 }
 
-/// The package install `exe` belongs to, when `exe` resolves to a file in a
-/// `bin/` directory whose prefix carries [`PACKAGE_MARKER`].
+/// The package install `exe` belongs to, when `exe` resolves to a file in
+/// `bin/` or `lib/mvmctl/` whose prefix carries [`PACKAGE_MARKER`].
 pub(crate) fn package_install_of(exe: &Path) -> Option<PackageInstall> {
     let exe = std::fs::canonicalize(exe).ok()?;
     let bin = exe.parent()?;
-    if bin.file_name()? != "bin" {
+    let prefix = if bin.file_name()? == "bin" {
+        bin.parent()?
+    } else if bin.file_name()? == "mvmctl" && bin.parent()?.file_name()? == "lib" {
+        bin.parent()?.parent()?
+    } else {
         return None;
-    }
-    let marker = bin.parent()?.join(PACKAGE_MARKER);
+    };
+    let marker = prefix.join(PACKAGE_MARKER);
     if !marker.is_file() {
         return None;
     }
@@ -121,6 +125,21 @@ mod tests {
         std::fs::write(other.join("1-v1").join(RELEASE_MARKER), "complete\n").unwrap();
         std::fs::write(other.join("1-v1").join("mvmctl"), "").unwrap();
         root
+    }
+
+    #[test]
+    fn package_markers_follow_canonical_library_executables() {
+        for format in ["deb", "rpm", "aur", "nix"] {
+            let root = tempfile::tempdir().unwrap();
+            let lib = root.path().join("lib/mvmctl");
+            let marker = root.path().join(PACKAGE_MARKER);
+            std::fs::create_dir_all(&lib).unwrap();
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(lib.join("mvmctl"), "").unwrap();
+            std::fs::write(&marker, format).unwrap();
+            let install = package_install_of(&lib.join("mvmctl")).unwrap();
+            assert_eq!(install.marker, std::fs::canonicalize(&marker).unwrap());
+        }
     }
 
     #[test]

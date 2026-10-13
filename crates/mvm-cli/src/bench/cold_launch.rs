@@ -70,6 +70,14 @@ pub const WARM_CLAIM_P99_BUDGET_MS: f64 = 50.0;
 /// whatever its percentiles say.
 pub const WARM_CLAIM_HARD_MAX_MS: f64 = crate::commands::vm::phase_timing::WARM_START_MAX_MS;
 
+/// Every prepared or warm sample must reach the guest strictly below this
+/// ceiling, measured from the moment the command was invoked.
+///
+/// The per-lane dispatch ceilings start at admission, so a launch can clear
+/// them while the caller waited far longer. This one starts where the caller
+/// does. It is the same limit `mvmctl` refuses a warm launch at.
+pub const STARTUP_HARD_MAX_MS: f64 = crate::commands::vm::phase_timing::WARM_START_MAX_MS;
+
 /// The dispatch-window budgets one lane publishes, by percentile.
 ///
 /// `None` is "this lane deliberately publishes no budget at this percentile",
@@ -289,6 +297,13 @@ pub enum LaneViolation {
         found_ms: f64,
         limit_ms: f64,
     },
+    /// A prepared or warm sample reached the guest at or past
+    /// [`STARTUP_HARD_MAX_MS`] after the command was invoked.
+    StartupCeilingExceeded {
+        lane: LaunchLane,
+        found_ms: f64,
+        limit_ms: f64,
+    },
     /// The stored summary does not match the report's raw samples.
     NonCanonicalSummary,
 }
@@ -364,6 +379,16 @@ impl std::fmt::Display for LaneViolation {
             } => write!(
                 f,
                 "lane {} slowest boot dispatch was {found_ms:.1}ms; every boot must be under {limit_ms:.1}ms",
+                lane.as_str()
+            ),
+            Self::StartupCeilingExceeded {
+                lane,
+                found_ms,
+                limit_ms,
+            } => write!(
+                f,
+                "lane {} sample reached the guest {found_ms:.1}ms after invocation; every \
+                 sample must be under {limit_ms:.1}ms",
                 lane.as_str()
             ),
             Self::NonCanonicalSummary => {
@@ -566,7 +591,8 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                 "process_table_scan",
                 "bundle_verify",
             ])?;
-            require_cold(lane, sample)
+            require_cold(lane, sample)?;
+            require_startup_below_ceiling(lane, sample)
         }
         LaunchLane::PreparedColdArtifact => {
             // Re-hashing is what verification is, so `artifact_hash` is the
@@ -586,7 +612,8 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
                     expected: "bundle_verify",
                 });
             }
-            require_cold(lane, sample)
+            require_cold(lane, sample)?;
+            require_startup_below_ceiling(lane, sample)
         }
         LaunchLane::MountMiss => {
             forbid(vec![
@@ -625,18 +652,33 @@ pub fn validate_lane(lane: LaunchLane, sample: &LaunchSample) -> Result<(), Lane
             if sample.warm_first_command_memory.is_none() {
                 return Err(LaneViolation::MissingWarmMemory);
             }
-            // The dispatch window starts at admission, so a claim can clear it
-            // while the launch as a caller sees it does not. Every warm sample
-            // is also held to the ceiling from invocation.
-            let Some(startup_ms) = sample.phases.startup_ms else {
-                return Err(LaneViolation::MissingWork {
-                    lane,
-                    expected: "startup_ms",
-                });
-            };
-            validate_hard_boot_timing(lane, startup_ms)
+            require_startup_below_ceiling(lane, sample)
         }
     }
+}
+
+/// The dispatch window starts at admission, so a launch can clear it while the
+/// caller waited far longer. A prepared or warm sample is also held to
+/// [`STARTUP_HARD_MAX_MS`] from invocation, and one that did not record it
+/// cannot show that it was.
+fn require_startup_below_ceiling(
+    lane: LaunchLane,
+    sample: &LaunchSample,
+) -> Result<(), LaneViolation> {
+    let Some(found_ms) = sample.phases.startup_ms else {
+        return Err(LaneViolation::MissingWork {
+            lane,
+            expected: "startup_ms",
+        });
+    };
+    if found_ms >= STARTUP_HARD_MAX_MS {
+        return Err(LaneViolation::StartupCeilingExceeded {
+            lane,
+            found_ms,
+            limit_ms: STARTUP_HARD_MAX_MS,
+        });
+    }
+    Ok(())
 }
 
 /// Every cold lane requires a genuinely new VMM and guest identity. A warm
@@ -1097,7 +1139,7 @@ mod tests {
             command_ms: 5.0,
             teardown_ms: 7.0,
             total_ms,
-            startup_ms: None,
+            startup_ms: Some(150.0),
         }
     }
 
@@ -1470,14 +1512,6 @@ mod tests {
             Err(LaneViolation::MissingWarmMemory)
         );
         sample.warm_first_command_memory = Some(warm_memory());
-        assert_eq!(
-            validate_lane(LaunchLane::WarmClaim, &sample),
-            Err(LaneViolation::MissingWork {
-                lane: LaunchLane::WarmClaim,
-                expected: "startup_ms",
-            })
-        );
-        sample.phases.startup_ms = Some(WARM_CLAIM_HARD_MAX_MS - 0.1);
         assert_eq!(validate_lane(LaunchLane::WarmClaim, &sample), Ok(()));
     }
 
@@ -1490,15 +1524,53 @@ mod tests {
         // A dispatch window well inside the ceiling does not excuse a launch
         // that took the ceiling to reach the guest from the caller's command.
         assert!(sample.phases.dispatch_window_ms() < WARM_CLAIM_HARD_MAX_MS);
-        sample.phases.startup_ms = Some(WARM_CLAIM_HARD_MAX_MS);
+        sample.phases.startup_ms = Some(STARTUP_HARD_MAX_MS);
         assert_eq!(
             validate_lane(LaunchLane::WarmClaim, &sample),
-            Err(LaneViolation::HardMaximumExceeded {
+            Err(LaneViolation::StartupCeilingExceeded {
                 lane: LaunchLane::WarmClaim,
-                found_ms: WARM_CLAIM_HARD_MAX_MS,
-                limit_ms: WARM_CLAIM_HARD_MAX_MS,
+                found_ms: STARTUP_HARD_MAX_MS,
+                limit_ms: STARTUP_HARD_MAX_MS,
             })
         );
+    }
+
+    #[test]
+    fn every_prepared_lane_is_held_to_the_ceiling_from_invocation() {
+        let samples = [
+            (LaunchLane::PreparedCold, launch_sample()),
+            (LaunchLane::PreparedColdMountHit, launch_sample()),
+            (LaunchLane::PreparedColdArtifact, artifact_launch_sample()),
+        ];
+        for (lane, mut sample) in samples {
+            // A dispatch window well inside the prepared ceiling does not
+            // excuse a launch whose admission alone ran past 300 ms.
+            assert!(sample.phases.dispatch_window_ms() < PREPARED_COLD_HARD_MAX_MS);
+            assert_eq!(validate_lane(lane, &sample), Ok(()), "{}", lane.as_str());
+            sample.phases.startup_ms = Some(STARTUP_HARD_MAX_MS - 0.1);
+            assert_eq!(validate_lane(lane, &sample), Ok(()), "{}", lane.as_str());
+            sample.phases.startup_ms = Some(STARTUP_HARD_MAX_MS);
+            assert_eq!(
+                validate_lane(lane, &sample),
+                Err(LaneViolation::StartupCeilingExceeded {
+                    lane,
+                    found_ms: STARTUP_HARD_MAX_MS,
+                    limit_ms: STARTUP_HARD_MAX_MS,
+                }),
+                "{}",
+                lane.as_str()
+            );
+            sample.phases.startup_ms = None;
+            assert_eq!(
+                validate_lane(lane, &sample),
+                Err(LaneViolation::MissingWork {
+                    lane,
+                    expected: "startup_ms",
+                }),
+                "{}",
+                lane.as_str()
+            );
+        }
     }
 
     #[test]

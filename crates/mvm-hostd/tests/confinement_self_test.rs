@@ -37,6 +37,7 @@ fn run_as_child_when_asked() {
         "thread-before-seccomp" => thread_started_before_the_filter(&dir),
         "thread-before-confinement" => thread_started_before_confinement(&dir),
         "threads-after-confinement" => threads_started_after_confinement(&dir),
+        "legacy-path-calls" => legacy_path_calls_after_confinement(&dir),
         other => panic!("unknown scenario {other}"),
     }
 }
@@ -159,6 +160,59 @@ fn threads_started_after_confinement(dir: &Path) -> ! {
         .expect("worker task");
     println!("{worker}");
     println!("{blocking}");
+    std::process::exit(0);
+}
+
+/// The legacy path calls a static musl build issues where glibc issues the
+/// `*at` form: musl's `open()` is `SYS_open` on x86_64, and audit rotation
+/// renames with `SYS_rename`. Both are made raw, under the endpoint's full
+/// confinement, so the scenario fails the same way the released musl
+/// endpoint did no matter which libc this test binary links.
+#[cfg(target_arch = "x86_64")]
+fn legacy_path_calls_after_confinement(dir: &Path) -> ! {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let spec = endpoint_spec(dir);
+    let audit = dir.join("audit");
+    let from = audit.join("segment.jsonl");
+    let to = audit.join("segment.seg-000001.jsonl");
+    std::fs::write(&from, "{}\n").expect("write the audit segment");
+    mvm_hostd::jailer::confine_self(&spec).expect("confine");
+
+    let from_c = CString::new(from.as_os_str().as_bytes()).expect("path");
+    let to_c = CString::new(to.as_os_str().as_bytes()).expect("path");
+    // SAFETY: a NUL-terminated path and plain flags; the fd is closed below.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_open,
+            from_c.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        )
+    };
+    assert!(fd >= 0, "SYS_open: {}", std::io::Error::last_os_error());
+    // SAFETY: `fd` was just returned by a successful open.
+    unsafe { libc::close(fd as libc::c_int) };
+    println!("open=ok");
+
+    // SAFETY: two NUL-terminated paths.
+    let renamed = unsafe { libc::syscall(libc::SYS_rename, from_c.as_ptr(), to_c.as_ptr()) };
+    assert_eq!(
+        renamed,
+        0,
+        "SYS_rename: {}",
+        std::io::Error::last_os_error()
+    );
+    println!("rename=ok");
+    std::process::exit(0);
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn legacy_path_calls_after_confinement(_dir: &Path) -> ! {
+    // aarch64 has no legacy `open`/`rename`: musl issues `openat`/`renameat`
+    // there, which the real-filter scenario already covers.
+    println!("open=ok");
+    println!("rename=ok");
     std::process::exit(0);
 }
 
@@ -312,5 +366,28 @@ fn threads_started_after_confinement_inherit_both_layers() {
     for kind in ["thread", "worker", "blocking"] {
         let expected = format!("{kind}: outside=errno {} check=confined", libc::EACCES);
         assert!(stdout.contains(&expected), "{kind}: {report}");
+    }
+}
+
+/// A static musl endpoint opens files with `SYS_open` on x86_64. The released
+/// v0.22.0 filter allowed only `openat`, so the endpoint was killed by its own
+/// filter on its first file open after a guest authenticated, and every
+/// builder shell job on Linux/Firecracker lost guest egress. Both legacy
+/// calls must survive full confinement.
+#[test]
+fn musl_legacy_open_and_rename_survive_full_confinement() {
+    let (output, dir) = run_scenario("legacy-path-calls");
+    let report = describe(&output);
+    assert_ne!(output.status.signal(), Some(libc::SIGSYS), "{report}");
+    assert!(output.status.success(), "{report}");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("open=ok"), "{report}");
+    assert!(stdout.contains("rename=ok"), "{report}");
+    if cfg!(target_arch = "x86_64") {
+        assert!(
+            dir.path().join("audit/segment.seg-000001.jsonl").exists(),
+            "{report}"
+        );
     }
 }
