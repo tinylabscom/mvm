@@ -1233,6 +1233,11 @@ impl crate::builder_vm::BuilderVm for PersistentBuilderVm {
                 flake_ref,
                 attr_path,
             } => (flake_ref.as_str(), attr_path.as_str()),
+            BuilderJob::FrozenFlakeDiagnostic { .. } => {
+                return Err(BuilderVmError::NixBuildFailed(
+                    "frozen input observation requires the one-shot builder".to_string(),
+                ));
+            }
             BuilderJob::Install { .. } => unreachable!("handled above"),
         };
 

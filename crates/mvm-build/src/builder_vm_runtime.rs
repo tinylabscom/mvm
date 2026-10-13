@@ -268,6 +268,11 @@ pub fn stage_job_dir(
         BuilderJob::Flake {
             flake_ref,
             attr_path,
+        }
+        | BuilderJob::FrozenFlakeDiagnostic {
+            flake_ref,
+            attr_path,
+            ..
         } => (flake_ref.as_str(), attr_path.as_str()),
         BuilderJob::Install { spec_path } => {
             // Copy the caller's spec into the per-job dir so the
@@ -325,7 +330,34 @@ pub fn stage_job_dir(
         None => false,
     };
 
-    let body = render_flake_cmd_sh(flake_ref, attr_path, override_mvm);
+    let body = if let BuilderJob::FrozenFlakeDiagnostic {
+        input_digest,
+        expected_mvm_revision,
+        ..
+    } = job
+    {
+        if override_mvm || workspace_src.is_some() || flake_ref != "/work" {
+            return Err(BuilderVmError::NixBuildFailed(
+                "input observation requires frozen /work without source overrides".to_string(),
+            ));
+        }
+        let job_id = job_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                BuilderVmError::ExtractionFailed(
+                    "observation job identity is not UTF-8".to_string(),
+                )
+            })?;
+        render_flake_cmd_sh_observed(
+            flake_ref,
+            attr_path,
+            override_mvm,
+            Some((input_digest, expected_mvm_revision, job_id)),
+        )
+    } else {
+        render_flake_cmd_sh(flake_ref, attr_path, override_mvm)
+    };
 
     let cmd_path = job_dir.join("cmd.sh");
     std::fs::write(&cmd_path, body).map_err(|e| {
@@ -461,6 +493,15 @@ pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// tests can assert the rendered output without touching the
 /// filesystem.
 fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> String {
+    render_flake_cmd_sh_observed(flake_ref, attr_path, override_mvm, None)
+}
+
+fn render_flake_cmd_sh_observed(
+    flake_ref: &str,
+    attr_path: &str,
+    override_mvm: bool,
+    diagnostic: Option<(&str, &str, &str)>,
+) -> String {
     // Source-checkout override mode: `/work` is the workspace and the
     // user flake was staged into this job dir (reachable beside cmd.sh).
     // Resolve it relative to the script so we don't need the job dir's
@@ -487,7 +528,26 @@ fn render_flake_cmd_sh(flake_ref: &str, attr_path: &str, override_mvm: bool) -> 
     // Resolved on the host, baked as a literal into the script so
     // the in-guest `du` comparison needs no env plumbing through the VM.
     let gc_cap_kib = builder_store_gc_cap_kib();
-    format!(
+    let (observation_before, observation_after) = diagnostic
+        .map(|(digest, revision, job)| {
+            crate::pipeline::frozen::observation_script(digest, revision, job)
+        })
+        .unwrap_or_default();
+    // Nix 2.31.5 rejects lock changes only when writing is enabled. An
+    // unchanged reference graph skips the write block, preserving readonly /work.
+    let lock_flags = if diagnostic.is_some() {
+        "--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file"
+    } else {
+        "--no-write-lock-file"
+    };
+    // Sidecar fallbacks are part of the observed output and must consume the
+    // same graph, not independently resolve the readonly source again.
+    let (eval_bin, eval_lock_flags) = if diagnostic.is_some() {
+        ("\"$NIX_BIN\"", format!(" {lock_flags}"))
+    } else {
+        ("nix", String::new())
+    };
+    let body = format!(
         r#"#!/bin/sh
 # mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime.
 # Runs inside the builder VM under `/bin/sh -eu`. The host wires
@@ -583,9 +643,10 @@ df -h /nix /tmp >&2 || true
 # stderr inline (default nix only prints the last 10 lines and
 # cascades up). We tee stderr to /job/nix-build.log so the host
 # can read the actual root cause when a deep dependency fails.
+{observation_before}
 set +e
 "$NIX_BIN" build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
-    --no-link --print-out-paths --no-write-lock-file --impure \
+    --no-link --print-out-paths {lock_flags} --impure \
     --print-build-logs --keep-going \
     > /job/nix-stdout.log 2> /job/nix-stderr.log
 NIX_RC=$?
@@ -703,10 +764,10 @@ chmod 0644 /out/rootfs.ext4 2>/dev/null || true
 if [ -f "$NIX_OUT/mvm-meta.json" ]; then
     cp -L "$NIX_OUT/mvm-meta.json" /out/mvm-meta.json
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (image-published sidecar)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag} \
+elif {eval_bin} eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.mvm" --impure{override_flag}{eval_lock_flags} \
       > /out/mvm-meta.json 2> /job/sidecar-direct.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.mvm)" >&2
-elif nix eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag} \
+elif {eval_bin} eval --json "${{FLAKE_REF}}#${{ATTR_PATH}}.passthru.rootfs.passthru.mvm" --impure{override_flag}{eval_lock_flags} \
       > /out/mvm-meta.json 2> /job/sidecar-rootfs.log; then
     echo "mvm-builder-vm: wrote /out/mvm-meta.json (passthru.rootfs.passthru.mvm)" >&2
 else
@@ -758,7 +819,8 @@ fi
         host_vm_init_sh =
             crate::builder_boot::guest_host_binary_sh("HOST_VM_INIT", "mvm-host-vm-init"),
         copy_members_sh = crate::builder_output::copy_nix_output_members_sh("\"$NIX_OUT\"", "/out"),
-    )
+    );
+    body + &observation_after
 }
 
 /// Escape a string for inclusion inside `'…'` single quotes in
@@ -1435,6 +1497,71 @@ pub fn builder_vm_timeout() -> Result<Duration, BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn non_native_observation_renderer_uses_one_locked_consuming_build() {
+        let script = super::render_flake_cmd_sh_observed(
+            "/work",
+            "packages.aarch64-linux.default",
+            false,
+            Some((&"a".repeat(64), &"b".repeat(40), "job-unique")),
+        );
+        let build = script
+            .split("\"$NIX_BIN\" build")
+            .nth(1)
+            .unwrap()
+            .split("NIX_RC=$?")
+            .next()
+            .unwrap();
+        assert!(
+            build.contains("--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file")
+        );
+        assert!(!build.contains("--no-write-lock-file"));
+        assert!(!build.contains("--output-lock-file"));
+        assert!(!script.contains("--override-input"));
+        assert!(script.contains(".nodes[.root].inputs.mvm"));
+        assert!(script.contains("ulimit -f 1024"));
+        assert!(script.contains("OBS_JOB='job-unique'"));
+        let sidecars: Vec<_> = script
+            .lines()
+            .filter(|line| line.starts_with("elif ") && line.contains(" eval --json "))
+            .collect();
+        assert_eq!(sidecars.len(), 2);
+        for line in sidecars {
+            assert!(line.starts_with("elif \"$NIX_BIN\" eval "));
+            assert!(
+                line.contains(
+                    "--reference-lock-file \"$OBS_DIR/flake.lock\" --no-update-lock-file"
+                )
+            );
+            assert!(!line.contains("--no-write-lock-file"));
+            assert!(!line.contains("--output-lock-file"));
+        }
+        let plain = super::render_flake_cmd_sh("/work", "default", false);
+        assert!(!plain.contains("OBS_DIR"));
+        assert!(plain.contains("--no-write-lock-file"));
+        assert_eq!(
+            plain
+                .lines()
+                .filter(|line| line.starts_with("elif nix eval --json "))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn non_native_observation_staging_refuses_source_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let job = super::BuilderJob::FrozenFlakeDiagnostic {
+            flake_ref: "/work".to_string(),
+            attr_path: "default".to_string(),
+            input_digest: "a".repeat(64),
+            expected_mvm_revision: "b".repeat(40),
+        };
+        assert!(super::stage_job_dir(dir.path(), &job, None, Some(work.path())).is_err());
+        assert!(!dir.path().join("cmd.sh").exists());
+    }
+
     /// A guest job outcome under this build's contract.
     fn outcome_json(exit_code: i32, stderr_tail: &str) -> String {
         use crate::builder_job_contract::{

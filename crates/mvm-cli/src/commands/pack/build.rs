@@ -54,9 +54,27 @@ pub(in crate::commands) struct BuildArgs {
     /// Hypervisor for the health boot (default: this host's auto-selection)
     #[arg(long)]
     pub hypervisor: Option<String>,
+    /// Write bounded frozen Nix input diagnostics (not an admission credential)
+    #[arg(long, value_name = "PATH")]
+    pub input_observation: Option<PathBuf>,
 }
 
 pub(super) fn run(args: BuildArgs) -> Result<()> {
+    let observation = args
+        .input_observation
+        .as_ref()
+        .map(|destination| {
+            if fs::symlink_metadata(destination).is_ok() {
+                bail!("input observation destination already exists");
+            }
+            let parent = destination
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            tempfile::NamedTempFile::new_in(parent)
+                .context("creating private input observation output")
+        })
+        .transpose()?;
     let loaded = LoadedSpec::read(&args.spec)?;
     let lock_path = args
         .lock
@@ -80,7 +98,10 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
 
     // ---- 2. Build the flake into a template slot in the builder VM ----
     eprintln!("building {} in the builder VM", pack_ref(&lock));
-    let inputs = FrozenInputs::stage(&artifact, &compiled)?;
+    let mut inputs = FrozenInputs::stage(&artifact, &compiled)?;
+    if let Some(report) = &observation {
+        inputs = inputs.with_input_observation(revision.as_str(), report.path().to_path_buf())?;
+    }
     let owned = crate::commands::build::build::FrozenFlakeSlot::build(inputs)
         .context("building the compiled pack")?;
     let slot = owned.slot_hash();
@@ -141,6 +162,11 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         );
     }
     let digest = file_sha256(&exported.path)?;
+    if let (Some(report), Some(destination)) = (observation, &args.input_observation) {
+        report
+            .persist_noclobber(destination)
+            .context("publishing input observation without overwriting")?;
+    }
     mvm_core::audit_emit!(
         PackBuild,
         "pack={},workload_sha256={},bundle_sha256={digest},key_id={}",
@@ -365,6 +391,34 @@ fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_observation_is_explicit_and_never_clobbers_existing_output() {
+        #[derive(clap::Parser)]
+        struct Parser {
+            #[command(flatten)]
+            args: BuildArgs,
+        }
+        use clap::Parser as _;
+        let plain =
+            Parser::try_parse_from(["pack-build", "missing.json", "--out", "out.mvmpkg"]).unwrap();
+        assert!(plain.args.input_observation.is_none());
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.json");
+        fs::write(&report, b"existing").unwrap();
+        let parsed = Parser::try_parse_from([
+            "pack-build",
+            "missing.json",
+            "--out",
+            "out.mvmpkg",
+            "--input-observation",
+            report.to_str().unwrap(),
+        ])
+        .unwrap();
+        let error = run(parsed.args).unwrap_err().to_string();
+        assert!(error.contains("destination already exists"), "{error}");
+        assert_eq!(fs::read(&report).unwrap(), b"existing");
+    }
     use tempfile::TempDir;
 
     fn spec(target: &str) -> PackSpec {

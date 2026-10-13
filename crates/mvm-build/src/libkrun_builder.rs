@@ -840,6 +840,11 @@ impl LibkrunBuilderVm {
             BuilderJob::Flake {
                 flake_ref,
                 attr_path,
+            }
+            | BuilderJob::FrozenFlakeDiagnostic {
+                flake_ref,
+                attr_path,
+                ..
             } => {
                 if flake_ref.trim().is_empty() {
                     return Err(BuilderVmError::NixBuildFailed(
@@ -1253,7 +1258,9 @@ impl BuilderVm for LibkrunBuilderVm {
         //    install jobs read `<artifact_out>/result.json` and
         //    return a different artifact variant.
         let artifacts = match job {
-            BuilderJob::Flake { .. } => finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id),
+            BuilderJob::Flake { .. } | BuilderJob::FrozenFlakeDiagnostic { .. } => {
+                finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id)
+            }
             BuilderJob::Install { .. } => finalize_install_job(&mounts.artifact_out),
         }?;
         if let Some(endpoint) = &egress_endpoint {

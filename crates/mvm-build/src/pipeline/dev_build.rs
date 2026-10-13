@@ -621,9 +621,22 @@ fn build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         None => (user_flake, None),
     };
 
-    let job = BuilderJob::Flake {
-        flake_ref: GUEST_WORK_DIR.to_string(),
-        attr_path,
+    let job = match source_policy {
+        SourcePolicy::Frozen(inputs) if inputs.observation().is_some() => {
+            let (revision, _) = inputs
+                .observation()
+                .context("missing frozen observation options")?;
+            BuilderJob::FrozenFlakeDiagnostic {
+                flake_ref: GUEST_WORK_DIR.to_string(),
+                attr_path,
+                input_digest: inputs.digest().to_string(),
+                expected_mvm_revision: revision.to_string(),
+            }
+        }
+        SourcePolicy::Contributor | SourcePolicy::Frozen(_) => BuilderJob::Flake {
+            flake_ref: GUEST_WORK_DIR.to_string(),
+            attr_path,
+        },
     };
     let staging = unique_dev_staging_dir();
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
@@ -666,6 +679,35 @@ fn build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
         }
     };
 
+    let observation = if let SourcePolicy::Frozen(inputs) = source_policy
+        && let Some((revision, destination)) = inputs.observation()
+    {
+        let report = super::frozen::take_input_observation(
+            &std::path::Path::new(&staging).join("frozen-input-observation.json"),
+            inputs.digest(),
+            revision,
+            &revision_hash,
+        )?;
+        let flake_sha =
+            mvm_core::crypto::image_verify::sha256_file(&inputs.path().join("flake.nix"))?;
+        let observed: serde_json::Value = serde_json::from_slice(&report)?;
+        let attr = match &job {
+            BuilderJob::FrozenFlakeDiagnostic { attr_path, .. } => attr_path.as_str(),
+            BuilderJob::Flake { .. } | BuilderJob::Install { .. } => {
+                anyhow::bail!("input observation returned for an ordinary build");
+            }
+        };
+        if observed["flake_sha256"].as_str() != Some(flake_sha.as_str())
+            || observed["attr_path"].as_str() != Some(attr)
+        {
+            anyhow::bail!("input observation source or output attribute mismatch");
+        }
+        super::frozen::verify_observed_outputs(std::path::Path::new(&staging), &observed)?;
+        Some((destination.to_path_buf(), report, observed))
+    } else {
+        None
+    };
+
     let final_dir = dev_build_dir(&revision_hash);
     if std::path::Path::new(&final_dir).exists() {
         env.log_info(&format!(
@@ -682,6 +724,11 @@ fn build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     // The staging dir is gone one way or another by this point (renamed
     // away, or removed above) — disarm so Drop doesn't redundantly try.
     staging_guard.disarm();
+
+    if let Some((destination, report, observed)) = observation {
+        super::frozen::verify_observed_outputs(std::path::Path::new(&final_dir), &observed)?;
+        std::fs::write(destination, report)?;
+    }
 
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
@@ -1416,6 +1463,41 @@ mod tests {
             Some(source.as_path())
         );
         assert_eq!(seen[0].1.flake_src, local_mvm_workspace(&source).unwrap());
+    }
+
+    #[test]
+    fn non_native_observed_mock_build_refuses_missing_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_HOME", home.path());
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("flake.nix"), "{}").unwrap();
+        let report = home.path().join("report.json");
+        let frozen = super::super::frozen::FrozenInputs::stage(
+            source.path(),
+            &super::super::frozen::tree_digest(source.path()).unwrap(),
+        )
+        .unwrap()
+        .with_input_observation(&"a".repeat(40), report.clone())
+        .unwrap();
+        let builder = RecordingBuilderVm::new("mock-output");
+        assert!(
+            build_with_builder_vm(
+                &TestEnv::new(),
+                frozen.path().to_str().unwrap(),
+                None,
+                BuildMode::Dev,
+                &builder,
+                SourcePolicy::Frozen(&frozen),
+            )
+            .is_err()
+        );
+        assert!(!report.exists());
+        assert!(matches!(
+            builder.seen.lock().unwrap()[0].0,
+            crate::builder_vm::BuilderJob::FrozenFlakeDiagnostic { .. }
+        ));
+        frozen.verify().unwrap();
     }
 
     #[test]

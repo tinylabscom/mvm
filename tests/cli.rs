@@ -4,6 +4,16 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn pack_build_help_advertises_explicit_input_observation() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["pack", "build", "--help"])
+        .output()
+        .expect("pack build help");
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("--input-observation <PATH>"));
+}
+
+#[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["build", "compile", "--help"])
