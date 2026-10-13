@@ -3,8 +3,9 @@
 //! One process-wide [`CaptureState`] holds the producer epoch, the monotonic
 //! origin, the shared bounded outbox and per-producer attempt/shed counters;
 //! [`CaptureState::emit`] is one non-waiting admission attempt, and
-//! [`AgentSubscriber`] is a hand-rolled events-only `tracing` collector over
-//! it (the sealed agent deliberately carries no subscriber crate).
+//! [`AgentSubscriber`] is a hand-rolled `tracing` collector for events and
+//! spans over it (the sealed agent deliberately carries no subscriber crate),
+//! tracking open spans in a fixed-capacity table.
 //!
 //! This is a pure component: nothing here installs the subscriber, spawns a
 //! worker, opens a transport, or wakes a consumer — the transport worker owns
@@ -14,6 +15,7 @@
 //! not something this module corrects.
 
 mod emit;
+mod span_table;
 mod state;
 mod stdio_tap;
 mod subscriber;

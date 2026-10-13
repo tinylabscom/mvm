@@ -75,6 +75,15 @@ impl CaptureState {
         self.count_shed(producer, reason, bytes);
         EmitOutcome::Shed(reason)
     }
+
+    /// Account for a record a producer could not even build — a span open
+    /// refused because the active-span table was full, say. It spends a
+    /// sequence number and counts the shed exactly as a failed offer would,
+    /// so the host sees the gap and the loss summary names its reason.
+    pub(super) fn shed_unbuilt(&self, producer: ProducerId, reason: ShedReason) -> EmitOutcome {
+        self.next_sequence(producer);
+        self.shed(producer, reason, 0)
+    }
 }
 
 impl CaptureState {
