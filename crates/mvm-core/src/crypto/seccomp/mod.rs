@@ -339,6 +339,10 @@ fn essential_syscalls() -> &'static [&'static str] {
         "geteuid",
         "getgid",
         "getegid",
+        // Read-only, like the calls above. A shell's `test -r`, `-w` and `-x`
+        // ask for the supplementary groups whenever the caller does not own
+        // the file, so without it they fail with EPERM.
+        "getgroups",
         // FD
         "fcntl",
     ]
@@ -637,6 +641,29 @@ mod tests {
     #[test]
     fn unrestricted_no_manifest() {
         assert!(SeccompTier::Unrestricted.to_manifest().is_none());
+    }
+
+    /// Every tier a workload can run under lets it read its own supplementary
+    /// groups. Busybox `test -r` calls `getgroups` for a file the caller does
+    /// not own, so a tier without it breaks ordinary shell scripts.
+    #[test]
+    fn every_enforced_tier_lets_a_process_read_its_groups() {
+        for tier in [
+            SeccompTier::Essential,
+            SeccompTier::Minimal,
+            SeccompTier::Standard,
+            SeccompTier::Vsock,
+            SeccompTier::Network,
+        ] {
+            assert!(
+                tier.syscalls().contains(&"getgroups"),
+                "{tier} must grant getgroups"
+            );
+            assert!(
+                !tier.syscalls().contains(&"setgroups"),
+                "{tier} must not grant setgroups"
+            );
+        }
     }
 
     #[test]
