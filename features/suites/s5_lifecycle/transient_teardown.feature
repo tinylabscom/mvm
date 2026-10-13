@@ -4,9 +4,9 @@ Feature: Workload lifecycle correctness
   reported exit code is sourced from the vsock-audited workload result
   rather than guessed at the host boundary.
 
-  The runs are named so they take the cold path. An unnamed transient run
-  must claim a prepared warm standby, and teardown after a claim is the
-  warm-claim scenario's subject, not this feature's.
+  The runs are named so they take the cold path and leave no standby behind.
+  Teardown after a claim is the warm-claim scenario's subject, not this
+  feature's.
 
   @live
   Scenario: A transient run tears down on entrypoint exit with the sourced exit code

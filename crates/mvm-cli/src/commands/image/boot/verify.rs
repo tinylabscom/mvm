@@ -1,16 +1,17 @@
 //! `mvmctl image boot verify` — check a published image set, offline.
 //!
 //! Reads the four inputs a verification needs from disk and hands them to
-//! `mvm_core::image_set::verify_image_set`, which owns every stage. This module
-//! adds nothing to what is checked; it only reads the inputs, and says which
-//! stage refused. Nothing here touches the network or the boot image cache.
+//! `mvm_core::image_set::verify_image_set`, which authenticates the manifest
+//! and artifacts. Workload roots then pass the same base-image contract check
+//! as acquisition. Nothing here touches the network or the boot image cache.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::image_set::{
-    ArtifactName, ImageLock, ImageSetError, ImageSetRequirement, ImageSetVerification,
-    VerifiedImageSet, VerifiedSelectedArtifacts, verify_image_set, verify_image_set_artifacts,
+    ArtifactFormat, ArtifactName, ImageLock, ImageSetError, ImageSetManifest, ImageSetRequirement,
+    ImageSetRole, ImageSetVerification, VerifiedArtifact, VerifiedImageSet,
+    VerifiedSelectedArtifacts, verify_image_set, verify_image_set_artifacts,
 };
 use mvm_core::image_set_revocation::load_image_set_revocations;
 use serde_json::json;
@@ -94,12 +95,14 @@ enum VerifyOutcome {
 fn verify(request: &VerifyRequest) -> Result<Result<VerifyOutcome, ImageSetError>> {
     let inputs = VerifyInputs::read(request)?;
     let requirement = ImageSetRequirement::current_train();
+    let host = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let mut verification = ImageSetVerification::new(
         &inputs.manifest_bytes,
         &inputs.bundle_bytes,
         &inputs.lock,
         &request.artifacts,
-    );
+    )
+    .with_host_protocols(&host);
     if request.require_complete {
         verification = verification.require(&requirement);
     }
@@ -111,15 +114,62 @@ fn verify(request: &VerifyRequest) -> Result<Result<VerifyOutcome, ImageSetError
         verification = verification.with_revocations(revocations);
     }
     if request.artifact.is_empty() {
-        Ok(verify_image_set(&verification).map(VerifyOutcome::Full))
+        Ok(verify_image_set(&verification).and_then(|verified| {
+            verify_workload_roots(&verified.manifest, &verified.artifacts)?;
+            Ok(VerifyOutcome::Full(verified))
+        }))
     } else {
         let selected = request
             .artifact
             .iter()
             .map(|name| ArtifactName::new(name).map_err(|error| anyhow!(error)))
             .collect::<Result<Vec<_>>>()?;
-        Ok(verify_image_set_artifacts(&verification, &selected).map(VerifyOutcome::Selected))
+        Ok(
+            verify_image_set_artifacts(&verification, &selected).and_then(|verified| {
+                verify_workload_roots(&verified.manifest, &verified.artifacts)?;
+                Ok(VerifyOutcome::Selected(verified))
+            }),
+        )
     }
+}
+
+fn verify_workload_roots(
+    manifest: &ImageSetManifest,
+    artifacts: &[VerifiedArtifact],
+) -> Result<(), ImageSetError> {
+    for artifact in artifacts {
+        if !matches!(artifact.role, ImageSetRole::WorkloadRootfs(_)) {
+            continue;
+        }
+        let mut declarations = manifest
+            .members
+            .iter()
+            .filter(|member| member.role == artifact.role && member.target == artifact.target)
+            .flat_map(|member| &member.artifacts)
+            .filter(|declared| declared.name == artifact.name);
+        let declared =
+            declarations
+                .next()
+                .ok_or_else(|| ImageSetError::UnknownSelectedArtifact {
+                    name: artifact.name.clone(),
+                })?;
+        if declarations.next().is_some() {
+            return Err(ImageSetError::DuplicateSelectedArtifact {
+                name: artifact.name.clone(),
+            });
+        }
+        if matches!(declared.format, ArtifactFormat::Ext4) {
+            mvm_build::published_image_set::verify_base_image_contract(
+                &artifact.path,
+                &manifest.compatibility,
+            )
+            .map_err(|error| ImageSetError::BaseImageContractInvalid {
+                artifact: artifact.name.clone(),
+                reason: format!("{error:#}"),
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// One line naming the stage first, so a reader learns how far the set got
@@ -131,6 +181,8 @@ fn refusal_message(error: &ImageSetError) -> String {
 fn verified_json(verified: &VerifiedImageSet) -> serde_json::Value {
     json!({
         "verified": true,
+        "image_manifest_schema": verified.manifest.schema_version,
+        "compatibility": &verified.manifest.compatibility,
         "set_version": verified.manifest.set_version.as_str(),
         "release_tag": verified.release.release_tag.as_str(),
         "manifest_sha256": verified.manifest_sha256.as_str(),
@@ -179,6 +231,8 @@ fn selected_json(verified: &VerifiedSelectedArtifacts) -> serde_json::Value {
     json!({
         "verified": true,
         "scope": "selected-artifacts",
+        "image_manifest_schema": verified.manifest.schema_version,
+        "compatibility": &verified.manifest.compatibility,
         "set_version": verified.manifest.set_version.as_str(),
         "release_tag": verified.release.release_tag.as_str(),
         "manifest_sha256": verified.manifest_sha256.as_str(),
@@ -348,6 +402,98 @@ mod tests {
         verify(&staged.request)
             .expect("every input is readable")
             .expect_err("the set must be refused")
+    }
+
+    fn root_manifest_value() -> serde_json::Value {
+        let mut manifest: serde_json::Value = serde_json::from_str(MANIFEST).unwrap();
+        manifest["members"][0]["role"] = json!({"workload_rootfs": "default_tenant"});
+        manifest["members"][0]["target"] = json!({"arch": "aarch64"});
+        manifest["members"][0]["artifacts"][0]["name"] = json!("rootfs.ext4");
+        manifest["members"][0]["artifacts"][0]["format"] = json!("ext4");
+        manifest
+    }
+
+    fn base_manifest() -> ImageSetManifest {
+        let mut manifest = root_manifest_value();
+        manifest["schema_version"] = json!(3);
+        manifest
+            .as_object_mut()
+            .unwrap()
+            .remove("mvm_source_commit");
+        manifest["compatibility"] = json!({
+            "base_image_contract": 1,
+            "builder_cache_contract": 1,
+            "builder_boot_abi": 2,
+        });
+        serde_json::from_value(manifest).unwrap()
+    }
+
+    fn root_artifact(directory: &Path, marker: Option<&[u8]>) -> VerifiedArtifact {
+        let tree = directory.join("tree");
+        std::fs::create_dir_all(tree.join("etc/mvm")).unwrap();
+        if let Some(marker) = marker {
+            std::fs::write(tree.join("etc/mvm/base-image-contract"), marker).unwrap();
+        }
+        let path = directory.join("rootfs.ext4");
+        mvm_fs::rootfs::materialize_ext4_pure(
+            &tree,
+            &path,
+            &mvm_fs::rootfs::MaterializeOptions::default(),
+        )
+        .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        VerifiedArtifact {
+            role: serde_json::from_value(json!({"workload_rootfs": "default_tenant"})).unwrap(),
+            target: serde_json::from_value(json!({"arch": "aarch64"})).unwrap(),
+            name: ArtifactName::new("rootfs.ext4").unwrap(),
+            path,
+            sha256: Sha256Hex::from_bytes(&bytes),
+            size: bytes.len() as u64,
+        }
+    }
+
+    #[test]
+    fn the_cli_checks_the_declared_base_contract_inside_workload_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = root_artifact(directory.path(), Some(b"1\n"));
+        verify_workload_roots(&base_manifest(), &[artifact]).unwrap();
+    }
+
+    #[test]
+    fn root_contract_verification_uses_the_declared_format_not_the_filename() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut artifact = root_artifact(directory.path(), None);
+        let mut manifest = base_manifest();
+        let name = ArtifactName::new("root-without-extension").unwrap();
+        manifest.members[0].artifacts[0].name = name.clone();
+        artifact.name = name;
+        let error = verify_workload_roots(&manifest, &[artifact]).unwrap_err();
+        assert!(matches!(
+            error,
+            ImageSetError::BaseImageContractInvalid { .. }
+        ));
+    }
+
+    #[test]
+    fn the_cli_reports_missing_malformed_and_mismatched_base_markers() {
+        for marker in [None, Some(b"1".as_slice()), Some(b"2\n".as_slice())] {
+            let directory = tempfile::tempdir().unwrap();
+            let artifact = root_artifact(directory.path(), marker);
+            let error = verify_workload_roots(&base_manifest(), &[artifact]).unwrap_err();
+            assert!(
+                matches!(error, ImageSetError::BaseImageContractInvalid { .. }),
+                "{error}"
+            );
+            assert_eq!(refused_json(&error)["verified"], false);
+        }
+    }
+
+    #[test]
+    fn legacy_workload_roots_do_not_require_the_new_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = root_artifact(directory.path(), None);
+        let legacy: ImageSetManifest = serde_json::from_value(root_manifest_value()).unwrap();
+        verify_workload_roots(&legacy, &[artifact]).unwrap();
     }
 
     #[test]

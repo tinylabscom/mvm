@@ -10,10 +10,10 @@ use ed25519_dalek::SigningKey;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ArtifactFormat, ArtifactName, BootProtocol, GitCommit, GuestDeviceRequirement,
-    IMAGE_SET_SCHEMA_VERSION, ImageSetCompatibility, ImageSetManifest, ImageSetMember,
-    ImageSetProducer, ImageSetRequirement, ImageSetRole, ImageSetVersion, MemberArtifact,
-    MemberTarget, NixInputs, ProtocolRange, ReleaseProducer, ReleaseTag, RepositorySlug,
-    RetiredGuestRuntimeRole, RevocationChannel, WorkflowPath,
+    ImageSetCompatibility, ImageSetManifest, ImageSetMember, ImageSetProducer, ImageSetRequirement,
+    ImageSetRole, ImageSetVersion, LEGACY_IMAGE_SET_SCHEMA_VERSION, MemberArtifact, MemberTarget,
+    NixInputs, ProtocolRange, ReleaseProducer, ReleaseTag, RepositorySlug, RetiredGuestRuntimeRole,
+    RevocationChannel, WorkflowPath,
 };
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
@@ -134,7 +134,7 @@ fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
         .map(|required| member(required.role, required.target))
         .unzip();
     let manifest = ImageSetManifest {
-        schema_version: IMAGE_SET_SCHEMA_VERSION,
+        schema_version: LEGACY_IMAGE_SET_SCHEMA_VERSION,
         set_version: ImageSetVersion::new("1.0.0").expect("version"),
         issued_at: Utc
             .with_ymd_and_hms(2026, 9, 23, 0, 0, 0)
@@ -146,7 +146,7 @@ fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
             release_tag: ReleaseTag::new("v1.0.0").expect("tag"),
             source_commit: GitCommit::new("a".repeat(40)).expect("commit"),
         }),
-        mvm_source_commit: GitCommit::new("b".repeat(40)).expect("commit"),
+        mvm_source_commit: Some(GitCommit::new("b".repeat(40)).expect("commit")),
         compatibility: ImageSetCompatibility {
             guest_agent_protocol: Some(ProtocolRange::new(2, 2).expect("protocol")),
             builder_cache_contract: 4,

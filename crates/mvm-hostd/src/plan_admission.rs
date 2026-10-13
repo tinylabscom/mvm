@@ -1120,34 +1120,26 @@ pub fn populate_audit_substrate(
 /// Parent dir is assumed pre-created by the caller (the producer sites
 /// in `up.rs` ensure `mvm_home/vms/<name>/` exists with the same
 /// `0700` umbrella as `~/.mvm`).
+///
+/// Nothing is synced. Every file written here is a per-run copy of material
+/// the admission record already holds durably, read by this run from the
+/// page cache; a host crash that could lose it also ends the guest that would
+/// read it, and a torn signed envelope fails verification rather than being
+/// trusted. On a rotational disk the sync was most of a warm claim's time
+/// between verifying its parent and forking its child.
+///
+/// The temporary has a fresh random name created exclusively, so nothing
+/// planted beside `path` is written through, and the rename replaces whatever
+/// sits at `path` itself, a link included, without following it.
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
     let parent = path.parent().ok_or_else(|| {
         anyhow::anyhow!("write_secret_file: path has no parent: {}", path.display())
     })?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("create parent dir {}", parent.display()))?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("open tmp file {}", tmp.display()))?;
-        f.write_all(body)
-            .with_context(|| format!("write secret bytes to {}", tmp.display()))?;
-        // Best-effort fsync; on tmpfs this is a no-op and on a flaky
-        // FS we'd rather succeed-and-warn than fail-and-abort.
-        let _ = f.sync_all();
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    mvm_core::atomic_io::write_private_ephemeral(path, body)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Stash the signed plan envelope + (optional) bundle pin in the
@@ -4556,6 +4548,33 @@ mod tests {
             !dir.path().join("plan.json.tmp").exists(),
             "tmp file should be renamed away"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_secret_file_never_writes_through_a_planted_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        let path = dir.path().join("plan.json");
+        // A link at the old fixed temporary name and one at the destination:
+        // neither may carry the write to the file they point at.
+        std::os::unix::fs::symlink(&outside, path.with_extension("json.tmp")).unwrap();
+        write_secret_file(&path, b"first").expect("write past a planted temporary");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        write_secret_file(&path, b"second").expect("write over a planted destination");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
     }
 
     #[test]

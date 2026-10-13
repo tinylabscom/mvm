@@ -12,12 +12,29 @@ use clap::Subcommand;
 pub(in crate::commands) enum DevAction {
     /// Ensure the dev default-tenant image is installed: pair-build from the
     /// selected image checkout, or install the pinned image set's dev members
-    Ensure,
+    Ensure {
+        /// Then prepare one warm standby of the image a bare `machine run`
+        /// boots, at the default sizing — the same as `mvmctl pool warm
+        /// --default`.
+        #[arg(long)]
+        warm: bool,
+    },
 }
 
-pub(in crate::commands) fn run(action: DevAction) -> Result<()> {
+pub(in crate::commands) fn run(
+    action: DevAction,
+    cfg: &mvm_core::user_config::MvmConfig,
+) -> Result<()> {
     match action {
-        DevAction::Ensure => run_ensure(),
+        DevAction::Ensure { warm } => {
+            run_ensure()?;
+            if warm {
+                crate::commands::pool::warm_request(
+                    &crate::commands::pool::WarmRequest::one_at_default_sizing(None, cfg),
+                )?;
+            }
+            Ok(())
+        }
     }
 }
 

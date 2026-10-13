@@ -281,10 +281,6 @@ pub fn build_root_in(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Resul
 /// lines are. The fold is the check — a cache that does not reproduce the
 /// signed root is discarded, so the cache is never believed, only confirmed.
 ///
-/// The live segment is still read in full every time, and its new lines are
-/// verified against the chain exactly as before. Only the part a published root
-/// already covers comes from cache.
-///
 /// Declines, never accuses — same contract as [`leaves_over_attested_prefix`],
 /// and for the same reason. Every path out of here that is not a fold over an
 /// attested prefix hands the question to the genesis walk.
@@ -293,85 +289,144 @@ fn root_over_cached_prefix(
     tenant: &str,
     vk: &VerifyingKey,
 ) -> Option<([u8; 32], u64)> {
-    let published = read_published_root(audit_dir, tenant)?;
-    if published.tenant != tenant {
-        return None;
-    }
-    verify_signed_root(&published, vk).ok()?;
-
-    let cache = leaf_cache::read(audit_dir, tenant)?;
-    if cache.tree_size() != published.tree_size {
-        return None;
-    }
-
-    // The fold is the whole trust argument: these hashes are the ones the host
-    // signed for, or they are not used.
-    if !cache.folds_to(&published.root_hash) {
-        return None;
-    }
-
-    // The fold says nothing about the files those leaves came from. The set's
-    // shape does, cheaply — a lost segment must reach the genesis walk, which
-    // names it, rather than being folded over as though nothing were missing.
-    let shape = crate::supervisor::audit_set::segment_shape(audit_dir, tenant).ok()?;
-    if shape.active.0 != cache.active_seq || shape.sealed.len() != cache.sealed.len() {
-        return None;
-    }
-    if sealed_fingerprints(&shape)? != cache.sealed {
-        return None;
-    }
-
-    // The live segment is read in full whatever happens, so the portion the
-    // cache claims is checked line by line rather than assumed. Sealed
-    // segments buy their speed by not being read; this one does not, and an
-    // edit here is caught at publish time exactly as it was before.
-    let content = std::fs::read_to_string(&shape.active.1).ok()?;
-    let active_lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-    let already = usize::try_from(cache.prefix_lines_in_active).ok()?;
-    if already > active_lines.len() {
-        return None;
-    }
-    let cached_active = cache.active_prefix_hashes()?;
-    if cached_active.len() != already
-        || active_lines[..already]
-            .iter()
-            .zip(cached_active)
-            .any(|(line, cached)| leaf_hash(line.as_bytes()) != *cached)
-    {
-        return None;
-    }
-
-    // The suffix is the part no published root covers, so it is verified in
-    // full, seeded from the attested prefix's final line.
-    let appended = &active_lines[already..];
-    if !appended.is_empty() {
-        // `already == 0` puts that final line in the *previous* segment, which
-        // this path deliberately did not read. That happens once per rotation;
-        // hand it to the genesis walk rather than growing a second seek path.
-        if already == 0 {
-            return None;
-        }
-        let seed = hash_line(active_lines[already - 1].as_bytes());
-        let resume = raw_line_index(&content, already)?;
-        verify_chain_bytes_resuming(&content, vk, resume, seed).ok()?;
-    }
-
-    let mut leaf_hashes = cache.leaf_hashes;
-    leaf_hashes.extend(appended.iter().map(|l| leaf_hash(l.as_bytes())));
-    let tree_size = leaf_hashes.len() as u64;
-    let root = merkle_root_of_leaf_hashes(&leaf_hashes);
-
+    let chain = CachedChain::load(audit_dir, tenant, vk)?;
+    let root = merkle_root_of_leaf_hashes(&chain.leaf_hashes);
+    let tree_size = chain.leaf_hashes.len() as u64;
+    let active_lines = chain.active_lines().len() as u64;
     leaf_cache::write(
         audit_dir,
         tenant,
         &leaf_cache::LeafCache {
-            sealed: cache.sealed,
-            active_seq: shape.active.0,
-            prefix_lines_in_active: active_lines.len() as u64,
-            leaf_hashes,
+            sealed: chain.sealed,
+            active_seq: chain.active_seq,
+            prefix_lines_in_active: active_lines,
+            leaf_hashes: chain.leaf_hashes,
         },
     );
     Some((root, tree_size))
+}
+
+/// The whole chain as the leaf cache and the live segment describe it: every
+/// leaf's hash, and the live segment's bytes.
+///
+/// This is what a caller gets instead of the full leaf list when it only needs
+/// the lines it is about to read plus the shape of everything before them —
+/// the root builder, and the session seal. Sealed segments are not read; the
+/// live segment is read once, its cached portion checked line by line against
+/// the cached hashes, and whatever it gained since the last published root is
+/// verified against the chain from the attested prefix's final line.
+pub(crate) struct CachedChain {
+    /// Fingerprints of the sealed segments, oldest first.
+    sealed: Vec<leaf_cache::SealedFingerprint>,
+    /// Sequence number of the live segment.
+    pub(crate) active_seq: u64,
+    /// The live segment's bytes, exactly as read and verified.
+    active_content: String,
+    /// One hash per leaf of the whole chain, in chain order.
+    leaf_hashes: Vec<[u8; 32]>,
+}
+
+impl CachedChain {
+    /// Load the view, or `None` on any doubt about it.
+    ///
+    /// Declines exactly where [`root_over_cached_prefix`] always has: no
+    /// verifying published root, a cache that does not fold to it, a segment
+    /// set that changed shape, a live segment whose cached portion no longer
+    /// hashes to the cache, a suffix that will not walk, or a rotation since the
+    /// last root.
+    pub(crate) fn load(audit_dir: &Path, tenant: &str, vk: &VerifyingKey) -> Option<Self> {
+        let published = read_published_root(audit_dir, tenant)?;
+        if published.tenant != tenant {
+            return None;
+        }
+        verify_signed_root(&published, vk).ok()?;
+
+        let cache = leaf_cache::read(audit_dir, tenant)?;
+        if cache.tree_size() != published.tree_size {
+            return None;
+        }
+
+        // The fold is the whole trust argument: these hashes are the ones the
+        // host signed for, or they are not used.
+        if !cache.folds_to(&published.root_hash) {
+            return None;
+        }
+
+        // The fold says nothing about the files those leaves came from. The
+        // set's shape does, cheaply — a lost segment must reach the genesis
+        // walk, which names it, rather than being folded over as though nothing
+        // were missing.
+        let shape = crate::supervisor::audit_set::segment_shape(audit_dir, tenant).ok()?;
+        if shape.active.0 != cache.active_seq || shape.sealed.len() != cache.sealed.len() {
+            return None;
+        }
+        if sealed_fingerprints(&shape)? != cache.sealed {
+            return None;
+        }
+
+        // The live segment is read in full whatever happens, so the portion the
+        // cache claims is checked line by line rather than assumed. Sealed
+        // segments buy their speed by not being read; this one does not, and an
+        // edit here is caught at publish time exactly as it was before.
+        let content = std::fs::read_to_string(&shape.active.1).ok()?;
+        let active_lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        let already = usize::try_from(cache.prefix_lines_in_active).ok()?;
+        if already > active_lines.len() {
+            return None;
+        }
+        let cached_active = cache.active_prefix_hashes()?;
+        if cached_active.len() != already
+            || active_lines[..already]
+                .iter()
+                .zip(cached_active)
+                .any(|(line, cached)| leaf_hash(line.as_bytes()) != *cached)
+        {
+            return None;
+        }
+
+        // The suffix is the part no published root covers, so it is verified in
+        // full, seeded from the attested prefix's final line.
+        let appended = &active_lines[already..];
+        if !appended.is_empty() {
+            // `already == 0` puts that final line in the *previous* segment,
+            // which this path deliberately did not read. That happens once per
+            // rotation; hand it to the genesis walk rather than growing a second
+            // seek path.
+            if already == 0 {
+                return None;
+            }
+            let seed = hash_line(active_lines[already - 1].as_bytes());
+            let resume = raw_line_index(&content, already)?;
+            verify_chain_bytes_resuming(&content, vk, resume, seed).ok()?;
+        }
+
+        let mut leaf_hashes = cache.leaf_hashes;
+        leaf_hashes.extend(appended.iter().map(|l| leaf_hash(l.as_bytes())));
+        Some(Self {
+            sealed: cache.sealed,
+            active_seq: shape.active.0,
+            active_content: content,
+            leaf_hashes,
+        })
+    }
+
+    /// The live segment's non-blank lines, in chain order.
+    pub(crate) fn active_lines(&self) -> Vec<&str> {
+        self.active_content
+            .lines()
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Whether any segment was sealed before the live one.
+    pub(crate) fn has_sealed_segments(&self) -> bool {
+        !self.sealed.is_empty()
+    }
+
+    /// Leaves in the whole chain.
+    pub(crate) fn tree_size(&self) -> u64 {
+        self.leaf_hashes.len() as u64
+    }
 }
 
 /// Fingerprint every sealed segment in `shape`, or `None` if any is gone.

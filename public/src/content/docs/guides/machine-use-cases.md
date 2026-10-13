@@ -36,16 +36,12 @@ Use one-shot runs when the result is the command output, not a retained machine:
 
 ```bash
 mvmctl image pull alpine:3.20
-export MVM_RESIDENCY=warm                # Linux defaults to parked: no claims
-mvmctl pool warm --image alpine:3.20
 mvmctl machine run --image alpine:3.20 -- uname -a
 ```
 
-An unnamed one-shot run claims a prepared warm standby of the same image and
-sizing and refuses rather than cold-booting without one; `--name` boots it cold.
-The first run may pull and materialize the image. Later runs can reuse cached
-inputs when the image digest and policy inputs still match. Cache reuse never
-skips admission or verification.
+The first run of an image boots cold and leaves a standby of it ready, so later
+matching runs start warm. Cached inputs are reused while the image digest and
+policy inputs still match; cache reuse never skips admission or verification.
 
 Networking is default-deny. Opt in explicitly:
 

@@ -46,6 +46,8 @@ pub(crate) enum ChildGrantError {
     VerbsMismatch,
     #[error("child drive grant does not match the admitted plan")]
     DriveMismatch,
+    #[error("child application terminal does not match the admitted plan")]
+    ApplicationTerminalMismatch,
     #[error("fresh child grant unexpectedly carries predecessor lineage")]
     UnexpectedPredecessor,
     #[error("child grant public key is not a 32-byte lowercase hex key")]
@@ -65,7 +67,13 @@ pub(crate) fn issue_child_grant(
         .grants
         .as_ref()
         .and_then(|grants| grants.drive.as_ref());
-    let grant_required = plan.agent_verbs.is_some() || expected_drive.is_some();
+    let expected_terminal = plan
+        .grants
+        .as_ref()
+        .and_then(|grants| grants.application_terminal.as_ref())
+        .map(mvm_contract::grants::ApplicationTerminalBinding::from);
+    let grant_required =
+        plan.agent_verbs.is_some() || expected_drive.is_some() || expected_terminal.is_some();
     let Some(issuer) = issuer else {
         return if grant_required {
             Err(ChildGrantError::IssuerRequired)
@@ -101,6 +109,9 @@ pub(crate) fn issue_child_grant(
     }
     if envelope.grant.drive.as_ref() != expected_drive {
         return Err(ChildGrantError::DriveMismatch);
+    }
+    if envelope.grant.application_terminal != expected_terminal {
+        return Err(ChildGrantError::ApplicationTerminalMismatch);
     }
     if envelope.predecessor_session_id.is_some() || envelope.predecessor_plan_nonce_hex.is_some() {
         return Err(ChildGrantError::UnexpectedPredecessor);
@@ -173,6 +184,11 @@ mod tests {
                 verbs: plan.agent_verbs.clone().unwrap(),
                 drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
                 tool_mediation: None,
+                application_terminal: plan
+                    .grants
+                    .as_ref()
+                    .and_then(|grants| grants.application_terminal.as_ref())
+                    .map(mvm_contract::grants::ApplicationTerminalBinding::from),
                 sig: vec![3u8; 64],
             },
         }
@@ -295,6 +311,40 @@ mod tests {
         assert!(matches!(
             issue_child_grant(&plan, &config, Some(&issuer)),
             Err(ChildGrantError::SignatureMalformed)
+        ));
+    }
+
+    #[test]
+    fn an_application_terminal_child_grant_must_carry_the_plans_argv() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new()
+            .nonce([7u8; 16])
+            .build();
+        plan.agent_verbs = Some(Vec::new());
+        plan.grants = Some(mvm_contract::grants::Grants {
+            application_terminal: Some(
+                mvm_contract::grants::ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()])
+                    .unwrap(),
+            ),
+            ..Default::default()
+        });
+        let config = VmStartConfig {
+            name: "child-terminal".into(),
+            ..Default::default()
+        };
+        let matching = matching_envelope(&plan, &config.name);
+        let issuer = FixedIssuer::returning(Some(matching.clone()));
+        assert!(
+            issue_child_grant(&plan, &config, Some(&issuer))
+                .expect("matching terminal grant")
+                .is_some()
+        );
+
+        let mut stripped = matching;
+        stripped.grant.application_terminal = None;
+        let issuer = FixedIssuer::returning(Some(stripped));
+        assert!(matches!(
+            issue_child_grant(&plan, &config, Some(&issuer)),
+            Err(ChildGrantError::ApplicationTerminalMismatch)
         ));
     }
 

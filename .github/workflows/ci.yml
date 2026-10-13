@@ -792,11 +792,15 @@ jobs:
       # The other half: a build without the verifier must refuse every signature
       # and say why. The workspace lane unifies the verifier in, so those tests
       # compile out there; mvmd links mvm-core without it, so the refusal is a
-      # shipped path. Run per crate with no features.
+      # shipped path. Run per crate with no features. mvm-client turns the
+      # verifier on by default, so it runs on its own with default features
+      # off: selected beside mvm-core it would unify the verifier back into
+      # mvm-core and compile every refusal test out.
       - name: verifier-absent refusal tests (no manifest-verify)
         run: |
-          cargo nextest run -p mvm-core -p mvm-build -p mvm-client \
-            -E 'test(/without_the_verifier|cannot_verify|without_manifest_verify|no_feature_build/)'
+          filter='test(/without_the_verifier|cannot_verify|without_manifest_verify|no_feature_build/)'
+          cargo nextest run -p mvm-core -p mvm-build -E "$filter"
+          cargo nextest run -p mvm-client --no-default-features -E "$filter"
 
       # The authored-policy schema is generated from the Rust types and
       # published twice (schema/ and the docs reference page); the drift tests

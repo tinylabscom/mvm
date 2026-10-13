@@ -21,6 +21,18 @@ pub const VERB_GRANT_BASELINE: [&str; 4] = [
     "resource-usage",
 ];
 
+/// The console verbs an application-terminal grant lets through. The guest
+/// still answers them only in the development profile, and opens a terminal
+/// only for the granted argv.
+pub const APPLICATION_TERMINAL_VERBS: [&str; 6] = [
+    "console-open",
+    "console-attach",
+    "console-detach",
+    "console-list",
+    "console-close",
+    "console-resize",
+];
+
 /// Host-signer-signed, session- and time-bound capability granting a
 /// workload a subset of agent control verbs. Signed by the admission
 /// authority, verified by the guest — deliberately a different key from
@@ -43,6 +55,11 @@ pub struct VerbGrant {
     /// path. The host signer derives this from the admitted plan's tool rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_mediation: Option<ToolMediationGrant>,
+    /// The admitted application terminal's argv digest. Its presence lets the
+    /// console verbs through this grant, and the guest then opens a terminal
+    /// only for exactly that argv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_terminal: Option<crate::grants::ApplicationTerminalBinding>,
     /// Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as
     /// base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal
     /// numbers — roughly 230 characters against base64's 88 — and this grant
@@ -140,6 +157,8 @@ struct VerbGrantSigned<'a> {
     drive: Option<&'a crate::grants::DriveGrant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_mediation: Option<&'a ToolMediationGrant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    application_terminal: Option<&'a crate::grants::ApplicationTerminalBinding>,
 }
 
 impl VerbGrant {
@@ -151,6 +170,7 @@ impl VerbGrant {
             verbs: self.verbs.iter().map(VerbId::as_str).collect(),
             drive: self.drive.as_ref(),
             tool_mediation: self.tool_mediation.as_ref(),
+            application_terminal: self.application_terminal.as_ref(),
         };
         serde_json::to_vec(&body).expect("VerbGrantSigned serializes")
     }
@@ -182,6 +202,7 @@ impl VerbGrant {
     pub fn permits(&self, verb: &str) -> bool {
         VERB_GRANT_BASELINE.contains(&verb)
             || (self.drive.is_some() && matches!(verb, "drive-open" | "drive-file"))
+            || (self.application_terminal.is_some() && APPLICATION_TERMINAL_VERBS.contains(&verb))
             || self.verbs.iter().any(|v| v.as_str() == verb)
     }
 }
@@ -213,6 +234,7 @@ mod tests {
             verbs: verbs.into_iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         g.sig = k.sign(&g.signing_bytes()).to_bytes().to_vec();
@@ -226,6 +248,43 @@ mod tests {
         assert!(
             g.verify(&k.verifying_key(), "sess-A", &nonce(), now)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_application_terminal_binding_is_signed_and_admits_only_console_verbs() {
+        use crate::grants::{ApplicationTerminalBinding, ApplicationTerminalGrant};
+        let now = Utc::now();
+        let (mut grant, signer) = signed(now, vec![]);
+        assert!(!grant.permits("console-open"));
+        let claude = ApplicationTerminalGrant::new(vec!["/usr/bin/claude".into()]).unwrap();
+        grant.application_terminal = Some(ApplicationTerminalBinding::from(&claude));
+        grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let json = serde_json::to_string(&grant).expect("serialize");
+        let round: VerbGrant = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            round
+                .verify(&signer.verifying_key(), "sess-A", &nonce(), now)
+                .is_ok()
+        );
+        for verb in APPLICATION_TERMINAL_VERBS {
+            assert!(round.permits(verb), "{verb}");
+        }
+        assert!(!round.permits("exec"));
+        assert!(!round.permits("proc-start"));
+
+        let shell = ApplicationTerminalGrant::new(vec!["/opt/other/bin/app".into()]).unwrap();
+        let mut redirected = round.clone();
+        redirected.application_terminal = Some(ApplicationTerminalBinding::from(&shell));
+        assert_eq!(
+            redirected.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
+            Err(VerbGrantError::BadSignature)
+        );
+        let mut stripped = round;
+        stripped.application_terminal = None;
+        assert_eq!(
+            stripped.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
+            Err(VerbGrantError::BadSignature)
         );
     }
 

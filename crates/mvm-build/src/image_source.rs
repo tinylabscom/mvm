@@ -48,6 +48,7 @@ pub use build::{
     contract_for, emit_argv, emit_local_manifest, render_build_script, stage_contract_files,
     stage_overlay_contract_files, stage_work_tree,
 };
+pub(crate) use cache::verify_local_cache_entry_record;
 pub use cache::{
     CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,
     ImageBuildRole, ImageBuildTarget, KeyInputs, LOCAL_IMAGE_CACHE_DIR, LocalImageCache,

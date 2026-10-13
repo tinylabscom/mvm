@@ -176,6 +176,8 @@ const CACHE_SUB: &[(&str, AuditPosture)] = &[
 const POOL_SUB: &[(&str, AuditPosture)] = &[
     ("warm", AuditPosture::Emits("PoolWarm")),
     ("status", AuditPosture::ReadOnly),
+    // The standby a run leaves behind: the same warm, recorded the same way.
+    ("refill", AuditPosture::Emits("PoolWarm")),
 ];
 
 const CHECKPOINT_SUB: &[(&str, AuditPosture)] = &[
@@ -261,6 +263,10 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("search", AuditPosture::ReadOnly),
+    // Both write only the file they were asked for (a lock or a flake
+    // directory) and touch no host state, like `build compile`.
+    ("lock", AuditPosture::ReadOnly),
+    ("compile", AuditPosture::ReadOnly),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),

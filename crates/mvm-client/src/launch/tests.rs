@@ -316,6 +316,24 @@ async fn a_transient_command_exit_is_sealed_from_its_admitted_plan() {
         mvm_hostd::audit::session::Verdict::Verified,
         "{verified:?}"
     );
+    // The closing root is published in the same flush as the seal, and still
+    // after it: it covers every line, the seal included.
+    let root: mvm_contract::merkle::SignedAuditRoot = serde_json::from_slice(
+        &std::fs::read(mvm_hostd::audit::emitter::audit_root_path_for_tenant(
+            &mvm_core::config::mvm_audit_dir(),
+            "local",
+        ))
+        .expect("published root"),
+    )
+    .expect("root parses");
+    let leaves: Vec<&str> = audit.lines().filter(|line| !line.is_empty()).collect();
+    assert_eq!(root.tree_size, leaves.len() as u64);
+    assert!(
+        leaves
+            .last()
+            .is_some_and(|head| head.contains("session.sealed")),
+        "the seal is the chain head the root closes over"
+    );
 }
 
 #[test]
@@ -1041,7 +1059,7 @@ async fn launch_with_managed_volume_takes_and_releases_the_lease() {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("work")
                 .unwrap()
-                .capacity_mib(16)
+                .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
                 .build()
                 .unwrap(),
         )
@@ -1101,7 +1119,7 @@ async fn launch_attaches_a_writable_managed_volume_under_standard_only_when_gran
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .unwrap()
-                .capacity_mib(16)
+                .capacity_mib(crate::volume::test_support::TEST_VOLUME_MIB)
                 .build()
                 .unwrap(),
         )

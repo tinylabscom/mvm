@@ -32,15 +32,15 @@ microVM without writing a flake or installing host Nix.
 mvmctl doctor --workflow cli-run                 # preflight
 mvmctl bootstrap                                # prepare shared artifacts
 mvmctl image pull alpine                        # prepare this OCI image
-export MVM_RESIDENCY=warm                        # enable prepared claims
-mvmctl pool warm 1 --image alpine               # prepare its launch shape
-mvmctl run --image alpine -- uname -a            # claim, run, tear down
+mvmctl run --image alpine -- uname -a            # boot, run, tear down
 mvmctl image inspect alpine                      # inspect cached provenance
 ```
 
-`machine run` does not pull or materialize. Preparation is explicit so a
-successful warm-eligible launch remains strictly below 300ms; a cache or
-standby miss fails quickly with the command needed to prepare it. Production
+`machine run` does not pull or materialize; a cache miss fails quickly with the
+command needed to prepare it. The first run of an image boots cold and leaves a
+standby behind, so later runs claim it and start inside the 300 ms ceiling.
+`mvmctl pool warm 1 --image alpine` prepares one ahead of time if the first run
+should be warm too. Production
 image runs should use digest-pinned refs and the existing OCI policy
 verification path.
 
@@ -64,12 +64,9 @@ macOS, GPU, and architecture limits, see
 You have a `flake.nix` (or want to scaffold one) and want a microVM
 booted from it.
 
-The run is named: an unnamed run must claim a prepared warm standby, and
-`pool warm` prepares only OCI and default images, so a named flake run boots cold.
-
 ```bash
 mvmctl doctor --workflow cli-run                # preflight
-mvmctl machine run --name my-app --flake . --cpus 2 --memory 1024   # build + boot
+mvmctl machine run --flake . --cpus 2 --memory 1024      # build + boot
 mvmctl machine stop --all                                     # tear down
 ```
 
@@ -184,14 +181,9 @@ builder VM is headless (it only exists to run `nix build` on your
 behalf), so an interactive shell means booting a dev-tier *workload*
 and attaching your terminal to it.
 
-An unnamed `-it` run claims a prepared warm standby like any other unnamed
-transient run, and refuses without one:
-
 ```bash
 mvmctl doctor --workflow dev-shell              # preflight (no host rust needed)
 mvmctl image pull alpine
-export MVM_RESIDENCY=warm
-mvmctl pool warm --image alpine
 mvmctl machine run --image alpine -it -- /bin/sh  # boot + drop into shell
 # inside the shell: do work; exit / Ctrl+D tears the VM down
 ```

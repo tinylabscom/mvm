@@ -3,9 +3,10 @@
 //!
 //! `mvm-guest-netinit` runs at boot inside every microVM,
 //! installs kernel blackhole routes for the mandatory-deny
-//! ranges, and writes a single marker-prefixed JSON line to
-//! stdout (captured by the kernel console). This module is the
-//! host-side glue that:
+//! ranges, and, when any route failed to install, writes a single
+//! marker-prefixed JSON line to stdout (captured by the console).
+//! A clean install writes nothing. This module is the host-side
+//! glue that:
 //!
 //! 1. Reads the console log after the VM is ready.
 //! 2. Parses the netinit `Report` via the canonical marker.
@@ -34,9 +35,9 @@ use mvm_agentd::netinit::{Report, parse_report_from_console};
 /// Read a console log file and emit netinit audit events.
 ///
 /// Returns `Ok(Some(report))` when a report was found and
-/// emitted, `Ok(None)` when no marker was present (e.g. the VM
-/// pre-dates the netinit-emitting mkGuest build, or netinit
-/// itself failed to even produce output), `Err` on I/O failure.
+/// emitted, `Ok(None)` when no marker was present (every route
+/// installed, so netinit wrote nothing; or netinit itself failed
+/// to even produce output), `Err` on I/O failure.
 ///
 /// **Best-effort semantics.** A missing report is not an error
 /// — older templates that boot without netinit are still valid

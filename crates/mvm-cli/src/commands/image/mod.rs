@@ -26,6 +26,7 @@ mod materialize;
 mod oci_types;
 mod pull;
 mod pull_core;
+mod recent;
 mod revocations;
 mod rm;
 mod source;
@@ -42,6 +43,7 @@ pub(in crate::commands) use pull_core::resolve_or_pull_run_image;
 pub(in crate::commands) use pull_core::{
     ensure_prod_digest_pin, ensure_prod_registry_allowed, require_prod_digest_pin,
 };
+pub(in crate::commands) use recent::recent_image_references;
 #[cfg(test)]
 pub(in crate::commands) use trust::registry_auth_from_lookup;
 pub(in crate::commands) use trust::{OciRegistryAuthDecision, registry_auth_for};
@@ -70,6 +72,12 @@ pub(in crate::commands) enum ImageAction {
         /// Production policy: require an immutable digest-pinned reference
         #[arg(long)]
         prod: bool,
+        /// After a successful, verified pull, prepare one warm standby of the
+        /// image at the default sizing — the same as
+        /// `mvmctl pool warm --image <REF>`. A failed pull, or a rootfs
+        /// directory that carries no provenance to verify, warms nothing.
+        #[arg(long)]
+        warm: bool,
     },
     /// List cached OCI images
     Ls {
@@ -107,16 +115,28 @@ pub(in crate::commands) enum ImageAction {
     Revocations(revocations::Args),
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     let cache_root = oci_cache_root();
     match args.action {
         ImageAction::BuildLayer { source, output } => build_layer::run(&source, &output),
-        ImageAction::Pull { reference, prod } => pull::run(&cache_root, reference, prod),
+        ImageAction::Pull {
+            reference,
+            prod,
+            warm,
+        } => {
+            let pulled = pull::run(&cache_root, reference.clone(), prod);
+            pull::warm_after_pull(pulled, &reference, warm, |reference| {
+                super::pool::warm_request(&super::pool::WarmRequest::one_at_default_sizing(
+                    Some(reference),
+                    cfg,
+                ))
+            })
+        }
         ImageAction::Ls { registry, json } => ls::run(&cache_root, registry.as_deref(), json),
         ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
         ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
         ImageAction::Boot { action } => boot::run(action),
-        ImageAction::Dev { action } => dev::run(action),
+        ImageAction::Dev { action } => dev::run(action, cfg),
         ImageAction::Revocations(args) => revocations::run(args.action),
     }
 }

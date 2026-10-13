@@ -19,6 +19,7 @@ struct VerifiedPackInfo {
     signer_issuer: String,
     official_status: &'static str,
     revocation_scope: &'static str,
+    revocation_required: bool,
     publisher_issuer: String,
     accepted_signing_identities: Vec<String>,
     policy_files: Vec<String>,
@@ -55,6 +56,12 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         &reference,
     )?;
     let manifest = verified.manifest();
+    let revocation_required = manifest.reference.namespace() == "mvm"
+        || matches!(
+            &manifest.image,
+            Some(mvm_core::registry_pack::RegistryPackImage::Built(_))
+        );
+    let official = manifest.reference.namespace() == "mvm";
     let trust = publisher
         .policy
         .trust_for_namespace(manifest.reference.namespace())?;
@@ -91,8 +98,17 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         manifest_sha256: verified.manifest_sha256().as_str().to_string(),
         signer_identity: verified.signer().identity.clone(),
         signer_issuer: verified.signer().issuer.clone(),
-        official_status: "not_established",
-        revocation_scope: "operator_configured_only",
+        official_status: if official {
+            "established"
+        } else {
+            "not_established"
+        },
+        revocation_scope: if official {
+            "mvm_release_identity"
+        } else {
+            "operator_configured_only"
+        },
+        revocation_required,
         publisher_issuer: trust.issuer,
         accepted_signing_identities: trust.accepted_identities,
         policy_files: policy_documents
@@ -124,8 +140,9 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         println!("Verified {} ({})", info.reference, info.manifest_sha256);
         println!("Signer identity: {}", info.signer_identity);
         println!("Signer issuer: {}", info.signer_issuer);
-        println!("Official status: not established by this verification");
-        println!("Revocation scope: operator-configured signed feed only; no feed is required");
+        for line in trust_status_lines(official, revocation_required) {
+            println!("{line}");
+        }
         println!("Signature proves publisher identity and integrity, not safety.");
         return Ok(());
     }
@@ -134,8 +151,9 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     println!("Manifest SHA-256: {}", info.manifest_sha256);
     println!("Signer identity: {}", info.signer_identity);
     println!("Signer issuer: {}", info.signer_issuer);
-    println!("Official status: not established by this verification");
-    println!("Revocation scope: operator-configured signed feed only; no feed is required");
+    for line in trust_status_lines(official, revocation_required) {
+        println!("{line}");
+    }
     println!("Publisher issuer: {}", info.publisher_issuer);
     println!(
         "Accepted signing identities: {}",
@@ -158,4 +176,41 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     }
     println!("Signature proves publisher identity and integrity, not safety.");
     Ok(())
+}
+
+/// Human-readable trust status. `official` is only passed after the pack and
+/// the official revocation feed have both verified.
+fn trust_status_lines(official: bool, revocation_required: bool) -> [&'static str; 2] {
+    match (official, revocation_required) {
+        (true, _) => [
+            "Official status: verified MVM release",
+            "Revocation scope: MVM-controlled signed release feed",
+        ],
+        (false, true) => [
+            "Official status: not established by this verification",
+            "Revocation scope: independent operator trust and a fresh signed feed required",
+        ],
+        (false, false) => [
+            "Official status: not established by this verification",
+            "Revocation scope: operator-configured signed feed only; no feed is required",
+        ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trust_status_lines;
+
+    #[test]
+    fn only_an_official_pack_reports_the_mvm_release_feed() {
+        let [status, scope] = trust_status_lines(true, true);
+        assert_eq!(status, "Official status: verified MVM release");
+        assert!(scope.contains("MVM-controlled"));
+        for required in [true, false] {
+            let [status, scope] = trust_status_lines(false, required);
+            assert!(status.contains("not established"));
+            assert!(!scope.contains("MVM-controlled"));
+            assert_eq!(scope.contains("fresh signed feed required"), required);
+        }
+    }
 }

@@ -56,11 +56,9 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let text = read_prompt(args.prompt.as_deref(), std::io::stdin())?;
     let prompt = build_prompt(&args, text)?;
-    let checkpointer: Option<&dyn StepCheckpointer> = if args.no_step_checkpoint {
-        None
-    } else {
-        Some(&VmFullStepCheckpointer)
-    };
+    let checkpointer = step_checkpointer(args.no_step_checkpoint, || {
+        crate::commands::shared::ensure_snapshot_key().map(|_| ())
+    })?;
     let outcome = super::invoke::prompt_machine(&prompt, checkpointer)?;
     match outcome {
         PromptOutcome::Duplicate { journal_cursor } => {
@@ -84,6 +82,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             Ok(())
         }
     }
+}
+
+/// The checkpointer each step is captured through, or none when the caller
+/// skipped step checkpoints.
+///
+/// A step checkpoint is an encrypted `vm_full` capture, so it needs the host
+/// snapshot key. A host that never ran `mvmctl bootstrap` has none, and every
+/// step would then be recorded without a resume point, leaving the session
+/// unreplayable. The key is provisioned here, before the prompt is sent, so a
+/// key that cannot be provisioned refuses the prompt instead.
+fn step_checkpointer(
+    no_step_checkpoint: bool,
+    ensure_snapshot_key: impl FnOnce() -> Result<()>,
+) -> Result<Option<&'static dyn StepCheckpointer>> {
+    if no_step_checkpoint {
+        return Ok(None);
+    }
+    ensure_snapshot_key().context(
+        "a prompt step checkpoint needs the host snapshot key; pass --no-step-checkpoint \
+         to send the prompt without one",
+    )?;
+    Ok(Some(&VmFullStepCheckpointer))
 }
 
 fn build_prompt(args: &Args, text: Vec<u8>) -> Result<AgentPrompt> {
@@ -172,6 +192,36 @@ mod tests {
             "read stops past the limit"
         );
         assert!(build_prompt(&args(None), text).is_err());
+    }
+
+    #[test]
+    fn a_stepped_prompt_provisions_the_snapshot_key_first() {
+        let ensured = std::cell::Cell::new(false);
+        let checkpointer = step_checkpointer(false, || {
+            ensured.set(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(checkpointer.is_some());
+        assert!(ensured.get());
+    }
+
+    #[test]
+    fn a_skipped_step_needs_no_snapshot_key() {
+        let checkpointer =
+            step_checkpointer(true, || panic!("no key is needed when no step is captured"))
+                .unwrap();
+        assert!(checkpointer.is_none());
+    }
+
+    #[test]
+    fn a_key_that_cannot_be_provisioned_refuses_the_stepped_prompt() {
+        let error = step_checkpointer(false, || anyhow::bail!("key file is group-readable"))
+            .err()
+            .expect("refused");
+        let message = format!("{error:#}");
+        assert!(message.contains("--no-step-checkpoint"), "{message}");
+        assert!(message.contains("group-readable"), "{message}");
     }
 
     #[test]

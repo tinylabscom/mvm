@@ -195,6 +195,141 @@ fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution(
     assert!(authenticate_opening(f.emitter.audit_dir(), &key, &seed).is_err());
 }
 
+/// A fixture with `history` unrelated entries in the chain, then the opening
+/// for its capture. Returns the seed and the opening entry.
+fn appended_opening_fixture(
+    history: usize,
+) -> (
+    Fixture,
+    TranscriptManifest,
+    mvm_core::audit_verify::PlanAuditEntry,
+) {
+    use mvm_core::transcript::evidence::{TRANSCRIPT_OPENED_EVENT, opening_labels};
+    let f = Fixture::new(false);
+    for n in 0..history {
+        let unrelated = for_plan(
+            &f.plan,
+            None,
+            "plan.launched",
+            [("n".to_string(), n.to_string())],
+        );
+        f.emitter
+            .emit_entry_for_evidence(&unrelated, EvidenceReceipt::Omitted)
+            .unwrap();
+    }
+    let mut seed = f.manifest.clone();
+    seed.chunks.clear();
+    seed.sealed_unix_secs = None;
+    seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
+    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    entry.labels = opening_labels(&seed).unwrap();
+    f.emitter
+        .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+        .unwrap();
+    (f, seed, entry)
+}
+
+fn live_segment(f: &Fixture) -> std::path::PathBuf {
+    f.emitter.audit_dir().join("local.jsonl")
+}
+
+fn rewrite_line(path: &Path, idx: usize, edit: impl FnOnce(&str) -> String) {
+    let content = std::fs::read_to_string(path).unwrap();
+    let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+    lines[idx] = edit(&lines[idx]);
+    std::fs::write(path, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn an_appended_opening_is_confirmed_from_the_genesis_line_and_after_history() {
+    use mvm_core::transcript::evidence::authenticate_appended_opening;
+    for history in [0, 5] {
+        let (f, seed, entry) = appended_opening_fixture(history);
+        let key = f.emitter.verifying_key();
+        assert_eq!(
+            authenticate_appended_opening(f.emitter.audit_dir(), &key, &seed).unwrap(),
+            entry,
+            "history of {history}"
+        );
+    }
+}
+
+/// The check a producer runs on its own fresh opening must not grow with the
+/// chain: it stands in front of every boot and every warm claim. It reads the
+/// live segment and verifies one signature, and never walks the entries before
+/// the opening, which the full history walk still does.
+#[test]
+fn confirming_an_appended_opening_does_not_rewalk_the_history_before_it() {
+    use mvm_core::transcript::evidence::{authenticate_appended_opening, authenticate_opening};
+    let (f, seed, entry) = appended_opening_fixture(4);
+    let key = f.emitter.verifying_key();
+    // Damage the oldest entry's signature. Only a walk of the history sees it.
+    rewrite_line(&live_segment(&f), 0, |line| {
+        let at = line.find("\"signature\":\"").unwrap() + "\"signature\":\"".len();
+        let mut bytes = line.as_bytes().to_vec();
+        bytes[at] = if bytes[at] == b'A' { b'B' } else { b'A' };
+        String::from_utf8(bytes).unwrap()
+    });
+    assert!(authenticate_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+    assert_eq!(
+        authenticate_appended_opening(f.emitter.audit_dir(), &key, &seed).unwrap(),
+        entry
+    );
+}
+
+#[test]
+fn an_appended_opening_is_refused_under_another_key_or_another_seed() {
+    use mvm_core::transcript::evidence::authenticate_appended_opening;
+    let (f, seed, _) = appended_opening_fixture(2);
+    let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[18; 32]).verifying_key();
+    assert!(authenticate_appended_opening(f.emitter.audit_dir(), &wrong_key, &seed).is_err());
+    let key = f.emitter.verifying_key();
+    for mutation in ["vm", "tenant", "capture"] {
+        let mut wrong = seed.clone();
+        match mutation {
+            "vm" => wrong.binding.vm_name = "service-instance-2".into(),
+            "tenant" => wrong.binding.tenant_id = "other".into(),
+            _ => wrong.capture_id = "another-capture".into(),
+        }
+        wrong.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&wrong).unwrap();
+        assert!(
+            authenticate_appended_opening(f.emitter.audit_dir(), &key, &wrong).is_err(),
+            "{mutation}"
+        );
+    }
+}
+
+#[test]
+fn an_edited_or_unchained_appended_opening_is_refused() {
+    use mvm_core::transcript::evidence::authenticate_appended_opening;
+    // The readable labels no longer match the signed bytes.
+    let (f, seed, _) = appended_opening_fixture(2);
+    let key = f.emitter.verifying_key();
+    rewrite_line(&live_segment(&f), 2, |line| {
+        line.replacen("service-instance-1", "service-instance-9", 1)
+    });
+    assert!(authenticate_appended_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+
+    // The entry before the opening changed, so the opening's link no longer
+    // names it.
+    let (f, seed, _) = appended_opening_fixture(2);
+    rewrite_line(&live_segment(&f), 1, |line| {
+        line.replacen("plan.launched", "plan.launcheX", 1)
+    });
+    assert!(authenticate_appended_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+}
+
+#[test]
+fn a_second_appended_opening_for_the_same_capture_is_refused() {
+    use mvm_core::transcript::evidence::authenticate_appended_opening;
+    let (f, seed, entry) = appended_opening_fixture(1);
+    f.emitter
+        .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+        .unwrap();
+    let key = f.emitter.verifying_key();
+    assert!(authenticate_appended_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+}
+
 #[test]
 fn atomic_recovery_publication_serializes_independent_signers() {
     use mvm_core::transcript::evidence::authenticated_seal;

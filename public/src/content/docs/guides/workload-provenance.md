@@ -22,13 +22,9 @@ this runtime consumes and verifies the result.
 
 ## Keep proof for one run
 
-Request a receipt when starting a transient workload. An unnamed run claims a prepared warm standby of the image it boots — here the
-`python:3.12-alpine` image a `python` command infers — and refuses rather than
-cold-booting without one, so the standby is warmed first; `--name` boots cold.
+Request a receipt when starting a transient workload:
 
 ```sh
-export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
-mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
 mvmctl run --receipt /tmp/run-receipt.json -- python task.py
 mvmctl trust receipt verify /tmp/run-receipt.json
 ```

@@ -57,16 +57,8 @@ The default is `standard`. Use `restrictive` when the workload does not need
 host files or host-provided environment values:
 
 ```sh
-export MVM_RESIDENCY=warm                     # Linux defaults to parked: no claims
-mvmctl pool warm --image python:3.12-alpine   # the image a `python` command infers
-mvmctl pool warm                              # the default image, for ./debug-script.sh below
 mvmctl run --profile restrictive -- python task.py
 ```
-
-An unnamed run claims a prepared warm standby of the image it boots — here the
-`python:3.12-alpine` image a `python` command infers — and refuses rather than
-cold-booting without one, so the standby is warmed first; `--name` boots cold. The examples
-below run in the same shell.
 
 Use `standard` when the workload needs explicit environment values or
 read-only input files:

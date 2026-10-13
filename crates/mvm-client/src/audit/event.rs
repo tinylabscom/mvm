@@ -349,7 +349,7 @@ pub(crate) fn classify_lifecycle_event(event: &str) -> AuditEventKind {
         return AuditEventKind::Refusal;
     }
     match event {
-        "plan.launched" | "plan.running" => AuditEventKind::Launch,
+        "plan.launched" | "plan.running" | "plan.start_mode" => AuditEventKind::Launch,
         "plan.admitted"
         | "plan.verified"
         | "plan.boot_posture"
@@ -588,6 +588,7 @@ mod tests {
         let cases = [
             ("plan.launched", Launch),
             ("plan.running", Launch),
+            ("plan.start_mode", Launch),
             ("plan.admitted", Admission),
             ("plan.verified", Admission),
             ("plan.oci_provenance", Admission),

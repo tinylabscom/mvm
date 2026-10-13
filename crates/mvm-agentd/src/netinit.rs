@@ -36,13 +36,14 @@
 //! ## Audit emission
 //!
 //! `install_mandatory_deny` returns a `Report` describing what
-//! was installed (and what failed). The caller — typically the
-//! `mvm-guest-netinit` binary running from `/init` — writes the
-//! report as a single JSON line to stdout, which the kernel
-//! console forwards to the host. A future slice wires the agent
-//! to forward the report as a `LocalAuditKind::NetworkMandatoryDeny`
-//! audit event via vsock; for v1 the console-scrape path is
-//! sufficient to surface install failures.
+//! was installed (and what failed). When any route failed, the
+//! `mvm-guest-netinit` binary writes the report as a single JSON
+//! line to stdout, which the console carries to the host
+//! ([`console_report_line`]). A clean install writes nothing: it is
+//! the same report on every boot, and on Firecracker the console is
+//! an emulated serial port that costs a VM exit per byte on the
+//! launch path. A future slice wires the agent to forward the report
+//! as a `LocalAuditKind::NetworkMandatoryDeny` audit event via vsock.
 //!
 //! ## Failure semantics
 //!
@@ -69,6 +70,21 @@ use serde::{Deserialize, Serialize};
 /// uppercase + double-underscore framing puts it well outside
 /// any reasonable log message.
 pub const REPORT_MARKER: &str = "__MVM_NETINIT_REPORT__";
+
+/// The console line the `mvm-guest-netinit` binary writes for `report`, or
+/// `None` when every route installed and there is nothing to diagnose.
+///
+/// The line is [`REPORT_MARKER`], a space and the report's JSON, which is
+/// exactly what [`parse_report_from_console`] reads back.
+pub fn console_report_line(report: &Report) -> Result<Option<String>, serde_json::Error> {
+    if !report.has_failures() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{REPORT_MARKER} {}",
+        serde_json::to_string(report)?
+    )))
+}
 
 /// Parse a console log buffer for the netinit report.
 ///
@@ -661,6 +677,30 @@ mod tests {
         // one skipped — that exercises every field path on the
         // parser side.
         r#"{"installed":[{"cidr":"169.254.169.254/32","category":"cloud-metadata"}],"failed":[{"cidr":"127.0.0.0/8","category":"loopback","reason":"forced"}],"skipped_ipv6":["::1/128"]}"#.to_string()
+    }
+
+    /// A clean install is the same report on every boot; writing it put a
+    /// few hundred bytes on Firecracker's serial console per launch.
+    #[test]
+    fn a_clean_install_writes_no_console_line() {
+        let report = install_mandatory_deny(&MockInstaller::new());
+        assert!(!report.has_failures());
+        assert!(!report.installed.is_empty());
+        assert_eq!(console_report_line(&report).unwrap(), None);
+    }
+
+    /// A failed install still reaches the console in the shape the host
+    /// parser reads.
+    #[test]
+    fn a_failed_install_writes_a_line_the_console_parser_reads_back() {
+        let report = install_mandatory_deny(&MockInstaller::new().fail_on(&["169.254.169.254/32"]));
+        assert!(report.has_failures());
+        let line = console_report_line(&report)
+            .unwrap()
+            .expect("a failed install must be reported");
+        assert!(line.starts_with(REPORT_MARKER));
+        let console = format!("[    0.120000] booting\n{line}\nmvm-guest-init: netinit exited\n");
+        assert_eq!(parse_report_from_console(&console), Some(report));
     }
 
     #[test]
