@@ -1332,10 +1332,10 @@ mod tests {
     }
 
     /// An exported bundle pins no boot assets, so a parent of it boots this
-    /// CLI's guest runtime like any other launch: it requires a claim instead
-    /// of keeping a cold path no `pool warm` could ever replace.
+    /// CLI's guest runtime like any other launch. It can claim when standbys
+    /// are enabled and respects the same disabled-pool policy as an image.
     #[test]
-    fn a_bundle_without_pinned_boot_assets_is_warm_eligible_and_requires_a_claim() {
+    fn a_bundle_without_pinned_boot_assets_is_warm_eligible_and_respects_pool_policy() {
         let tmp = tempfile::tempdir().unwrap();
         let kernel = tmp.path().join("vmlinux");
         let rootfs = tmp.path().join("rootfs.ext4");
@@ -1348,11 +1348,11 @@ mod tests {
         })
         .unwrap();
         assert_eq!(spawned, 1);
-        assert!(warm_claim_requested(&cfg, false).unwrap());
+        assert_eq!(claim_gate(&cfg, false), Ok(()));
         cfg.warm_pool_size = 0;
-        assert!(
-            warm_claim_requested(&cfg, false).is_err(),
-            "an unwarmed bundle launch is refused by strict startup, not cold-booted"
+        assert_eq!(
+            claim_gate(&cfg, false),
+            Err(ColdStartReason::StandbysDisabled)
         );
     }
 

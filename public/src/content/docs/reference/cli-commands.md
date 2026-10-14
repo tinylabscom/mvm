@@ -1947,10 +1947,11 @@ refuses that bundle before preparing a standby, rather than creating capacity
 that no launch can claim.
 
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
-size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
-capacity and fail rather than silently cold-booting. Named launches and shapes
-with extra volumes (including directory mounts) retain their cold path,
-including when the pool size is zero.
+size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
+when standbys are enabled. If no compatible standby is ready, the launch
+declares a cold boot rather than reporting it as a warm claim. Named launches,
+shapes with extra volumes (including directory mounts), and launches with
+standbys disabled retain their cold path.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left
