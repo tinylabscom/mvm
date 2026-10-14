@@ -241,17 +241,11 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         parent_meta.meta_digest.as_str(),
         grant_env,
     ) {
-        let stop_result = mvm_runtime::microvm::stop_vm(&p.child_vm_name);
-        return match stop_result {
-            Ok(()) => Err(error.context(format!(
-                "stopped forked child '{}' after post-restore hygiene failure",
-                p.child_vm_name
-            ))),
-            Err(stop_error) => Err(error.context(format!(
-                "post-restore hygiene failed for '{}' and stopping the child also failed: {}",
-                p.child_vm_name, stop_error
-            ))),
-        };
+        return Err(stop_fc_child_after_restore_failure(&p.child_vm_name, error));
+    }
+
+    if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &parent_meta) {
+        return Err(stop_fc_child_after_restore_failure(&p.child_vm_name, error));
     }
 
     if p.json {
@@ -563,7 +557,7 @@ fn fork_vm_full_arm_hvf(
         return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
     }
 
-    if let Err(error) = record_hvf_fork_runtime_meta(&p.child_vm_name, &p.parent_meta) {
+    if let Err(error) = record_fork_runtime_meta(&p.child_vm_name, &p.parent_meta) {
         return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
     }
 
@@ -607,16 +601,40 @@ fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -
     }
 }
 
-fn record_hvf_fork_runtime_meta(
+/// Stop a restored Firecracker child when post-restore hygiene or its runtime
+/// metadata fails, and report both the original failure and the stop outcome.
+fn stop_fc_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -> anyhow::Error {
+    match mvm_runtime::microvm::stop_vm(child_vm_name) {
+        Ok(()) => error.context(format!(
+            "stopped forked child '{child_vm_name}' after restore completion failure"
+        )),
+        Err(stop_error) => error.context(format!(
+            "restore completion failed for '{child_vm_name}' and stopping the child also \
+             failed: {stop_error}"
+        )),
+    }
+}
+
+/// Record a restored child's runtime metadata (`mode.json`) exactly as a cold
+/// boot does: its own rootfs, the accessibility bit from the guest sidecar the
+/// checkpoint carried beside it, and the parent's runtime overlay version —
+/// plus the device paths its restored VMM still names, which a snapshot of the
+/// child embeds and a fork of that snapshot must remap.
+///
+/// A step checkpoint of the child resolves its rootfs from this record, so a
+/// child without it answers prompts but can never be checkpointed or replayed
+/// past them.
+fn record_fork_runtime_meta(
     child_vm_name: &str,
     parent: &mvm_core::checkpoint::CheckpointMeta,
 ) -> Result<()> {
     use mvm_runtime::vm::runtime_meta;
 
-    let rootfs = vm_state_dir(child_vm_name).join(mvm_core::checkpoint::ROOTFS_BLOB);
+    let state_dir = vm_state_dir(child_vm_name);
+    let rootfs = state_dir.join(mvm_core::checkpoint::ROOTFS_BLOB);
     anyhow::ensure!(
         rootfs.is_file(),
-        "restored HVF child has no rootfs at {}",
+        "restored child has no rootfs at {}",
         rootfs.display()
     );
     runtime_meta::record_from_rootfs(
@@ -625,14 +643,15 @@ fn record_hvf_fork_runtime_meta(
         &rootfs,
     )?;
     let mut meta = runtime_meta::read(child_vm_name)?
-        .context("restored HVF child runtime metadata was not written")?;
+        .context("restored child runtime metadata was not written")?;
     meta.runtime_overlay_version = parent.runtime_overlay_version.clone();
+    meta.restored_device_anchors = runtime_meta::read_restored_device_anchors(&state_dir)?;
     runtime_meta::write(child_vm_name, &meta)?;
     let persisted = runtime_meta::read(child_vm_name)?
-        .context("restored HVF child runtime metadata did not persist")?;
+        .context("restored child runtime metadata did not persist")?;
     anyhow::ensure!(
         persisted == meta,
-        "restored HVF child runtime metadata changed during write"
+        "restored child runtime metadata changed during write"
     );
     Ok(())
 }
@@ -731,7 +750,7 @@ mod tests {
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 
     #[test]
-    fn restored_hvf_child_records_its_own_rootfs_and_overlay() {
+    fn a_restored_child_records_its_own_rootfs_and_overlay() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");
         env.isolate_mvm_home(home.path());
@@ -740,6 +759,21 @@ mod tests {
         std::fs::create_dir_all(&child_dir).expect("child dir");
         let rootfs = child_dir.join(ROOTFS_BLOB);
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
+        // The anchors the checkpoint carried: the parent's paths, which the
+        // child's restored VMM keeps naming.
+        let inherited = mvm_core::checkpoint::DeviceAnchors {
+            rootfs: "/parent/rootfs.ext4".into(),
+            rootfs_verity: None,
+            config: Some("/parent/vm/config.ext4".into()),
+            secrets: None,
+            identity: None,
+            vsock: "/parent/vm/runtime/v.sock".into(),
+        };
+        std::fs::write(
+            child_dir.join(mvm_core::checkpoint::DEVICE_ANCHORS_BLOB),
+            serde_json::to_vec(&inherited).expect("anchors json"),
+        )
+        .expect("anchors");
         let mut parent = CheckpointMeta::builder(
             CheckpointId::new("parent-meta"),
             CheckpointClass::VmFull,
@@ -748,7 +782,7 @@ mod tests {
         .build();
         parent.runtime_overlay_version = Some("overlay-v1".into());
 
-        record_hvf_fork_runtime_meta(child, &parent).expect("record child metadata");
+        record_fork_runtime_meta(child, &parent).expect("record child metadata");
         let saved = mvm_runtime::vm::runtime_meta::read(child)
             .expect("read child metadata")
             .expect("present");
@@ -758,10 +792,44 @@ mod tests {
             saved.mode,
             mvm_runtime::vm::runtime_meta::StartModeKind::Detached
         );
+        assert!(saved.accessible, "no sidecar reads as accessible");
+        assert_eq!(saved.restored_device_anchors, Some(inherited));
+    }
+
+    /// A checkpoint carries the image's `mvm-meta.json` beside the rootfs it
+    /// restores, so a child of a sealed image records itself sealed and the
+    /// console gate refuses it, as it refuses the parent.
+    #[test]
+    fn a_restored_child_of_a_sealed_image_records_itself_sealed() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let child = "restored-sealed-child";
+        let child_dir = vm_state_dir(child);
+        std::fs::create_dir_all(&child_dir).expect("child dir");
+        std::fs::write(child_dir.join(ROOTFS_BLOB), b"rootfs").expect("rootfs");
+        std::fs::write(
+            child_dir.join(mvm_core::guest_sidecar::SIDECAR_FILENAME),
+            br#"{"accessible": false}"#,
+        )
+        .expect("sidecar");
+        let parent = CheckpointMeta::builder(
+            CheckpointId::new("parent-meta"),
+            CheckpointClass::VmFull,
+            "source-meta",
+        )
+        .build();
+
+        record_fork_runtime_meta(child, &parent).expect("record child metadata");
+        let saved = mvm_runtime::vm::runtime_meta::read(child)
+            .expect("read child metadata")
+            .expect("present");
+        assert!(!saved.accessible);
+        assert!(crate::commands::vm::console::enforce_accessible_gate(child, false).is_err());
     }
 
     #[test]
-    fn restored_hvf_child_refuses_missing_rootfs_metadata() {
+    fn a_restored_child_without_a_rootfs_records_no_metadata() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().expect("tempdir");
         env.isolate_mvm_home(home.path());
@@ -771,7 +839,7 @@ mod tests {
             "source-meta",
         )
         .build();
-        assert!(record_hvf_fork_runtime_meta("missing-child", &parent).is_err());
+        assert!(record_fork_runtime_meta("missing-child", &parent).is_err());
         assert!(
             mvm_runtime::vm::runtime_meta::read("missing-child")
                 .expect("read metadata")

@@ -64,6 +64,7 @@ mod check_no_vz;
 mod check_one_guest_protocol;
 mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
+mod check_private_diagnostic_files;
 mod check_private_mvm_dirs;
 mod check_public_function_names;
 mod check_require_grant_token_allowlist;
@@ -473,6 +474,10 @@ fn main() -> Result<()> {
         Some("check-vcpu-ceilings") => {
             let workspace = workspace_root();
             check_vcpu_ceilings::run(&workspace)
+        }
+        Some("check-private-diagnostic-files") => {
+            let workspace = workspace_root();
+            check_private_diagnostic_files::run(&workspace)
         }
         Some("check-private-mvm-dirs") => {
             let workspace = workspace_root();

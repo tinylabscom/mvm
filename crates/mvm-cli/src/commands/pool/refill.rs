@@ -142,7 +142,7 @@ fn refill_one(
     idle_timeout: std::time::Duration,
 ) -> Result<()> {
     let req = WarmRequest {
-        image: refill.image.clone(),
+        source: super::WarmSource::Image(refill.image.clone()),
         cpus: refill.cpus,
         memory_mib: refill.memory_mib,
         target,

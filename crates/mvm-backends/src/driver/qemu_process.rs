@@ -380,7 +380,8 @@ pub(crate) fn spawn_vsock_bridges(
     let spec_path = state_dir.join(BRIDGE_SPEC_FILE);
     let json = serde_json::to_string(spec)
         .map_err(|e| anyhow!("serialize qemu bridge spec for '{name}': {e}"))?;
-    std::fs::write(&spec_path, json).map_err(|e| anyhow!("write {}: {e}", spec_path.display()))?;
+    mvm_core::util::atomic_io::write_private_ephemeral(&spec_path, json.as_bytes())
+        .map_err(|e| anyhow!("write {}: {e}", spec_path.display()))?;
     for dial in &spec.host_dials {
         let _ = std::fs::remove_file(&dial.listen_uds);
     }

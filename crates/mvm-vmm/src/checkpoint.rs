@@ -47,4 +47,14 @@ pub trait VmFullControl {
 
     /// Absolute host paths the snapshot embeds and a fork restore must remap.
     fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors>;
+
+    /// The host files that back each of [`Self::device_anchors`] on this host,
+    /// which a capture copies into the checkpoint.
+    ///
+    /// The same paths unless the VM was itself restored from a snapshot: its
+    /// VMM then still names its parent's paths, which a restore made resolve to
+    /// this VM's own copies only inside the VMM's private mount namespace.
+    fn device_anchor_files(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
+        self.device_anchors()
+    }
 }
