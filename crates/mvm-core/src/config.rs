@@ -581,6 +581,11 @@ pub fn vms_dir_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
     mvm_home.as_ref().join("vms")
 }
 
+/// Private retained runtime generations, outside PID-reconciled VM state.
+pub fn runtime_evidence_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home()).join("runtime-evidence")
+}
+
 /// Per-VM state directory: `<mvm_home>/vms/<name>/`. Holds the
 /// libkrun pid file, console log, vsock listener socket(s), runtime
 /// `mode.json`, `rootfs.ref` / `kernel.ref`, and the `ports` file.

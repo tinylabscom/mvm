@@ -111,8 +111,13 @@ and cite #4100 for the direction, never the reverse.
   static agent is PID 1, receives the rootfs and runtime-overlay verity
   parameters in `ActivateEnvironment` over vsock, mounts and checks them,
   mounts the SDK sidecar and volumes, and pivots in-process.
-  `mkGuest`'s `/init` still runs for dev boots, for the chained builder boot,
-  and for `mvm-images`' own e2e boots.
+  Dev boots take the same path. `mkGuest` no longer writes a `/init` (#4106):
+  its root carries the workload's packages, the fixed identities and the
+  `/etc/mvm` markers, and the agent provisions what the shell init used to —
+  the egress client and its FlowMux identity, addon DNS, the overlay and proxy
+  environment of every workload process, the entrypoint and its exit report.
+  The builder boots its payload's `mvm-host-vm-init`, and `mvm-images`' e2e
+  boots an `init=` program its smoke image owns.
 - A source checkout builds one guest-runtime archive from this tree
   (`mvm_build::guest_runtime::resolve_or_build_source_guest_runtime`), keyed
   by its digest, and assembles all three pieces from it on the host, whether
@@ -199,8 +204,10 @@ and cite #4100 for the direction, never the reverse.
 - `mvmctl` assembles the overlay, the initramfs and the SDK sidecar from the
   archive or a source build, with one cache keyed by the archive digest
   (#4104). The host-built sidecar is the library alone.
-- Everything `mkGuest`'s `/init` still does that the agent does not moves into
-  Rust, and the base root filesystem stops carrying an mvm `/init` (#4106).
+- Everything `mkGuest`'s `/init` did that the agent did not moved into Rust,
+  and `mkGuest` writes no `/init` (#4106, landed). The base root filesystems
+  `mvm-images` publishes stop carrying one when its `mvm` input advances past
+  that change or is dropped (tinylabscom/mvm-images#49).
 - `mvm-setpriv` joins the builder boot payload at ABI 2; the builder image
   then bakes no mvm binary, and the builder cache key stops folding the setpriv
   source closure for ABI 2 images (#4107).
@@ -252,8 +259,7 @@ publishes them, is decided in #3928.
 
 Workload authors call `mkGuest` from their own flakes; it is mvm's API, not an
 image definition. The commit history above says it moves with mvm's crates.
-What changes is narrower: its `/init` stops being part of any image mvm boots
-(#4106), it gains an option to omit its own `mvm-setpriv` copy, which the
+What changes is narrower: it writes no `/init` (#4106), it gains an option to omit its own `mvm-setpriv` copy, which the
 builder image sets (#4107), and the workload-author guide is updated with it.
 
 ### Superseded

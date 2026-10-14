@@ -90,7 +90,7 @@ fn validate_dialable_destination(
     }
 }
 
-fn is_secret_field_name(name: &str) -> bool {
+pub(crate) fn is_secret_field_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     secret_field_tokens().iter().any(|tok| {
         lower == *tok || lower.ends_with(&format!("_{tok}")) || lower.ends_with(&format!("-{tok}"))

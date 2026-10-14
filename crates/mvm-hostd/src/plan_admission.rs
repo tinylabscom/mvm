@@ -88,14 +88,19 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod assurance_runtime;
+mod bundle_environment;
 mod display_grants;
 mod host_trust;
 mod registry_pack;
 mod verb_grant_sidecar;
+
+use assurance_runtime::{AssuranceRuntimeBinding, verify_selected_runtime};
 use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
 use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
+pub use bundle_environment::BundleEnvironmentRefused;
 pub use mvm_core::time::{Clock, SystemClock};
 
 /// Production nonce ledger. Holds a `NonceStore` behind a mutex so
@@ -145,6 +150,7 @@ pub struct AdmittedPlan {
     signer_id: String,
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
 }
 
 /// Re-verified host artifact behind one extension binding in the signed plan.
@@ -209,7 +215,16 @@ impl AdmittedPlan {
             plan,
             signed,
             extensions: Vec::new(),
+            assurance_runtime: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_assurance_runtime_for_test(mut self, config: &VmStartConfig) -> Self {
+        self.assurance_runtime = Some(
+            AssuranceRuntimeBinding::verify(config, &self.plan).expect("verified test runtime"),
+        );
+        self
     }
 }
 
@@ -328,6 +343,8 @@ pub fn admit_plan_for_run(
     extension_ctx: Option<&ExtensionAdmissionContext<'_>>,
     posture: RunPosture,
 ) -> Result<AdmittedPlan> {
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(plan)?;
     validate_extension_bindings(plan)?;
     let extensions = verify_extension_packs(plan, extension_ctx)?;
     verify_registry_pack_assets(plan)?;
@@ -365,6 +382,7 @@ pub fn admit_plan_for_run(
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -410,6 +428,8 @@ pub fn admit_signed_plan_for_run(
         verify_plan(signed, &trusted_refs).context("verifying externally-signed plan")?;
     let signer_id = signed.0.signer_id.clone();
 
+    posture.verify_runtime()?;
+    let assurance_runtime = posture.assurance_runtime(&verified)?;
     validate_extension_bindings(&verified)?;
     // No extension verification context on this path: a plan that binds
     // optional extensions is refused rather than admitted unchecked.
@@ -425,6 +445,7 @@ pub fn admit_signed_plan_for_run(
         signed: signed.clone(),
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -448,6 +469,7 @@ struct VerifiedAdmission<'a> {
     signer_id: String,
     /// Re-verified extension artifacts, empty when the plan binds none.
     extensions: Vec<AdmittedExtension>,
+    assurance_runtime: Option<AssuranceRuntimeBinding>,
     clock: &'a dyn Clock,
     ledger: &'a InMemoryNonceLedger,
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
@@ -466,6 +488,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         signed,
         signer_id,
         extensions,
+        assurance_runtime,
         clock,
         ledger,
         bundle_ctx,
@@ -494,16 +517,6 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         other => anyhow::anyhow!("plan validity error: {other}"),
     })?;
 
-    // Replay protection: insert (signer_id, nonce). A second admission with
-    // the same signer + nonce — a re-submitted fleet plan, or a synthesized
-    // plan that somehow recurred — is refused.
-    {
-        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
-        store
-            .check_and_insert(&signer_id, &verified)
-            .context("replay protection check")?;
-    }
-
     // Bundle re-verify at admit time. Only fires
     // when the plan pinned a bundle; missing context with a pinned
     // plan is operator misconfiguration (the driver wasn't wired
@@ -518,6 +531,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         })?;
         let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -552,12 +566,22 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         })?;
     }
 
+    // Spend the nonce only after every fallible descriptor and bundle check.
+    // Refusal must not consume an externally signed plan's replay allowance.
+    {
+        let mut store = ledger.inner.lock().expect("nonce store mutex poisoned");
+        store
+            .check_and_insert(&signer_id, &verified)
+            .context("replay protection check")?;
+    }
+
     Ok(AdmittedPlan {
         plan_id: verified.plan_id.clone(),
         signer_id,
         plan: verified,
         signed,
         extensions,
+        assurance_runtime,
     })
 }
 
@@ -764,12 +788,13 @@ fn admit_within_host_budget(plan: &ExecutionPlan) -> Result<()> {
 /// gate that read it would be deciding which resource controls apply from a
 /// string a caller picked.
 #[derive(Debug, Clone, Copy)]
-pub struct RunPosture {
+pub struct RunPosture<'a> {
     variant: Variant,
     backend: Option<BackendKind>,
+    runtime_config: Option<&'a VmStartConfig>,
 }
 
-impl RunPosture {
+impl<'a> RunPosture<'a> {
     /// A run whose backend is in hand. The only shape that can measure a grant
     /// against the mechanisms that will really be there.
     #[must_use]
@@ -777,6 +802,7 @@ impl RunPosture {
         Self {
             variant,
             backend: Some(backend),
+            runtime_config: None,
         }
     }
 
@@ -792,7 +818,15 @@ impl RunPosture {
         Self {
             variant,
             backend: None,
+            runtime_config: None,
         }
+    }
+
+    /// The actual launch selection, not claims copied from plan JSON.
+    #[must_use]
+    pub fn with_runtime(mut self, runtime_config: Option<&'a VmStartConfig>) -> Self {
+        self.runtime_config = runtime_config;
+        self
     }
 
     /// The sealed-production / developer posture this run carries.
@@ -1120,34 +1154,26 @@ pub fn populate_audit_substrate(
 /// Parent dir is assumed pre-created by the caller (the producer sites
 /// in `up.rs` ensure `mvm_home/vms/<name>/` exists with the same
 /// `0700` umbrella as `~/.mvm`).
+///
+/// Nothing is synced. Every file written here is a per-run copy of material
+/// the admission record already holds durably, read by this run from the
+/// page cache; a host crash that could lose it also ends the guest that would
+/// read it, and a torn signed envelope fails verification rather than being
+/// trusted. On a rotational disk the sync was most of a warm claim's time
+/// between verifying its parent and forking its child.
+///
+/// The temporary has a fresh random name created exclusively, so nothing
+/// planted beside `path` is written through, and the rename replaces whatever
+/// sits at `path` itself, a link included, without following it.
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-
     let parent = path.parent().ok_or_else(|| {
         anyhow::anyhow!("write_secret_file: path has no parent: {}", path.display())
     })?;
     std::fs::create_dir_all(parent)
         .with_context(|| format!("create parent dir {}", parent.display()))?;
-    let tmp = path.with_extension("json.tmp");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("open tmp file {}", tmp.display()))?;
-        f.write_all(body)
-            .with_context(|| format!("write secret bytes to {}", tmp.display()))?;
-        // Best-effort fsync; on tmpfs this is a no-op and on a flaky
-        // FS we'd rather succeed-and-warn than fail-and-abort.
-        let _ = f.sync_all();
-    }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
-    Ok(())
+    mvm_core::atomic_io::write_private_ephemeral(path, body)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 /// Stash the signed plan envelope + (optional) bundle pin in the
@@ -2063,12 +2089,21 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
     // A refusal in any post-admission gate must still terminate the chain:
     // `plan.admitted` already fired, so a gate refusal emits `plan.failed`
     // carrying the refusing stage rather than leaving a dangling admission.
-    let mut config = match run_post_admission_gates(
-        params.config,
-        &admitted,
-        backend.kind(),
-        params.policy_bundle,
-    ) {
+    let gated = (|| {
+        if params.assurance.is_some() || admitted.assurance_runtime.is_some() {
+            admitted
+                .verify_assurance_launch(&params.config)
+                .map_err(|error| ("assurance-runtime", error))?;
+        }
+        verify_selected_runtime(&params.config).map_err(|error| ("guest-runtime", error))?;
+        run_post_admission_gates(
+            params.config,
+            &admitted,
+            backend.kind(),
+            params.policy_bundle,
+        )
+    })();
+    let mut config = match gated {
         Ok(config) => config,
         Err((stage, err)) => {
             if let Some(emitter) = params.emitter
@@ -2177,7 +2212,11 @@ pub fn admit_and_start(
     // name: the grant gate decides which resource controls a run is measured
     // against, and deciding that from a string is how a plan ends up measured
     // against a tier it is not running on.
-    let posture = RunPosture::on_backend(params.variant, backend.kind());
+    let posture =
+        RunPosture::on_backend(params.variant, backend.kind()).with_runtime(Some(&params.config));
+    if params.assurance.is_some() {
+        crate::operator_admitted_trial_booter::verify_assurance_guest_protocol(&params.config)?;
+    }
 
     // Synthesize the plan up-front so a refusal can be recorded with the
     // plan context if admission fails. Synthesis failures have no plan to
@@ -4159,6 +4198,17 @@ mod tests {
         rootfs: &[u8],
         arch: &str,
     ) -> (Vec<u8>, PlanArtifact) {
+        make_test_bundle_with_members(sk, kernel, rootfs, arch, Vec::new())
+    }
+
+    // Synthetic, locally signed admission fixtures, not released image or VM evidence.
+    fn make_test_bundle_with_members(
+        sk: &ed25519_dalek::SigningKey,
+        kernel: &[u8],
+        rootfs: &[u8],
+        arch: &str,
+        members: Vec<mvm_core::plan::bundle::BundleMember>,
+    ) -> (Vec<u8>, PlanArtifact) {
         use mvm_core::plan::bundle::{
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
@@ -4185,7 +4235,7 @@ mod tests {
                 make_art("vmlinux", ArtifactRole::Kernel, kernel),
                 make_art("rootfs.ext4", ArtifactRole::Rootfs, rootfs),
             ],
-            members: Vec::new(),
+            members,
             verity: None,
             resources: None,
         };
@@ -4218,6 +4268,116 @@ mod tests {
         let mut input = fixture_input(vm_name);
         input.bundle_pin = Some(pin.clone());
         input
+    }
+
+    #[test]
+    fn direct_host_admission_enforces_signed_environment_slots() {
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let environment = serde_json::from_value(serde_json::json!({
+            "descriptor_version": 1,
+            "target": format!("{arch}-linux"),
+            "entrypoint": { "argv": ["/usr/bin/agent"] },
+            "secret_slots": [
+                { "name": "AGENT_TOKEN", "required": true },
+                { "name": "OPTIONAL_KEY", "required": false }
+            ]
+        }))
+        .unwrap();
+        let (archive, pin) = make_test_bundle_with_members(
+            &sk,
+            b"kernel",
+            b"rootfs",
+            &arch,
+            vec![BundleMember::Environment(environment)],
+        );
+        let trust = MapTrust(HashMap::from([(
+            key_id_from_pubkey(&sk.verifying_key()),
+            sk.verifying_key(),
+        )]));
+        let resolver = FixedResolver(archive);
+        let ctx = BundleAdmissionContext {
+            resolver: &resolver,
+            trust: &trust,
+            image: None,
+        };
+        let mut input = input_with_pin("vm-environment", &pin);
+        let error = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("direct host admission must refuse missing mandatory slot");
+        assert!(format!("{error:#}").contains("AGENT_TOKEN"), "{error:#}");
+        input.secrets = vec![mvm_core::plan::SecretBinding {
+            name: "AGENT_TOKEN".into(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "agent-token".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: false,
+        }];
+        let admitted = admit_for_run(
+            &input,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(dir.path()),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("bound required slot admits without binding optional slot");
+        assert_eq!(admitted.plan().secrets.len(), 1);
+
+        // Exercise the independently authenticated external-plan entry point,
+        // not just the host's synthesis/signing wrapper.
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "environment-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        let bound = sign_plan(admitted.plan(), &fleet, "environment-fleet");
+        admit_signed_plan_for_run(
+            &bound,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect("externally signed bound required slot admits");
+        input.secrets.clear();
+        let missing = synthesize_plan(&input).unwrap();
+        let signed = sign_plan(&missing, &fleet, "environment-fleet");
+        let ledger = InMemoryNonceLedger::new();
+        let error = admit_signed_plan_for_run(
+            &signed,
+            &SystemClock,
+            &ledger,
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("externally signed plan must also bind mandatory slot");
+        assert!(format!("{error:#}").contains("AGENT_TOKEN"), "{error:#}");
+        let retry = admit_signed_plan_for_run(
+            &signed,
+            &SystemClock,
+            &ledger,
+            Some(&ctx),
+            RunPosture::without_backend(Variant::Dev),
+        )
+        .expect_err("a rejected descriptor must not spend the nonce");
+        assert!(format!("{retry:#}").contains("AGENT_TOKEN"), "{retry:#}");
+        assert!(
+            !format!("{retry:#}").contains("replay protection"),
+            "{retry:#}"
+        );
     }
 
     #[test]
@@ -4560,6 +4720,33 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn write_secret_file_never_writes_through_a_planted_link() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"untouched").unwrap();
+        let path = dir.path().join("plan.json");
+        // A link at the old fixed temporary name and one at the destination:
+        // neither may carry the write to the file they point at.
+        std::os::unix::fs::symlink(&outside, path.with_extension("json.tmp")).unwrap();
+        write_secret_file(&path, b"first").expect("write past a planted temporary");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        write_secret_file(&path, b"second").expect("write over a planted destination");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"untouched");
+        assert!(
+            !std::fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn write_secret_file_creates_parent_dir() {
         // The bridge writes under `~/.mvm/vms/<vm>/`; that dir may not
         // exist on a first boot. The helper must create it (matching
@@ -4834,6 +5021,191 @@ mod tests {
     // admit_and_start: the shared admitted-boot entrypoint
     // ───────────────────────────────────────────────────────────────
 
+    fn baked_assurance_config(directory: &std::path::Path) -> VmStartConfig {
+        mvm_runtime::signed_legacy_runtime_fixture(
+            directory,
+            std::path::Path::new(&mvm_core::config::mvm_home()),
+            false,
+        )
+    }
+
+    #[test]
+    fn an_unsigned_release_proof_cannot_mint_an_assurance_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let archive = directory.path().join("runtime.tar.gz");
+        let checksum = directory.path().join("runtime.tar.gz.sha256");
+        let signature = directory.path().join("runtime.tar.gz.bundle");
+        std::fs::write(&archive, b"unsigned archive").unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&archive).unwrap();
+        std::fs::write(&checksum, format!("{digest}  runtime.tar.gz\n")).unwrap();
+        std::fs::write(&signature, b"{}").unwrap();
+        let config = VmStartConfig {
+            runtime_release_proof: Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                archive,
+                checksum,
+                signature_bundle: signature,
+                archive_sha256: digest,
+                version: "1.2.3".into(),
+                arch: mvm_core::arch::GuestArch::host(),
+            }),
+            runtime_overlay_version: Some("1.2.3".into()),
+            runtime_overlay_path: Some(directory.path().join("overlay").display().to_string()),
+            runtime_overlay_verity_path: Some(
+                directory.path().join("verity").display().to_string(),
+            ),
+            runtime_overlay_roothash: Some("a".repeat(64)),
+            initrd_path: Some(directory.path().join("initramfs").display().to_string()),
+            ..Default::default()
+        };
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan_binding(&[])).is_err());
+    }
+
+    #[test]
+    fn changed_runtime_after_admission_records_failure_without_starting_backend() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let config = VmStartConfig {
+            name: "changed-assurance-runtime".into(),
+            ..baked_assurance_config(directory.path())
+        };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let mut synthesis = fixture_input(&config.name);
+        synthesis.image_sha256 = &image_sha256;
+        synthesis
+            .services
+            .push(mvm_core::protocol::broker::ServiceId::parse("host.assurance.v1").unwrap());
+        let admitted = admit_for_run(
+            &synthesis,
+            &SystemClock,
+            &InMemoryNonceLedger::new(),
+            Some(directory.path()),
+            None,
+            RunPosture::on_backend(Variant::Dev, backend.kind()).with_runtime(Some(&config)),
+        )
+        .unwrap();
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[41; 32]),
+            audit.path(),
+        )
+        .unwrap();
+        crate::audit::durability::record_admission(
+            Some(&emitter),
+            admitted.plan(),
+            admitted.signer_id(),
+            crate::audit::durability::AuditDurability::BestEffort,
+        )
+        .unwrap();
+        std::fs::write(&config.rootfs_path, b"changed after admission").unwrap();
+        let vm_id = mvm_core::vm_backend::VmId(config.name.clone());
+        start_admitted(StartAdmittedParams {
+            backend: &backend,
+            admitted,
+            config,
+            policy_bundle: None,
+            emitter: Some(&emitter),
+            assurance: None,
+        })
+        .expect_err("admitted artifact substitution must refuse before spawn");
+        assert!(!matches!(
+            backend.status(&vm_id),
+            Ok(mvm_core::vm_backend::VmStatus::Running)
+        ));
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert!(chain.contains("plan.admitted"), "{chain}");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(chain.contains("assurance-runtime"), "{chain}");
+        assert!(!chain.contains("plan.launched"), "{chain}");
+    }
+
+    #[test]
+    fn assurance_binding_requires_matching_image_and_unchanged_launch_bytes() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let kernel = directory.path().join("kernel");
+        std::fs::write(&kernel, b"original kernel").unwrap();
+        let config = VmStartConfig {
+            name: "assurance-bound".into(),
+            kernel_path: Some(kernel.display().to_string()),
+            ..baked_assurance_config(directory.path())
+        };
+        let mut plan = plan_binding(&[]);
+        assert!(AssuranceRuntimeBinding::verify(&config, &plan).is_err());
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let unchecked = AdmittedPlan::for_test(plan, signer_id, signed);
+        assert!(unchecked.require_assurance_runtime(&config.name).is_err());
+        let admitted = unchecked.with_assurance_runtime_for_test(&config);
+        admitted.require_assurance_runtime(&config.name).unwrap();
+        assert!(
+            admitted
+                .require_assurance_runtime("different-machine")
+                .is_err()
+        );
+        admitted.verify_assurance_launch(&config).unwrap();
+
+        let renamed = VmStartConfig {
+            name: "different-machine".into(),
+            ..config.clone()
+        };
+        assert!(admitted.verify_assurance_launch(&renamed).is_err());
+        std::fs::write(&kernel, b"replacement kernel").unwrap();
+        assert!(admitted.verify_assurance_launch(&config).is_err());
+        std::fs::write(&config.rootfs_path, b"replacement rootfs").unwrap();
+        assert!(AssuranceRuntimeBinding::verify(&config, admitted.plan()).is_err());
+    }
+
+    #[test]
+    fn portable_assurance_capability_binds_original_proof_and_manifest_after_admission() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let directory = tempfile::tempdir().unwrap();
+        let config = mvm_runtime::signed_legacy_portable_runtime_fixture(directory.path());
+        let mut plan = plan_binding(&[]);
+        plan.image.sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .unwrap();
+        let signer_id = "host:test".to_string();
+        let signed = sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[7; 32]),
+            &signer_id,
+        );
+        let admitted = AdmittedPlan::for_test(plan, signer_id, signed)
+            .with_assurance_runtime_for_test(&config);
+        admitted.verify_assurance_launch(&config).unwrap();
+        for mutation in 0..3 {
+            let mut changed = config.clone();
+            let proof = changed.legacy_portable_runtime.as_mut().unwrap();
+            match mutation {
+                0 => proof.pin.bundle_sha256 = "0".repeat(64),
+                1 => proof.manifest_sha256 = "0".repeat(64),
+                2 => {
+                    let copy = directory.path().join("same-signed-archive.mvmpkg");
+                    std::fs::copy(&proof.archive, &copy).unwrap();
+                    proof.archive = copy;
+                    // An independently valid proof at another location still
+                    // changes the selection this capability admitted.
+                    AssuranceRuntimeBinding::verify(&changed, admitted.plan()).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                admitted.verify_assurance_launch(&changed).is_err(),
+                "mutation {mutation}"
+            );
+        }
+    }
+
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
         let (_env, _home) = host_with_ceiling(Default::default());
@@ -4945,9 +5317,12 @@ mod tests {
         synthesis.services = vec![service];
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-rollback".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let err = admit_and_start(
             &backend,
@@ -5220,9 +5595,12 @@ mod tests {
         );
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-assurance".into(),
-            rootfs_path: "/store/rootfs.ext4".into(),
-            ..Default::default()
+            ..baked_assurance_config(dir.path())
         };
+        let image_sha256 =
+            mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(&config.rootfs_path))
+                .expect("fixture digest");
+        synthesis.image_sha256 = &image_sha256;
 
         let started = admit_and_start(
             &backend,
@@ -5269,8 +5647,7 @@ mod tests {
                 synthesis: &refused_synthesis,
                 config: mvm_core::vm_backend::VmStartConfig {
                     name: "vm-assurance-refused".into(),
-                    rootfs_path: "/store/rootfs.ext4".into(),
-                    ..Default::default()
+                    ..baked_assurance_config(dir.path())
                 },
                 clock: &SystemClock,
                 ledger: &InMemoryNonceLedger::new(),

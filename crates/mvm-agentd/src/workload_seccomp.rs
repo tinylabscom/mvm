@@ -210,8 +210,10 @@ pub fn confine(command: &mut std::process::Command) {
     let _ = command;
 }
 
-/// Compile `tier` to a BPF program: listed syscalls are allowed, anything else
-/// fails with `EPERM`. `None` for `unrestricted`.
+/// Compile `tier` to a BPF program: listed syscalls are allowed, a tier's
+/// argument-scoped syscalls are allowed only for their listed argument values
+/// (`socket` for `AF_VSOCK` alone, under `vsock`), and anything else fails
+/// with `EPERM`. `None` for `unrestricted`.
 ///
 /// A name that has no number on this architecture is skipped — tiers list
 /// legacy x86_64 names beside their `*at` replacements so a capability holds
@@ -229,12 +231,19 @@ pub fn compile(tier: SeccompTier) -> Result<Option<seccompiler::BpfProgram>, sec
     if tier.is_unrestricted() {
         return Ok(None);
     }
-    let rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> = tier
+    // An empty rule list allows the syscall whatever its arguments.
+    let mut rules: std::collections::BTreeMap<i64, Vec<SeccompRule>> = tier
         .syscalls()
         .into_iter()
         .filter_map(syscall_number)
         .map(|nr| (nr, Vec::new()))
         .collect();
+    for scoped in tier.argument_scoped_syscalls() {
+        let Some(nr) = syscall_number(scoped.name) else {
+            continue;
+        };
+        rules.insert(nr, argument_rules(scoped)?);
+    }
     let filter = SeccompFilter::new(
         rules,
         SeccompAction::Errno(libc::EPERM as u32),
@@ -242,6 +251,30 @@ pub fn compile(tier: SeccompTier) -> Result<Option<seccompiler::BpfProgram>, sec
         TARGET_ARCH,
     )?;
     Ok(Some(filter.try_into()?))
+}
+
+/// One rule per allowed value of `scoped`'s argument; the kernel allows the
+/// call when any of them matches.
+#[cfg(target_os = "linux")]
+fn argument_rules(
+    scoped: &mvm_core::crypto::seccomp::ArgumentScopedSyscall,
+) -> Result<Vec<seccompiler::SeccompRule>, seccompiler::Error> {
+    use seccompiler::{SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompRule};
+
+    scoped
+        .allowed
+        .iter()
+        .map(|value| {
+            let condition = SeccompCondition::new(
+                scoped.arg_index,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                *value,
+            )?;
+            SeccompRule::new(vec![condition])
+        })
+        .collect::<Result<_, _>>()
+        .map_err(seccompiler::Error::from)
 }
 
 /// Set `no_new_privs` and install `program` on the calling thread.
@@ -377,6 +410,39 @@ mod tests {
         );
     }
 
+    /// The family the `vsock` tier scopes `socket` to is the kernel's.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_scoped_family_is_the_kernels_af_vsock() {
+        assert_eq!(mvm_core::crypto::seccomp::AF_VSOCK, libc::AF_VSOCK as u64);
+    }
+
+    /// The scoped `socket` costs the `vsock` program instructions beyond its
+    /// unconditional list, so the argument check is in the filter rather than
+    /// dropped on the way to it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_vsock_program_carries_the_socket_argument_check() {
+        let program = compile(SeccompTier::Vsock).unwrap().expect("vsock filters");
+        let rules: std::collections::BTreeMap<i64, Vec<seccompiler::SeccompRule>> =
+            SeccompTier::Vsock
+                .syscalls()
+                .into_iter()
+                .filter_map(mvm_core::crypto::seccomp::syscall_table::syscall_number)
+                .map(|nr| (nr, Vec::new()))
+                .collect();
+        let unscoped: seccompiler::BpfProgram = seccompiler::SeccompFilter::new(
+            rules,
+            seccompiler::SeccompAction::Errno(libc::EPERM as u32),
+            seccompiler::SeccompAction::Allow,
+            TARGET_ARCH,
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert!(program.len() > unscoped.len());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn unrestricted_compiles_to_no_program() {
@@ -393,6 +459,7 @@ mod tests {
             SeccompTier::Essential,
             SeccompTier::Minimal,
             SeccompTier::Standard,
+            SeccompTier::Vsock,
             SeccompTier::Network,
         ] {
             let program = compile(tier)

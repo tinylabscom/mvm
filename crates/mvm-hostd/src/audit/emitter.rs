@@ -633,6 +633,27 @@ impl AuditEmitter {
         )
     }
 
+    /// Emit `plan.start_mode` — records whether this run claimed a prepared
+    /// standby (`warm`) or booted from nothing (`cold`), and for a cold boot,
+    /// why no standby served it.
+    ///
+    /// The 300 ms startup ceiling holds a warm launch only; a cold boot is not
+    /// refused for its time. So a cold boot is declared here rather than
+    /// passed over in silence: a reader of the chain can tell the first run of
+    /// an image from a run that should have been warm and was not.
+    pub fn emit_start_mode(
+        &self,
+        plan: &ExecutionPlan,
+        mode: &str,
+        cold_reason: Option<&str>,
+    ) -> Result<()> {
+        let mut labels = vec![("mode".to_string(), mode.to_string())];
+        if let Some(reason) = cold_reason {
+            labels.push(("cold_reason".to_string(), reason.to_string()));
+        }
+        self.emit(plan, "plan.start_mode", labels)
+    }
+
     /// Emit `plan.policy_resolved` after admission validates the plan's
     /// policy refs. `resolution` describes what was validated without
     /// claiming that every bundle section has a live runtime consumer.

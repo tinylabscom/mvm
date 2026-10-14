@@ -4,6 +4,7 @@ pub mod broker_control;
 pub mod handler;
 #[allow(clippy::module_inception)]
 pub mod protocol;
+pub mod runtime_release;
 pub mod signed_config;
 pub mod telemetry;
 pub mod vm_backend;
@@ -17,7 +18,7 @@ pub mod volume_bridge;
 // path keeps resolving unchanged.
 pub use mvm_contract::protocol::{
     audit_signer, broker, dns, host_audit, host_beacon, host_cost, host_kv, host_signer, host_time,
-    routing, signing,
+    host_tool, routing, signing,
 };
 
 // Flatten protocol.rs contents up to `mvm_core::protocol::*`.

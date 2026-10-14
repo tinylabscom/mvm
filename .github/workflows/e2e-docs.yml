@@ -273,6 +273,11 @@ jobs:
       # macOS 26+ default, and the fetched builder image is self-contained, so
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
+      # Every warm launch here is held to the 300 ms startup ceiling, which is
+      # a property of an optimized build. Unoptimized, plan admission alone
+      # took 268 ms of it on this runner. The Linux warm-claim witness builds
+      # the same profile for the same reason.
+      MVM_E2E_PROFILE: release-witness
     steps:
       - uses: actions/checkout@v6
 

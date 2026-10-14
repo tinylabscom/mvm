@@ -29,6 +29,11 @@ pub struct ChildForkRequest<'a> {
     /// The child's state dir, already holding the copy-on-write clone of the
     /// verified parent's own content.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    /// Saved-state Firecracker restores require it before loading any state.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
     /// Fresh VMGenID token, bound to the child's content-address, that the
     /// child must adopt so its CSPRNG diverges from the parent's.
     ///
@@ -99,6 +104,10 @@ pub struct PreloadChildRequest<'a> {
     pub child_vm_name: &'a str,
     /// Canonical child state directory containing the materialized snapshot.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
 }
 
 /// The process identity and control endpoint of a paused preloaded child.

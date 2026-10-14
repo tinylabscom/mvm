@@ -2502,7 +2502,7 @@ fn test_image_dev_ensure_parses() {
         cli.command,
         Commands::Image(image::Args {
             action: ImageAction::Dev {
-                action: image::dev::DevAction::Ensure,
+                action: image::dev::DevAction::Ensure { warm: false },
             },
         })
     ));
@@ -3834,10 +3834,16 @@ fn test_image_pull_parses() {
         Cli::try_parse_from(["mvmctl", "image", "pull", "docker.io/library/alpine:3.20"]).unwrap();
     match cli.command {
         Commands::Image(image::Args {
-            action: ImageAction::Pull { reference, prod },
+            action:
+                ImageAction::Pull {
+                    reference,
+                    prod,
+                    warm,
+                },
         }) => {
             assert_eq!(reference, "docker.io/library/alpine:3.20");
             assert!(!prod);
+            assert!(!warm, "--warm is opt-in");
         }
         _ => panic!("Expected Image Pull command"),
     }
@@ -3854,6 +3860,7 @@ fn test_image_pull_prod_parses() {
                 ImageAction::Pull {
                     reference: parsed,
                     prod,
+                    ..
                 },
         }) => {
             assert_eq!(parsed, reference);
@@ -3861,6 +3868,35 @@ fn test_image_pull_prod_parses() {
         }
         _ => panic!("Expected Image Pull command"),
     }
+}
+
+#[test]
+fn test_image_pull_warm_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "pull", "alpine", "--warm"]).unwrap();
+    match cli.command {
+        Commands::Image(image::Args {
+            action: ImageAction::Pull {
+                reference, warm, ..
+            },
+        }) => {
+            assert_eq!(reference, "alpine");
+            assert!(warm);
+        }
+        _ => panic!("Expected Image Pull command"),
+    }
+}
+
+#[test]
+fn test_image_dev_ensure_warm_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "dev", "ensure", "--warm"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Dev {
+                action: image::dev::DevAction::Ensure { warm: true },
+            },
+        })
+    ));
 }
 
 #[test]
@@ -5029,6 +5065,48 @@ fn test_pool_warm_parses_optional_count() {
 }
 
 #[test]
+fn test_pool_warm_default_flag_parses_and_conflicts_with_image() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm", "--default"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action:
+                pool::PoolAction::Warm {
+                    image,
+                    default_image,
+                    ..
+                },
+        }) => {
+            assert!(default_image);
+            assert_eq!(image, None);
+        }
+        _ => panic!("Expected Pool Warm command"),
+    }
+    assert!(
+        Cli::try_parse_from(["mvmctl", "pool", "warm", "--default", "--image", "alpine"]).is_err(),
+        "--default and --image name different images"
+    );
+}
+
+#[test]
+fn test_pool_warm_without_an_image_selects_neither_flag() {
+    let cli = Cli::try_parse_from(["mvmctl", "pool", "warm"]).unwrap();
+    match cli.command {
+        Commands::Pool(pool::Args {
+            action:
+                pool::PoolAction::Warm {
+                    image,
+                    default_image,
+                    ..
+                },
+        }) => {
+            assert_eq!(image, None);
+            assert!(!default_image);
+        }
+        _ => panic!("Expected Pool Warm command"),
+    }
+}
+
+#[test]
 fn test_pool_status_parses_json_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "pool", "status", "--json"]).unwrap();
     match cli.command {
@@ -6184,6 +6262,7 @@ fn machine_console_refused_on_sealed_image() {
             accessible: false,
             rootfs_path: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         },
     )
@@ -6460,5 +6539,45 @@ fn run_carries_machine_run_flags_and_the_sdk_transport() {
     assert!(
         Cli::try_parse_from(["mvmctl", "machine", "run", "--mode", "plan", "./script.py"]).is_err(),
         "the SDK transport stays off machine run"
+    );
+}
+
+/// What `run_command` does with a command line: parse, then record which
+/// resource flags were named.
+fn parse_recording_resources(argv: &[&str]) -> Cli {
+    let matches = cli_command()
+        .try_get_matches_from(argv)
+        .expect("command line parses");
+    let mut cli = Cli::from_arg_matches(&matches).expect("typed command");
+    record_explicit_run_resources(&matches, &mut cli);
+    cli
+}
+
+#[test]
+fn named_resource_flags_are_recorded_for_both_run_verbs() {
+    let cli = parse_recording_resources(&["mvmctl", "machine", "run", "--cpus", "4", "--", "x"]);
+    let Commands::Machine(machine) = cli.command else {
+        panic!("expected machine");
+    };
+    let machine::MachineAction::Run(run) = machine.action else {
+        panic!("expected machine run");
+    };
+    assert!(run.run.explicit_resources.cpus);
+    assert!(!run.run.explicit_resources.memory);
+
+    let cli = parse_recording_resources(&["mvmctl", "run", "--memory", "1G", "--", "x"]);
+    let Commands::Run(verb) = cli.command else {
+        panic!("expected run");
+    };
+    assert!(!verb.machine.run.explicit_resources.cpus);
+    assert!(verb.machine.run.explicit_resources.memory);
+
+    let cli = parse_recording_resources(&["mvmctl", "run", "--", "x"]);
+    let Commands::Run(verb) = cli.command else {
+        panic!("expected run");
+    };
+    assert_eq!(
+        verb.machine.run.explicit_resources,
+        vm::exec::environment_defaults::ExplicitResources::default()
     );
 }

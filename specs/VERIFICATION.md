@@ -181,9 +181,18 @@ minutes — round-robin had put the four most expensive files in the tree on
 those two shards — while `3of4` finished its three cheapest in 24.
 
 Assignment is therefore by cost, not by stride: shards are packed
-longest-first, heaviest file onto the lightest shard. Cost is stood in for
-by source size, which needs nothing recorded or maintained beside the
-surface and tracks mutant count closely enough to pack with. Replaying the
+longest-first, heaviest file onto the lightest shard. Cost is the file's
+mutant count, read from `cargo mutants --list` under the same package,
+features and scope the run uses, so it needs nothing recorded beside the
+surface and cannot drift from what the shard executes. Every mutant in a
+package runs the same suite, which is what makes the count a cost.
+
+Source size stood in for it until 2026-10-12, and stopped tracking it:
+`audit/session.rs` (44 KB, 155 mutants, 234 minutes) is a third the size of
+`audit/emitter.rs` (137 KB, 81 mutants, 42 minutes), so size packing put
+`session.rs`, `broker/registry.rs` and `admission_budget.rs` on one shard,
+whose job had taken 307 of its 330 minutes the night before and whose
+mutation step was stopped inside `registry.rs` the next night. Replaying the
 2026-08-21 per-file measurements through it splits that same surface
 188/189/191/193 minutes where round-robin gave 90/323/24/324 — 1.01x the
 ideal even split against 1.70x. `xtask`'s

@@ -701,8 +701,8 @@ prod_pull_requires_digest_pin_before_network` and
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-agentd/src/console.rs`). The universal agent
     dispatches it only when the runtime profile and signed grant authorize
-    the request. Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
-    variant serves a shell; (2) the prod rootfs is dm-verity sealed
+    the request. Plan 165 WS-C. Five independent layers: (1) only a dev image
+    is served a shell; (2) the prod rootfs is dm-verity sealed
     (claim 3); (3) the backend captures the guest console **write-only**
     to `console.log` with no host input fd
     (`mvm_runtime::libkrun::open_console_capture` — `mvm_backend` is

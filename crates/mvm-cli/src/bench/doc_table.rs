@@ -15,7 +15,7 @@
 
 use super::cold_launch::{
     COLD_LAUNCH_SCHEMA_VERSION, LaunchLane, MATRIX_WARMUP_SAMPLES, MIN_MATRIX_SAMPLES,
-    PREPARED_COLD_HARD_MAX_MS, WARM_CLAIM_HARD_MAX_MS,
+    PREPARED_COLD_HARD_MAX_MS, STARTUP_HARD_MAX_MS, WARM_CLAIM_HARD_MAX_MS,
 };
 
 /// Delimiters bounding the generated region of the performance page. The text
@@ -52,11 +52,13 @@ pub fn sample_contract_sentence() -> String {
          lanes additionally require every measured dispatch to be strictly \
          under {PREPARED_COLD_HARD_MAX_MS:.0} ms, and the warm-claim lane every \
          measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms, \
-         both on its dispatch window and from the moment the command was \
-         invoked (`startup=` on the phase-timing line), even below the \
-         publication sample floor. `mvmctl` holds each warm launch to the same \
+         even below the publication sample floor. Every prepared and warm \
+         sample must also reach the guest strictly under \
+         {STARTUP_HARD_MAX_MS:.0} ms from the moment the command was invoked \
+         (`startup=` on the phase-timing line), because the dispatch window \
+         starts after admission. `mvmctl` holds each warm launch to that \
          ceiling itself: one that has not reached the guest strictly under \
-         {WARM_CLAIM_HARD_MAX_MS:.0} ms after invocation is refused before its \
+         {STARTUP_HARD_MAX_MS:.0} ms after invocation is refused before its \
          workload is sent."
     )
 }
@@ -192,6 +194,10 @@ mod tests {
         assert!(sentence.contains(&format!("strictly under {PREPARED_COLD_HARD_MAX_MS:.0} ms")));
         assert!(sentence.contains(&format!(
             "every measured claim to be strictly under {WARM_CLAIM_HARD_MAX_MS:.0} ms"
+        )));
+        assert!(sentence.contains(&format!(
+            "Every prepared and warm sample must also reach the guest strictly under \
+             {STARTUP_HARD_MAX_MS:.0} ms from the moment the command was invoked"
         )));
         assert!(render_budget_section().contains(&sentence));
     }

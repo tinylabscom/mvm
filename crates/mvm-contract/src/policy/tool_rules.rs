@@ -74,11 +74,16 @@ pub struct ToolRules {
 }
 
 impl ToolRules {
-    /// Exact executable names admitted for guest command mediation.
+    /// Exact executable mapping admitted for guest command mediation:
+    /// tool name to the exact guest path, for every allow- or ask-listed
+    /// tool whose detail names one. A deny-only tool is omitted: `deny` wins
+    /// at decision time, so substituting its path would intercept every
+    /// invocation only to refuse it.
     #[must_use]
     pub fn command_executables(&self) -> BTreeMap<String, String> {
         self.detail
             .iter()
+            .filter(|(tool, _)| self.allow.contains(*tool) || self.ask.contains(*tool))
             .filter_map(|(tool, detail)| {
                 detail
                     .executable

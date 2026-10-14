@@ -110,10 +110,12 @@ impl EntrypointAdmission {
             assets,
             volumes,
             bundle_archive,
+            runtime_config,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: crate::admission::InstructionSources::for_workload(None)
                 .with_mount_roots(&[])
                 .with_materialized_mounts(&materialized_mounts),
@@ -127,6 +129,7 @@ impl EntrypointAdmission {
             kernel_path: kernel,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config,
             cpus: self.cpus,
             mem_mib: self.mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -312,6 +315,7 @@ mod tests {
             assets: &[],
             volumes: &[],
             bundle_archive: None,
+            runtime_config: None,
         }
     }
 
@@ -594,6 +598,7 @@ mod stdin_grant_tests {
                     assets: &[],
                     volumes: &[],
                     bundle_archive: None,
+                    runtime_config: None,
                 })
         }
     }

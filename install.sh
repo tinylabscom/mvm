@@ -649,6 +649,15 @@ sign_release() {
   command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
   for name in $(release_entries "$STAGE"); do
     [ -f "$STAGE/$name" ] || continue
+    if codesign --verify --strict "$STAGE/$name" >/dev/null 2>&1 \
+        && codesign -dvv "$STAGE/$name" 2>&1 | grep -q '^Authority=Developer ID Application:'; then
+      if entitlement_required "$name" \
+          && ! already_entitled "$STAGE/$name" "$(required_entitlement_key "$name")"; then
+        die "Developer ID signed $name is missing its required entitlement; refusing to replace its signature"
+      fi
+      say "Preserved Developer ID signature: $name"
+      continue
+    fi
     profile_name="$(entitlement_profile "$name")"
     profile="$(find_entitlement_profile "$STAGE" "$profile_name")"
     if [ -z "$profile" ]; then
@@ -901,6 +910,15 @@ esac
 
 verify_release_checksum "$ARCHIVE"
 got="$(sha256_of "$TMP/$ARCHIVE")"
+
+# An explicit hash pins the exact archive bytes, not merely the bytes used to
+# bootstrap a verifier. Enforce it even when a verifier is already installed
+# or the release-manifest checksum check was skipped.
+if [ -n "${MVM_TRUSTED_ARCHIVE_SHA256:-}" ]; then
+  trusted_hash="$(trusted_archive_sha256)"
+  [ "$got" = "$trusted_hash" ] \
+    || die "trusted archive SHA-256 mismatch for $ARCHIVE (want $trusted_hash, got $got)"
+fi
 
 # Signature. An installed mvmctl verifies offline against its embedded trust
 # root and is preferred to cosign. A fresh host authenticates the archive

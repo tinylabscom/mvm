@@ -82,6 +82,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn workload_synthesis_delivers_the_stored_substitution_pair() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let path = mvm_core::config::vm_substitution_env_path("substitution-delivery");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, br#"[["API_KEY","mvm-secret://opaque-placeholder"]]"#).unwrap();
+
+        let projected = workload_egress_env("substitution-delivery");
+        assert!(projected.iter().any(|(key, value)| {
+            key == "API_KEY" && value == "mvm-secret://opaque-placeholder"
+        }));
+        assert!(projected.iter().any(|(key, _)| key == "HTTPS_PROXY"));
+    }
+
+    #[test]
     fn drive_open_receives_substituted_placeholder_not_a_secret() {
         let env = build_substitution_env(vec![(
             "MVM_API_TOKEN".to_string(),

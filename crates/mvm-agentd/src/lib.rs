@@ -30,6 +30,9 @@ pub mod child_wait;
 /// PTY-over-vsock console support. Access is enforced by the guest agent's
 /// runtime profile and signed verb grant before a request reaches this module.
 pub mod console;
+/// Restores the `quiet` console loglevel once PID 1 has `/proc`, after a boot
+/// that lowered it to keep early-boot kernel errors off a slow serial console.
+pub mod console_loglevel;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
@@ -149,6 +152,15 @@ pub mod telemetry_service;
 /// Linux only: it reads `/proc`, and no egress client runs anywhere else.
 #[cfg(any(target_os = "linux", test))]
 pub mod tool_attribution;
+/// Same gate as `tool_attribution`: the decision socket exists to coordinate
+/// with the attribution registry, and both read `/proc`.
+#[cfg(any(target_os = "linux", test))]
+pub mod tool_decision_socket;
+/// The declared-command tool helper. The spawn path is Linux-only; the policy
+/// core (`approve`, `verify_stash`) compiles and tests everywhere.
+pub mod tool_helper;
+pub mod tool_install;
+pub mod tool_map;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

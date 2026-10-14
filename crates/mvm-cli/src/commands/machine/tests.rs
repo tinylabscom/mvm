@@ -1768,6 +1768,7 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             accessible: false,
             rootfs_path: None,
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         },
     )
@@ -1804,6 +1805,7 @@ fn resolve_machine_build_mode_is_fail_closed_and_reads_accessible() {
                 accessible,
                 rootfs_path: None,
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 observability_target: None,
             },
         )
@@ -4007,6 +4009,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
             }),
             drive: None,
             display_input: None,
+            application_terminal: None,
         })
     );
 }
@@ -4209,6 +4212,8 @@ fn start_resolver_recreates_with_force() {
 /// An unlocked managed block volume named `state`, registered read-write
 /// against `machine`. Registered before the machine has a spec, so no profile
 /// is applied until the machine starts.
+/// Registers a 3 MiB managed volume: the smallest the ext4 layout accepts, and
+/// every lifecycle step encrypts the whole image with an unoptimised cipher.
 fn register_writable_state_volume(machine: &str) {
     use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
     let volumes =
@@ -4219,7 +4224,7 @@ fn register_writable_state_volume(machine: &str) {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .expect("volume name")
-                .capacity_mib(16)
+                .capacity_mib(3)
                 .build()
                 .expect("create request"),
         )
@@ -4284,7 +4289,7 @@ fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
         .create_block_volume(
             &CreateBlockVolumeRequest::builder("state")
                 .expect("volume name")
-                .capacity_mib(16)
+                .capacity_mib(3)
                 .build()
                 .expect("create request"),
         )

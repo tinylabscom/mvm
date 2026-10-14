@@ -107,6 +107,7 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -119,6 +120,7 @@ mod tests {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

@@ -277,6 +277,11 @@ Two notes from experience:
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —
   it does not run on pull requests.
+- A stable `release.yml` tag is promoted only after verification of the
+  published signatures and provenance, fresh-install guest boots, native
+  install of the published deb/rpm packages, and installation of the generated
+  AUR/Nix recipes. A build artifact or a deleted dry-run draft is never
+  publication evidence.
 - Website/docs changes under `public/` are built and validated on PRs by
   `website.yml` and deploy to Cloudflare Workers Static Assets only after merge.
 - The merge queue runs the required `Test` check on the synthetic merge commit.

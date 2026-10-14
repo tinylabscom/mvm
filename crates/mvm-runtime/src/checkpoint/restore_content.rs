@@ -20,20 +20,26 @@ use super::sha256_file_hex;
 /// so it mints its own key pinned to the same host signer and writes it over the
 /// clone. Checkpoints captured before the identity drive was content — and every
 /// backend that attaches none — leave nothing to replace, and this is a no-op.
-pub(super) fn reseed_forked_identity_drive(child_vm_name: &str, child_dir: &Path) -> Result<()> {
+pub(super) fn reseed_forked_identity_drive(
+    child_vm_name: &str,
+    child_dir: &Path,
+) -> Result<Option<String>> {
     let drive = child_dir.join(mvm_vmm::host::flowmux_identity::IDENTITY_DRIVE_FILE);
     if !drive.is_file() {
-        return Ok(());
+        return Ok(None);
     }
-    mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(child_vm_name)
-        .context("minting a fresh FlowMux identity for the fork")?
-        .write_drive(&drive)
-        .with_context(|| {
-            format!(
-                "writing the fork's fresh identity drive to {}",
-                drive.display()
-            )
-        })
+    let digest = mvm_vmm::host::flowmux_identity::FlowMuxIdentityMaterial::mint_from_host_signer(
+        child_vm_name,
+    )
+    .context("minting a fresh FlowMux identity for the fork")?
+    .write_drive_measured(&drive)
+    .with_context(|| {
+        format!(
+            "writing the fork's fresh identity drive to {}",
+            drive.display()
+        )
+    })?;
+    Ok(Some(digest))
 }
 
 /// Hand a load-verifying backend the whole-file digest of the memory blob.

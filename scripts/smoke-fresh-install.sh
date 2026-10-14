@@ -8,13 +8,18 @@
 # The installer runs the way the README runs it — piped into `sh`, with the
 # builder VM bootstrap it performs by default — pinned to `version` when one
 # is given, otherwise choosing the release the one-liner would choose today.
-# Then `mvmctl machine run --image alpine -- echo <token>` runs from that HOME
-# with stdin redirected from /dev/null, and must print the token on stdout
-# within its time budget.
+# Then the README's quick start runs from that HOME: `mvmctl image pull alpine`
+# and `mvmctl machine run --image alpine -- echo <token>`, with nothing set and
+# nothing warmed. A launch reads only the local cache, so a smoke that skipped
+# the pull would test nothing a user does. The first run of the image boots
+# cold and leaves a standby behind. The run's stdin is redirected from
+# /dev/null, and it must print the token on stdout within its time budget.
 #
 # Three more boots follow from the same HOME, each with its own token and
 # budget, because a release binary's downloads are not checked by its first
-# boot. That boot runs the runtime overlay and initramfs it has just fetched.
+# boot. The second boot and the SDK boot are named, so each boots cold, as a
+# named run always does, and resolves the launch pieces from the cache rather
+# than restoring a standby. That boot runs the runtime overlay and initramfs it has just fetched.
 # The second is the first to resolve them from the cache, which fetches again,
 # or refuses, an artifact whose VERSION is not the binary's own. So the second
 # boot must print its token and must not have replaced any file the first left
@@ -63,6 +68,8 @@
 #   MVM_SMOKE_OUT                  directory for the transcript and VM logs;
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
+#   MVM_SMOKE_PREPARE_BUDGET_SECS  budget for each preparation step (image
+#                                  image pulls); default 900
 #   MVM_SMOKE_RUN_BUDGET_SECS      first-command budget; default 600
 #   MVM_SMOKE_SECOND_RUN_BUDGET_SECS
 #                                  second-boot budget; default 300
@@ -70,6 +77,9 @@
 #   MVM_SMOKE_EGRESS_RUN_BUDGET_SECS
 #                                  egress-boot budget; default 300
 #   MVM_SMOKE_KEEP                 set to 1 to keep the throwaway HOME
+#   MVM_SMOKE_STATE_FILE           optional file receiving the created HOME path
+#                                  (for the release evidence wrapper's cleanup)
+#   MVM_SMOKE_TEMP_PARENT          wrapper-owned parent (wrapper handles cleanup)
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
 #
 #   MVM_SMOKE_DOCTOR_BUDGET_SECS   `mvmctl doctor` budget, guest-runtime mode
@@ -106,6 +116,7 @@ if [ -n "$ARCHIVE" ] && [ -n "${MVM_SMOKE_INSTALLER:-}" ]; then
 fi
 INSTALLER="${MVM_SMOKE_INSTALLER:-$REPO_ROOT/install.sh}"
 INSTALL_BUDGET="${MVM_SMOKE_INSTALL_BUDGET_SECS:-1200}"
+PREPARE_BUDGET="${MVM_SMOKE_PREPARE_BUDGET_SECS:-900}"
 RUN_BUDGET="${MVM_SMOKE_RUN_BUDGET_SECS:-600}"
 SECOND_RUN_BUDGET="${MVM_SMOKE_SECOND_RUN_BUDGET_SECS:-300}"
 SDK_RUN_BUDGET="${MVM_SMOKE_SDK_RUN_BUDGET_SECS:-300}"
@@ -117,7 +128,7 @@ IMAGE="alpine"
 EGRESS_IMAGE="curlimages/curl:8.21.0"
 EGRESS_HOST="example.com"
 
-for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET" "$EGRESS_RUN_BUDGET" "$DOCTOR_BUDGET"; do
+for budget in "$INSTALL_BUDGET" "$PREPARE_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET" "$EGRESS_RUN_BUDGET" "$DOCTOR_BUDGET"; do
   case "$budget" in
     ''|*[!0-9]*|0) echo "time budgets must be positive whole seconds, got: $budget" >&2; exit 2 ;;
   esac
@@ -126,7 +137,11 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required to bound the s
 
 # A short root: the machine's sockets live under it, and a Unix socket path
 # must fit in 104 bytes on macOS.
-ROOT="$(mktemp -d /tmp/mvm-fresh.XXXXXX)"
+if [ -n "${MVM_SMOKE_TEMP_PARENT:-}" ]; then
+  ROOT="$(mktemp -d "$MVM_SMOKE_TEMP_PARENT/s.XXX")"
+else
+  ROOT="$(mktemp -d /tmp/mvm-fresh.XXXXXX)"
+fi
 ROOT="$(cd "$ROOT" && pwd -P)"
 SMOKE_HOME="$ROOT/home"
 mkdir -p "$SMOKE_HOME" "$ROOT/tmp"
@@ -139,6 +154,8 @@ fi
 OUT="$(cd "$OUT" && pwd -P)"
 TRANSCRIPT="$OUT/transcript.log"
 : > "$TRANSCRIPT"
+BOOT_RESULTS="$OUT/boot-results.jsonl"
+: > "$BOOT_RESULTS"
 
 cleanup() {
   status=$?
@@ -155,7 +172,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+if [ -n "${MVM_SMOKE_STATE_FILE:-}" ]; then
+  printf '%s\n' "$SMOKE_HOME" > "$MVM_SMOKE_STATE_FILE"
+fi
+
 log() { printf '%s\n' "$*" | tee -a "$TRANSCRIPT"; }
+boot_pass() { printf '{"name":"%s","result":"success"}\n' "$1" >> "$BOOT_RESULTS"; }
 section() { log ""; log "=== $* ==="; }
 append() {
   if [ -s "$1" ]; then
@@ -420,11 +442,34 @@ for cache in sys.argv[2:]:
 SNAPSHOT
 }
 
+# What the README has a user run between bootstrap and the first command. A
+# launch reads only the local cache, so the images the boots below use are
+# pulled first.
+prepare_step() {
+  prepare_stem="$1"
+  shift
+  section "prepare: $*"
+  if bounded "$PREPARE_BUDGET" "$ROOT/$prepare_stem.out" "$ROOT/$prepare_stem.err" "$@"; then
+    prepare_status=0
+  else
+    prepare_status=$?
+  fi
+  append "$ROOT/$prepare_stem.out"
+  log "--- stderr ---"
+  append "$ROOT/$prepare_stem.err"
+  log "--- exited $prepare_status after ${BOUNDED_ELAPSED}s ---"
+  [ "$prepare_status" -ne 124 ] || fail "'$*' did not finish within ${PREPARE_BUDGET}s"
+  [ "$prepare_status" -eq 0 ] || fail "'$*' exited $prepare_status"
+}
+prepare_step pull mvmctl image pull "$IMAGE"
+prepare_step pull-egress mvmctl image pull "$EGRESS_IMAGE"
+
 TOKEN="mvm-fresh-install-$(date +%s)-$$"
 section "first command (mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/null)"
 boot_and_expect "first command" "$RUN_BUDGET" "$TOKEN" run \
   mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
 RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass cold
 
 CACHES_FIRST="$OUT/download-caches-after-first.txt"
 CACHES_SECOND="$OUT/download-caches-after-second.txt"
@@ -439,9 +484,9 @@ append "$CACHES_FIRST"
 # later one resolves the cache, and that is where a mismatched artifact is
 # fetched again on every boot, or refused outright.
 TOKEN2="$TOKEN-second"
-section "second boot from the same HOME (mvmctl machine run --image $IMAGE -- echo $TOKEN2 </dev/null)"
+section "second boot from the same HOME (mvmctl machine run --name smoke-second --image $IMAGE -- echo $TOKEN2 </dev/null)"
 boot_and_expect "second boot" "$SECOND_RUN_BUDGET" "$TOKEN2" run-second \
-  mvmctl machine run --image "$IMAGE" -- echo "$TOKEN2"
+  mvmctl machine run --name smoke-second --image "$IMAGE" -- echo "$TOKEN2"
 SECOND_RUN_ELAPSED="$STEP_ELAPSED"
 
 section "download caches after the second boot"
@@ -450,6 +495,7 @@ append "$CACHES_SECOND"
 REFETCHED="$(LC_ALL=C comm -23 "$CACHES_FIRST" "$CACHES_SECOND" | cut -d' ' -f3- | tr '\n' ' ')"
 [ -z "$REFETCHED" ] \
   || fail "the second boot replaced or removed what the first cached, so it fetched it again: $REFETCHED"
+boot_pass cache-reuse
 
 # The documented way to give a workload the SDK: binding an SDK-served host
 # service attaches the sidecar read-only at /mvm/sdk, downloading the published
@@ -458,10 +504,11 @@ TOKEN3="$TOKEN-sdk"
 SDK_SERVICE="host.time.v1"
 SDK_LIB="/mvm/sdk/lib/libmvm_host_services.so"
 SDK_SCRIPT="if test -r $SDK_LIB; then echo $TOKEN3; else echo 'no SDK sidecar library at $SDK_LIB' >&2; exit 3; fi"
-section "SDK boot (mvmctl machine run --image $IMAGE --host-service $SDK_SERVICE -- sh -c \"$SDK_SCRIPT\" </dev/null)"
+section "SDK boot (mvmctl machine run --name smoke-sdk --image $IMAGE --host-service $SDK_SERVICE -- sh -c \"$SDK_SCRIPT\" </dev/null)"
 boot_and_expect "SDK boot" "$SDK_RUN_BUDGET" "$TOKEN3" run-sdk \
-  mvmctl machine run --image "$IMAGE" --host-service "$SDK_SERVICE" -- sh -c "$SDK_SCRIPT"
+  mvmctl machine run --name smoke-sdk --image "$IMAGE" --host-service "$SDK_SERVICE" -- sh -c "$SDK_SCRIPT"
 SDK_RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass sdk-sidecar
 
 # What every --allow-host, --net, --secret and --policy run depends on: the
 # guest's traffic leaves only through the network endpoint the release ships,
@@ -472,6 +519,7 @@ section "egress boot (mvmctl machine run --image $EGRESS_IMAGE --allow-host $EGR
 boot_and_expect "egress boot" "$EGRESS_RUN_BUDGET" "$TOKEN4" run-egress \
   mvmctl machine run --image "$EGRESS_IMAGE" --allow-host "$EGRESS_HOST" -- sh -c "$EGRESS_SCRIPT"
 EGRESS_RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass egress
 
 # The boots above could only attach what the cache held. With the release's
 # guest runtime adopted, that is the pieces assembled from it and nothing from

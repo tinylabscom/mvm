@@ -46,6 +46,11 @@ pub struct SubprocessConfig {
     /// Parse timeout in milliseconds. Capped at 50ms by default.
     #[serde(default = "default_parse_timeout_ms", with = "duration_ms")]
     pub parse_timeout: Duration,
+    /// Per-VM network endpoint connector socket. When set (and the admitted
+    /// plan binds `host.tool.v1`), the broker registers the guest-origin
+    /// tool-decision handler that forwards `decide`/`release` calls here.
+    #[serde(default)]
+    pub tool_decision_socket: Option<PathBuf>,
     /// Exact host-service bindings admitted for this workload.
     #[serde(default)]
     pub services_bindings: Vec<ServiceId>,
@@ -106,6 +111,7 @@ mod tests {
             audit_signer_uds_path: Some(PathBuf::from("/tmp/test/audit-signer.sock")),
             max_frame_bytes: 65_536,
             parse_timeout: Duration::from_millis(50),
+            tool_decision_socket: Some(PathBuf::from("/tmp/test/tool.sock")),
             services_bindings: vec![],
             capability_bindings: vec![],
         };

@@ -40,6 +40,7 @@ impl Host {
         let keys = self.dir.path().join("keys");
         let audit = self.dir.path().join("audit");
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -52,6 +53,7 @@ impl Host {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 1,
             mem_mib: 256,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

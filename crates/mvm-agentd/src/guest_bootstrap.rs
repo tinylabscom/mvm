@@ -111,7 +111,7 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_flowmux_identity();
     provision_egress_ca();
     run_one(resolve_exec([NETINIT_OVERLAY]), "netinit");
-    let vsock_egress = cmdline_has_flag("mvm.vsock_egress=1");
+    let vsock_egress = cmdline_has_flag(crate::workload_env::VSOCK_EGRESS_TOKEN);
     if vsock_egress {
         start_vsock_egress()?;
     }
@@ -160,26 +160,15 @@ fn provision_pty_devices() {
 /// every other boot over a filesystem the workload may never read is the
 /// wrong default.
 fn provision_cgroup2() {
-    match crate::guest_mount::mount_and_delegate_cgroup2(
+    // Both outcomes are healthy, so neither is narrated: this runs on the
+    // launch path, where Firecracker's console costs a VM exit per byte. An
+    // orchestrator guest on a kernel without cgroups reports the missing
+    // hierarchy itself when it goes looking for one.
+    if let Err(error) = crate::guest_mount::mount_and_delegate_cgroup2(
         crate::guest_mount::WORKLOAD_UID,
         crate::guest_mount::WORKLOAD_GID,
     ) {
-        Ok(crate::guest_mount::Cgroup2Status::MountedAndDelegated) => {
-            eprintln!(
-                "mvm-guest-init: mounted cgroup2 at {}; delegated {} to uid {}",
-                crate::guest_mount::CGROUP2_MOUNT_POINT,
-                crate::guest_mount::CGROUP_DELEGATION_DIR,
-                crate::guest_mount::WORKLOAD_UID,
-            );
-        }
-        Ok(crate::guest_mount::Cgroup2Status::KernelLacksCgroups) => {
-            eprintln!(
-                "mvm-guest-init: kernel has no cgroup2; skipping cgroup mount                  (orchestrator guests need a cgroup-capable kernel)"
-            );
-        }
-        Err(error) => {
-            eprintln!("mvm-guest-init: cgroup2 provisioning failed (continuing): {error}");
-        }
+        eprintln!("mvm-guest-init: cgroup2 provisioning failed (continuing): {error}");
     }
 }
 
@@ -412,7 +401,7 @@ pub fn mount_mediated_tools() {
 /// the `/run` tmpfs, so the workload's unprivileged uid cannot reach it either.
 /// Scoped to the one directory holding a mediated tool rather than the whole
 /// root, so every other path keeps resolving straight to the sealed image.
-fn overlay_parent_for_write(target: &Path) -> Result<(), String> {
+pub(crate) fn overlay_parent_for_write(target: &Path) -> Result<(), String> {
     let dir = target
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
@@ -472,7 +461,7 @@ fn mount_overlay(target: &Path, options: &str) -> Result<(), String> {
 }
 
 /// Replace the image's copy of a tool with the stand-in, in place.
-fn substitute_in_place(source: &str, target: &str) -> Result<(), String> {
+pub(crate) fn substitute_in_place(source: &str, target: &str) -> Result<(), String> {
     replace_symlink_target(Path::new(target))?;
     bind_mount_file(source, target)
 }
@@ -877,6 +866,78 @@ fn busybox_loopback_up() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// On Firecracker the guest's stderr is an emulated serial port, a VM
+    /// exit per byte, and a healthy activation used to spend about 13 ms of
+    /// the launch path narrating facts true of every boot. None of these
+    /// lines may come back; a failure still prints.
+    #[test]
+    fn a_healthy_activation_narrates_nothing_on_the_console() {
+        let sources = [
+            ("guest_bootstrap.rs", include_str!("guest_bootstrap.rs")),
+            ("netinit.rs", include_str!("netinit.rs")),
+            (
+                "bin/mvm-guest-agent.rs",
+                include_str!("bin/mvm-guest-agent.rs"),
+            ),
+            (
+                "bin/mvm-guest-agent/init.rs",
+                include_str!("bin/mvm-guest-agent/init.rs"),
+            ),
+            (
+                "bin/mvm-guest-netinit.rs",
+                include_str!("bin/mvm-guest-netinit.rs"),
+            ),
+            (
+                "crng_reseed/helper.rs",
+                include_str!("crng_reseed/helper.rs"),
+            ),
+            ("integrations.rs", include_str!("integrations.rs")),
+            ("probes.rs", include_str!("probes.rs")),
+        ];
+        // Assembled at run time so this test's own source does not match.
+        let healthy_lines = [
+            ["handshake (readiness", " probe); no session opened"].concat(),
+            ["\"mvm-guest-agent: workload seccomp", " tier {tier}"].concat(),
+            ["wall clock set from", " host epoch"].concat(),
+            ["\"mvm-guest-netinit: no", " eth0"].concat(),
+            ["\"mvm-guest-init: mounted", " cgroup2"].concat(),
+            ["\"mvm-guest-init: kernel has", " no cgroup2"].concat(),
+            ["\"mvm-guest-agent: CRNG reseed", " helper pid="].concat(),
+            ["not found,", " no integrations"].concat(),
+            ["not found,", " no probes"].concat(),
+        ];
+        for (file, source) in sources {
+            for line in &healthy_lines {
+                assert!(
+                    !source.contains(line.as_str()),
+                    "{file} prints {line:?} on a healthy activation"
+                );
+            }
+        }
+        // The failure arms beside them still print.
+        let failure_lines = [
+            (
+                "guest_bootstrap.rs",
+                ["cgroup2 provisioning", " failed"].concat(),
+            ),
+            (
+                "bin/mvm-guest-agent.rs",
+                ["authenticated control handshake", " failed"].concat(),
+            ),
+            (
+                "bin/mvm-guest-netinit.rs",
+                ["guest network bring-up", " failed"].concat(),
+            ),
+        ];
+        for (file, line) in failure_lines {
+            let (_, source) = sources
+                .iter()
+                .find(|(name, _)| *name == file)
+                .expect("source listed above");
+            assert!(source.contains(line.as_str()), "{file} lost {line:?}");
+        }
+    }
 
     #[test]
     fn base64_decode_round_trips_each_padding_length() {

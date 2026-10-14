@@ -42,6 +42,7 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
     let audit = dir.join("audit");
     let ledger = InMemoryNonceLedger::new();
     let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+        gpu: false,
         tools: Default::default(),
         instructions: Default::default(),
         outputs: Vec::new(),
@@ -51,6 +52,7 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
         backend_name: "firecracker",
         configured_images_dir: None,
         rootfs_path: &rootfs,
+        runtime_config: None,
         kernel_path: None,
         precomputed_image_sha256: None,
         boot_artifact_identity: None,

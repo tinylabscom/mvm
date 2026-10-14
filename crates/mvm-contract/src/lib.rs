@@ -39,6 +39,7 @@ pub mod grants;
 /// the crate that detects it and the crate that keys the SDK sidecar cache on
 /// it; those are siblings, so it sits underneath both.
 pub mod guest_libc;
+pub mod hash;
 #[cfg(feature = "protocol")]
 pub mod ir;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
@@ -52,6 +53,9 @@ pub mod oci;
 /// Frozen resolution of an authored pack, checked before every frozen build.
 #[cfg(feature = "protocol")]
 pub mod pack_lock;
+/// Optional digest-bound task scenario beside a pack environment.
+#[cfg(feature = "protocol")]
+pub mod pack_scenario;
 /// Language-neutral authored pack input, not a resolved build or release.
 #[cfg(feature = "protocol")]
 pub mod pack_spec;

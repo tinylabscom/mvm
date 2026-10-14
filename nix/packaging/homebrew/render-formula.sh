@@ -2,10 +2,31 @@
 # Render mvmctl.rb from the template + a checksums-sha256.txt file.
 # Usage: render-formula.sh <version-no-v> <checksums-file> <out.rb>
 set -eu
+[ "$#" -eq 3 ] || { echo "usage: render-formula.sh VERSION CHECKSUMS OUT" >&2; exit 1; }
 VERSION="$1"; CHECKSUMS="$2"; OUT="$3"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
-sha_for() { grep " $1\$" "$CHECKSUMS" | awk '{print $1}' | head -n1; }
+case "$VERSION" in
+  *[!0-9.]*) echo "expected a stable CLI version" >&2; exit 1 ;;
+esac
+printf '%s\n' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' ||
+  { echo "expected a stable CLI version" >&2; exit 1; }
+
+# The caller authenticates this manifest before rendering. Reject ambiguous or
+# malformed records rather than silently choosing the first duplicate.
+sha_for() {
+  awk -v name="$1" '
+    $2 == name {
+      count++
+      if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/) bad=1
+      digest=$1
+    }
+    END {
+      if (count != 1 || bad) exit 1
+      print digest
+    }
+  ' "$CHECKSUMS"
+}
 
 # x86_64-apple-darwin (Intel mac) is deferred — no asset / checksum for it.
 A_DARWIN="$(sha_for mvmctl-aarch64-apple-darwin.tar.gz)"

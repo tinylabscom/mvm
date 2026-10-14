@@ -386,6 +386,8 @@ fn capture_vm_full_for_running_vm(
         vm_name: args.name.to_string(),
         supervisor_config_digest: supervisor_config_digest(args.state_dir),
         runtime_overlay_version,
+        runtime_launch_binding: mvm_runtime::base::runtime_meta::read(args.name)?
+            .and_then(|meta| meta.runtime_launch_binding),
         // Backends that drive their VMM through a supervisor config (HVF) carry
         // it into the checkpoint: a restore has to rebuild the launch shape the
         // capture froze, and every stop reaps the live copy. Firecracker returns
@@ -1100,6 +1102,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),
         network_mode: parent_network_mode(p.parent_checkpoint, p.store),
@@ -1111,6 +1114,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         kernel_path: Some(std::path::Path::new(&vmlinux_path)),
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
+        runtime_config: Some(&start_config),
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2082,6 +2086,7 @@ mod tests {
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
@@ -2112,6 +2117,7 @@ mod tests {
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
@@ -2309,6 +2315,7 @@ mod tests {
             verbs: vec![],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -2353,6 +2360,7 @@ mod tests {
                 verbs: vec![],
                 drive: None,
                 tool_mediation: None,
+                application_terminal: None,
                 sig: vec![0u8; 64],
             },
         };

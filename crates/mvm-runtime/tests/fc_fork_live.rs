@@ -5,8 +5,7 @@
 //! parent boots NIC-less (the shape every child inherits), activates over
 //! vsock, is captured through the driver's own `vm_full_control` with
 //! `retain_paused: false` so it resumes, and then N children restore the same
-//! captured memory — each in its own subprocess, because each child's device
-//! remap unshares the mount namespace of the process that launches it.
+//! captured memory — each in its own subprocess, as separate launches would.
 //!
 //! The witness asserts the vsock-only per-child resource model: the parent
 //! keeps serving while every child is up, each child answers on its own
@@ -52,6 +51,7 @@ use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
 use mvm_core::vm_backend::{
     RuntimeSourceRootStrategy, SnapshotCapability, StandbySpec, StandbyState, StartMode,
+    VmStartConfig,
 };
 use mvm_runtime::checkpoint::{CaptureVmFullParams, CheckpointStore, capture_vm_full};
 use mvm_runtime::driver::fc::FcDriver;
@@ -71,6 +71,47 @@ struct LiveImages {
     runtime_overlay: PathBuf,
     runtime_verity: PathBuf,
     runtime_roothash: String,
+}
+
+/// Keep the actual source-built boot assets under one checked source cache,
+/// then retain an immutable generation just as a production launch does.
+fn bind_parent_runtime(images: &mut LiveImages, home: &Path, parent_id: &str) -> VmStartConfig {
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = GuestArch::host();
+    let checked =
+        mvm_build::guest_runtime::source::check_source_runtime(&home.join("cache"), version, arch)
+            .expect("verify the source-built guest runtime before binding the parent");
+    let parent = home.join("runtime-evidence").join(parent_id);
+    mvm_core::config::create_private_dir(&parent).expect("create private retained-runtime parent");
+    let selection = mvm_build::guest_runtime::evidence::RuntimeArtifactSelection {
+        arch,
+        overlay: &images.runtime_overlay,
+        overlay_verity: &images.runtime_verity,
+        overlay_roothash: &images.runtime_roothash,
+        initramfs: &images.initramfs,
+        minimum_protocol: mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        host_protocol: mvm_runtime::runtime_evidence::GUEST_RPC_PROTOCOL_VERSION,
+    };
+    let retained = checked
+        .snapshot_artifacts_in(&selection, &parent)
+        .expect("retain checked source-runtime artifacts")
+        .persist()
+        .expect("persist checked source-runtime generation");
+    images.initramfs = retained.initramfs_path();
+    images.runtime_overlay = retained.overlay_path();
+    images.runtime_verity = retained.overlay_verity_path();
+    VmStartConfig {
+        name: parent_id.into(),
+        rootfs_path: images.rootfs.to_string_lossy().into_owned(),
+        runtime_overlay_version: Some(version.into()),
+        runtime_overlay_path: Some(images.runtime_overlay.to_string_lossy().into_owned()),
+        runtime_overlay_verity_path: Some(images.runtime_verity.to_string_lossy().into_owned()),
+        runtime_overlay_roothash: Some(images.runtime_roothash.clone()),
+        initrd_path: Some(images.initramfs.to_string_lossy().into_owned()),
+        source_runtime_archive_sha256: Some(retained.archive_sha256().into()),
+        unsigned_runtime_development: true,
+        ..Default::default()
+    }
 }
 
 struct LiveImageInputs {
@@ -100,7 +141,7 @@ fn resolve_live_images(inputs: LiveImageInputs, cache_root: &Path) -> LiveImages
     )
     .expect("resolve source-matched universal initramfs");
     let overlay = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-        &cache_root.join("runtime-overlay"),
+        cache_root,
         env!("CARGO_PKG_VERSION"),
         GuestArch::host(),
     )
@@ -336,8 +377,25 @@ fn restore_forked_child_and_read_random(
     copy_checkpoint_content(store, checkpoint, meta, &child_dir);
 
     let t_restore = Instant::now();
+    // Resolve the plaintext digests authenticated by the parent manifest:
+    // sealed captures store opaque blob digests, not these plaintext digests.
+    let observation_sha256 =
+        mvm_runtime::checkpoint::materialized_blob_sha256(store, meta, "runtime-artifacts.json")
+            .expect("authenticate the captured parent's runtime observation");
+    let anchors_sha256 =
+        mvm_runtime::checkpoint::materialized_blob_sha256(store, meta, "device-anchors.json")
+            .expect("authenticate the captured parent's device anchors");
     mvm_runtime::firecracker::FcForkRestorer
-        .restore_fork(child_id, &child_dir, None)
+        .restore_fork(
+            child_id,
+            &child_dir,
+            None,
+            &mvm_backends::fc::ForkRuntimeEvidence {
+                observation_sha256: &observation_sha256,
+                anchors_sha256: &anchors_sha256,
+                reseeded_identity_sha256: None,
+            },
+        )
         .unwrap_or_else(|e| {
             for name in ["firecracker.log", "console.log"] {
                 let path = child_dir.join(name);
@@ -498,7 +556,7 @@ fn fc_live_fork_n_children_from_running_parent() {
             "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
         );
     }
-    let images = resolve_live_images(inputs, &home.join("cache"));
+    let mut images = resolve_live_images(inputs, &home.join("cache"));
 
     let pid = std::process::id();
     let parent_id = format!("fc-fork-live-parent-{pid}");
@@ -527,12 +585,19 @@ fn fc_live_fork_n_children_from_running_parent() {
     let spec = standby_spec(&parent_id, &images, &home);
     let parent_state_dir = mvm_core::config::vm_state_dir(&parent_id);
     std::fs::create_dir_all(&parent_state_dir).expect("create parent state dir");
-    mvm_runtime::base::runtime_meta::record_from_rootfs(
+    let runtime_config = bind_parent_runtime(&mut images, &home, &parent_id);
+    mvm_runtime::base::runtime_meta::record_from_start_config(
         &parent_id,
         StartMode::Detached,
-        &images.rootfs,
+        &runtime_config,
     )
-    .expect("record the parent rootfs metadata");
+    .expect("record the parent's checked source runtime");
+    let runtime_binding = mvm_runtime::base::runtime_meta::read(&parent_id)
+        .expect("read parent launch metadata")
+        .and_then(|meta| meta.runtime_launch_binding)
+        .expect("parent must carry its source-runtime binding");
+    mvm_runtime::runtime_evidence::verify_runtime_binding(&runtime_binding)
+        .expect("reverify retained parent runtime against checked source");
     let boot = parent_boot_spec(&parent_id, &images, &parent_state_dir);
 
     let handle = driver
@@ -568,7 +633,8 @@ fn fc_live_fork_n_children_from_running_parent() {
             id: parent_checkpoint.clone(),
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
-            runtime_overlay_version: None,
+            runtime_overlay_version: Some(env!("CARGO_PKG_VERSION").into()),
+            runtime_launch_binding: Some(runtime_binding),
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,
             tag: None,
@@ -592,10 +658,7 @@ fn fc_live_fork_n_children_from_running_parent() {
         "the resumed parent must keep serving while children restore"
     );
 
-    // Each child restores in its own subprocess: the fork remap unshares the
-    // mount namespace of the process that launches the child VMM, so restoring
-    // several children in one process would stack bind mounts over the
-    // parent's recorded paths and shadow the parent for every later lookup.
+    // Each child restores in its own subprocess, as separate launches would.
     // The batch wall clock spans every child: clone through witness.
     let t_batch = Instant::now();
     let mut witnesses = Vec::new();

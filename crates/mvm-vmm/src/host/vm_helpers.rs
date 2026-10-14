@@ -43,7 +43,11 @@ mod tests {
         let pid_file = dir
             .path()
             .join(super::super::network_endpoint_spawn::SUBST_PID_FILE);
-        std::fs::write(&pid_file, endpoint.id().to_string()).expect("record its pid");
+        std::fs::write(
+            &pid_file,
+            crate::host::network_endpoint_spawn::EndpointPid::of_child(endpoint.id()).render(),
+        )
+        .expect("record its pid");
 
         reap_vm_host_helpers(dir.path(), "vm-with-endpoint");
 

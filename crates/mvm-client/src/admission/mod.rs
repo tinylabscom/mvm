@@ -27,8 +27,9 @@ use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
 
 use self::audit::{
-    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_posture_refused,
-    emit_policy_audit_invalid, emit_policy_resolve_failure, emit_policy_resolved,
+    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_environment_refused,
+    emit_bundle_posture_refused, emit_policy_audit_invalid, emit_policy_resolve_failure,
+    emit_policy_resolved,
 };
 use self::policy::{
     InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
@@ -37,6 +38,7 @@ use self::policy::{
 pub mod agent_verbs;
 mod audit;
 mod bundle_binding;
+pub mod bundle_environment;
 pub mod bundle_posture;
 pub mod entrypoint_resolve;
 pub mod instructions;
@@ -65,6 +67,27 @@ pub enum AssetSpec {
 }
 
 pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+
+/// Add the tool-decision service binding when the plan declares tools.
+///
+/// Keeps caller order and deduplicates: a caller that already bound
+/// `host.tool.v1` does not get a duplicate entry.
+fn services_with_tool_decision(
+    mut services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    tools: &mvm_contract::policy::tool_rules::ToolRules,
+) -> Vec<mvm_contract::protocol::broker::ServiceId> {
+    if tools.is_empty() {
+        return services;
+    }
+    let tool_decision = mvm_contract::protocol::broker::ServiceId::parse(
+        mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE,
+    )
+    .expect("host.tool.v1 is a valid ServiceId");
+    if !services.contains(&tool_decision) {
+        services.push(tool_decision);
+    }
+    services
+}
 
 pub struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
@@ -98,6 +121,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// boot. When present, both labeled digests and the byte count are
     /// reverified before plan synthesis.
     pub boot_artifact_identity: Option<&'a BootArtifactIdentity>,
+    /// The exact selected runtime, verified before it can contribute assurance.
+    pub runtime_config: Option<&'a mvm_core::vm_backend::VmStartConfig>,
     pub cpus: u32,
     pub mem_mib: u64,
     /// The transport this launch gives the guest, recorded on the plan.
@@ -177,6 +202,7 @@ pub struct AdmitPlanForBootParams<'a> {
     /// template default, or deny-all default). Non-deny
     /// policies are lowered into a generated PolicyBundle and referenced by the
     /// signed plan so the bridge never relies on an unsigned bare carrier to
+
     /// authorize outbound traffic.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
@@ -189,6 +215,10 @@ pub struct AdmitPlanForBootParams<'a> {
     /// decide whether the optional glibc SDK sidecar must be attached. Empty
     /// (the common case) means the workload calls no host service.
     pub services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    /// Whether this launch arms the GPU remoting plane. Its shims dial the
+    /// host GPU endpoint over vsock from inside the workload, so admission
+    /// raises the seccomp tier to one that opens `AF_VSOCK` sockets.
+    pub gpu: bool,
     /// True iff this run should receive an attenuated (ProdSafe-only) agent-verb
     /// grant. Set this with `grant_eligible(pty, has_ad_hoc_argv, is_dev_profile)`.
     /// Interactive / ad-hoc / dev runs must pass `false`: they issue DevOnly verbs
@@ -417,7 +447,8 @@ pub fn admit_plan_for_boot_configured_ingress(
             // Fail closed. The alternative — admit and hope — is what leaves a
             // refusal that reports present and can never fire, which is worse
             // than no refusal at all because it is believed.
-            ResolvedEntrypoint::Unresolved { because } => anyhow::bail!(
+            ResolvedEntrypoint::Unresolved { because }
+            | ResolvedEntrypoint::AdHocOverride { because } => anyhow::bail!(
                 "refusing the workload input grant: this launch cannot say what the \
                  workload runs ({because}), so it cannot rule out a shell — and under \
                  a sealed production posture streaming stdin to a shell is interactive \
@@ -466,6 +497,9 @@ pub fn admit_plan_for_boot_configured_ingress(
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let mut postures: Vec<mvm_core::plan::BundleSecurityPosture> =
         p.bundle_posture.into_iter().collect();
+    // The pinned bundle's signed environment, checked against this launch
+    // once the plan is admitted (below), beside the posture.
+    let mut pinned_environment: Option<mvm_core::plan::EnvironmentDescriptor> = None;
     let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
         match p.bundle_pin {
             Some(bundle) => {
@@ -507,6 +541,7 @@ pub fn admit_plan_for_boot_configured_ingress(
                 }
                 let has_embedded_images = !verified.embedded_image_sets.is_empty();
                 postures.extend(verified.manifest.security_posture().copied());
+                pinned_environment = verified.manifest.environment().cloned();
                 let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
                     || format!("extracting signature from bundle at {}", path.display()),
                 )?;
@@ -668,6 +703,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         &p.network_policy,
         &ingress,
         &p.services,
+        p.gpu,
     );
     let input = SynthesisInput {
         outputs: p.outputs.clone(),
@@ -729,7 +765,13 @@ pub fn admit_plan_for_boot_configured_ingress(
                 mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
-        services: p.services.clone(),
+        // Tool rules need a guest-origin decision channel: the in-guest spawn
+        // helper asks `host.tool.v1` over the broker, and the broker refuses
+        // any service the signed plan does not bind. Injecting the binding
+        // here (before signing) means an authored `[tools]` section always
+        // carries its enforcement channel; an author cannot forget it, and
+        // dropping it while tools remain is not expressible.
+        services: services_with_tool_decision(p.services.clone(), &p.tools),
         extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent
@@ -780,13 +822,43 @@ pub fn admit_plan_for_boot_configured_ingress(
         match p.backend_kind {
             Some(kind) => RunPosture::on_backend(variant, kind),
             None => RunPosture::without_backend(variant),
-        },
-    )?;
+        }
+        .with_runtime(p.runtime_config),
+    )
+    .or_else(|err| -> Result<_> {
+        if let Some(refused) =
+            err.downcast_ref::<mvm_hostd::plan_admission::BundleEnvironmentRefused>()
+        {
+            let signer = match p.keys_dir {
+                Some(dir) => load_or_init_at(dir),
+                None => mvm_hostd::audit::host_keypair::load_or_init(),
+            }
+            .context("loading host signer for the environment refusal")?;
+            let emitter = build_default_audit_emitter(signer.signing, p.audit_dir)
+                .context("opening audit chain emitter for the environment refusal")?;
+            emit_bundle_environment_refused(refused.plan(), &emitter, &err);
+        }
+        Err(err)
+    })?;
     let t_signed = std::time::Instant::now();
     tracing::debug!(
         ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
         "admit: sign+verify"
     );
+    // The plan was synthesized just now and nothing has been recorded for it
+    // yet, so this is the one moment its session's first possible segment is
+    // known without reading the chain. Sealing it later reads only that far.
+    if let Some(dir) = p
+        .audit_dir
+        .map(std::path::Path::to_path_buf)
+        .or_else(|| mvm_hostd::audit::emitter::default_audit_dir().ok())
+    {
+        mvm_hostd::audit::session::note_new_session(
+            &dir,
+            &admitted.plan().tenant.0,
+            &admitted.plan_id().0,
+        );
+    }
     tracing::info!(
         plan_id = %admitted.plan_id().0,
         signer_id = %admitted.signer_id(),
@@ -826,6 +898,25 @@ pub fn admit_plan_for_boot_configured_ingress(
             .context("opening audit chain emitter for the posture refusal")?;
         emit_bundle_posture_refused(admitted.plan(), &emitter, &err);
         return Err(err);
+    }
+    // The pinned bundle's signed environment, measured against what this
+    // launch binds and runs. Refused and audited the same way as the posture.
+    if let Some(environment) = &pinned_environment {
+        let refused = bundle_environment::environment_refusals(
+            environment,
+            &bundle_environment::EnvironmentRequest {
+                secrets: &p.secrets,
+                entrypoint: &p.entrypoint,
+                postures: &postures,
+            },
+        );
+        if !refused.is_empty() {
+            let err = anyhow::anyhow!(bundle_environment::refusal_message(&refused));
+            let emitter = build_default_audit_emitter(signer.signing.clone(), p.audit_dir)
+                .context("opening audit chain emitter for the environment refusal")?;
+            emit_bundle_environment_refused(admitted.plan(), &emitter, &err);
+            return Err(err);
+        }
     }
     let t_signer = std::time::Instant::now();
     tracing::debug!(
@@ -1215,6 +1306,48 @@ fn emit_boot_posture(ctx: &AdmissionContext, strategy: mvm_build::run_image::Roo
     }
 }
 
+/// How a transient launch came to be running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartMode {
+    /// It claimed a prepared standby.
+    Warm,
+    /// It booted from nothing, for the reason the label names.
+    Cold { reason: &'static str },
+}
+
+/// What a transient launch reports back about how it booted, for the
+/// chain-signed log: the rootfs strategy, and whether it was warm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BootPosture {
+    pub root_strategy: mvm_build::run_image::RootStrategy,
+    /// `None` for a launch that never reached the claim-or-boot decision.
+    pub start: Option<StartMode>,
+}
+
+impl BootPosture {
+    /// A posture with no start mode yet, as the run path seeds it.
+    #[must_use]
+    pub fn block() -> Self {
+        Self {
+            root_strategy: mvm_build::run_image::RootStrategy::BlockExt4,
+            start: None,
+        }
+    }
+}
+
+fn emit_start_mode(ctx: &AdmissionContext, start: StartMode) {
+    let (mode, reason) = match start {
+        StartMode::Warm => ("warm", None),
+        StartMode::Cold { reason } => ("cold", Some(reason)),
+    };
+    if let Err(e) = ctx
+        .emitter
+        .emit_start_mode(ctx.admitted.plan(), mode, reason)
+    {
+        tracing::warn!(error = %e, "audit emit_start_mode failed (non-fatal)");
+    }
+}
+
 /// Tier A.1 admission enforcement: refuse to boot if any volume about to
 /// be attached isn't named in the verified `ExecutionPlan.shares`, so no
 /// host-fs grant reaches a guest unless the signed plan admitted it
@@ -1241,8 +1374,8 @@ pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Pa
 }
 
 /// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched` and the boot posture when the run succeeded, `plan.failed`
-/// when it did not.
+/// `plan.launched`, the boot posture and the start mode when the run
+/// succeeded, `plan.failed` when it did not.
 ///
 /// `admitted` is `None` only when the run failed before admission was reached —
 /// resolving the image, say. There is no plan to bind that failure to, so
@@ -1254,14 +1387,17 @@ pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Pa
 pub fn record_transient_outcome<T>(
     admitted: Option<&AdmissionContext>,
     backend: &str,
-    strategy: mvm_build::run_image::RootStrategy,
+    posture: BootPosture,
     outcome: &Result<T>,
 ) {
     let Some(ctx) = admitted else { return };
     match outcome {
         Ok(_) => {
             emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, strategy);
+            emit_boot_posture(ctx, posture.root_strategy);
+            if let Some(start) = posture.start {
+                emit_start_mode(ctx, start);
+            }
         }
         Err(e) => emit_failed(
             ctx,
@@ -1550,11 +1686,13 @@ pub(crate) mod admit_plan_tests {
         ledger: &'a InMemoryNonceLedger,
     ) -> AdmitPlanForBootParams<'a> {
         AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-pinned",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: rootfs,
@@ -1758,6 +1896,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
@@ -1805,6 +1944,7 @@ pub(crate) mod admit_plan_tests {
         let admit = |kind| {
             let ledger = InMemoryNonceLedger::new();
             admit_plan_for_boot(AdmitPlanForBootParams {
+                gpu: false,
                 instructions: Default::default(),
                 outputs: Vec::new(),
                 kernel_path: Some(kernel.as_path()),
@@ -1842,6 +1982,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             kernel_path: Some(kernel.as_path()),
@@ -1873,11 +2014,13 @@ pub(crate) mod admit_plan_tests {
         let boot_artifact = mvm_sdk::deploy::digest_boot_artifact(&rootfs).unwrap();
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-happy",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -1942,11 +2085,13 @@ pub(crate) mod admit_plan_tests {
         let audit_dir = tempfile::tempdir().unwrap();
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-missing",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
@@ -2026,6 +2171,7 @@ pub(crate) mod admit_plan_tests {
         ] {
             let ledger = InMemoryNonceLedger::new();
             let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+                gpu: false,
                 instructions: Default::default(),
                 outputs: Vec::new(),
                 network_mode: mode,
@@ -2033,6 +2179,7 @@ pub(crate) mod admit_plan_tests {
                 backend_kind: None,
                 tenant: "local",
                 vm_name: "vm-transport",
+                runtime_config: None,
                 backend_name: "firecracker",
                 configured_images_dir: None,
                 rootfs_path: &rootfs,
@@ -2086,11 +2233,13 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let a1 = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-1",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2124,11 +2273,13 @@ pub(crate) mod admit_plan_tests {
         })
         .unwrap();
         let a2 = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-2",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2176,12 +2327,14 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), vm_name.as_bytes());
         let ledger = InMemoryNonceLedger::new();
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name,
             backend_name: "firecracker",
+            runtime_config: None,
             configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
@@ -2248,7 +2401,10 @@ pub(crate) mod admit_plan_tests {
         record_transient_outcome(
             Some(&ctx),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            BootPosture {
+                start: Some(StartMode::Warm),
+                ..BootPosture::block()
+            },
             &outcome,
         );
 
@@ -2256,7 +2412,40 @@ pub(crate) mod admit_plan_tests {
             .expect("audit file exists");
         assert!(content.contains("plan.launched"), "{content}");
         assert!(content.contains("plan.boot_posture"), "{content}");
+        assert!(content.contains("plan.start_mode"), "{content}");
+        assert!(content.contains("\"mode\":\"warm\""), "{content}");
+        assert!(!content.contains("cold_reason"), "{content}");
         assert!(!content.contains("plan.failed"), "{content}");
+    }
+
+    /// A cold boot is declared on the chain with its reason, so the first run
+    /// of an image can be told apart from a run that should have been warm.
+    #[test]
+    fn a_cold_transient_run_records_why_it_was_cold() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-cold");
+
+        let outcome: Result<()> = Ok(());
+        record_transient_outcome(
+            Some(&ctx),
+            "firecracker",
+            BootPosture {
+                start: Some(StartMode::Cold {
+                    reason: "no_standby_ready",
+                }),
+                ..BootPosture::block()
+            },
+            &outcome,
+        );
+
+        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
+            .expect("audit file exists");
+        assert!(content.contains("\"mode\":\"cold\""), "{content}");
+        assert!(
+            content.contains("\"cold_reason\":\"no_standby_ready\""),
+            "{content}"
+        );
     }
 
     #[test]
@@ -2269,7 +2458,12 @@ pub(crate) mod admit_plan_tests {
         record_transient_outcome(
             Some(&ctx),
             "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
+            BootPosture {
+                start: Some(StartMode::Cold {
+                    reason: "no_standby_ready",
+                }),
+                ..BootPosture::block()
+            },
             &outcome,
         );
 
@@ -2279,6 +2473,7 @@ pub(crate) mod admit_plan_tests {
         assert!(content.contains("the guest never came up"), "{content}");
         assert!(!content.contains("plan.launched"), "{content}");
         assert!(!content.contains("plan.boot_posture"), "{content}");
+        assert!(!content.contains("plan.start_mode"), "{content}");
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -2306,11 +2501,13 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"local-default-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-local-default",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2370,11 +2567,13 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"allow-list-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-allow-list",
+            runtime_config: None,
             backend_name: "libkrun",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2451,11 +2650,13 @@ pub(crate) mod admit_plan_tests {
         let rootfs = write_rootfs(rootfs_dir.path(), b"unrestricted-payload");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-unrestricted",
+            runtime_config: None,
             backend_name: "hvf",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2566,6 +2767,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             keys_dir: Some(keys_dir.path()),
@@ -2628,12 +2830,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-non-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2696,12 +2900,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2753,12 +2959,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2806,6 +3014,24 @@ pub(crate) mod admit_plan_tests {
     }
 
     #[test]
+    fn an_ad_hoc_override_does_not_bypass_the_sealed_input_grant_gate() {
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unit-only rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.restrict_agent_verbs = true;
+        params.services = vec![stream_grant_service()];
+        params.entrypoint = ResolvedEntrypoint::ad_hoc_override();
+
+        let err = admit_plan_for_boot(params)
+            .expect_err("an explicit override is not evidence for a sealed input grant");
+        assert!(
+            format!("{err:#}").contains("cannot say what the workload runs"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
     fn an_unresolved_entrypoint_with_the_grant_is_refused() {
         // The gate's fail-closed arm. Before it, every launch path passed an
         // empty argv and the shell refusal could never fire — a control that
@@ -2819,12 +3045,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2881,12 +3109,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2935,12 +3165,14 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-dev-shell",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3017,6 +3249,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3047,6 +3280,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3067,6 +3301,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3125,6 +3360,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3146,6 +3382,7 @@ pub(crate) mod admit_plan_tests {
         let ledger = InMemoryNonceLedger::new();
 
         admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             keys_dir: Some(keys_dir.path()),
             audit_dir: Some(audit_dir.path()),
@@ -3343,11 +3580,13 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-shares",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3453,11 +3692,13 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3629,11 +3870,13 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let err = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-over-ceiling",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3699,11 +3942,13 @@ allow_hosts = ["localhost:8443"]
         let rootfs = write_rootfs(rootfs_dir.path());
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,

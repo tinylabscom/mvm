@@ -37,6 +37,27 @@ pub use mvm_contract::protocol::vm_backend::{
 // VmStartConfig — backend-agnostic VM launch configuration
 // ---------------------------------------------------------------------------
 
+/// Untrusted inputs for a legacy image's baked runtime. The runtime boundary
+/// re-verifies the pin against the host's enrolled publishers and binds the
+/// selected rootfs and initrd to signed artifact roles. This is not authority
+/// to bypass verification, and the archive cannot supply its own trust store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyBundleRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+}
+
+/// Untrusted original schema-4 archive and schema-2 runtime selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPortableRuntimeProof {
+    pub archive: std::path::PathBuf,
+    pub pin: crate::plan::PlanArtifact,
+    pub manifest_sha256: String,
+    pub arch: crate::arch::GuestArch,
+}
+
 /// Backend-agnostic configuration describing *what* to run.
 ///
 /// Callers build a `VmStartConfig` from CLI arguments and build output.
@@ -82,6 +103,11 @@ pub struct VmStartConfig {
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
+    /// Untrusted pinned bundle inputs for a baked runtime and per-image initrd.
+    /// External CLI runtime selections still require their own release/source proof.
+    pub legacy_bundle_runtime: Option<LegacyBundleRuntimeProof>,
+    /// Portable overlay evidence must be independently verified before launch.
+    pub legacy_portable_runtime: Option<LegacyPortableRuntimeProof>,
     /// Verified bundle runtime selection. Never inferred from a cache version.
     pub bundle_boot_assets: Option<BundleBootAssetsPin>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
@@ -114,6 +140,15 @@ pub struct VmStartConfig {
     /// runtime metadata so lifecycle operations can reason about the exact
     /// overlay the VM booted with rather than consulting mutable cache state.
     pub runtime_overlay_version: Option<String>,
+    /// Untrusted release inputs. The launch boundary authenticates the archive
+    /// and snapshots the selected boot artifacts before a backend can read them.
+    pub runtime_release_proof: Option<super::runtime_release::RuntimeReleaseProof>,
+    /// Explicit unsigned contributor runtime. Never sufficient for production
+    /// assurance, regardless of cache fingerprints or declared protocol.
+    pub unsigned_runtime_development: bool,
+    /// Digest selected by the checked source resolver. This pins continuity,
+    /// not authority: source admission must independently recheck its bytes.
+    pub source_runtime_archive_sha256: Option<String>,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -874,6 +909,7 @@ mod tests {
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
@@ -906,6 +942,7 @@ mod tests {
             ],
             drive: None,
             tool_mediation: None,
+            application_terminal: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();

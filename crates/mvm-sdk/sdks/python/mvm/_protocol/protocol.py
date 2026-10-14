@@ -1641,15 +1641,19 @@ class SeccompTier3(Enum):
 
 
 class SeccompTier4(Enum):
-    network = 'network'
+    vsock = 'vsock'
 
 
 class SeccompTier5(Enum):
+    network = 'network'
+
+
+class SeccompTier6(Enum):
     unrestricted = 'unrestricted'
 
 
 SeccompTier = Union[
-    SeccompTier1, SeccompTier2, SeccompTier3, SeccompTier4, SeccompTier5
+    SeccompTier1, SeccompTier2, SeccompTier3, SeccompTier4, SeccompTier5, SeccompTier6
 ]
 
 
@@ -1815,6 +1819,11 @@ class VolumeMountResult3:
 
 
 VolumeMountResult = Union[VolumeMountResult1, VolumeMountResult2, VolumeMountResult3]
+
+
+@dataclass
+class ApplicationTerminalBinding:
+    argv_digest: Sha256Digest
 
 
 @dataclass
@@ -2117,6 +2126,7 @@ class VerbGrant:
     session_id: str
     sig: str
     verbs: List[VerbId]
+    application_terminal: Optional[ApplicationTerminalBinding] = None
     drive: Optional[DriveGrant] = None
     tool_mediation: Optional[ToolMediationGrant] = None
 

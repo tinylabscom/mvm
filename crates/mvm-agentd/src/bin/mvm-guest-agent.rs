@@ -57,10 +57,10 @@ use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
     AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ToolCheckReply,
-    TrafficPlane, TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_drive_grant,
-    enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
-    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
-    workload_privilege_refusal,
+    TrafficPlane, TrustDecision, VERB_TRUST_POLICY_PATH, current_uid,
+    enforce_application_terminal_grant, enforce_drive_grant, enforce_verb_grant,
+    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
+    load_pinned_verb_grant, load_verb_trust_policy, trust_decision, workload_privilege_refusal,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -209,14 +209,11 @@ fn handle_client(
             // poll, which connects on a backoff while the guest boots and drops
             // each probe once it has its answer. Reporting it as a failed
             // authentication put a security-relevant line on every healthy
-            // boot, which is how a real one gets skipped.
-            Err(error) if error.is_peer_hangup() => {
-                eprintln!(
-                    "mvm-guest-agent: control peer disconnected before completing the \
-                     handshake (readiness probe); no session opened"
-                );
-                return;
-            }
+            // boot, which is how a real one gets skipped. Nor is it worth a
+            // line at all: the probe hangs up on every boot, and on
+            // Firecracker each byte of stderr is a serial-port VM exit on the
+            // launch path.
+            Err(error) if error.is_peer_hangup() => return,
             Err(error) => {
                 eprintln!("mvm-guest-agent: authenticated control handshake failed: {error}");
                 return;
@@ -332,6 +329,10 @@ fn handle_client(
         return;
     }
     if let Some(resp) = enforce_drive_grant(&req, verb_grant.as_ref()) {
+        send_authenticated_response(&mut file, &mut session, &resp);
+        return;
+    }
+    if let Some(resp) = enforce_application_terminal_grant(&req, verb_grant.as_ref()) {
         send_authenticated_response(&mut file, &mut session, &resp);
         return;
     }
@@ -951,6 +952,27 @@ fn main() {
         })
         .flatten();
 
+    // Same ownership and lifetime as the attribution listener: bound by PID 1
+    // before any workload runs, served once activation has dropped privilege,
+    // answering only the tool helper identity and root. Without it the helper
+    // cannot consume relay decisions or record tool sessions, so declared
+    // commands fall back to a full host decision per invocation and scoped
+    // tools run unattributed — degraded, never wider.
+    #[cfg(target_os = "linux")]
+    let decision_listener = init::is_pid1()
+        .then(|| {
+            mvm_agentd::tool_decision_socket::bind_listener()
+                .map_err(|error| {
+                    eprintln!(
+                        "mvm-guest-agent: tool decision socket unavailable, so declared \
+                         commands are decided per invocation and scoped tools unattributed: \
+                         {error}"
+                    );
+                })
+                .ok()
+        })
+        .flatten();
+
     if init::is_pid1() && serve_until_activated(&listener, &server) {
         init::start_orphan_reaper();
     }
@@ -962,6 +984,11 @@ fn main() {
         #[cfg(target_os = "linux")]
         if let Some(listener) = attribution_listener {
             std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(listener) = decision_listener {
+            std::thread::spawn(move || mvm_agentd::tool_decision_socket::serve(listener));
         }
 
         // Defer integration and probe scans to background threads, but only

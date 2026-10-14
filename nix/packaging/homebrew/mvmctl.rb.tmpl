@@ -10,10 +10,8 @@ class Mvmctl < Formula
   license "Apache-2.0"
 
   on_macos do
-    # Apple Silicon only. Intel mac (x86_64-apple-darwin) is deferred — no
-    # release asset is published for it yet (Intel-macOS CI runners are
-    # unavailable to this org). On an Intel mac Homebrew reports no bottle,
-    # which is the honest state until the target is restored.
+    depends_on arch: :arm64
+    depends_on macos: :tahoe
     on_arm do
       url "https://github.com/tinylabscom/mvm/releases/download/v@@VERSION@@/mvmctl-aarch64-apple-darwin.tar.gz"
       sha256 "@@SHA_AARCH64_DARWIN@@"
@@ -32,32 +30,41 @@ class Mvmctl < Formula
   end
 
   def install
-    bin.install "mvmctl"
-    %w[
-      mvm-hvf-supervisor
-      mvm-libkrun-supervisor
+    hostbins = %w[
+      mvmctl
+      mvm-host-agent
+      mvm-signer-helper
       mvm-network-endpoint
-    ].each do |hostbin|
-      bin.install hostbin if File.exist?(hostbin)
-    end
-    (prefix/"assets").install Dir["assets/*"] if Dir.exist?("assets")
-    # macOS: sign the complete VM launch path with role-specific entitlements.
-    if OS.mac?
-      system "codesign", "--sign", "-", "--force", "--entitlements",
-             prefix/"assets/mvmctl.entitlements", bin/"mvmctl"
-      %w[mvm-hvf-supervisor mvm-libkrun-supervisor].each do |hostbin|
-        next unless (bin/hostbin).exist?
+      mvm-broker
+      mvm-audit-signer
+      mvm-gpu-endpoint
+    ]
+    hostbins << "mvm-hvf-supervisor" if OS.mac?
+    hostlib = OS.mac? ? "libmvm_hostlib.dylib" : "libmvm_hostlib.so"
+    destination = lib/"mvmctl"
+    destination.install(*hostbins, hostlib)
+    hostbins.each { |name| bin.install_symlink destination/name }
+    lib.install_symlink destination/hostlib
+    (share/"mvmctl").mkpath
+    (share/"mvmctl/package-managed").write "homebrew\n"
 
-        system "codesign", "--sign", "-", "--force", "--entitlements",
-               prefix/"assets/mvm-supervisor.entitlements", bin/hostbin
+    # Release signatures and notarization must survive installation unchanged.
+    if OS.mac?
+      (hostbins + [hostlib]).each do |name|
+        system "/usr/bin/codesign", "--verify", "--strict",
+               "-R=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
+               destination/name
       end
+      system "/usr/sbin/spctl", "--assess", "--type", "execute", destination/"mvmctl"
+      system "/usr/sbin/spctl", "--assess", "--type", "execute", destination/"mvm-hvf-supervisor"
     end
   end
 
   def caveats
     <<~EOS
-      macOS (non-Apple-Silicon-26+) needs the libkrun runtime:
-        brew install slp/krun/libkrun slp/krun/libkrunfw
+      macOS requires Apple Silicon and macOS 26 or later.
+      Guest runtime is fetched and signature-verified for this CLI version on first use.
+      Update this package with `brew upgrade mvmctl`, not `mvmctl update`.
       Run `mvmctl doctor` to verify your host.
     EOS
   end

@@ -33,6 +33,12 @@ pub trait SnapshotIO {
     /// `dir`, leave the VM in a paused-and-shutdown state.
     fn create_snapshot(&self, dir: &Path) -> Result<()>;
 
+    /// Read the paused VMM's actual runtime configuration. Unsupported
+    /// implementations fail closed; absence of an observer is not legacy.
+    fn runtime_artifacts(&self) -> Result<crate::runtime_artifacts::RuntimeArtifacts> {
+        anyhow::bail!("snapshot backend cannot attest its paused runtime artifacts")
+    }
+
     /// Load the sealed snapshot at `<dir>/{vmstate,mem}.bin` into a
     /// fresh VMM, leaving vCPUs PAUSED. The caller must inspect
     /// [`restored_device_model`](Self::restored_device_model) and run
@@ -44,9 +50,9 @@ pub trait SnapshotIO {
     ///
     /// Same contract as
     /// [`load_snapshot_paused`](Self::load_snapshot_paused) — the guard still
-    /// has to run before [`resume`](Self::resume) — but the child's device
-    /// paths are already bind-mounted into its private mount namespace, so
-    /// this variant must not re-create the host vsock socket underneath them.
+    /// has to run before [`resume`](Self::resume) — but the snapshot names the
+    /// parent's devices, so this variant points the load at the child's own
+    /// before it returns.
     fn load_snapshot_for_fork_paused(&self, dir: &Path) -> Result<()>;
 
     /// How many network interfaces the restored VM's device model carries,
@@ -100,20 +106,33 @@ pub fn assert_vsock_only_device_model(network_interface_count: usize) -> Result<
 }
 
 pub fn guarded_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
+    guarded_load_resume_with(io, dir, || Ok(()))
+}
+
+/// Run an additional authenticated-input check after load, before either the
+/// device guard or resume. Any refusal tears down the still-paused VMM.
+pub fn guarded_load_resume_with<IO: SnapshotIO + ?Sized>(
+    io: &IO,
+    dir: &Path,
+    verify_paused: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     if let Err(e) = io.load_snapshot_paused(dir) {
         // The VMM may be left paused after a failed load; do not let it sit
         // alive with an unaudited device model.
         let _ = io.teardown_paused();
         return Err(e).context(format!("load_snapshot_paused({})", dir.display()));
     }
+    if let Err(error) = verify_paused() {
+        let _ = io.teardown_paused();
+        return Err(error).context("verifying the restored runtime while paused");
+    }
     guard_and_resume(io)
 }
 
 /// Fork variant of [`guarded_load_resume`].
 ///
-/// A forked child's device paths are already bind-mounted into its private
-/// mount namespace, so its load must not re-create the host vsock socket the
-/// way a plain instance restore does. Only the load differs — the guard and the
+/// A forked child's load is pointed at the child's own devices rather than the
+/// parent's its snapshot names. Only the load differs — the guard and the
 /// resume are the same, so a fork cannot reach userspace unchecked or stay
 /// paused forever.
 pub fn guarded_fork_load_resume<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) -> Result<()> {
@@ -154,6 +173,13 @@ pub fn guarded_fork_load_paused<IO: SnapshotIO + ?Sized>(io: &IO, dir: &Path) ->
 /// down before the error is returned.
 fn guard_and_resume<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     guard_loaded_device_model(io)?;
+    resume_verified_or_teardown(io)
+}
+
+/// Resume a VM whose loaded state and device model have already been checked.
+/// A failed request may have taken effect remotely, so always tear down before
+/// returning its original error (with any teardown failure attached).
+pub fn resume_verified_or_teardown<IO: SnapshotIO + ?Sized>(io: &IO) -> Result<()> {
     if let Err(error) = io.resume() {
         let error = error.context("resume after restore");
         return Err(match io.teardown_paused() {
@@ -236,6 +262,16 @@ impl CannedIO {
 }
 
 impl SnapshotIO for CannedIO {
+    fn runtime_artifacts(&self) -> Result<crate::runtime_artifacts::RuntimeArtifacts> {
+        Ok(crate::runtime_artifacts::RuntimeArtifacts {
+            kernel: None,
+            initramfs: None,
+            disks: Vec::new(),
+            kernel_cmdline: String::new(),
+            firecracker_drives: None,
+        })
+    }
+
     fn create_snapshot(&self, dir: &Path) -> Result<()> {
         std::fs::write(dir.join(VMSTATE_FILENAME), &self.vmstate_bytes)?;
         std::fs::write(dir.join(MEM_FILENAME), &self.mem_bytes)?;
@@ -329,5 +365,12 @@ mod tests {
         let io = CannedIO::new(b"vmstate", b"memory");
         guarded_load_resume(&io, dir.path()).expect("resumed");
         assert!(!io.calls().contains(&"teardown_paused"));
+    }
+
+    #[test]
+    fn a_previously_verified_prepared_vm_is_torn_down_on_resume_error() {
+        let io = CannedIO::new(b"vmstate", b"memory").with_failing_resume();
+        assert!(resume_verified_or_teardown(&io).is_err());
+        assert_eq!(io.calls(), vec!["resume", "teardown_paused"]);
     }
 }

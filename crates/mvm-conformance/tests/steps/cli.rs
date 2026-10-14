@@ -100,6 +100,7 @@ fn run_mvmctl_isolated_home(world: &mut CliWorld, args: String) {
     // dev's real `~/.mvm`. The run is synchronous (`output()` blocks to exit)
     // and the fail-fast path spawns no VM, so the temp dir can drop right after.
     let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let _reaper = mvm_conformance::vmm_reaper::ReapOnDrop::new(home.path());
     let mut cmd = mvmctl_command();
     let output = cmd
         .args(mvm_conformance::doc_examples::tokenize(&args))
@@ -133,6 +134,7 @@ fn run_mvmctl_in_isolated_home(world: &mut CliWorld, args: String) {
         cmd.env("MVM_KERNEL_SOURCE", "download")
             .env("MVM_UPDATE_DOWNLOAD_URL", "http://127.0.0.1:9");
     }
+    mvm_conformance::vmm_reaper::register_launched_home(home.path());
     let output = cmd.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
@@ -438,6 +440,31 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     run_mvmctl_isolated_live_home_argv(world, mvm_conformance::doc_examples::tokenize(&args));
 }
 
+#[when("I run the workload-origin scoped-secret live witness")]
+fn run_workload_origin_scoped_secret_live_witness(world: &mut CliWorld) {
+    run_mvmctl_isolated_live_home_argv(world, workload_origin_scoped_secret_argv());
+}
+
+fn workload_origin_scoped_secret_argv() -> Vec<String> {
+    [
+        "machine",
+        "run",
+        "--image",
+        "python:3.12",
+        "--policy",
+        "features/suites/s8_readme_contract/fixtures/tool-workload-origin.toml",
+        "--secret",
+        "tool-live",
+        "--",
+        "/bin/sh",
+        "-c",
+        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbingo.org/bearer "Bearer $TOOL_LIVE""#,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 /// The live-home run with an already-tokenized argv, so steps that
 /// substitute scenario state (e.g. a staging path) into the command line
 /// reuse exactly the home/cwd/PATH wiring the plain step uses.
@@ -552,6 +579,7 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
             command.pre_exec(|| nix::unistd::setsid().map(drop).map_err(Into::into));
         }
     }
+    mvm_conformance::vmm_reaper::register_launched_home(&home);
     let output = command.output().expect("failed to spawn mvmctl");
     world.last_live_home = Some(home);
     world.last_run = Some(output);

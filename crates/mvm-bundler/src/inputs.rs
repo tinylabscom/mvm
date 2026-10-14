@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use mvm_core::plan::BundleResources;
+use mvm_core::plan::EnvironmentDescriptor;
 use mvm_core::plan::types::BuildProvenance;
 use mvm_core::policy::security::AgentProfile;
 
@@ -18,6 +19,16 @@ pub struct BootAssetsInputs<'a> {
     pub initramfs: &'a Path,
 }
 
+/// Durable release proofs and prepared bytes for a schema-6 portable bundle.
+/// The caller authenticates the release and verifies the assembly first.
+#[derive(Debug, Clone)]
+pub struct CliBootAssetsInputs<'a> {
+    pub manifest_bytes: &'a [u8],
+    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
+    pub runtime: &'a mvm_core::plan::bundle::EmbeddedCliBootAssets,
+    pub artifacts: &'a [(&'a str, &'a Path)],
+}
+
 /// Everything one export reads.
 ///
 /// The verity pair is taken as the caller found it rather than as one value:
@@ -26,6 +37,7 @@ pub struct BootAssetsInputs<'a> {
 #[derive(Debug, Clone)]
 pub struct BundleExportInputs<'a> {
     pub boot_assets: Option<BootAssetsInputs<'a>>,
+    pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -54,6 +66,12 @@ pub struct BundleExportInputs<'a> {
     /// digests are replaced with those of the bytes actually sealed, so the
     /// record cannot describe a build other than the one shipped.
     pub provenance: Option<BuildProvenance>,
+    /// What the workload requires from its launch. Sealed as the bundle's
+    /// environment member, which stamps the manifest with the schema that
+    /// introduced it; the verifier refuses a descriptor whose target is not
+    /// `arch_label` or whose capabilities the posture does not permit, so a
+    /// descriptor that needs a capability needs a posture beside it.
+    pub environment: Option<EnvironmentDescriptor>,
     /// Where the archive is written. Missing parent directories are created;
     /// an existing file is overwritten.
     pub out: &'a Path,
@@ -66,6 +84,7 @@ impl<'a> BundleExportInputs<'a> {
     pub fn new(vmlinux: &'a str, rootfs: &'a str, arch_label: &'a str, out: &'a Path) -> Self {
         Self {
             boot_assets: None,
+            cli_boot_assets: None,
             vmlinux,
             initrd: None,
             rootfs,
@@ -78,6 +97,7 @@ impl<'a> BundleExportInputs<'a> {
             cmdline: None,
             posture: None,
             provenance: None,
+            environment: None,
             out,
             debug_out: None,
         }
@@ -122,6 +142,11 @@ impl<'a> BundleExportInputs<'a> {
 
     pub fn provenance(mut self, provenance: BuildProvenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    pub fn environment(mut self, environment: EnvironmentDescriptor) -> Self {
+        self.environment = Some(environment);
         self
     }
 

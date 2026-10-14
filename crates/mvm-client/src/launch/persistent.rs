@@ -301,6 +301,9 @@ pub fn start_persistent_oci_machine(
                 .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
+                    // What the backend will arm, so the admitted tier opens
+                    // the GPU endpoint's vsock socket exactly when there is one.
+                    gpu: config.gpu,
                     instructions: crate::admission::InstructionSources::for_workload(workload_dir)
                         .with_mount_roots(&[])
                         .with_materialized_mounts(&instruction_mounts),
@@ -315,6 +318,7 @@ pub fn start_persistent_oci_machine(
                     kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
                     precomputed_image_sha256: None,
                     boot_artifact_identity: None,
+                    runtime_config: Some(config),
                     cpus,
                     mem_mib: u64::from(memory_mib),
                     seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -354,8 +358,9 @@ pub fn start_persistent_oci_machine(
                     // than refusing for want of an answer.
                     backend_kind: Some(crate::backend_kind_for(backend_name)),
                     entrypoint:
-                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                            "the persistent OCI start path resolves no entrypoint",
+                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::for_launch(
+                            rootfs_path,
+                            has_ad_hoc_argv,
                         ),
                 },
                 ingress,
@@ -488,6 +493,7 @@ mod persistent_oci_boot_tests {
         std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
         let ledger = InMemoryNonceLedger::new();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            gpu: false,
             tools: Default::default(),
             instructions: Default::default(),
             outputs: Vec::new(),
@@ -500,6 +506,7 @@ mod persistent_oci_boot_tests {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 2,
             mem_mib: 512,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

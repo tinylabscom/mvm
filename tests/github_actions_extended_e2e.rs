@@ -59,6 +59,30 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
     );
 }
 
+#[test]
+fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        workflow.contains("tool_live_only:"),
+        "workflow_dispatch must expose the focused witness input"
+    );
+    let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
+    assert!(
+        warm_claim.contains("!inputs.tool_live_only"),
+        "a focused tool witness must skip the warm-claim predecessor"
+    );
+    let readme = job_block(&workflow, "bdd-live-readme");
+    assert!(
+        readme.contains(r#"[{"witness":"tool_live","timeout":60,"slot":1}]"#),
+        "the focused matrix must contain only tool_live"
+    );
+    assert!(
+        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-latest'"),
+        "the focused witness must use the dedicated self-hosted KVM runner"
+    );
+}
+
 /// So must the release workflow. This is the gate that did not exist: a tag
 /// could be cut with only the hermetic BDD lane green, and the hermetic lane
 /// boots no guest.
@@ -72,7 +96,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
     );
     assert!(
         workflow.contains(
-            "needs: [bdd, e2e-docs, build, guest-runtime, release-archive-smoke, distro-packages]"
+            "needs: [bdd, e2e-docs, build, archive-install-smoke, guest-runtime, release-archive-smoke, distro-packages]"
         ),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
@@ -96,6 +120,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "bdd",
         "e2e-docs",
         "build",
+        "archive-install-smoke",
         "guest-runtime",
         "release-archive-smoke",
         "distro-packages",
@@ -678,6 +703,32 @@ fn perf_budget_scenario_prepares_its_parent_immediately_before_launch() {
 
 fn ci_full() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
+}
+
+#[test]
+fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    for job in ["test-workspace-build", "test-workspace-aarch64-build"] {
+        let body = job_block(&ci, job);
+        let install = body
+            .find("- uses: ./.github/actions/install-zigbuild")
+            .expect("producer lane installs the pinned cross toolchain");
+        let tests = body
+            .find("- name: Install cargo-nextest")
+            .expect("producer lane runs nextest");
+        assert!(install < tests, "{job} must install Zig before tests");
+    }
+
+    let shard = fs::read_to_string(".github/workflows/workspace-shard.yml")
+        .expect("read workspace shard workflow");
+    assert!(shard.contains(
+        "- uses: ./.github/actions/install-zigbuild\n        if: inputs.runner_kind == 'github'"
+    ));
+    assert!(shard.contains("command -v cargo-zigbuild"));
+
+    let extended = ci_full();
+    let live = job_block(&extended, "bdd-live-readme");
+    assert!(live.contains("- uses: ./.github/actions/install-zigbuild"));
 }
 
 fn source_bootstrap_script() -> String {
@@ -1340,7 +1391,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     let script = documented_surface_script();
 
     assert!(
-        script.contains("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""),
+        script.contains(
+            "cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\""
+        ),
         "the aws-lc-backed user build must use Cargo's standard compiler and linker path"
     );
     // Checks that `cargo-fast.sh` is never handed `$E2E_FEATURES`, not that it
@@ -1350,7 +1403,9 @@ fn signature_verifying_build_avoids_the_fast_codegen_link_path() {
     // `embed-host-bins` was added to both arms. That flag pulls no aws-lc, so
     // it is fine on the fast path; `$E2E_FEATURES` is the one that is not.
     assert!(
-        !script.contains("./scripts/cargo-fast.sh build --bin mvmctl --features \"$E2E_FEATURES"),
+        !script
+            .lines()
+            .any(|line| line.contains("cargo-fast.sh build") && line.contains("$E2E_FEATURES")),
         "the fast codegen wrapper leaves aws-lc native symbols unresolved"
     );
 }
@@ -1363,10 +1418,12 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
     let script = documented_surface_script();
 
     let unembedded_build = script
-        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES\"")
+        .find("cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES\"")
         .expect("the release-feature lane must build an unembedded witness");
     let embedded_build = script
-        .find("cargo build --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"")
+        .find(
+            "cargo build --profile \"$E2E_PROFILE\" --bin mvmctl --features \"$E2E_FEATURES,embed-host-bins\"",
+        )
         .expect("the live suite must restore its embedded binary");
     let sidecar_warm = script
         .find("\"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build")
@@ -1381,6 +1438,35 @@ fn documented_surface_builds_the_sidecar_through_an_unembedded_cli() {
         explicit_bootstrap < sidecar_warm,
         "the builder image must be acquired before the sidecar build needs it"
     );
+}
+
+/// The macOS lane holds every warm launch to the 300 ms startup ceiling, so
+/// it has to measure an optimized build: unoptimized, plan admission alone
+/// took most of the budget on its runner. And every binary under test has to
+/// come from that one profile, because `mvmctl` launches the helpers and loads
+/// the host library that sit beside it.
+#[test]
+fn the_ceiling_enforcing_macos_lane_builds_every_binary_under_test_optimized() {
+    let workflow = extended_ci();
+    assert!(
+        job_block(&workflow, "e2e-docs-macos").contains("MVM_E2E_PROFILE: release-witness"),
+        "the macOS HVF lane must build the binaries it holds to the startup ceiling optimized"
+    );
+
+    let script = documented_surface_script();
+    assert!(script.contains("MVMCTL=\"$TARGET_DIR/$E2E_PROFILE_DIR/mvmctl\""));
+    assert!(script.contains("just payload::supervisors --profile \"$E2E_PROFILE\""));
+    assert!(script.contains("build_sdk_hostlib \"$MVMCTL\" \"$E2E_PROFILE\""));
+    for line in script.lines().filter(|line| {
+        let line = line.trim_start();
+        (line.starts_with("cargo build") || line.starts_with("./scripts/cargo-fast.sh build"))
+            && line.contains("--bin mvmctl")
+    }) {
+        assert!(
+            line.contains("--profile \"$E2E_PROFILE\""),
+            "every mvmctl build must use the lane's profile: {line}"
+        );
+    }
 }
 
 #[test]

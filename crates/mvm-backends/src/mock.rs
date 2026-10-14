@@ -22,8 +22,11 @@ use mvm_vmm::driver::spec::{VmmSpec, VsockPort};
 use mvm_vmm::driver::traits::{PreloadChildRequest, PreloadedChild};
 use mvm_vmm::driver::{ChildForkRequest, DuplexStream, RunningVm, StandbyParentSpawn, VmmDriver};
 use mvm_vmm::post_restore::{ChildIdentity, PostRestoreOutcome};
+use mvm_vmm::runtime_artifacts::{RuntimeArtifact, RuntimeArtifacts};
 
 type GuestEnds = Arc<Mutex<HashMap<(String, u32), UnixStream>>>;
+type BootObservation = std::result::Result<RuntimeArtifacts, String>;
+type BootObservations = Arc<Mutex<HashMap<String, BootObservation>>>;
 
 /// What a `MockDriver` reports from `deliver_child_identity`. `None` scripts a
 /// guest that never answered inside the RPC deadline (the shape a real
@@ -76,6 +79,7 @@ pub struct MockDriver {
     exit: VmExitStatus,
     status: VmStatus,
     booted: Arc<Mutex<Vec<VmmSpec>>>,
+    observations: BootObservations,
     forked: Arc<Mutex<Vec<MockChildFork>>>,
     guest_ends: GuestEnds,
     /// The rootfs path `vm_full_control`'s returned control reports from
@@ -135,6 +139,7 @@ impl MockDriver {
             exit,
             status: VmStatus::Running,
             booted: Arc::new(Mutex::new(Vec::new())),
+            observations: Arc::new(Mutex::new(HashMap::new())),
             forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
             vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
@@ -323,6 +328,10 @@ impl VmmDriver for MockDriver {
         self.fork_standby_child(req)
     }
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
+        self.observations.lock().unwrap().insert(
+            spec.name.clone(),
+            observe_boot(spec).map_err(|error| format!("{error:#}")),
+        );
         self.booted.lock().unwrap().push(spec.clone());
         Ok(Box::new(MockRunningVm {
             id: VmId(spec.name.clone()),
@@ -442,10 +451,10 @@ impl VmmDriver for MockDriver {
         &self,
         vm_name: &str,
     ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
-        let _ = vm_name;
         Some(Box::new(MockVmFullControl {
             rootfs: self.vm_full_rootfs.clone(),
             calls: Arc::clone(&self.vm_full_calls),
+            observation: self.observations.lock().unwrap().get(vm_name).cloned(),
         }))
     }
 
@@ -539,9 +548,40 @@ impl RunningVm for MockRunningVm {
 struct MockVmFullControl {
     rootfs: PathBuf,
     calls: Arc<Mutex<Vec<&'static str>>>,
+    observation: Option<BootObservation>,
+}
+
+fn observe_boot(boot: &VmmSpec) -> Result<RuntimeArtifacts> {
+    let measure = |path: &PathBuf| -> Result<RuntimeArtifact> {
+        Ok(RuntimeArtifact::loaded(
+            path.clone(),
+            &std::fs::read(path)?,
+        )?)
+    };
+    let mut disks = boot.blocks.iter().collect::<Vec<_>>();
+    disks.sort_by_key(|disk| disk.slot);
+    Ok(RuntimeArtifacts {
+        kernel: None,
+        initramfs: boot.initramfs.as_ref().map(measure).transpose()?,
+        disks: disks
+            .into_iter()
+            .filter(|disk| disk.read_only)
+            .map(|disk| measure(&disk.source))
+            .collect::<Result<_>>()?,
+        kernel_cmdline: boot.cmdline.clone(),
+        firecracker_drives: None,
+    })
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
+    fn runtime_artifacts(&self) -> Result<RuntimeArtifacts> {
+        match &self.observation {
+            Some(Ok(actual)) => Ok(actual.clone()),
+            Some(Err(error)) => bail!("mock boot observation failed: {error}"),
+            None => bail!("mock VM has no recorded boot inputs"),
+        }
+    }
+
     fn pause(&self) -> Result<()> {
         self.calls.lock().unwrap().push("pause");
         Ok(())
@@ -560,6 +600,16 @@ impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
 
     fn rootfs_path(&self) -> Result<PathBuf> {
         Ok(self.rootfs.clone())
+    }
+
+    fn extra_content(&self, content_dir: &Path) -> Result<Vec<mvm_core::checkpoint::ContentBlob>> {
+        let name = mvm_core::checkpoint::HVF_FRAME_BLOB;
+        let path = content_dir.join(name);
+        std::fs::write(&path, b"mock-hvf-machine-state")?;
+        Ok(vec![mvm_core::checkpoint::ContentBlob {
+            name: name.into(),
+            sha256: mvm_core::crypto::image_verify::sha256_file(&path)?,
+        }])
     }
 
     fn device_anchors(&self) -> Result<mvm_core::checkpoint::DeviceAnchors> {
@@ -620,6 +670,86 @@ mod tests {
         );
         assert_eq!(vm.id(), &VmId("probe".into()));
         assert_eq!(driver.name(), "mock");
+    }
+
+    #[test]
+    fn mock_control_observes_boot_bytes_in_device_order_not_later_path_contents() {
+        use mvm_vmm::driver::spec::BlockDev;
+        let tmp = tempfile::tempdir().unwrap();
+        let initramfs = tmp.path().join("initramfs");
+        let first = tmp.path().join("runtime");
+        let second = tmp.path().join("verity");
+        for path in [&initramfs, &first, &second] {
+            std::fs::write(path, path.file_name().unwrap().as_encoded_bytes()).unwrap();
+        }
+        let mut spec = sample_spec("observed");
+        spec.initramfs = Some(initramfs.clone());
+        spec.cmdline = "mvm.runtime_data=/dev/vda mvm.runtime_hash=/dev/vdb".into();
+        spec.blocks = vec![
+            BlockDev {
+                source: second.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 1,
+            },
+            BlockDev {
+                source: first.clone(),
+                read_only: true,
+                ephemeral: false,
+                slot: 0,
+            },
+            BlockDev {
+                source: tmp.path().join("writable"),
+                read_only: false,
+                ephemeral: false,
+                slot: 2,
+            },
+        ];
+        let driver = MockDriver::default();
+        assert!(
+            driver
+                .vm_full_control("observed")
+                .unwrap()
+                .runtime_artifacts()
+                .is_err()
+        );
+        driver.boot(&spec).unwrap();
+        let before = driver
+            .vm_full_control("observed")
+            .unwrap()
+            .runtime_artifacts()
+            .unwrap();
+        assert_eq!(
+            before
+                .disks
+                .iter()
+                .map(|disk| &disk.path)
+                .collect::<Vec<_>>(),
+            vec![&first, &second]
+        );
+        assert_eq!(before.kernel_cmdline, spec.cmdline);
+        assert!(before.firecracker_drives.is_none());
+        for path in [&initramfs, &first, &second] {
+            std::fs::write(path, b"replacement after boot").unwrap();
+        }
+        assert_eq!(
+            driver
+                .vm_full_control("observed")
+                .unwrap()
+                .runtime_artifacts()
+                .unwrap(),
+            before
+        );
+        let mut missing = sample_spec("missing");
+        missing.initramfs = Some(tmp.path().join("missing-initramfs"));
+        driver.boot(&missing).unwrap();
+        assert!(
+            driver
+                .vm_full_control("missing")
+                .unwrap()
+                .runtime_artifacts()
+                .is_err()
+        );
     }
 
     #[test]

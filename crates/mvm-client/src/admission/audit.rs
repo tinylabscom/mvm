@@ -97,6 +97,25 @@ pub fn emit_bundle_posture_refused(
     }
 }
 
+/// The audit class a launch refused by its bundle's signed environment is
+/// recorded under.
+pub const BUNDLE_ENVIRONMENT_REFUSED_CLASS: &str = "bundle-environment-refused";
+
+pub fn emit_bundle_environment_refused(
+    plan: &mvm_core::plan::ExecutionPlan,
+    emitter: &AuditEmitter,
+    err: &anyhow::Error,
+) {
+    if let Err(audit_err) =
+        emitter.emit_failed(plan, BUNDLE_ENVIRONMENT_REFUSED_CLASS, &format!("{err:#}"))
+    {
+        tracing::warn!(
+            error = %audit_err,
+            "audit emit_failed for {BUNDLE_ENVIRONMENT_REFUSED_CLASS} failed (non-fatal)"
+        );
+    }
+}
+
 pub fn emit_policy_audit_invalid(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,

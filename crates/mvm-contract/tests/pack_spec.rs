@@ -332,3 +332,29 @@ fn schema_is_closed_and_requires_explicit_target_and_positive_resources() {
     assert_eq!(identity["name"]["maxLength"], 129);
     assert_eq!(identity["version"]["maxLength"], 128);
 }
+
+#[test]
+fn node_dependency_files_reuse_the_ir_node_tool_vocabulary() {
+    let mut doc = document();
+    doc["dependencies"] = json!([
+        { "kind": "node", "tool": "npm", "manifest": "package.json", "lockfile": "package-lock.json" }
+    ]);
+    let spec: PackSpec = serde_json::from_value(doc.clone()).unwrap();
+    let canonical = String::from_utf8(spec.canonical_json().unwrap()).unwrap();
+    assert!(canonical.contains(
+        r#"{"kind":"node","lockfile":"package-lock.json","manifest":"package.json","tool":"npm"}"#
+    ));
+
+    for (field, value) in [
+        ("tool", json!("bun")),
+        ("manifest", json!("../package.json")),
+        ("lockfile", json!("/abs/package-lock.json")),
+    ] {
+        let mut bad = doc.clone();
+        bad["dependencies"][0][field] = value;
+        assert!(
+            serde_json::from_value::<PackSpec>(bad).is_err(),
+            "{field} must be refused"
+        );
+    }
+}

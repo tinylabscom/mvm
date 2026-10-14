@@ -18,6 +18,17 @@ pub struct CaptureDirectory {
 }
 
 #[cfg(unix)]
+impl Drop for CaptureDirectory {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit the file description before CLOEXEC
+        // closes it. The directory lease ends with this guard, not that child.
+        if let Err(error) = rustix::fs::flock(&self.dir, FlockOperation::Unlock) {
+            tracing::warn!(%error, "failed to release capture directory lease");
+        }
+    }
+}
+
+#[cfg(unix)]
 impl CaptureDirectory {
     /// Pin an already trusted configured root, then walk a bounded relative
     /// capture path without following any descendant symlink.
@@ -252,6 +263,28 @@ mod tests {
         AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME,
         RetentionPolicy, TranscriptWriter, TranscriptWriterConfig,
     };
+
+    #[test]
+    fn lexical_capture_lease_releases_even_while_a_duplicate_descriptor_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
+        let capture = CaptureDirectory::for_writer(dir.path()).unwrap();
+        let duplicate = capture.dir.try_clone().unwrap();
+        assert_eq!(
+            CaptureDirectory::for_writer(dir.path())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        drop(capture);
+        let next = CaptureDirectory::for_writer(dir.path())
+            .expect("the lexical lease ended even if a fork inherited its file description");
+        assert!(duplicate.metadata().unwrap().is_dir());
+        drop(next);
+        drop(duplicate);
+    }
 
     fn fixture() -> (tempfile::TempDir, TranscriptManifest) {
         let dir = tempfile::tempdir().unwrap();

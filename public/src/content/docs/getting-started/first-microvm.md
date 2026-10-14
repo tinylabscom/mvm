@@ -99,9 +99,8 @@ With a `mvm.toml` next to `flake.nix`:
 # Build (manifest discovered from cwd)
 mvmctl machine build
 
-# Boot (auto-selects best backend). Named: an unnamed run must claim a
-# prepared warm standby, which `pool warm` cannot prepare for a manifest image.
-mvmctl machine run --name hello --manifest .
+# Boot (auto-selects best backend)
+mvmctl machine run --manifest .
 
 # Or declare signed ingress before boot
 mvmctl machine run --manifest . --name my-vm --port 8080:8080
@@ -111,7 +110,7 @@ Without a `mvm.toml` (just a flake), pass `--flake` explicitly — that legacy p
 
 ```bash
 mvmctl machine build --flake .
-mvmctl machine run --name hello --flake . --cpus 2 --memory 1024
+mvmctl machine run --flake . --cpus 2 --memory 1024
 ```
 
 ## Check Status
@@ -140,9 +139,8 @@ The share flag is `--mount` (alias `--volume`); there is no short form — `-v` 
 the global verbosity counter.
 
 A guest mount path must live under `/data` or `/work`. `/mnt/config` and
-`/mnt/secrets` are runtime-owned: `/init` mounts mvm's own read-only config and
-secret drives there before any user volume is attached, and the mount policy
-refuses a share that would sit inside or shadow them. Mounts are read-only by
+`/mnt/secrets` are reserved runtime paths, and the mount policy refuses a share
+that would sit inside or shadow them. Mounts are read-only by
 default; a transient run is read-only under every profile.
 
 Inside the guest, the files appear at the path you asked for — `/data/config/`

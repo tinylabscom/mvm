@@ -99,7 +99,7 @@ allowed to run inside those layers at all.
 | 12  | Every broker service is bound to a signed plan binding                     | admission                | Binding-gated dispatch, enforced before the handler runs, with a rejection ladder for unbound and out-of-profile calls                                   |
 | 13  | Managed substitution hands the guest placeholders, never raw secret values | data containment         | The host-side substitution endpoint mints the guest environment and resolves credentials only while preparing an admitted outbound request              |
 | 14  | Every OCI image admission records provenance in the audit log              | supply chain             | A provenance entry carries registry, repo, resolved digest, layer digests, and trust verdict; production refuses a mutable reference                     |
-| 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only the dev `/init` serves a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
+| 15  | A sealed production microVM has no shell, no DevOnly verbs, no PTY         | L4                       | Only a dev image is served a console; console capture is write-only with no host input; the host gate refuses `console` on a sealed image               |
 
 Three further claims — 16 (egress substitution keeps a raw secret off the
 guest), 17 (workload stdin is grant-gated and secret-scanned), and 18 (workload
@@ -121,7 +121,7 @@ The plan now carries an `admission_profile`: a compact record of the workload's 
 - secret-release posture (`none`, plan-bound, or attestation-bound)
 - audit taxonomy and required labels
 
-The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under, and that same tier is what the guest enforces. The host names it on the guest kernel cmdline, and the guest agent compiles the `mvm_core::crypto::seccomp::SeccompTier` allowlist once at activation and installs it, with `no_new_privs`, in every process it starts for the workload. Admission raises a tier below `network` to `network` when the run admits egress, an ingress mapping or a host service, because the workload needs sockets to use any of them.
+The admission profile records the selected tier in the signed plan so the audit chain can prove which security posture the workload was admitted under, and that same tier is what the guest enforces. The host names it on the guest kernel cmdline, and the guest agent compiles the `mvm_core::crypto::seccomp::SeccompTier` allowlist once at activation and installs it, with `no_new_privs`, in every process it starts for the workload. Admission raises a tier below `network` to `network` when the run admits egress, an ingress mapping or a host service, because the workload needs sockets to use any of them. A GPU-granted run that needs none of them is raised to `vsock` instead, which allows `socket` only for `AF_VSOCK`: enough for the GPU shims to reach the host endpoint, and no other address family.
 
 ## Per-backend tier matrix
 

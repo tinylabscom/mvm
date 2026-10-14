@@ -291,26 +291,49 @@ pub fn parse_leaves(lines: &[String]) -> Result<Vec<Leaf<'_>>> {
         .collect()
 }
 
+/// A run of chain lines that ends at the chain head, and the position of its
+/// first line in the whole chain.
+///
+/// A seal is normally computed over the whole chain. When the session and the
+/// previous seal are both known to sit in the live segment, that segment alone
+/// is enough — the positions are the same either way, because `first_seq`
+/// carries everything before it.
+struct ChainTail<'a> {
+    lines: Vec<&'a str>,
+    first_seq: u64,
+}
+
+impl<'a> ChainTail<'a> {
+    /// The whole chain.
+    fn whole(lines: &'a [String]) -> Self {
+        Self {
+            lines: lines.iter().map(String::as_str).collect(),
+            first_seq: 0,
+        }
+    }
+}
+
 /// The leaves whose entry belongs to `plan_id`, seals included.
 ///
-/// Sealing runs at every exit over the whole segment set, so it must not
-/// decode every line: a textual prefilter on the exact serialized field picks
-/// the candidates, and each candidate is then decoded and compared properly.
-/// The prefilter cannot miss a line — an entry's own `plan_id` serializes to
-/// exactly this text — and a line that merely mentions the id elsewhere is
-/// dropped by the decoded comparison.
-fn leaves_for_plan<'a>(lines: &'a [String], plan_id: &str) -> Result<Vec<Leaf<'a>>> {
+/// Sealing runs at every exit, so it must not decode every line: a textual
+/// prefilter on the exact serialized field picks the candidates, and each
+/// candidate is then decoded and compared properly. The prefilter cannot miss
+/// a line — an entry's own `plan_id` serializes to exactly this text — and a
+/// line that merely mentions the id elsewhere is dropped by the decoded
+/// comparison.
+fn leaves_for_plan<'a>(tail: &ChainTail<'a>, plan_id: &str) -> Result<Vec<Leaf<'a>>> {
     let needle = serde_json::to_string(plan_id).map(|quoted| format!("\"plan_id\":{quoted}"))?;
     let mut leaves = Vec::new();
-    for (seq, line) in lines.iter().enumerate() {
+    for (idx, line) in tail.lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
         }
+        let seq = tail.first_seq + idx as u64;
         let envelope: SignedEnvelope =
             serde_json::from_str(line).with_context(|| format!("decoding audit line {seq}"))?;
         if envelope.entry.plan_id == plan_id {
             leaves.push(Leaf {
-                seq: seq as u64,
+                seq,
                 line,
                 hash: hex(&hash_line(line.as_bytes())),
                 entry: envelope.entry,
@@ -320,21 +343,22 @@ fn leaves_for_plan<'a>(lines: &'a [String], plan_id: &str) -> Result<Vec<Leaf<'a
     Ok(leaves)
 }
 
-/// Hash of the last `session.sealed` line in `lines` (any session), or
-/// [`GENESIS_SEAL`].
-fn last_seal_hash(lines: &[String]) -> Result<String> {
+/// Hash of the last `session.sealed` line in `tail` (any session), or `None`
+/// when `tail` holds none.
+fn last_seal_hash(tail: &ChainTail<'_>) -> Result<Option<String>> {
     let needle = format!("\"event\":\"{SESSION_SEALED_EVENT}\"");
-    for (seq, line) in lines.iter().enumerate().rev() {
+    for (idx, line) in tail.lines.iter().enumerate().rev() {
         if !line.contains(&needle) {
             continue;
         }
+        let seq = tail.first_seq + idx as u64;
         let envelope: SignedEnvelope =
             serde_json::from_str(line).with_context(|| format!("decoding audit line {seq}"))?;
         if envelope.entry.event == SESSION_SEALED_EVENT {
-            return Ok(hex(&hash_line(line.as_bytes())));
+            return Ok(Some(hex(&hash_line(line.as_bytes()))));
         }
     }
-    Ok(GENESIS_SEAL.to_string())
+    Ok(None)
 }
 
 fn is_seal(leaf: &Leaf<'_>) -> bool {
@@ -369,15 +393,29 @@ fn checkpoint_root(entries: &[&Leaf<'_>]) -> Result<Option<String>> {
 
 /// Compute the seal for `request.plan_id` over the verified chain `lines`.
 pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<SessionSeal> {
-    let leaves = leaves_for_plan(lines, request.plan_id)?;
+    let tail = ChainTail::whole(lines);
+    let prev_seal = last_seal_hash(&tail)?.unwrap_or_else(|| GENESIS_SEAL.to_string());
+    compute_seal_over(&tail, prev_seal, request)
+}
+
+/// [`compute_seal`] over `tail`, which must hold every one of the session's
+/// lines and end at the chain head. `prev_seal` is the hash of the last seal
+/// in the whole chain, which the caller resolves because `tail` may not reach
+/// back to it.
+fn compute_seal_over(
+    tail: &ChainTail<'_>,
+    prev_seal: String,
+    request: &SealRequest<'_>,
+) -> Result<SessionSeal> {
+    let leaves = leaves_for_plan(tail, request.plan_id)?;
     let session: Vec<&Leaf<'_>> = leaves.iter().filter(|leaf| !is_seal(leaf)).collect();
-    let (Some(first), Some(last), Some(head)) = (session.first(), session.last(), lines.last())
+    let (Some(first), Some(last), Some(head)) =
+        (session.first(), session.last(), tail.lines.last())
     else {
         anyhow::bail!("no audit entries for session {} to seal", request.plan_id);
     };
-    let head_seq = (lines.len() - 1) as u64;
+    let head_seq = tail.first_seq + (tail.lines.len() - 1) as u64;
     let chain_head = hex(&hash_line(head.as_bytes()));
-    let prev_seal = last_seal_hash(lines)?;
     let last_label = |event: &str, key: &str| {
         session
             .iter()
@@ -412,8 +450,12 @@ pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<Sessi
 /// The session's last seal, if it has one and no session entry follows it.
 /// A seal that no longer covers the session's end is not current.
 pub fn current_seal(lines: &[String], plan_id: &str) -> Result<Option<SessionSeal>> {
+    current_seal_over(&ChainTail::whole(lines), plan_id)
+}
+
+fn current_seal_over(tail: &ChainTail<'_>, plan_id: &str) -> Result<Option<SessionSeal>> {
     let mut current = None;
-    for leaf in &leaves_for_plan(lines, plan_id)? {
+    for leaf in &leaves_for_plan(tail, plan_id)? {
         current = if is_seal(leaf) {
             SessionSeal::from_labels(&leaf.entry.labels).ok()
         } else {
@@ -421,6 +463,26 @@ pub fn current_seal(lines: &[String], plan_id: &str) -> Result<Option<SessionSea
         };
     }
     Ok(current)
+}
+
+/// What sealing a session comes to: a seal to append, or the one already there.
+enum SealDecision {
+    New(SessionSeal),
+    Existing(SessionSeal),
+}
+
+/// Decide the seal over `tail`. Idempotent: a session already sealed with
+/// nothing after its seal is left alone, so two teardown paths reaching the
+/// same run write one seal between them.
+fn decide_seal(
+    tail: &ChainTail<'_>,
+    prev_seal: String,
+    request: &SealRequest<'_>,
+) -> Result<SealDecision> {
+    if let Some(existing) = current_seal_over(tail, request.plan_id)? {
+        return Ok(SealDecision::Existing(existing));
+    }
+    compute_seal_over(tail, prev_seal, request).map(SealDecision::New)
 }
 
 /// The verdict on one session.
@@ -1059,34 +1121,94 @@ impl crate::audit::emitter::AuditEmitter {
     /// Call at the session's end — exit, failure, or stop — and before the
     /// closing root is published, so that root covers the seal. The seal is a
     /// sync barrier like every event not listed as deferrable: it is on disk
-    /// before this returns. See [`crate::audit::session`] for what it lets a
-    /// verifier detect.
+    /// before this returns, or before the enclosing
+    /// [`batched`](Self::batched) scope returns. See [`crate::audit::session`]
+    /// for what it lets a verifier detect.
     pub fn seal_session(&self, plan: &ExecutionPlan, reason: SealReason) -> Result<SessionSeal> {
-        let tenant = &plan.tenant.0;
+        let request = SealRequest {
+            plan_id: &plan.plan_id.0,
+            reason,
+            image_sha256: Some(plan.image.sha256.to_ascii_lowercase()),
+            kernel_sha256: plan
+                .environment
+                .as_ref()
+                .map(|value| value.kernel_sha256.clone()),
+            compute_environment: compute_environment_digest(plan),
+        };
+        let decision = match self.decide_seal_in_live_segment(&plan.tenant.0, &request)? {
+            Some(decision) => decision,
+            None => self.decide_seal_from_genesis(&plan.tenant.0, &request)?,
+        };
+        let seal = match decision {
+            SealDecision::Existing(seal) => seal,
+            SealDecision::New(seal) => {
+                self.emit(plan, SESSION_SEALED_EVENT, seal.to_labels())?;
+                seal
+            }
+        };
+        floor::forget(self.audit_dir(), &plan.tenant.0, &plan.plan_id.0);
+        Ok(seal)
+    }
+
+    /// The seal over the whole verified chain. Always available; reads every
+    /// segment.
+    fn decide_seal_from_genesis(
+        &self,
+        tenant: &str,
+        request: &SealRequest<'_>,
+    ) -> Result<SealDecision> {
         let lines =
             crate::audit::merkle::read_leaves(self.audit_dir(), tenant, &self.verifying_key())
                 .context("reading the verified chain to seal the session")?;
-        // Idempotent: a session already sealed with nothing after its seal is
-        // left alone, so two teardown paths reaching the same run write one
-        // seal between them.
-        if let Some(existing) = current_seal(&lines, &plan.plan_id.0)? {
-            return Ok(existing);
+        let tail = ChainTail::whole(&lines);
+        let prev_seal = last_seal_hash(&tail)?.unwrap_or_else(|| GENESIS_SEAL.to_string());
+        decide_seal(&tail, prev_seal, request)
+    }
+
+    /// The seal computed from the live segment alone, or `None` when the live
+    /// segment cannot be shown to hold everything the seal depends on.
+    ///
+    /// The seal reads three things out of the chain: the session's own lines,
+    /// the chain head, and the last seal before it. The head is the live
+    /// segment's last line, and positions come from the leaf cache, which only
+    /// counts as known once it folds to the signed published root. What is left
+    /// is to know that nothing the seal needs sits in a sealed segment: the
+    /// previous seal must be in the live segment, and so must every line of the
+    /// session — which a chain that never rotated gives for free, and a rotated
+    /// one gives only when this process noted where the session could first
+    /// land ([`note_new_session`]) and the chain has not rotated since.
+    ///
+    /// Anything short of that returns `None`, and the caller reads the whole
+    /// chain exactly as it always has. The two answers are the same seal.
+    fn decide_seal_in_live_segment(
+        &self,
+        tenant: &str,
+        request: &SealRequest<'_>,
+    ) -> Result<Option<SealDecision>> {
+        let audit_dir = self.audit_dir();
+        let Some(chain) =
+            crate::audit::merkle::CachedChain::load(audit_dir, tenant, &self.verifying_key())
+        else {
+            return Ok(None);
+        };
+        let lines = chain.active_lines();
+        let Some(first_seq) = chain.tree_size().checked_sub(lines.len() as u64) else {
+            return Ok(None);
+        };
+        let rotated = chain.has_sealed_segments();
+        if !rotated && first_seq != 0 {
+            return Ok(None);
         }
-        let seal = compute_seal(
-            &lines,
-            &SealRequest {
-                plan_id: &plan.plan_id.0,
-                reason,
-                image_sha256: Some(plan.image.sha256.to_ascii_lowercase()),
-                kernel_sha256: plan
-                    .environment
-                    .as_ref()
-                    .map(|value| value.kernel_sha256.clone()),
-                compute_environment: compute_environment_digest(plan),
-            },
-        )?;
-        self.emit(plan, SESSION_SEALED_EVENT, seal.to_labels())?;
-        Ok(seal)
+        if rotated && !floor::confined_to(audit_dir, tenant, request.plan_id, chain.active_seq) {
+            return Ok(None);
+        }
+        let tail = ChainTail { lines, first_seq };
+        let prev_seal = match last_seal_hash(&tail)? {
+            Some(hash) => hash,
+            None if !rotated => GENESIS_SEAL.to_string(),
+            None => return Ok(None),
+        };
+        decide_seal(&tail, prev_seal, request).map(Some)
     }
 }
 
@@ -1098,6 +1220,9 @@ fn compute_environment_digest(plan: &ExecutionPlan) -> Option<String> {
         .find(|asset| matches!(asset.kind, mvm_core::plan::AssetKind::ComputeEnvironment))
         .map(|asset| asset.digest.clone())
 }
+
+mod floor;
+pub use floor::note_new_session;
 
 #[cfg(test)]
 mod tests;
