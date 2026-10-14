@@ -83,6 +83,11 @@ pub enum LaunchSource {
         /// The 64-character slot address.
         slot_hash: String,
     },
+    /// An installed built registry image, reopened under its exact pin on every
+    /// start. No previously resolved host path is carried as authority.
+    RegistryPack {
+        pin: mvm_core::registry_pack::PackPin,
+    },
 }
 
 impl LaunchSource {
@@ -127,6 +132,7 @@ impl LaunchSource {
         match self {
             Self::Image(image) => image.to_string(),
             Self::Built { slot_hash } => slot_hash.clone(),
+            Self::RegistryPack { pin } => format!("pack:{}", pin.reference()),
         }
     }
 }
@@ -180,6 +186,63 @@ pub struct LaunchRequest {
     /// persistent one would silently re-admit under the host key on its next
     /// start.
     pub(crate) signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
+}
+
+/// Build the persisted declarative spec a persistent launch writes.
+pub(crate) fn persisted_spec_from_request(
+    request: &LaunchRequest,
+    name: &str,
+) -> mvm_runtime::machine::persist::MachineSpec {
+    use mvm_runtime::machine::persist as mp;
+
+    mp::MachineSpec {
+        schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
+        name: name.to_string(),
+        // The persisted record carries the written form — the same token the
+        // caller declared, so a spec read back reconstructs the same value.
+        image: match &request.source {
+            LaunchSource::Image(image) => Some(image.to_string()),
+            LaunchSource::Built { .. } | LaunchSource::RegistryPack { .. } => None,
+        },
+        manifest: match &request.source {
+            LaunchSource::Image(_) | LaunchSource::RegistryPack { .. } => None,
+            LaunchSource::Built { slot_hash } => Some(slot_hash.clone()),
+        },
+        deployment: None,
+        resolved_digest: None,
+        runtime_pack: false,
+        registry_pack_image: match &request.source {
+            LaunchSource::RegistryPack { pin } => Some(pin.clone()),
+            _ => None,
+        },
+        tools: Default::default(),
+        net: false,
+        allow_host: vec![],
+        peer: Vec::new(),
+        routes: Vec::new(),
+        ai: None,
+        ports: request.ports.clone(),
+        cpus: request.cpus,
+        memory: format!("{}M", request.memory_mib),
+        mem_initial: None,
+        profile: request.profile.clone(),
+        volumes: vec![],
+        init: vec![],
+        agent_verb: vec![],
+        // The daemon launch surface does not carry the GPU flag yet; the
+        // CLI persistent path (`machine create/start --gpu`) is the
+        // supported route for GPU machines.
+        gpu: false,
+        gpu_device: None,
+        caller_commitment: None,
+        workload_dir: None,
+        created_at: Some(mvm_core::util::time::utc_now()),
+        last_started_at: None,
+        health_check: None,
+        // The permission set the launch was admitted under, so a later
+        // `start` by name re-admits under the same bounds.
+        grants: request.grants.clone(),
+    }
 }
 
 impl LaunchRequest {
@@ -462,6 +525,10 @@ impl LaunchRequestBuilder {
             env,
             cwd,
         } = validated_command(self.command, self.env, self.cwd)?;
+        if matches!(self.source, LaunchSource::RegistryPack { .. }) {
+            super::built_pack::validate_built_pack_profile(&self.profile)
+                .map_err(|error| invalid(error.to_string()))?;
+        }
         if matches!(self.source, LaunchSource::Built { .. })
             && self.mode == LifecycleMode::Transient
         {

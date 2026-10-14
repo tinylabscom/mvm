@@ -197,6 +197,7 @@ impl EntrypointAdmission {
                 tenant_id: ctx.admitted.plan().tenant.0.clone(),
                 plan_json,
                 bundle_json,
+                built_pack_check: ctx.admitted.built_pack_boot_check()?,
                 config_files: start_config.config_files,
                 read_only_materialized_images: ctx
                     .admitted

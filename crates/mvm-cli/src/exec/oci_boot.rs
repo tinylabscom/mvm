@@ -108,7 +108,9 @@ fn source_boots_oci_image(source: &ImageSource) -> Result<bool> {
             slot_hash,
             revision_hash,
         )),
-        ImageSource::Template(_) | ImageSource::WasmModule { .. } => Ok(false),
+        ImageSource::Template(_)
+        | ImageSource::WasmModule { .. }
+        | ImageSource::RegistryPack { .. } => Ok(false),
     }
 }
 

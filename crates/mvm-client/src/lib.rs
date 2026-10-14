@@ -73,6 +73,7 @@ pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
 pub mod registration;
+pub mod registry_pack_local;
 pub mod replay;
 pub mod secret;
 pub mod snapshot;

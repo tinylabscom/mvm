@@ -650,6 +650,9 @@ fn machine_run_spec(
         // The verified runtime pack is its own source; recorded via
         // `runtime_pack: true` below, not `image`/`manifest`.
         (None, None, None)
+    } else if args.run.registry_pack_image.is_some() {
+        // Persist only the built image's exact pin, never a host payload path.
+        (None, None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.
         (None, None, None)

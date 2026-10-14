@@ -68,28 +68,43 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
         let Some(image) = &verified.manifest().image else {
             continue;
         };
-        let mvm_core::registry_pack::RegistryPackImage::Source(image) = image else {
-            anyhow::bail!("built pack image release assets are not yet installed or admitted");
-        };
         anyhow::ensure!(
             selected.is_none(),
             "more than one --policy pack declares an image; select an explicit boot source"
         );
-        let manifest_path = installed.payload_root().join(&image.manifest);
-        let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
-            .context("reading verified pack image manifest")?;
-        let flake_dir = manifest_path
-            .parent()
-            .context("pack image manifest has no parent directory")?;
         let pin = mvm_core::registry_pack::PackPin::new(
             verified.manifest().reference.clone(),
             verified.manifest_sha256().clone(),
         )?;
-        selected = Some((flake_dir.display().to_string(), manifest.profile, pin));
+        let source = match image {
+            mvm_core::registry_pack::RegistryPackImage::Source(image) => {
+                let manifest_path = installed.payload_root().join(&image.manifest);
+                let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
+                    .context("reading verified pack image manifest")?;
+                let flake_dir = manifest_path
+                    .parent()
+                    .context("pack image manifest has no parent directory")?;
+                Some((flake_dir.display().to_string(), manifest.profile))
+            }
+            mvm_core::registry_pack::RegistryPackImage::Built(_) => {
+                anyhow::ensure!(
+                    matches!(
+                        args.profile,
+                        mvm_client::profile::RunProfile::Restrictive
+                            | mvm_client::profile::RunProfile::Standard
+                    ),
+                    "built registry images require a restrictive or standard workload profile"
+                );
+                None
+            }
+        };
+        selected = Some((source, pin));
     }
-    if let Some((flake, profile, pin)) = selected {
-        args.flake = Some(flake);
-        args.flake_profile = Some(profile);
+    if let Some((source, pin)) = selected {
+        if let Some((flake, profile)) = source {
+            args.flake = Some(flake);
+            args.flake_profile = Some(profile);
+        }
         args.registry_pack_image = Some(pin);
     }
     Ok(())

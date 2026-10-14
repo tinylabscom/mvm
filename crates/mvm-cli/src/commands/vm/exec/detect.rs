@@ -109,6 +109,7 @@ pub(in crate::commands) fn resolve_run_source(
         || args.flake.is_some()
         || args.deployment.is_some()
         || args.runtime_pack
+        || args.registry_pack_image.is_some()
     {
         return Ok(ResolvedSource::Explicit);
     }
