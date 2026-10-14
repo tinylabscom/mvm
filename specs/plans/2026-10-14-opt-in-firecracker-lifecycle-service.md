@@ -50,8 +50,8 @@ explicit trusted-operator re-registration; transparent restart acceptance is
 not part of this slice.
 
 Path validation and signal delivery are not one atomic filesystem operation.
-Detected binding changes refuse the operation; the retained pidfd guarantees
-that a concurrent rename cannot redirect delivery to a replacement process.
+Detected binding changes refuse the operation; signal delivery uses the
+retained original pidfd rather than resolving a replacement process by PID.
 Do not claim rejection of every mutation occurring after the final check.
 No numeric-PID fallback or user-writable executable may gain root
 authority. Existing signed-plan admission, audit, resource grants, verified
