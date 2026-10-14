@@ -225,6 +225,16 @@ class SigningTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "outside"):
             signing.sign(self.payload, self.payload / "report.json")
 
+    def test_canonical_libkrun_role_has_the_hypervisor_requirement(self):
+        self.assertEqual(
+            signing.ROLES["mvm-libkrun-supervisor"],
+            ["com.apple.security.hypervisor"],
+        )
+        self.assertEqual(
+            signing.ROLES["mvm-libkrun-supervisor"],
+            signing.ROLES["mvm-krun-supervisor"],
+        )
+
     def test_producer_full_role_matrix_and_post_sign_hashes_without_credentials(self):
         for name in signing.ROLES:
             self.binary(name)
@@ -234,7 +244,7 @@ class SigningTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             signing.producer_sign(self.payload, self.report, True)
         calls = [c for c in self.calls if "--sign" in c]
-        self.assertEqual(len(calls), 6)
+        self.assertEqual(len(calls), len(signing.ROLES) + 3)
         self.assertEqual(self.entitlements, {
             name: dict.fromkeys(keys, True) for name, keys in signing.ROLES.items()
         })
@@ -243,7 +253,7 @@ class SigningTests(unittest.TestCase):
             self.assertNotIn("--deep", call)
             self.assertNotIn("--options", call)
         verifies = [c for c in self.calls if "--verify" in c]
-        self.assertEqual(len(verifies), 6)
+        self.assertEqual(len(verifies), len(signing.ROLES) + 3)
         self.assertTrue(all("--strict" in c and "--all-architectures" in c for c in verifies))
         report = json.loads(self.report.read_text())
         self.assertEqual(report["status"], "ProducerAdhocVerified")

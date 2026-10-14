@@ -30,6 +30,8 @@ FAT = {b"\xca\xfe\xba\xbe": (">", False), b"\xbe\xba\xfe\xca": ("<", False),
 ROLES = {
     "mvmctl": ["com.apple.security.virtualization"],
     "mvm-hvf-supervisor": ["com.apple.security.hypervisor"],
+    "mvm-libkrun-supervisor": ["com.apple.security.hypervisor"],
+    # Retain the historical spelling when inspecting older staging layouts.
     "mvm-krun-supervisor": ["com.apple.security.hypervisor"],
 }
 # codesign treats a requirement argument without '=' as a filename.
