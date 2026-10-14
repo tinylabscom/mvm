@@ -396,7 +396,7 @@ fn boot_with_handoff(
                 mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
 
@@ -868,7 +868,7 @@ fn wait_for_agent_socket(
                 socket.display()
             );
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
 }
@@ -923,7 +923,7 @@ fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result
         if deadline.saturating_duration_since(Instant::now()).is_zero() {
             break;
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
     let reason = last_error.map_or_else(
