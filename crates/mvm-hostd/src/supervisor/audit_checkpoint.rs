@@ -5,22 +5,26 @@
 //! producing a wrong answer. It lives under the mvm cache dir rather than
 //! beside the audit log so that a checkpoint is never mistaken for part of the
 //! chain, and so wiping the cache restores genesis-anchored verification.
+//!
+//! The signed heads of [`audit_head`](super::audit_head) share this directory
+//! and its per-chain naming; they differ in being authenticated, and in their
+//! file suffix.
 
 use std::path::{Path, PathBuf};
 
 use super::audit_file::ChainCheckpoint;
 
 /// Directory holding one checkpoint per verified chain.
-fn checkpoint_dir() -> PathBuf {
+pub(crate) fn cache_dir() -> PathBuf {
     Path::new(&mvm_core::config::mvm_cache_dir()).join("audit-verify")
 }
 
-/// Cache filename for `chain_path`.
+/// Cache file stem for `chain_path`, without an extension.
 ///
 /// Keyed on the full path, not just the file name: two chains with the same
 /// basename under different roots (a test `MVM_HOME`, a second audit dir) must
 /// not share a checkpoint, or one would resume onto the other's history.
-fn checkpoint_name(chain_path: &Path) -> String {
+pub(crate) fn cache_file_stem(chain_path: &Path) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(chain_path.as_os_str().as_encoded_bytes());
@@ -31,12 +35,28 @@ fn checkpoint_name(chain_path: &Path) -> String {
         .unwrap_or("chain");
     // The readable stem is for a human looking in the cache dir; the digest is
     // what actually distinguishes entries.
-    format!("{stem}-{}.json", hex::encode(&digest[..8]))
+    format!("{stem}-{}", hex::encode(&digest[..8]))
 }
 
 /// Path of the checkpoint file for `chain_path`.
 pub fn checkpoint_path(chain_path: &Path) -> PathBuf {
-    checkpoint_dir().join(checkpoint_name(chain_path))
+    cache_dir().join(format!("{}.json", cache_file_stem(chain_path)))
+}
+
+/// Write a cache file via a per-process temp file and a rename, so a
+/// concurrent reader never sees a half-written file.
+///
+/// Deliberately not fsynced: these files sit on the launch path, and every
+/// reader treats a torn or missing one as absent and falls back to a full walk,
+/// so durability buys nothing here.
+pub(crate) fn write_cache_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "cache path has no parent")
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Load the stored checkpoint for `chain_path`, if any is readable.
@@ -51,20 +71,10 @@ pub fn load(chain_path: &Path) -> Option<ChainCheckpoint> {
 /// Store `checkpoint` for `chain_path`. Best-effort; a failure to persist only
 /// costs the next run a full walk.
 pub fn store(chain_path: &Path, checkpoint: &ChainCheckpoint) {
-    let path = checkpoint_path(chain_path);
-    let Some(parent) = path.parent() else { return };
-    if std::fs::create_dir_all(parent).is_err() {
-        return;
-    }
-    let Ok(encoded) = serde_json::to_string(checkpoint) else {
+    let Ok(encoded) = serde_json::to_vec(checkpoint) else {
         return;
     };
-    // Write via a temp file and rename so a concurrent reader never sees a
-    // half-written checkpoint and resumes onto a truncated hash.
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, encoded).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    }
+    let _ = write_cache_file(&checkpoint_path(chain_path), &encoded);
 }
 
 #[cfg(test)]

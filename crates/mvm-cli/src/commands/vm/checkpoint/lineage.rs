@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use mvm_core::checkpoint::{CheckpointDigest, CheckpointMeta};
 use mvm_core::image_lineage::ImageNode;
+use mvm_hostd::audit::host_keypair::HostSigner;
+use mvm_hostd::supervisor::{PlanAuditEntry, VerifyError, audit_head};
 use mvm_runtime::checkpoint::{CheckpointChainAnchor, CheckpointStore, verify_lineage};
 use mvm_runtime::image_lineage::ImageChainAnchor;
 
@@ -21,11 +26,20 @@ struct CheckpointVerifyJson<'a> {
 
 /// A [`CheckpointChainAnchor`] backed by the host-signed audit chains on disk.
 ///
-/// Verifies every host-lifecycle chain's signatures up front (skipping the
-/// per-VM workload chains, which use a different format) and indexes the
+/// Verifies every host-lifecycle chain's signatures (skipping the per-VM
+/// workload chains, which use a different format) and indexes the
 /// content-address each checkpoint's creation entry recorded. Only entries from
 /// chains that verify clean are indexed: an entry stranded behind a tampered
 /// line is not trusted, so the checkpoint it names fails closed as un-anchored.
+///
+/// The verification resumes from a host-signed head per chain
+/// ([`audit_head`]): the index each load builds is signed into that head along
+/// with where verification ended, and the next load re-verifies only the
+/// boundary line and whatever was appended after it. Loading therefore costs
+/// what was appended since the last load, not the chain's whole history — the
+/// warm-claim path calls this on every launch, and a host that has served a day
+/// of launches carries megabytes of chain. A head that does not verify, or does
+/// not fit the chain any more, is dropped and the chain is walked from genesis.
 ///
 /// A chain that fails verification is skipped but *remembered*, because the two
 /// ways a lookup can come back empty are not the same finding and must not
@@ -49,13 +63,42 @@ pub struct SignedChainAnchor {
 }
 
 /// What a signed creation entry recorded about one record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RecordedCreation {
     /// The content-address the entry recorded.
     digest: CheckpointDigest,
     /// The tenant whose chain the entry was signed into.
     tenant: String,
     plan_id: String,
+}
+
+/// The creation entries one chain's verified prefix recorded — the state the
+/// signed head carries between loads, so the prefix never has to be re-parsed.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CreationIndex {
+    recorded: BTreeMap<String, RecordedCreation>,
+}
+
+/// What one load read, for the debug log and the regression witness.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct LoadStats {
+    /// Host-lifecycle chains found.
+    pub(super) chains: usize,
+    /// Chains whose signed head fit and was resumed from.
+    pub(super) resumed: usize,
+    /// Entries whose signatures were verified on this load.
+    pub(super) entries_verified: usize,
+}
+
+/// One chain's contribution to the anchor.
+enum ChainIndex {
+    Verified {
+        index: CreationIndex,
+        resumed: bool,
+        entries_verified: usize,
+    },
+    /// The chain did not verify from genesis; its entries anchor nothing.
+    Unverifiable(VerifyError),
 }
 
 /// Namespace tag for a checkpoint-id key in [`SignedChainAnchor::recorded`].
@@ -88,20 +131,30 @@ impl SignedChainAnchor {
         }
     }
 
+    /// Verify every host-lifecycle chain and index its creation entries.
     pub fn load() -> Result<Self> {
+        Self::load_measured().map(|(anchor, _)| anchor)
+    }
+
+    /// [`Self::load`], also reporting what the load had to read.
+    pub(super) fn load_measured() -> Result<(Self, LoadStats)> {
         use mvm_hostd::audit::emitter::default_audit_dir;
 
         let dir = default_audit_dir()?;
         let mut recorded = std::collections::HashMap::new();
         let mut unverifiable = Vec::new();
+        let mut stats = LoadStats::default();
         let read_dir = match std::fs::read_dir(&dir) {
             Ok(rd) => rd,
             // No audit dir yet → nothing to anchor; every lookup is None (fail closed).
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self {
-                    recorded,
-                    unverifiable,
-                });
+                return Ok((
+                    Self {
+                        recorded,
+                        unverifiable,
+                    },
+                    stats,
+                ));
             }
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
@@ -115,34 +168,44 @@ impl SignedChainAnchor {
             if !mvm_core::config::is_host_lifecycle_chain(&path) {
                 continue;
             }
-            // A chain we cannot verify cannot anchor anything: skip it whole so a
-            // tampered line strands (rather than silently trusts) its entries.
-            // Recorded, not just logged — a later lookup miss has to be able to
-            // say "cannot tell" instead of "never audited".
-            if let Err(e) = mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "audit chain failed verification; its entries will not anchor any checkpoint"
-                );
-                unverifiable.push(path);
-                continue;
-            }
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            for line in content.lines() {
-                if line.is_empty() {
-                    continue;
+            stats.chains += 1;
+            match load_chain_index(&path, &signer)? {
+                ChainIndex::Verified {
+                    index,
+                    resumed,
+                    entries_verified,
+                } => {
+                    stats.resumed += usize::from(resumed);
+                    stats.entries_verified += entries_verified;
+                    recorded.extend(index.recorded);
                 }
-                let envelope: mvm_hostd::supervisor::SignedEnvelope = serde_json::from_str(line)
-                    .with_context(|| format!("parsing audit line in {}", path.display()))?;
-                index_creation_digest(&mut recorded, &envelope)?;
+                // A chain we cannot verify cannot anchor anything: skip it whole
+                // so a tampered line strands (rather than silently trusts) its
+                // entries. Recorded, not just logged — a later lookup miss has
+                // to be able to say "cannot tell" instead of "never audited".
+                ChainIndex::Unverifiable(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "audit chain failed verification; its entries will not anchor any checkpoint"
+                    );
+                    unverifiable.push(path);
+                }
             }
         }
-        Ok(Self {
-            recorded,
-            unverifiable,
-        })
+        tracing::debug!(
+            chains = stats.chains,
+            resumed = stats.resumed,
+            entries_verified = stats.entries_verified,
+            "loaded the signed lineage anchor"
+        );
+        Ok((
+            Self {
+                recorded,
+                unverifiable,
+            },
+            stats,
+        ))
     }
 
     /// Resolve one namespaced anchor key.
@@ -179,19 +242,64 @@ impl SignedChainAnchor {
     }
 }
 
-/// Index one signed audit entry's creation content-address, when it is a
+/// Verify one lifecycle chain and index its creation entries, resuming from
+/// its signed head when one fits and signing a new head when the pass learned
+/// something the stored one did not say.
+///
+/// A chain that does not verify is reported as [`ChainIndex::Unverifiable`],
+/// never as an error: the caller records it and keeps going. A creation entry
+/// whose digest label is malformed is an error, as it always was — the chain is
+/// sound, the writer is not, and that is a bug to surface rather than a chain
+/// to distrust. No head is stored in that case, so the next load reports it
+/// again rather than signing the malformed entry into the index.
+fn load_chain_index(path: &Path, signer: &HostSigner) -> Result<ChainIndex> {
+    let head = audit_head::load::<CreationIndex>(path, &signer.verifying);
+    let mut malformed: Option<anyhow::Error> = None;
+    let outcome = audit_head::verify_resuming(
+        path,
+        &signer.verifying,
+        head,
+        CreationIndex::default,
+        |index, entry| {
+            if let Err(e) = index_creation_digest(&mut index.recorded, entry)
+                && malformed.is_none()
+            {
+                malformed = Some(e.context(format!("indexing audit entry in {}", path.display())));
+            }
+        },
+    );
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => return Ok(ChainIndex::Unverifiable(e)),
+    };
+    if let Some(e) = malformed {
+        return Err(e);
+    }
+    if outcome.advanced()
+        && let Some(position) = &outcome.position
+    {
+        audit_head::store(path, position, &outcome.state, &signer.signing);
+    }
+    Ok(ChainIndex::Verified {
+        index: outcome.state,
+        resumed: outcome.resumed,
+        entries_verified: outcome.verified_now,
+    })
+}
+
+/// Index one verified audit entry's creation content-address, when it is a
 /// checkpoint or image-node creation event. `checkpoint.created` keys on
 /// `checkpoint_id`/`meta_digest`; `checkpoint.forked` is a child's creation, so
 /// it keys on `child_id`/`child_digest`. `image.created` has no separate id —
 /// the node's identity *is* its content-address — so it keys the digest under
 /// itself.
 fn index_creation_digest(
-    recorded: &mut std::collections::HashMap<String, RecordedCreation>,
-    envelope: &mvm_hostd::supervisor::SignedEnvelope,
+    recorded: &mut BTreeMap<String, RecordedCreation>,
+    entry: &PlanAuditEntry,
 ) -> Result<()> {
     use mvm_hostd::audit::emitter::checkpoint_audit as k;
     use mvm_hostd::audit::emitter::image_audit as ik;
-    let event = envelope.entry.event.as_str();
+    let event = entry.event.as_str();
     // The (id-label, digest-label, namespace) a creation event keys on;
     // non-creation events carry none.
     let keys = if event == k::CREATED_EVENT {
@@ -206,14 +314,14 @@ fn index_creation_digest(
     let Some((id_key, digest_key, namespace)) = keys else {
         return Ok(());
     };
-    let labels = &envelope.entry.labels;
+    let labels = &entry.labels;
     if let (Some(id), Some(digest)) = (labels.get(id_key), labels.get(digest_key)) {
         recorded.insert(
             anchor_key(namespace, id),
             RecordedCreation {
                 digest: CheckpointDigest::parse(digest.clone())?,
-                tenant: envelope.entry.tenant.0.clone(),
-                plan_id: envelope.entry.plan_id.0.clone(),
+                tenant: entry.tenant.0.clone(),
+                plan_id: entry.plan_id.0.clone(),
             },
         );
     }
@@ -346,18 +454,27 @@ mod tests {
     /// matches its signature. This is a *forgery-shaped* break, not a syntax
     /// error — the case the anchor used to silently skip.
     fn break_chain(path: &std::path::Path) {
+        break_line(path, 0);
+    }
+
+    /// [`break_chain`], at a chosen line.
+    fn break_line(path: &std::path::Path, idx: usize) {
         let content = std::fs::read_to_string(path).unwrap();
         let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
         assert!(
-            !lines.is_empty(),
-            "fixture chain must have entries to break"
+            lines.len() > idx,
+            "fixture chain must have an entry at line {idx} to break"
         );
-        lines[0] = lines[0].replace("fs_quick", "vm_full");
+        lines[idx] = lines[idx].replace("fs_quick", "vm_full");
         assert!(
-            lines[0].contains("vm_full"),
+            lines[idx].contains("vm_full"),
             "the tampered field must actually be present in the fixture"
         );
         std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+    }
+
+    fn lookup(anchor: &SignedChainAnchor, id: &str) -> Result<Option<CheckpointDigest>> {
+        CheckpointChainAnchor::recorded_creation_digest(anchor, &meta(id))
     }
 
     #[test]
@@ -588,6 +705,180 @@ mod tests {
             CheckpointChainAnchor::recorded_creation_digest(&anchor, &meta("cp-any"))
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    // ── Signed head: the warm-claim path's cost is the appended tail ──────────
+
+    /// The regression witness for warm-claim time. The anchor is loaded on
+    /// every claim; a second load of an unchanged ledger verifies no entry at
+    /// all, because the signed head carries both where verification ended and
+    /// what it indexed. The work is bounded by what was appended since the last
+    /// load, so a home that has accumulated megabytes of chain costs the same
+    /// as a fresh one.
+    #[test]
+    fn a_second_load_resumes_from_the_signed_head_without_re_verifying_the_chain() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let ids: Vec<String> = (0..24).map(|i| format!("cp-{i}")).collect();
+        let digests: Vec<CheckpointDigest> = ids.iter().map(|id| seed_signed_chain(id)).collect();
+
+        let (_, first) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(first.chains, 1);
+        assert_eq!(
+            first.resumed, 0,
+            "no head yet: the first load walks from genesis"
+        );
+        assert!(first.entries_verified >= ids.len(), "{first:?}");
+
+        let (anchor, second) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(
+            second.resumed, 1,
+            "the signed head fits the unchanged chain"
+        );
+        assert_eq!(
+            second.entries_verified, 0,
+            "an unchanged chain costs no signature check, however long it is"
+        );
+        for (id, digest) in ids.iter().zip(&digests) {
+            assert_eq!(lookup(&anchor, id).unwrap().as_ref(), Some(digest));
+        }
+    }
+
+    /// What is appended after a head is verified and indexed on the next load,
+    /// and only that.
+    #[test]
+    fn entries_appended_after_the_head_are_verified_and_indexed() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        seed_signed_chain("cp-early");
+        SignedChainAnchor::load().unwrap();
+
+        let late = seed_signed_chain("cp-late");
+        let (anchor, stats) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(stats.resumed, 1);
+        assert_eq!(
+            stats.entries_verified, 1,
+            "only the appended entry is verified"
+        );
+        assert_eq!(lookup(&anchor, "cp-late").unwrap(), Some(late));
+        assert!(lookup(&anchor, "cp-early").unwrap().is_some());
+    }
+
+    /// A head is signed under the host key; one that no longer verifies is not
+    /// a head, and the ledger is walked from genesis instead of serving it.
+    #[test]
+    fn a_tampered_head_is_dropped_for_a_genesis_walk() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let real = seed_signed_chain("cp-real");
+        SignedChainAnchor::load().unwrap();
+
+        let head = audit_head::head_path(&chain_path(tmp.path()));
+        let raw = std::fs::read_to_string(&head).unwrap();
+        assert!(raw.contains("cp-real"), "the head carries the index");
+        std::fs::write(&head, raw.replace("cp-real", "cp-fake")).unwrap();
+
+        let (anchor, stats) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(stats.resumed, 0, "an unverifiable head is not resumed from");
+        assert_eq!(lookup(&anchor, "cp-real").unwrap(), Some(real));
+        assert_eq!(
+            lookup(&anchor, "cp-fake").unwrap(),
+            None,
+            "the forgery is never served"
+        );
+    }
+
+    /// The boundary line — the last one the head stands on — is re-hashed on
+    /// every resumed load, so an edit there drops the head and the genesis walk
+    /// records the damage exactly as it did before heads existed.
+    #[test]
+    fn an_edit_at_the_head_s_boundary_is_recorded_as_damage() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        seed_signed_chain("cp-first");
+        seed_signed_chain("cp-second");
+        SignedChainAnchor::load().unwrap();
+
+        break_line(&chain_path(tmp.path()), 1);
+
+        let (anchor, stats) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(stats.resumed, 0);
+        let err = lookup(&anchor, "cp-absent").expect_err("a miss against a damaged ledger");
+        assert!(
+            format!("{err:#}").contains(mvm_runtime::lineage::LEDGER_UNVERIFIABLE),
+            "{err:#}"
+        );
+    }
+
+    /// An edit behind the boundary that changes the line's length moves every
+    /// byte offset after it, so the boundary no longer stands and the head is
+    /// dropped: the genesis walk records the damage.
+    #[test]
+    fn a_length_changing_edit_behind_the_head_moves_the_boundary_and_is_recorded_as_damage() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        seed_signed_chain("cp-first");
+        seed_signed_chain("cp-second");
+        SignedChainAnchor::load().unwrap();
+
+        // `fs_quick` → `vm_full` is one byte shorter.
+        break_line(&chain_path(tmp.path()), 0);
+
+        let (anchor, stats) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(
+            stats.resumed, 0,
+            "the boundary moved, so the head does not fit"
+        );
+        assert!(
+            lookup(&anchor, "cp-absent").is_err(),
+            "the damage is recorded"
+        );
+    }
+
+    /// The trade the head makes, pinned so it cannot be mistaken for a full
+    /// walk: a same-length edit to a line *behind* the boundary is not re-read
+    /// on a resumed load. The anchor keeps serving what the chain said when it
+    /// was verified — the edit changes nothing it answers — and the edit itself
+    /// is caught by the genesis walk `mvmctl trust audit verify` always
+    /// performs.
+    #[test]
+    fn a_same_length_edit_behind_the_head_is_caught_by_the_genesis_walk_not_the_resumed_load() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let first = seed_signed_chain("cp-first");
+        seed_signed_chain("cp-second");
+        SignedChainAnchor::load().unwrap();
+
+        let chain = chain_path(tmp.path());
+        let content = std::fs::read_to_string(&chain).unwrap();
+        let mut lines: Vec<String> = content.lines().map(str::to_string).collect();
+        let edited = lines[0].replace("fs_quick", "fs_quack");
+        assert_eq!(edited.len(), lines[0].len(), "same-length edit");
+        assert_ne!(edited, lines[0], "the tampered field is present");
+        lines[0] = edited;
+        std::fs::write(&chain, format!("{}\n", lines.join("\n"))).unwrap();
+
+        let (anchor, stats) = SignedChainAnchor::load_measured().unwrap();
+        assert_eq!(
+            stats.resumed, 1,
+            "the boundary still stands, so the head is resumed"
+        );
+        assert_eq!(
+            lookup(&anchor, "cp-first").unwrap(),
+            Some(first),
+            "the head answers with what the chain recorded when it verified"
+        );
+        let signer = load_or_init().unwrap();
+        assert!(
+            mvm_hostd::supervisor::verify_audit_chain(&chain, &signer.verifying).is_err(),
+            "the genesis walk is where the edit is caught"
         );
     }
 }
