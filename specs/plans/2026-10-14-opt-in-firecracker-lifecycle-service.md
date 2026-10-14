@@ -1,5 +1,5 @@
 ---
-kind: implementation
+kind: design
 issue: https://github.com/tinylabscom/mvm/issues/4443
 status: accepted
 ---
