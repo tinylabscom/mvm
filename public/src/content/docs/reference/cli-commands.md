@@ -1870,6 +1870,12 @@ running microVM.
 
 ## Packs, Bundles, and Dependencies
 
+Pack discovery reads only root `index.json` with `schema_version: 2`. Versions
+are catalog objects containing `version` and `manifest_sha256`; search displays
+their version strings. Pull checks the catalog digest against exact manifest
+bytes before adoption or installation. This untrusted discovery hash does not
+replace publisher signatures or existing authenticated installed pins.
+
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
