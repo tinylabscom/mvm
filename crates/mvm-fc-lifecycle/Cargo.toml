@@ -1,0 +1,24 @@
+[package]
+name = "mvm-fc-lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Explicitly opt-in, manually registered Firecracker lifecycle prototype"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+libc.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+socket2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mvm-vmm.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
