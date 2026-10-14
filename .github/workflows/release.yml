@@ -383,6 +383,29 @@ jobs:
           # Generate SHA256 checksum for the tarball
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
 
+      - name: Inspect final macOS package bytes
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notary=()
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            notary=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
+          fi
+          python3 scripts/release/verify_macos_package.py \
+            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz \
+            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory \
+            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json" \
+            "${notary[@]}" --report "${RUNNER_TEMP}/macos-final-package.json"
+
+      - name: Retain final macOS package inspection
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-final-package
+          path: ${{ runner.temp }}/macos-final-package.json
+          if-no-files-found: warn
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:

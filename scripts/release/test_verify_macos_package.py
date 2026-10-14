@@ -1,0 +1,234 @@
+"""Offline final-package policy tests: codesign is always mocked."""
+
+import hashlib
+import io
+import json
+from pathlib import Path
+import plistlib
+import struct
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+import verify_macos_package as gate
+
+
+def macho(kind=6, extra=b""):
+    return b"\xcf\xfa\xed\xfe" + b"\0" * 8 + struct.pack("<I", kind) + extra
+
+
+class PackageTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.archive = self.root / "package.whl"
+        self.producer = self.root / "producer.json"
+        self.notary = self.root / "notary.json"
+        self.report = self.root / "inspection.json"
+        self.data = macho()
+        self.inventory = [{"path": "darwin-arm64/libmvm_hostlib.dylib",
+                           "role": "code", "required_entitlements": [],
+                           "sha256": hashlib.sha256(self.data).hexdigest()}]
+        self.write_producer()
+        self.pack()
+        self.addCleanup(patch.stopall)
+        patch.object(gate.platform, "system", return_value="Darwin").start()
+        self.run = patch.object(gate.sign_macos, "run",
+                                return_value=plistlib.dumps({}).decode()).start()
+
+    def write_producer(self):
+        self.producer.write_text(json.dumps({
+            "status": "ProducerAdhocVerified", "notarized": False,
+            "files": self.inventory}))
+
+    def pack(self, files=None):
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            for name, data in (files or {
+                    "mvm/_native/libmvm_hostlib.dylib": self.data}).items():
+                archive.writestr(name, data)
+
+    def verify(self, notary=None, **kwargs):
+        gate.verify(self.archive, self.producer, notary, self.report,
+                    sdk_layout=True, **kwargs)
+
+    def test_final_wheel_hash_and_strict_empty_entitlements(self):
+        self.verify()
+        report = json.loads(self.report.read_text())
+        self.assertEqual(report["package_sha256"], gate.sha256(self.archive))
+        self.assertEqual(report["files"][0]["sha256"], self.inventory[0]["sha256"])
+        self.assertEqual(report["report_source"], str(self.producer))
+        self.assertEqual(report["authority"], "package-inspection-only")
+        self.assertEqual(self.run.call_args_list[0].args[:4],
+                         ("codesign", "--verify", "--strict", "--all-architectures"))
+        self.assertEqual(self.run.call_args_list[1].args[:5],
+                         ("codesign", "-d", "--entitlements", "-", "--xml"))
+
+    def test_unconfigured_uses_producer_not_accepted(self):
+        self.notary.write_text('{"status":"Unconfigured"}')
+        self.verify(self.notary)
+        self.assertEqual(json.loads(self.report.read_text())["report_source"],
+                         str(self.producer))
+
+    def test_accepted_uses_final_not_producer_hash(self):
+        self.data = macho(extra=b"signed")
+        self.pack()
+        self.notary.write_text(json.dumps({
+            "status": "Accepted", "id": "submission", "team_id": "TEAM",
+            "files": [{"path": self.inventory[0]["path"],
+                       "sha256": hashlib.sha256(self.data).hexdigest()}]}))
+        self.verify(self.notary)
+        self.assertEqual(json.loads(self.report.read_text())["report_source"],
+                         str(self.notary))
+
+    def test_failure_unknown_and_incomplete_accepted_reject(self):
+        for status in ("Invalid", "Rejected", "In Progress", "Accepted"):
+            with self.subTest(status=status):
+                self.notary.write_text(json.dumps({"status": status}))
+                with self.assertRaises(ValueError):
+                    self.verify(self.notary)
+                self.assertFalse(self.report.exists())
+
+    def test_tampering_extra_missing_and_ambiguous_reject(self):
+        cases = [
+            {"mvm/libmvm_hostlib.dylib": macho(extra=b"tamper")},
+            {"mvm/libmvm_hostlib.dylib": self.data, "other": macho()},
+            {"other": macho()},
+        ]
+        for files in cases:
+            with self.subTest(files=list(files)):
+                self.pack(files)
+                with self.assertRaises(ValueError):
+                    self.verify()
+        self.pack()
+        self.inventory.append(dict(self.inventory[0], path="other/libmvm_hostlib.dylib"))
+        self.write_producer()
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_code_entitlements_and_strict_failure_reject(self):
+        self.run.return_value = plistlib.dumps({"com.apple.security.hypervisor": True}).decode()
+        with self.assertRaises(RuntimeError):
+            self.verify()
+        self.run.side_effect = RuntimeError("strict failed")
+        with self.assertRaises(RuntimeError):
+            self.verify()
+
+    def test_required_cli_and_multislice_reject(self):
+        with self.assertRaises(ValueError):
+            self.verify(require_cli_inventory=True)
+        self.pack({"mvm/libmvm_hostlib.dylib":
+                   b"\xca\xfe\xba\xbe" + struct.pack(">I", 2) + b"\0" * 8})
+        with self.assertRaises(RuntimeError):
+            self.verify()
+
+    def test_cli_roles_exact_entitlements(self):
+        files = {"mvmctl": macho(2), "mvm-hvf-supervisor": macho(2)}
+        self.inventory = [{
+            "path": name, "role": name,
+            "required_entitlements": gate.sign_macos.ROLES[name],
+            "sha256": hashlib.sha256(data).hexdigest(),
+        } for name, data in files.items()]
+        self.write_producer()
+        self.pack(files)
+        def readback(*args):
+            if args[1] == "-d":
+                return plistlib.dumps(dict.fromkeys(
+                    gate.sign_macos.ROLES[args[-1].name], True)).decode()
+            return ""
+        self.run.side_effect = readback
+        self.verify(require_cli_inventory=True)
+
+    def test_zip_unsafe_normalized_duplicate_and_link_reject(self):
+        for names in (["/abs"], ["../up"], ["a/../up"], ["a\\b"],
+                      ["a/b", "a//b"], ["C:drive"]):
+            with self.subTest(names=names):
+                with zipfile.ZipFile(self.archive, "w") as archive:
+                    for name in names:
+                        archive.writestr(name, b"data")
+                with self.assertRaises(ValueError):
+                    self.verify()
+        with zipfile.ZipFile(self.archive, "w") as archive:
+            member = zipfile.ZipInfo("link")
+            member.external_attr = 0o120777 << 16
+            archive.writestr(member, "target")
+        with self.assertRaises(ValueError):
+            self.verify()
+
+    def test_tar_reuses_envelope_and_rejects_links(self):
+        self.archive = self.root / "package.tgz"
+        with tarfile.open(self.archive, "w:gz") as archive:
+            member = tarfile.TarInfo("package/libmvm_hostlib.dylib")
+            member.size = len(self.data)
+            archive.addfile(member, io.BytesIO(self.data))
+        self.verify(envelope="package")
+        with tarfile.open(self.archive, "w:gz") as archive:
+            member = tarfile.TarInfo("package/link")
+            member.type = tarfile.SYMTYPE
+            member.linkname = "../escape"
+            archive.addfile(member)
+        with self.assertRaises(ValueError):
+            self.verify(envelope="package")
+
+    def test_zip_limits_before_extraction(self):
+        member = zipfile.ZipInfo("large")
+        member.file_size = 2**30 + 1
+        with patch.object(gate.zipfile.ZipFile, "infolist", return_value=[member]):
+            with self.assertRaisesRegex(ValueError, "limits"):
+                gate.extract_zip(self.archive, self.root / "unwritten")
+        self.assertFalse((self.root / "unwritten").exists())
+
+    def test_unconfigured_cannot_claim_accepted_evidence(self):
+        for field in ({"files": self.inventory}, {"id": "submission"},
+                      {"notarized": True}):
+            self.notary.write_text(json.dumps(dict(status="Unconfigured", **field)))
+            with self.assertRaises(ValueError):
+                self.verify(self.notary)
+
+    def test_duplicate_report_inventory_and_changed_final_inventory_reject(self):
+        self.inventory.append(dict(self.inventory[0]))
+        self.write_producer()
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.inventory.pop()
+        self.write_producer()
+        self.notary.write_text(json.dumps({
+            "status": "Accepted", "id": "submission", "team_id": "TEAM",
+            "files": [dict(self.inventory[0], path="different.dylib")]}))
+        with self.assertRaises(ValueError):
+            self.verify(self.notary)
+
+    def test_stale_report_removed_on_failure_and_inputs_protected(self):
+        self.report.write_text('{"status":"FinalPackageVerified"}')
+        self.pack({"mvm/libmvm_hostlib.dylib": macho(extra=b"tamper")})
+        with self.assertRaises(ValueError):
+            self.verify()
+        self.assertFalse(self.report.exists())
+        with self.assertRaises(ValueError):
+            gate.verify(self.archive, self.producer, None, self.producer)
+        self.assertTrue(self.producer.exists())
+
+    def test_workflow_gate_order_and_existing_smoke_dependencies(self):
+        root = Path(__file__).resolve().parents[2]
+        cli = (root / ".github/workflows/release.yml").read_text()
+        pypi = (root / ".github/workflows/publish-pypi.yml").read_text()
+        npm = (root / ".github/workflows/publish-npm.yml").read_text()
+        self.assertLess(cli.index("Package binary and generate checksums"),
+                        cli.index("Inspect final macOS package bytes"))
+        self.assertLess(cli.index("Inspect final macOS package bytes"),
+                        cli.index("- name: Upload artifact\n"))
+        self.assertLess(pypi.index("Build sdist + wheel"),
+                        pypi.index("Inspect final macOS wheel bytes"))
+        self.assertLess(pypi.index("Inspect final macOS wheel bytes"),
+                        pypi.index("Smoke the wheel in a fresh venv"))
+        self.assertLess(npm.index("Download Darwin producer signing report"),
+                        npm.index("Inspect actual packed Darwin npm bytes"))
+        self.assertLess(npm.index("Inspect actual packed Darwin npm bytes"),
+                        npm.index("Install and load on"))
+        self.assertIn("needs: [build, smoke]", npm)
+
+
+if __name__ == "__main__":
+    unittest.main()
