@@ -85,6 +85,19 @@ pub struct VmRuntimeMeta {
     /// Best-effort: if the file cannot be written the VM still starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observability_target: Option<VmObservabilityTarget>,
+
+    /// The device paths the running VMM names, when it was restored from a
+    /// saved machine state instead of booted.
+    ///
+    /// A snapshot embeds its devices by absolute path, and a restore makes the
+    /// parent's paths resolve to the child's own copies rather than rewriting
+    /// them. The restored VMM therefore still names its parent's paths, and a
+    /// snapshot of it embeds those again; a fork of that snapshot has to remap
+    /// these, not the child's own. `None` for a cold boot, and every cold boot
+    /// rewrites the whole record, so a stale value cannot outlive the restore
+    /// it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored_device_anchors: Option<mvm_core::checkpoint::DeviceAnchors>,
 }
 
 fn default_accessible() -> bool {
@@ -218,6 +231,7 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         rootfs_path: None,
         runtime_overlay_version: None,
         observability_target: None,
+        restored_device_anchors: None,
     }
 }
 
@@ -317,6 +331,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         rootfs_path: None,
         runtime_overlay_version: None,
         observability_target: None,
+        restored_device_anchors: None,
     })
 }
 
@@ -346,12 +361,46 @@ pub fn record_from_start_config(
     mode: StartMode,
     start_config: &VmStartConfig,
 ) -> Result<()> {
+    write(name, &from_start_config(mode, start_config)?)
+}
+
+/// [`record_from_start_config`] for a VM restored from a saved machine state:
+/// the same record, plus the device paths the restored VMM still names.
+pub fn record_restored_from_start_config(
+    name: &str,
+    mode: StartMode,
+    start_config: &VmStartConfig,
+    device_anchors: Option<mvm_core::checkpoint::DeviceAnchors>,
+) -> Result<()> {
+    let mut meta = from_start_config(mode, start_config)?;
+    meta.restored_device_anchors = device_anchors;
+    write(name, &meta)
+}
+
+fn from_start_config(mode: StartMode, start_config: &VmStartConfig) -> Result<VmRuntimeMeta> {
     let rootfs = std::path::Path::new(&start_config.rootfs_path);
     let dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut meta = from_sidecar(mode, dir)?;
     meta.rootfs_path = Some(start_config.rootfs_path.clone());
     meta.runtime_overlay_version = start_config.runtime_overlay_version.clone();
-    write(name, &meta)
+    Ok(meta)
+}
+
+/// Read the device anchors a restored VM's state directory carries: the copy
+/// of the checkpoint's `device-anchors.json` its restore remapped. `None` when
+/// the directory has none, which is every cold-booted VM's.
+pub fn read_restored_device_anchors(
+    state_dir: &Path,
+) -> Result<Option<mvm_core::checkpoint::DeviceAnchors>> {
+    let path = state_dir.join(mvm_core::checkpoint::DEVICE_ANCHORS_BLOB);
+    let body = match std::fs::read(&path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    serde_json::from_slice(&body)
+        .map(Some)
+        .with_context(|| format!("parsing {}", path.display()))
 }
 
 #[cfg(test)]
@@ -382,6 +431,7 @@ mod tests {
                 rootfs_path: None,
                 runtime_overlay_version: None,
                 observability_target: None,
+                restored_device_anchors: None,
             };
             write("rt-test-1", &meta).expect("write");
             let read_back = read("rt-test-1").expect("read").expect("present");
@@ -398,10 +448,74 @@ mod tests {
                 rootfs_path: None,
                 runtime_overlay_version: None,
                 observability_target: None,
+                restored_device_anchors: None,
             };
             write("rt-test-2", &meta).expect("write");
             let read_back = read("rt-test-2").expect("read").expect("present");
             assert_eq!(read_back, meta);
+        });
+    }
+
+    /// A restored VM's record carries the anchors its state dir inherited; a
+    /// cold boot's carries none, and a record written before the field reads
+    /// as a cold boot's.
+    #[test]
+    fn restored_device_anchors_round_trip_and_default_to_none() {
+        with_home_temp(|_home| {
+            let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
+            let config = VmStartConfig {
+                name: "rt-restored".into(),
+                rootfs_path: rootfs_dir
+                    .path()
+                    .join("rootfs.ext4")
+                    .to_string_lossy()
+                    .into_owned(),
+                ..Default::default()
+            };
+            let state_dir = mvm_core::config::vm_state_dir("rt-restored");
+            std::fs::create_dir_all(&state_dir).unwrap();
+            assert!(read_restored_device_anchors(&state_dir).unwrap().is_none());
+
+            let anchors = mvm_core::checkpoint::DeviceAnchors {
+                rootfs: "/parent/rootfs.ext4".into(),
+                rootfs_verity: None,
+                config: None,
+                secrets: None,
+                identity: None,
+                vsock: "/parent/vm/runtime/v.sock".into(),
+            };
+            std::fs::write(
+                state_dir.join(mvm_core::checkpoint::DEVICE_ANCHORS_BLOB),
+                serde_json::to_vec(&anchors).unwrap(),
+            )
+            .unwrap();
+            let inherited = read_restored_device_anchors(&state_dir).unwrap();
+            assert_eq!(inherited.as_ref(), Some(&anchors));
+
+            record_restored_from_start_config(
+                "rt-restored",
+                StartMode::Detached,
+                &config,
+                inherited,
+            )
+            .unwrap();
+            let meta = read("rt-restored").unwrap().unwrap();
+            assert_eq!(meta.restored_device_anchors, Some(anchors));
+            assert_eq!(
+                meta.rootfs_path.as_deref(),
+                Some(config.rootfs_path.as_str())
+            );
+
+            record_from_start_config("rt-restored", StartMode::Detached, &config).unwrap();
+            let cold = read("rt-restored").unwrap().unwrap();
+            assert!(
+                cold.restored_device_anchors.is_none(),
+                "a cold boot rewrites the record without the restored anchors"
+            );
+
+            let legacy: VmRuntimeMeta =
+                serde_json::from_str(r#"{"mode":"detached","accessible":true}"#).unwrap();
+            assert!(legacy.restored_device_anchors.is_none());
         });
     }
 
@@ -546,6 +660,7 @@ mod tests {
                 rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
                 runtime_overlay_version: Some("0.17.0".to_string()),
                 observability_target: None,
+                restored_device_anchors: None,
             };
             write("rp-with", &with_path).expect("write");
             let back = read("rp-with").expect("read").expect("present");
@@ -558,6 +673,7 @@ mod tests {
                 rootfs_path: None,
                 runtime_overlay_version: None,
                 observability_target: None,
+                restored_device_anchors: None,
             };
             write("rp-without", &without_path).expect("write");
             let back2 = read("rp-without").expect("read").expect("present");

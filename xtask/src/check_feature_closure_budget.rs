@@ -93,7 +93,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 486 (was 485): the first-party `mvm-compiler` extraction adds one workspace
 /// crate. All of its third-party dependencies were already present.
-const FEATURE_CLOSURE_BUDGET: usize = 486;
+///
+/// 487 (was 486): the unpublished `mvm-fc-lifecycle` prototype adds one
+/// first-party workspace node; no new third-party dependencies or default
+/// mvmctl dependencies are introduced.
+const FEATURE_CLOSURE_BUDGET: usize = 487;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default
