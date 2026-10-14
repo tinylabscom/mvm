@@ -38,7 +38,7 @@ use mvm_compiler::{
 };
 use mvm_contract::ir::{Entrypoint, Workload};
 use mvm_core::user_config::MvmConfig;
-use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
+use mvm_compiler::{ParseError, parse_python, parse_typescript};
 
 use super::Cli;
 use super::ir_input::{IrJsonSource, read_ir_json_workload};

@@ -3471,8 +3471,6 @@ dependencies = [
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-nix",
- "tree-sitter-python",
- "tree-sitter-typescript",
 ]
 
 [[package]]

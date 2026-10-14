@@ -30,7 +30,10 @@ fn default_sdk_does_not_link_client_surface_or_backend() {
         "--prefix",
         "none",
     ]);
-    for forbidden in ["mvm-compiler", "globset", "mvm-http"] {
+    // mvm-compiler is now a required dependency: the decorator parser
+    // lives there and mvm-sdk is a thin facade. globset comes transitively
+    // through mvm-compiler, so it is also expected.
+    for forbidden in ["mvm-http"] {
         assert!(
             !tree_contains_crate(&tree, forbidden),
             "base mvm-sdk must not link {forbidden}:\n{tree}"
