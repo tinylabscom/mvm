@@ -47,13 +47,18 @@ mod refill;
 mod select;
 mod status;
 mod warm;
+mod warm_source;
 
 pub use cold_start::{ColdStartReason, WarmClaimOutcome};
 use cold_start::{claim_gate, claim_required, outcome_for_refusal};
 pub use refill::{StandbyRefill, schedule_standby_refill};
-
+use select::{recent_image_limit, warm_each, warm_sources};
 use status::{PoolStatus, PoolStatusEntry};
 pub use warm::WarmResult;
+#[cfg(test)]
+use warm_source::manifest_template_source;
+use warm_source::warm_if_eligible;
+pub(in crate::commands) use warm_source::{WarmRequest, WarmSource};
 
 struct HostChildGrantIssuer;
 
@@ -1336,6 +1341,13 @@ mod tests {
         let rootfs = tmp.path().join("rootfs.ext4");
         let mut cfg = bundle_launch(&kernel, &rootfs, &"a".repeat(64));
         assert!(warm_eligible_launch(&cfg));
+        let mut spawned = 0;
+        warm_if_eligible(&cfg, || {
+            spawned += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(spawned, 1);
         assert!(warm_claim_requested(&cfg, false).unwrap());
         cfg.warm_pool_size = 0;
         assert!(
@@ -1362,6 +1374,17 @@ mod tests {
         for pool_size in [0, 2] {
             cfg.warm_pool_size = pool_size;
             assert!(!warm_eligible_launch(&cfg));
+            let mut spawned = 0;
+            let error = warm_if_eligible(&cfg, || {
+                spawned += 1;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("pinned boot assets"));
+            assert_eq!(
+                spawned, 0,
+                "ineligible warming performs no spawn preparation"
+            );
             assert_eq!(
                 claim_gate(&cfg, false),
                 Err(ColdStartReason::IneligibleShape)
@@ -2765,10 +2788,12 @@ pub(in crate::commands) enum PoolAction {
         /// How many idle standbys to warm each image toward (default 1).
         count: Option<u32>,
         /// OCI image the warmed parents boot, matching the `--image` the launch
-        /// will pass. Omit every source flag to warm the image a bare
-        /// `machine run` boots.
-        #[arg(long, conflicts_with_all = ["manifest", "flake"])]
+        /// will pass. Omit every source flag to warm recently pulled images.
+        #[arg(long, conflicts_with_all = ["default_image", "manifest", "flake"])]
         image: Option<String>,
+        /// Warm the image a bare `machine run` boots, regardless of recent pulls.
+        #[arg(long = "default", conflicts_with_all = ["image", "manifest", "flake"])]
+        default_image: bool,
         /// Manifest, built slot, installed bundle sha256 or signed `.mvmpkg`
         /// archive the warmed parents boot, matching the `--manifest` (or
         /// positional `.mvmpkg`) the launch will pass. An archive is verified
@@ -2824,111 +2849,6 @@ pub(in crate::commands) enum PoolAction {
         #[arg(long)]
         egress: bool,
     },
-}
-
-/// The boot source a `pool warm` request names, mirroring the run flag a
-/// matching launch passes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) enum WarmSource {
-    /// `--image`, or the image a bare `machine run` boots when `None`.
-    Image(Option<String>),
-    /// `--manifest`: a manifest, built slot, installed bundle sha256, or a
-    /// signed `.mvmpkg` archive.
-    Manifest(String),
-    /// `--flake`, built into a slot before it is resolved.
-    Flake {
-        flake_ref: String,
-        profile: Option<String>,
-    },
-}
-
-impl WarmSource {
-    fn from_flags(
-        image: Option<String>,
-        manifest: Option<String>,
-        flake: Option<String>,
-        flake_profile: Option<String>,
-    ) -> Result<Self> {
-        match (image, manifest, flake) {
-            (image, None, None) => Ok(Self::Image(image)),
-            (None, Some(manifest), None) => Ok(Self::Manifest(manifest)),
-            (None, None, Some(flake_ref)) => Ok(Self::Flake {
-                flake_ref,
-                profile: flake_profile,
-            }),
-            _ => anyhow::bail!("pool warm takes one of --image, --manifest or --flake"),
-        }
-    }
-
-    /// The image source a run of this request resolves, by the run path's
-    /// own resolvers: a `.mvmpkg` is verified against the trust store and
-    /// installed, a manifest resolves to its built slot, and a flake is built
-    /// into one. Each of the last three becomes a template source keyed by
-    /// that slot or bundle digest, exactly as `machine run` keys it.
-    fn resolve(&self) -> Result<crate::exec::ImageSource> {
-        match self {
-            Self::Image(reference) => {
-                super::vm::exec::resolve_launch_image_source(reference.as_deref(), false, None)
-            }
-            Self::Manifest(arg) => {
-                let mut manifest = Some(arg.clone());
-                super::bundle::settle_manifest_archive(&mut manifest, false)?;
-                let settled = manifest.unwrap_or_else(|| arg.clone());
-                manifest_template_source(&settled)
-            }
-            Self::Flake { flake_ref, profile } => {
-                let slot = super::build::build::build_flake_to_slot(flake_ref, profile.as_deref())?;
-                Ok(crate::exec::ImageSource::Template(slot))
-            }
-        }
-    }
-}
-
-/// The template source a settled `--manifest` argument boots. A wasm manifest
-/// has no guest to keep warm, so it is refused rather than resolved.
-fn manifest_template_source(arg: &str) -> Result<crate::exec::ImageSource> {
-    match super::shared::resolve_manifest_arg(arg)? {
-        super::shared::ManifestArgRef::Slot { slot_hash } => {
-            Ok(crate::exec::ImageSource::Template(slot_hash))
-        }
-        super::shared::ManifestArgRef::WasmModule { .. } => {
-            anyhow::bail!("{arg} names a wasm module; the wasm backend has no standby pool to warm")
-        }
-    }
-}
-
-/// What `pool warm` warms toward, expressed as the launch it must mirror.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct WarmRequest {
-    pub(in crate::commands) source: WarmSource,
-    pub(in crate::commands) cpus: u32,
-    pub(in crate::commands) memory_mib: u32,
-    pub(in crate::commands) target: u32,
-    /// Whether the parents boot the guest's egress client.
-    pub(in crate::commands) egress: bool,
-}
-
-impl WarmRequest {
-    /// One standby of `image` at the configured default sizing — the shape a
-    /// `machine run` that passes no `--cpus`, `--memory` or egress grant claims.
-    pub(in crate::commands) fn one_at_default_sizing(image: Option<&str>, cfg: &MvmConfig) -> Self {
-        Self {
-            source: WarmSource::Image(image.map(str::to_string)),
-            cpus: cfg.default_cpus,
-            memory_mib: cfg.default_memory_mib,
-            target: 1,
-            egress: false,
-        }
-    }
-
-    fn label(&self) -> String {
-        match &self.source {
-            WarmSource::Image(Some(image)) => image.clone(),
-            WarmSource::Image(None) => "the default image".to_string(),
-            WarmSource::Manifest(path) => format!("manifest {path}"),
-            WarmSource::Flake { flake_ref, .. } => format!("flake {flake_ref}"),
-        }
-    }
 }
 
 /// The policy a warm request resolves its launch shape under.
@@ -3019,6 +2939,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         PoolAction::Warm {
             count,
             image,
+            default_image,
             manifest,
             flake,
             flake_profile,
@@ -3031,16 +2952,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
                 None => cfg.default_memory_mib,
             };
-            run_warm(
-                &SupervisorStandbyPool::open()?,
-                &WarmRequest {
+            let recent = if matches!(source, WarmSource::Image(None)) && !default_image {
+                super::image::recent_image_references(&super::image::oci_cache_root())?
+            } else {
+                Vec::new()
+            };
+            let sources = warm_sources(source, default_image, &recent, recent_image_limit());
+            let requests: Vec<_> = sources
+                .into_iter()
+                .map(|source| WarmRequest {
                     source,
                     cpus: cpus.unwrap_or(cfg.default_cpus),
                     memory_mib,
                     target: count.unwrap_or(1),
                     egress,
-                },
-            )
+                })
+                .collect();
+            warm_each(&requests, warm_request)
         }
     }
 }
@@ -3054,18 +2982,20 @@ pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
     let target = req.target;
     let launch = resolve_warm_launch(req)?;
-    // Ensure the host signer exists — the standby re-verifies the attach plan against it.
-    let signer = host_signer::load_or_init()?;
-    let result = warm_to_target(
-        pool,
-        &WarmParams {
-            backend: &launch.backend,
-            signer_id: &host_signer::host_signer_id(),
-            signing_key_path: &signer.secret_path,
-            target,
-            launch: &launch.start_config,
-        },
-    )?;
+    let result = warm_if_eligible(&launch.start_config, || {
+        // Ensure the host signer exists only for a parent a launch can claim.
+        let signer = host_signer::load_or_init()?;
+        warm_to_target(
+            pool,
+            &WarmParams {
+                backend: &launch.backend,
+                signer_id: &host_signer::host_signer_id(),
+                signing_key_path: &signer.secret_path,
+                target,
+                launch: &launch.start_config,
+            },
+        )
+    })?;
     // A state-changing verb emits one audit record per attempt.
     mvm_core::audit_emit!(
         PoolWarm,

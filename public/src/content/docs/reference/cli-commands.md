@@ -1927,8 +1927,13 @@ explicitly:
 ```bash
 mvmctl image pull alpine
 mvmctl pool warm --image alpine          # optional pre-warm
-mvmctl machine run --image alpine -- /bin/true   # claims it
+MVM_RESIDENCY=warm mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
+
+Without a source flag, `pool warm` warms the most recently pulled images,
+bounded by the residency standby target (at least one). With no pull history
+it warms the default image. `pool warm --default` selects the default image
+regardless of pull history; it conflicts with the explicit source flags.
 
 `pool warm` takes the same source a launch names: `--image`, `--manifest`
 (a manifest, a built slot, an installed bundle sha256 or a signed `.mvmpkg`
@@ -1937,21 +1942,15 @@ verified and installed exactly as `machine run` does it. Standbys are keyed by
 the verified bundle or slot digest and the image digest, so a launch of a
 different artifact, or of the same rootfs under the host runtime, never claims
 one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
-path: the guest runtime it pins predates the claim handshake.
+path: the guest runtime it pins predates the claim handshake. `pool warm`
+refuses that bundle before preparing a standby, rather than creating capacity
+that no launch can claim.
 
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
 capacity and fail rather than silently cold-booting. Named launches and shapes
 with extra volumes (including directory mounts) retain their cold path,
 including when the pool size is zero.
-
-A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
-with `pool warm --egress`. That standby's guest starts its egress client but
-holds no policy and no destinations; the claim spawns the child's own endpoint
-under the policy its signed plan recorded, and refuses any other. A launch
-whose endpoint must terminate TLS for its own destinations (a bound secret or
-an intercepted route) keeps its cold path, because a shared standby cannot
-hold a certificate minted for them.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left

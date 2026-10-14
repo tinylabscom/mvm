@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::WarmRequest;
+use super::{WarmRequest, WarmSource};
 
 /// Which images a `pool warm` invocation names.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,27 @@ impl WarmSelection {
             (None, true) => Self::Default,
             (None, false) => Self::Recent,
         }
+    }
+}
+
+/// Explicit artifacts bypass pull history; OCI selection preserves the default
+/// and recent-image behavior of the image-only command.
+pub(super) fn warm_sources(
+    source: WarmSource,
+    default_image: bool,
+    recent: &[String],
+    limit: usize,
+) -> Vec<WarmSource> {
+    match source {
+        WarmSource::Image(image) => {
+            let selection = WarmSelection::from_flags(image, default_image);
+            let images = images_to_warm(selection.clone(), recent, limit);
+            if selection == WarmSelection::Recent {
+                announce_recent_selection(&images);
+            }
+            images.into_iter().map(WarmSource::Image).collect()
+        }
+        artifact => vec![artifact],
     }
 }
 
@@ -98,6 +119,33 @@ mod tests {
     }
 
     #[test]
+    fn artifact_selection_never_substitutes_recent_images() {
+        for source in [
+            WarmSource::Manifest("app.mvmpkg".into()),
+            WarmSource::Flake {
+                flake_ref: ".".into(),
+                profile: Some("slim".into()),
+            },
+        ] {
+            assert_eq!(
+                warm_sources(source.clone(), false, &recent(), 2),
+                vec![source]
+            );
+        }
+        assert_eq!(
+            warm_sources(WarmSource::Image(None), true, &recent(), 2),
+            vec![WarmSource::Image(None)]
+        );
+        assert_eq!(
+            warm_sources(WarmSource::Image(None), false, &recent(), 2),
+            vec![
+                WarmSource::Image(Some("python:3.12".into())),
+                WarmSource::Image(Some("nginx".into())),
+            ]
+        );
+    }
+
+    #[test]
     fn a_bare_pool_warm_picks_the_newest_pulls_up_to_the_limit() {
         assert_eq!(
             images_to_warm(WarmSelection::Recent, &recent(), 2),
@@ -137,7 +185,7 @@ mod tests {
         let requests: Vec<WarmRequest> = ["alpine", "nginx"]
             .into_iter()
             .map(|image| WarmRequest {
-                image: Some(image.to_string()),
+                source: WarmSource::Image(Some(image.to_string())),
                 cpus: 2,
                 memory_mib: 512,
                 target: 1,
