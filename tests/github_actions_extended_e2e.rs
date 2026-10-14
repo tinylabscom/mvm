@@ -563,6 +563,49 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
     );
 }
 
+/// Output must reach the console as it is written, not when a 64 KiB block
+/// fills: the live suite prints a line per step, and a lane that times out has
+/// to show where it was.
+#[cfg(unix)]
+#[test]
+fn the_bounded_runner_forwards_a_line_while_the_command_still_runs() {
+    use std::io::{BufRead as _, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+
+    let scratch = tempfile::tempdir().expect("create streaming fixture");
+    let log_path = scratch.path().join("runner.log");
+    let mut runner = Command::new("python3")
+        .args([
+            "scripts/run-bounded-command.py",
+            "--timeout",
+            "20",
+            "--grace",
+            "1",
+            "--log",
+        ])
+        .arg(&log_path)
+        .args(["--", "sh", "-c", "echo early-marker; sleep 15"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("start bounded runner");
+    let stdout = runner.stdout.take().expect("runner stdout");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+
+    let first = rx.recv_timeout(Duration::from_secs(10));
+    let _ = runner.kill();
+    let _ = runner.wait();
+    assert_eq!(
+        first.expect("the first line must arrive while the command is still running"),
+        "early-marker\n"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn bounded_cleanup_only_ignores_permission_denial_after_the_child_exits() {

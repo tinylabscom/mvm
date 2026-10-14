@@ -384,9 +384,13 @@ pub fn supervisor_config_dump_path(state_dir: &Path) -> PathBuf {
     state_dir.join("supervisor-config.json")
 }
 
+/// The dump is the supervisor's whole configuration — paths, ports, the
+/// plan reference — so it is written owner-only, replacing any link at the
+/// path rather than writing through it.
 pub fn persist_supervisor_config_dump(state_dir: &Path, json: &str) -> Result<()> {
     let path = supervisor_config_dump_path(state_dir);
-    std::fs::write(&path, json).map_err(|e| anyhow!("write {}: {e}", path.display()))
+    mvm_core::util::atomic_io::write_private_ephemeral(&path, json.as_bytes())
+        .map_err(|e| anyhow!("write {}: {e}", path.display()))
 }
 
 pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String> {

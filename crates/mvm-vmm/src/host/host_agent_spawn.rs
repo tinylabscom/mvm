@@ -54,17 +54,7 @@ const CONTROL_RETRY_BASE_DELAY_MS: u64 = 100;
 const CONTROL_RETRY_CAP_DELAY_MS: u64 = 500;
 
 fn warm_claim_debug(message: &str) {
-    let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") else {
-        return;
-    };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
-        return;
-    };
-    let _ = writeln!(file, "[host-agent-registration] {message}");
+    crate::agent_debug::line("host-agent-registration", message);
 }
 
 fn control_retry_delay(attempt: u32) -> Duration {

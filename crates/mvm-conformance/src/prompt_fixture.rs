@@ -7,8 +7,14 @@ use std::path::Path;
 pub const AGENT_MACHINE: &str = "bdd-prompt";
 /// Fork receiving the recorded prompts during the live witness.
 pub const REPLAY_MACHINE: &str = "bdd-prompt-replay";
+/// Fork of the first fork's own session: a prompt to a replayed fork is
+/// recorded and step-checkpointed, so the fork's session replays in turn.
+pub const SECOND_REPLAY_MACHINE: &str = "bdd-prompt-replay-2";
 
-/// Remove only the two prompt-session directories left by an interrupted run.
+/// Every machine, and so every prompt session, the live witness creates.
+pub const PROMPT_MACHINES: [&str; 3] = [AGENT_MACHINE, REPLAY_MACHINE, SECOND_REPLAY_MACHINE];
+
+/// Remove only the prompt-session directories left by an interrupted run.
 ///
 /// # Errors
 /// A session directory could not be inspected or removed.
@@ -26,7 +32,7 @@ pub fn clear_stale_prompt_sessions(home: &Path) -> io::Result<()> {
         ));
     }
 
-    for name in [AGENT_MACHINE, REPLAY_MACHINE] {
+    for name in PROMPT_MACHINES {
         let path = sessions.join(name);
         match std::fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
@@ -50,10 +56,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rerun_clears_both_prompt_sessions_but_preserves_other_sessions() {
+    fn rerun_clears_every_prompt_session_but_preserves_other_sessions() {
         let home = tempfile::tempdir().expect("home");
         let sessions = home.path().join("agent-sessions");
-        for name in [AGENT_MACHINE, REPLAY_MACHINE, "unrelated"] {
+        for name in PROMPT_MACHINES.into_iter().chain(["unrelated"]) {
             let dir = sessions.join(name);
             std::fs::create_dir_all(&dir).expect("session dir");
             std::fs::write(dir.join("history.jsonl"), name).expect("history");
@@ -61,8 +67,9 @@ mod tests {
 
         clear_stale_prompt_sessions(home.path()).expect("clear stale prompt sessions");
 
-        assert!(!sessions.join(AGENT_MACHINE).exists());
-        assert!(!sessions.join(REPLAY_MACHINE).exists());
+        for name in PROMPT_MACHINES {
+            assert!(!sessions.join(name).exists(), "{name}");
+        }
         assert!(sessions.join("unrelated").join("history.jsonl").is_file());
     }
 

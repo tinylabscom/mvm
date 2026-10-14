@@ -51,8 +51,18 @@ fn registry_files(root: &Path, manifest: &[u8], group: &[u8]) -> PathBuf {
     let pack = registry.join("packs/runtime/go/1.0.0");
     std::fs::create_dir_all(pack.join("files/pack")).expect("pack fixture directory");
     std::fs::write(
-        registry.join("packs/index.json"),
-        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":["1.0.0"]}]}"#,
+        registry.join("index.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "packs": [{
+                "namespace": "runtime", "name": "go", "description": "Go runtime policy",
+                "versions": [{
+                    "version": "1.0.0",
+                    "manifest_sha256": mvm_core::packs::Sha256Hex::from_bytes(manifest)
+                }]
+            }]
+        }))
+        .expect("catalog bytes"),
     )
     .expect("registry index");
     std::fs::write(pack.join("manifest.json"), manifest).expect("signed manifest");
@@ -95,8 +105,24 @@ fn isolated_signed_dependency_registry(
     std::fs::create_dir_all(dependency.join("files/pack/image"))
         .expect("dependency payload directory");
     std::fs::write(
-        registry.join("packs/index.json"),
-        br#"{"schema_version":1,"packs":[{"namespace":"agent","name":"claude","description":"Agent policy","versions":["1.0.1"]},{"namespace":"runtime","name":"python","description":"Runtime policy","versions":["1.1.0"]}]}"#,
+        registry.join("index.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "packs": [{
+                "namespace": "agent", "name": "claude", "description": "Agent policy",
+                "versions": [{
+                    "version": "1.0.1",
+                    "manifest_sha256": mvm_core::packs::Sha256Hex::from_bytes(CLAUDE_MANIFEST)
+                }]
+            }, {
+                "namespace": "runtime", "name": "python", "description": "Runtime policy",
+                "versions": [{
+                    "version": "1.1.0",
+                    "manifest_sha256": mvm_core::packs::Sha256Hex::from_bytes(PYTHON_MANIFEST)
+                }]
+            }]
+        }))
+        .expect("catalog bytes"),
     )
     .expect("registry index");
     std::fs::write(parent.join("manifest.json"), CLAUDE_MANIFEST).expect("parent manifest");
@@ -306,12 +332,30 @@ fn a_pinned_pack_refuses_manifest_drift_on_the_next_pull() {
         .position(|bytes| bytes == b"Go")
         .expect("description present");
     manifest[offset] = b'N';
-    std::fs::write(manifest_path, manifest).expect("modify registry copy");
+    std::fs::write(manifest_path, &manifest).expect("modify registry copy");
+    registry_files(temp.path(), &manifest, GROUP);
 
     let error = mvm_cli::pack_registry::pull("runtime/go").expect_err("drift refused");
     assert!(format!("{error:#}").contains("digest drift"));
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
     assert_eq!(lock.pins()[0].manifest_sha256().as_str(), MANIFEST_SHA256);
+}
+
+#[test]
+fn catalog_digest_mismatch_refuses_a_valid_signature_before_installation() {
+    let temp = TempDir::new().expect("tempdir");
+    let _env = isolated_registry(&temp, MANIFEST, GROUP);
+    let index_path = temp.path().join("registry/index.json");
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&index_path).expect("catalog")).expect("JSON");
+    index["packs"][0]["versions"][0]["manifest_sha256"] =
+        serde_json::json!(mvm_core::packs::Sha256Hex::from_bytes(b"different bytes"));
+    std::fs::write(index_path, serde_json::to_vec(&index).expect("JSON")).expect("catalog");
+    let error = mvm_cli::pack_registry::pull("runtime/go").expect_err("digest mismatch");
+    assert!(format!("{error:#}").contains("catalog manifest digest mismatch"));
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
+    assert!(lock.pins().is_empty());
+    assert!(!mvm_core::config::registry_pack_cache_dir().exists());
 }
 
 #[test]
@@ -344,8 +388,18 @@ fn a_real_signed_image_pack_pulls_with_its_image_and_reopens_under_the_pin() {
     let pack = registry.join("packs/runtime/python/1.1.0");
     std::fs::create_dir_all(pack.join("files/pack/image")).expect("image payload directory");
     std::fs::write(
-        registry.join("packs/index.json"),
-        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"python","description":"Python runtime","versions":["1.1.0"]}]}"#,
+        registry.join("index.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "packs": [{
+                "namespace": "runtime", "name": "python", "description": "Python runtime",
+                "versions": [{
+                    "version": "1.1.0",
+                    "manifest_sha256": mvm_core::packs::Sha256Hex::from_bytes(PYTHON_MANIFEST)
+                }]
+            }]
+        }))
+        .expect("catalog bytes"),
     )
     .expect("registry index");
     std::fs::write(pack.join("manifest.json"), PYTHON_MANIFEST).expect("signed manifest");
