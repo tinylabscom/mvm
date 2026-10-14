@@ -489,8 +489,12 @@ mod tests {
             idle.contains("umask 077"),
             "root keeps its records owner-only"
         );
+        // Every launch line creates its log files owner-only; only root's
+        // payload also narrows the identity record it writes under sudo.
         let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
-        assert!(!as_user.contains("umask"), "{as_user}");
+        assert!(idle.contains("'umask 077; s=$("), "{idle}");
+        assert!(!as_user.contains("'umask 077; s=$("), "{as_user}");
+        assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
