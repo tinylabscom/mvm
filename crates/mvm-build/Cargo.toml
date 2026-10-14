@@ -78,6 +78,10 @@ mvm-vmm = { workspace = true }
 mvm-compiler.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+# Pure-Rust Git data access: config parsing, object database, attributes,
+# excludes and index. Replaces the former git2/libgit2-sys C FFI dependency
+# to eliminate the LGPL xdiff code bundled in libgit2.
+gix = { version = "0.87.1", default-features = false, features = ["attributes", "excludes", "sha1"] }
 hex.workspace = true
 # Libkrun FFI facade used by the in-tree builder VM launcher. Native C linkage
 # remains behind libkrun-sys's own opt-in feature; naming the Rust facade here
@@ -91,6 +95,7 @@ serde_jcs = "0.1"
 # DSSE envelope payloads and signatures are base64 on the wire.
 base64.workspace = true
 sha2.workspace = true
+sha1.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
 # hands us a signing key) signatures inside this crate so the

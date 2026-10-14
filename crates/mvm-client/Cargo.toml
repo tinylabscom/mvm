@@ -164,7 +164,6 @@ path = "src/bin/emit_instruction_trust_schema.rs"
 required-features = ["schema"]
 
 [dev-dependencies]
-mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
 # Reuse the signed-image-set fixture instead of duplicating acquisition policy.
 mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
