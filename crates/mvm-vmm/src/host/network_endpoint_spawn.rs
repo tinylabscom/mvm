@@ -1277,6 +1277,8 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     // the input gate.
     let env_json = serde_json::to_vec(&handshake.env)
         .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
+    // The launch env is configuration: owner-only, and a link at the path is
+    // replaced rather than written through.
     mvm_core::atomic_io::write_private_ephemeral(&env_path, &env_json)
         .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
     record_secret_fingerprints(vm_name, handshake.input_fingerprints);

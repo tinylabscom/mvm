@@ -17,6 +17,7 @@ mod custody;
 mod diff;
 #[cfg(test)]
 mod durability_tests;
+mod embedded_devices;
 mod gc;
 mod params;
 #[cfg(test)]
@@ -1031,6 +1032,8 @@ fn capture_vm_full_inner(
     // Capture the absolute host paths the snapshot embeds, so a forked child
     // can remap them to its own copies without editing Firecracker bitcode.
     let anchors = control.device_anchors()?;
+    let anchor_files = control.device_anchor_files()?;
+    let embedded_files = embedded_devices::embedded_device_files(&anchors, &anchor_files)?;
     let anchors_path = content_dir.join("device-anchors.json");
     std::fs::write(
         &anchors_path,
@@ -1047,15 +1050,7 @@ fn capture_vm_full_inner(
     // materialize its own copies.
     // The rootfs itself is already cloned above; the vsock UDS is recreated at
     // restore time and must not be copied while the parent is bound to it.
-    for src in [
-        anchors.rootfs_verity.as_deref(),
-        anchors.config.as_deref(),
-        anchors.secrets.as_deref(),
-        anchors.identity.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    for src in embedded_files {
         let name = src
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("anchor path has no file name: {}", src.display()))?
