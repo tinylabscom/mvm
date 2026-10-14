@@ -486,16 +486,15 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
     if report.startup_requirement != expected_startup {
         return Err(LaneViolation::NonCanonicalSummary);
     }
-    if let Some(startup) = report.startup_requirement.as_ref() {
-        if let Some(found_ms) = startup.observed_max_ms {
-            if found_ms >= STARTUP_HARD_MAX_MS {
-                return Err(LaneViolation::StartupCeilingExceeded {
-                    lane: report.lane,
-                    found_ms,
-                    limit_ms: STARTUP_HARD_MAX_MS,
-                });
-            }
-        }
+    if let Some(startup) = report.startup_requirement.as_ref()
+        && let Some(found_ms) = startup.observed_max_ms
+        && found_ms >= STARTUP_HARD_MAX_MS
+    {
+        return Err(LaneViolation::StartupCeilingExceeded {
+            lane: report.lane,
+            found_ms,
+            limit_ms: STARTUP_HARD_MAX_MS,
+        });
     }
     Ok(())
 }
