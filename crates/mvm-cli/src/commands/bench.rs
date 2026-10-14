@@ -390,6 +390,7 @@ mod tests {
                     "Every prepared boot must reach authenticated command dispatch in under 200 ms."
                         .to_string(),
             }),
+            startup_requirement: None,
             raw: Vec::new(),
         }
     }
