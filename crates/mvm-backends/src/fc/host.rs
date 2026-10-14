@@ -354,9 +354,27 @@ pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
 /// A live process whose identity cannot be confirmed — its `/proc` entry
 /// hidden, its command line unreadable, no `--api-sock` on it — is an error,
 /// because a caller treats "not ours" as "already stopped".
+///
+/// A VMM claimed from the idle pool was started with the pool's socket on its
+/// command line; its claim recorded that path beside the VM's socket, and it is
+/// accepted too.
 pub fn is_firecracker_for_socket(pid: u32, api_socket: &Path) -> Result<bool> {
-    identity_from(observe_process(pid)?, api_socket)
+    let view = observe_process(pid)?;
+    let origin = super::idle_pool::claim_origin_for(api_socket);
+    identity_from_any(view, api_socket, origin.as_deref())
         .with_context(|| format!("confirming which VM pid {pid} serves"))
+}
+
+/// [`identity_from`] against the VM's socket, or the pool socket its VMM was
+/// claimed from.
+fn identity_from_any(view: ProcessView, api_socket: &Path, origin: Option<&Path>) -> Result<bool> {
+    if identity_from(view.clone(), api_socket)? {
+        return Ok(true);
+    }
+    match origin {
+        Some(origin) => identity_from(view, origin),
+        None => Ok(false),
+    }
 }
 
 /// What the process table says about one pid.
@@ -928,6 +946,28 @@ mod tests {
         assert!(identity_from(spawned, mine).unwrap());
         let equals = firecracker(&["firecracker", "--api-sock=/state/vms/vm-a/fc.socket"]);
         assert!(identity_from(equals, mine).unwrap());
+    }
+
+    /// A VMM claimed from the idle pool still names the pool socket it was
+    /// started with. The claim's record makes it this VM's; without one, or
+    /// for another pool socket, it is not.
+    #[test]
+    fn a_claimed_vmm_is_identified_by_the_pool_socket_its_claim_recorded() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        let origin = std::path::Path::new("/state/fc-idle/idle-1f/fc.socket");
+        let claimed = || {
+            firecracker(&[
+                "firecracker",
+                "--api-sock",
+                "/state/fc-idle/idle-1f/fc.socket",
+            ])
+        };
+        assert!(identity_from_any(claimed(), mine, Some(origin)).unwrap());
+        assert!(!identity_from_any(claimed(), mine, None).unwrap());
+        let other = std::path::Path::new("/state/fc-idle/idle-2a/fc.socket");
+        assert!(!identity_from_any(claimed(), mine, Some(other)).unwrap());
+        let own = firecracker(&["firecracker", "--api-sock", "/state/vms/vm-a/fc.socket"]);
+        assert!(identity_from_any(own, mine, Some(origin)).unwrap());
     }
 
     /// Only a positively different answer is "not ours": a process that is

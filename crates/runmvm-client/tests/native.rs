@@ -6,24 +6,20 @@ use std::{
 };
 use wait_timeout::ChildExt;
 
-struct Scratch(PathBuf);
+struct Scratch {
+    path: PathBuf,
+    _directory: tempfile::TempDir,
+}
 impl Scratch {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "runmvm-client-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
+        let directory = tempfile::Builder::new()
+            .prefix("runmvm-client-")
+            .tempdir()
+            .unwrap();
+        Self {
+            path: directory.path().to_path_buf(),
+            _directory: directory,
+        }
     }
 }
 fn build(dir: &Path, variant: &str) -> PathBuf {
@@ -62,7 +58,7 @@ fn relative_paths_in_isolated_process() {
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "relative_paths_child", "--nocapture"])
         .env("RUNMVM_CLIENT_RELATIVE_TEST", "1")
-        .current_dir(&scratch.0)
+        .current_dir(&scratch.path)
         .spawn()
         .unwrap();
     // Let the child's shorter rustc deadline kill and reap its own compiler.
@@ -123,7 +119,7 @@ fn relative_paths_child() {
 #[test]
 fn native_ownership_negotiation_and_errors() {
     let scratch = Scratch::new();
-    let good = build(&scratch.0, "good");
+    let good = build(&scratch.path, "good");
     // SAFETY: this test owns and compiles the exact fixture ABI.
     let monitor = unsafe { libloading::Library::new(&good) }.unwrap();
     // SAFETY: fixture exports this exact signature, monitor remains live.
@@ -158,11 +154,11 @@ fn native_ownership_negotiation_and_errors() {
     }
     assert_eq!(count(), 6);
     assert!(matches!(
-        unsafe { Hostlib::load(build(&scratch.0, "bad_abi")) },
+        unsafe { Hostlib::load(build(&scratch.path, "bad_abi")) },
         Err(Error::Abi { .. })
     ));
     assert!(matches!(
-        unsafe { Hostlib::load(build(&scratch.0, "missing_free")) },
+        unsafe { Hostlib::load(build(&scratch.path, "missing_free")) },
         Err(Error::Load)
     ));
 }
@@ -170,7 +166,7 @@ fn native_ownership_negotiation_and_errors() {
 #[test]
 fn injected_discovery_does_not_execute_cli() {
     let scratch = Scratch::new();
-    let executable = scratch.0.join(if cfg!(windows) {
+    let executable = scratch.path.join(if cfg!(windows) {
         "mvmctl.exe"
     } else {
         "mvmctl"
@@ -188,15 +184,15 @@ fn injected_discovery_does_not_execute_cli() {
     } else {
         "libmvm_hostlib.so"
     };
-    let library = scratch.0.join(name);
+    let library = scratch.path.join(name);
     std::fs::write(&library, b"discovery only").unwrap();
     let options = DiscoveryOptions {
         hostlib_path: None,
-        path: Some(std::env::join_paths([&scratch.0]).unwrap()),
+        path: Some(std::env::join_paths([&scratch.path]).unwrap()),
     };
     assert_eq!(options.resolve().unwrap(), library.canonicalize().unwrap());
     let options = DiscoveryOptions {
-        hostlib_path: Some(scratch.0.join("missing")),
+        hostlib_path: Some(scratch.path.join("missing")),
         ..options
     };
     assert!(matches!(options.resolve(), Err(Error::ExplicitPath)));

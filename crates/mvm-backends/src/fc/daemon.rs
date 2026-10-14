@@ -93,7 +93,38 @@ const SCOPE_LAUNCHER_PID_FILE: &str = "scope-launcher.pid";
 fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     ensure_api_socket_fits(abs_socket)?;
     ui::info("Starting Firecracker...");
+    // A process started here serves the socket its own command line names, so
+    // any record that this dir's VMM came from the idle pool is now stale.
+    super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
     run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
+    await_started_firecracker(abs_dir, abs_socket, scope)?;
+    ui::info("Firecracker started.");
+    Ok(())
+}
+
+/// Start an idle Firecracker for the pool: the same launch line as a VM's,
+/// inside the scope `scope` names, without the progress lines a launch prints.
+pub(crate) fn start_idle_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
+    ensure_api_socket_fits(abs_socket)?;
+    let identity = std::path::Path::new(abs_dir).join(super::idle_pool::FC_IDENTITY_FILE);
+    let output = mvm_vmm::host::shell::run_in_vm(&idle_firecracker_launch_script(
+        abs_dir,
+        abs_socket,
+        scope,
+        &identity.to_string_lossy(),
+    ))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "idle Firecracker launch script failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    await_started_firecracker(abs_dir, abs_socket, scope)
+}
+
+/// Wait for a just-launched Firecracker: its scope, when it has one, then its
+/// API socket.
+fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Result<()> {
     if !scope.is_empty() {
         let dir = std::path::Path::new(abs_dir);
         let machine = dir
@@ -116,9 +147,7 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
             e,
             &std::path::Path::new(abs_dir).join(FIRECRACKER_STDERR_LOG),
         )
-    })?;
-    ui::info("Firecracker started.");
-    Ok(())
+    })
 }
 
 /// Where the launch script sends Firecracker's stderr, relative to the VM dir.
@@ -210,6 +239,36 @@ fn firecracker_launch_script(abs_dir: &str, abs_socket: &str, scope: &str) -> St
 }
 
 fn firecracker_launch_script_as(abs_dir: &str, abs_socket: &str, scope: &str, euid: u32) -> String {
+    launch_script(abs_dir, abs_socket, scope, euid, None)
+}
+
+/// The launch script for an idle pool process: the same line, with the
+/// launched process also recording its own pid and start time in
+/// `identity_file` before it becomes Firecracker. The record comes from the
+/// process itself, so it exists as soon as Firecracker does, whether or not
+/// the `mvmctl` that started it is still running.
+pub(crate) fn idle_firecracker_launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    identity_file: &str,
+) -> String {
+    launch_script(
+        abs_dir,
+        abs_socket,
+        scope,
+        effective_user_id(),
+        Some(identity_file),
+    )
+}
+
+fn launch_script(
+    abs_dir: &str,
+    abs_socket: &str,
+    scope: &str,
+    euid: u32,
+    identity_file: Option<&str>,
+) -> String {
     let sudo = sudo_prefix_for_euid(euid);
     let vsock = firecracker_vsock_uds_path(abs_dir);
     let vsock_cleanup = format!(
@@ -238,19 +297,31 @@ fn firecracker_launch_script_as(abs_dir: &str, abs_socket: &str, scope: &str, eu
             shell_quote(&format!("{abs_dir}/{SCOPE_LAUNCHER_PID_FILE}"))
         )
     };
+    let payload = match identity_file {
+        None => format!(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket}"#),
+        Some(identity) => {
+            // A root caller can read owner-only files; a sudo-elevated
+            // process must leave its records readable to the invoking user,
+            // inside the pool's owner-only directory.
+            let umask = if euid == 0 { "umask 077; " } else { "" };
+            format!(
+                r#"'{umask}s=$(sed "s/^.*) //" /proc/$$/stat | cut -d" " -f20); echo "$$ $s" > "$2"; echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} {q_identity}"#,
+                q_identity = shell_quote(identity),
+            )
+        }
+    };
     format!(
         r#"
         mkdir -p {q_dir} {q_socket_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
         touch {q_dir}/console.log {q_dir}/firecracker.log
-        {scope}{sudo}setsid nohup sh -c 'echo $$ > "$0"; exec firecracker --api-sock "$1"' {q_pid} {q_socket} \
+        {scope}{sudo}setsid nohup sh -c {payload} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
         {record_launcher}
         "#,
         q_dir = q_dir,
-        q_pid = q_pid,
-        q_socket = q_socket,
+        payload = payload,
         q_socket_dir = q_socket_dir,
         vsock_cleanup = vsock_cleanup,
         scope = scope,
@@ -393,6 +464,34 @@ pub fn read_firecracker_pid(abs_dir: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An idle process records its own pid and start time before it execs
+    /// Firecracker; a VM launch line records neither.
+    #[test]
+    fn only_the_idle_launch_line_records_the_process_identity() {
+        let idle = launch_script(
+            "/p/idle-1",
+            "/p/idle-1/fc.socket",
+            "",
+            0,
+            Some("/p/idle-1/fc.identity"),
+        );
+        assert!(idle.contains(r#"echo "$$ $s" > "$2""#), "{idle}");
+        assert!(idle.contains("/proc/$$/stat"), "{idle}");
+        assert!(idle.contains("'/p/idle-1/fc.identity'"), "{idle}");
+        assert!(
+            idle.contains("umask 077"),
+            "root keeps its records owner-only"
+        );
+        let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
+        assert!(!as_user.contains("umask"), "{as_user}");
+        let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
+        assert!(!vm.contains("/proc/$$/stat"), "{vm}");
+        assert!(
+            vm.contains(r#"'echo $$ > "$0"; exec firecracker --api-sock "$1"'"#),
+            "{vm}"
+        );
+    }
 
     /// A boot that reaches the deadline with no socket must fail with a
     /// message naming the path, not hang. The shell loop this replaced had the

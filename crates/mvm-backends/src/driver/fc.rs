@@ -1135,17 +1135,27 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = crate::fc::fc_api_socket_path(&abs_dir);
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker_bounded(
-            &abs_dir,
-            &socket,
-            &spec.name,
-            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-                .with_cpu_grant(spec.cpu_grant),
-        )?;
+        // A workload whose scope limits an idle process already carries takes
+        // that process instead of starting one; anything else starts its own.
+        let idle_shape = crate::fc::idle_pool::IdleShape::for_launch(spec)
+            .filter(|_| crate::fc::idle_pool::enabled());
+        let claimed = idle_shape.is_some_and(|shape| {
+            crate::fc::idle_pool::claim(shape, &state_dir, std::path::Path::new(&socket))
+        });
+        if !claimed {
+            start_vm_firecracker_bounded(
+                &abs_dir,
+                &socket,
+                &spec.name,
+                &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                    .with_cpu_grant(spec.cpu_grant),
+            )?;
+        }
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
             ms = boot_started.elapsed().as_secs_f64() * 1000.0,
+            claimed,
             "fc boot: process spawn + API socket"
         );
 
@@ -1257,6 +1267,11 @@ impl VmmDriver for FcDriver {
 
         trace.mark("guest_boot");
         trace.write_driver_to(&state_dir);
+        // The guest is up; prepare the next launch's process while this one
+        // runs its workload.
+        if let Some(shape) = idle_shape {
+            crate::fc::idle_pool::refill_in_background(shape);
+        }
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),

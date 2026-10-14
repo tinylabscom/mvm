@@ -103,84 +103,35 @@ pub fn authenticate_appended_opening(
     trusted_key: &VerifyingKey,
     seed: &TranscriptManifest,
 ) -> Result<PlanAuditEntry> {
-    use crate::audit_verify::SignedEnvelope;
-    use crate::audit_verify::set::segment_shape;
-    use ed25519_dalek::{Signature, Verifier as _};
-    use mvm_contract::verify::{hash_line, signed_bytes_for};
-
     let expected = opening_labels(seed)?;
     let tenant = &seed.binding.tenant_id;
-    let (active_seq, active) = segment_shape(audit_dir, tenant)?.active;
-    let content = std::fs::read_to_string(&active)
-        .with_context(|| format!("reading live audit segment {}", active.display()))?;
+    // The capture id appears verbatim in the readable entry, so a line
+    // without it cannot be this opening and is never parsed.
+    let live = crate::audit_verify::live::authenticate_live_entries(
+        audit_dir,
+        tenant,
+        trusted_key,
+        seed.capture_id.as_str(),
+        |entry| {
+            entry.event == TRANSCRIPT_OPENED_EVENT
+                && entry.labels.get(LABEL_CAPTURE_ID) == Some(&seed.capture_id)
+        },
+    )?;
+    let mut openings = live.entries.into_iter();
+    let opening = openings
+        .next()
+        .context("expected exactly one original host-signed transcript opening")?;
     ensure!(
-        content.is_empty() || content.ends_with('\n'),
-        "live audit segment ends mid-record"
+        openings.next().is_none(),
+        "duplicate original transcript opening"
     );
-    let lines: Vec<&str> = content.lines().filter(|line| !line.is_empty()).collect();
-    let mut opening = None;
-    for (idx, line) in lines.iter().enumerate() {
-        // The capture id appears verbatim in the readable entry, so a line
-        // without it cannot be this opening and is never parsed.
-        if !line.contains(seed.capture_id.as_str()) {
-            continue;
-        }
-        let envelope: SignedEnvelope =
-            serde_json::from_str(line).context("malformed live audit line")?;
-        let entry = &envelope.entry;
-        if entry.event != TRANSCRIPT_OPENED_EVENT
-            || entry.labels.get(LABEL_CAPTURE_ID) != Some(&seed.capture_id)
-        {
-            continue;
-        }
-        ensure!(opening.is_none(), "duplicate original transcript opening");
-        let prev = match idx {
-            0 => {
-                // Only the genesis segment opens with an ordinary entry; every
-                // later one opens with its continuation record.
-                ensure!(
-                    active_seq == 1,
-                    "transcript opening is not chained into the live segment"
-                );
-                [0u8; 32]
-            }
-            _ => hash_line(lines[idx - 1].as_bytes()),
-        };
-        let claimed_prev: [u8; 32] = decode_b64(&envelope.prev_hash)
-            .context("transcript opening prev_hash")?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("transcript opening prev_hash is not 32 bytes"))?;
-        ensure!(
-            claimed_prev == prev,
-            "transcript opening is not chained to the entry before it"
-        );
-        let signature: [u8; 64] = decode_b64(&envelope.signature)
-            .context("transcript opening signature")?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("transcript opening signature is not 64 bytes"))?;
-        // Also proves the readable entry is the one that was signed.
-        let mut signed = signed_bytes_for(&envelope, idx)
-            .map_err(|e| anyhow::anyhow!("transcript opening is not authentic: {e}"))?;
-        signed.extend_from_slice(&prev);
-        trusted_key
-            .verify(&signed, &Signature::from_bytes(&signature))
-            .map_err(|_| anyhow::anyhow!("transcript opening signature is invalid"))?;
-        ensure!(
-            entry.tenant.0 == *tenant && entry.labels == expected,
-            "conflicting original transcript opening"
-        );
-        opening = Some(envelope.entry);
-    }
-    let opening =
-        opening.context("expected exactly one original host-signed transcript opening")?;
-    std::fs::File::open(&active)?.sync_all()?;
+    ensure!(
+        opening.tenant.0 == *tenant && opening.labels == expected,
+        "conflicting original transcript opening"
+    );
+    std::fs::File::open(&live.segment)?.sync_all()?;
     std::fs::File::open(audit_dir)?.sync_all()?;
     Ok(opening)
-}
-
-fn decode_b64(text: &str) -> Result<Vec<u8>> {
-    use base64::Engine as _;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(text)?)
 }
 
 /// Build a recovered terminal entry only from authenticated opening attribution.
