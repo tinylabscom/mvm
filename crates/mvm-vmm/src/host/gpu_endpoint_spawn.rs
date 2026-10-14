@@ -85,7 +85,7 @@ pub fn spawn_gpu_endpoint(
         EndpointTransport::Vsock { port } => format!("vsock:{port}"),
     };
     let log_path = state_dir.join(GPU_ENDPOINT_LOG_FILE);
-    let log = std::fs::File::create(&log_path)
+    let log = crate::host::console_capture::open_console_capture(&log_path)
         .with_context(|| format!("creating {}", log_path.display()))?;
     let mut child = endpoint_command(&endpoint, &listen, vm_name, device_ordinal)
         .stdin(Stdio::null())

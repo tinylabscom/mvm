@@ -1487,6 +1487,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_overlay_version: None,
                     observability_target: None,
+                    restored_device_anchors: None,
                 },
             )
             .expect("write");
@@ -1534,6 +1535,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_overlay_version: None,
                     observability_target: None,
+                    restored_device_anchors: None,
                 },
             )
             .expect("write");
@@ -1561,6 +1563,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_overlay_version: None,
                     observability_target: None,
+                    restored_device_anchors: None,
                 },
             )
             .expect("write");
@@ -1581,6 +1584,7 @@ mod accessible_gate_tests {
                     rootfs_path: None,
                     runtime_overlay_version: None,
                     observability_target: None,
+                    restored_device_anchors: None,
                 },
             )
             .expect("write");
@@ -1670,6 +1674,7 @@ mod picker_hvf_tests {
                 rootfs_path: None,
                 runtime_overlay_version: None,
                 observability_target: None,
+                restored_device_anchors: None,
             },
         )
         .unwrap();

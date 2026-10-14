@@ -47,15 +47,18 @@ mod refill;
 mod select;
 mod status;
 mod warm;
+mod warm_source;
 
 pub use cold_start::{ColdStartReason, WarmClaimOutcome};
 use cold_start::{claim_gate, claim_required, outcome_for_refusal};
 pub use refill::{StandbyRefill, schedule_standby_refill};
-use select::{
-    WarmSelection, announce_recent_selection, images_to_warm, recent_image_limit, warm_each,
-};
+use select::{recent_image_limit, warm_each, warm_sources};
 use status::{PoolStatus, PoolStatusEntry};
 pub use warm::WarmResult;
+#[cfg(test)]
+use warm_source::manifest_template_source;
+use warm_source::warm_if_eligible;
+pub(in crate::commands) use warm_source::{WarmRequest, WarmSource};
 
 struct HostChildGrantIssuer;
 
@@ -961,9 +964,17 @@ fn compat_for_launch(cfg: &VmStartConfig) -> Result<StandbyCompat> {
 ///
 /// - **extra volumes** — the attach threads only the rootfs, so a volume disk
 ///   would be missing from the child;
-/// - **bundle-owned boot assets** — the pool command cannot prepare a parent
-///   from an archive's pinned runtime set, so claiming a host-prepared parent
-///   would substitute boot assets the bundle did not select.
+/// - **bundle-pinned boot assets** — a parent of such a bundle has to boot the
+///   bundle's own signed overlay and initramfs, and the guest runtime those
+///   carry predates the claim handshake: it refuses the claiming plan's seccomp
+///   tier, so every claim would be refused. Such a launch keeps its cold path
+///   until a bundle can pin a guest runtime that takes the handshake.
+///
+/// A launch of an installed bundle that pins no boot assets is keyed rather
+/// than excluded. Its template identity is the bundle's verified archive digest
+/// and its image identity the bundle's rootfs digest. A host-runtime parent of
+/// the same rootfs carries a different template identity, so it can never serve
+/// the bundle, and a bundle parent never serves a launch of anything else.
 ///
 /// A virtio-fs root is keyed rather than excluded. The parent boots the same
 /// read-only image tree and a restored child inherits that device model, so the
@@ -1309,9 +1320,52 @@ mod tests {
         assert!(required.is::<WarmClaimRefusal>());
     }
 
-    #[test]
-    fn bundle_owned_runtime_never_claims_a_host_prepared_parent() {
+    /// A launch of an installed bundle, as `resolve_launch` hands it to both
+    /// halves of the pool: the template identity is the bundle's verified
+    /// archive digest.
+    fn bundle_launch(kernel: &Path, rootfs: &Path, bundle_sha256: &str) -> VmStartConfig {
         let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.display().to_string());
+        cfg.rootfs_path = rootfs.display().to_string();
+        cfg.template_id = Some(bundle_sha256.to_string());
+        cfg
+    }
+
+    /// An exported bundle pins no boot assets, so a parent of it boots this
+    /// CLI's guest runtime like any other launch. It can claim when standbys
+    /// are enabled and respects the same disabled-pool policy as an image.
+    #[test]
+    fn a_bundle_without_pinned_boot_assets_is_warm_eligible_and_respects_pool_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        let rootfs = tmp.path().join("rootfs.ext4");
+        let mut cfg = bundle_launch(&kernel, &rootfs, &"a".repeat(64));
+        assert!(warm_eligible_launch(&cfg));
+        let mut spawned = 0;
+        warm_if_eligible(&cfg, || {
+            spawned += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(spawned, 1);
+        assert_eq!(claim_gate(&cfg, false), Ok(()));
+        cfg.warm_pool_size = 0;
+        assert_eq!(
+            claim_gate(&cfg, false),
+            Err(ColdStartReason::StandbysDisabled)
+        );
+    }
+
+    /// A bundle that pins boot assets boots a guest runtime that refuses the
+    /// claim handshake, so it keeps its cold path rather than being refused.
+    #[test]
+    fn a_bundle_with_pinned_boot_assets_keeps_its_cold_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = bundle_launch(
+            &tmp.path().join("vmlinux"),
+            &tmp.path().join("rootfs.ext4"),
+            &"a".repeat(64),
+        );
         cfg.bundle_boot_assets = Some(mvm_core::vm_backend::BundleBootAssetsPin {
             manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"bundle set"),
             arch: mvm_core::arch::GuestArch::host(),
@@ -1320,11 +1374,131 @@ mod tests {
         for pool_size in [0, 2] {
             cfg.warm_pool_size = pool_size;
             assert!(!warm_eligible_launch(&cfg));
+            let mut spawned = 0;
+            let error = warm_if_eligible(&cfg, || {
+                spawned += 1;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("pinned boot assets"));
+            assert_eq!(
+                spawned, 0,
+                "ineligible warming performs no spawn preparation"
+            );
             assert_eq!(
                 claim_gate(&cfg, false),
                 Err(ColdStartReason::IneligibleShape)
             );
         }
+    }
+
+    /// The exact artifact digest is part of the key, so a parent warmed from
+    /// one artifact answers that artifact alone: never another bundle, never
+    /// the same rootfs booted under the host runtime, and never the reverse.
+    #[test]
+    fn a_parent_answers_only_the_artifact_it_was_warmed_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"same rootfs bytes").unwrap();
+
+        let bundle_a =
+            compat_for_launch(&bundle_launch(&kernel, &rootfs, &"a".repeat(64))).unwrap();
+        let bundle_b =
+            compat_for_launch(&bundle_launch(&kernel, &rootfs, &"b".repeat(64))).unwrap();
+        let mut host_cfg = eligible_cfg();
+        host_cfg.kernel_path = Some(kernel.display().to_string());
+        host_cfg.rootfs_path = rootfs.display().to_string();
+        let host = compat_for_launch(&host_cfg).unwrap();
+        let mut slot_cfg = host_cfg.clone();
+        slot_cfg.template_id = Some("c".repeat(64));
+        let slot = compat_for_launch(&slot_cfg).unwrap();
+
+        assert_eq!(
+            bundle_a.image_sha256, host.image_sha256,
+            "the fixture shares one rootfs, so only the artifact identity separates them"
+        );
+        let keys = [&bundle_a, &bundle_b, &host, &slot];
+        for (i, warmed) in keys.iter().enumerate() {
+            let mut parent = saved_idle_handle("standby", &warmed.kernel_sha256, "img");
+            parent.template_id = warmed.template_id.clone();
+            parent.image_sha256 = warmed.image_sha256.clone();
+            parent.vcpus = warmed.vcpus;
+            parent.mem_mib = warmed.mem_mib;
+            parent.vsock_egress = warmed.vsock_egress;
+            for (j, launch) in keys.iter().enumerate() {
+                assert_eq!(
+                    parent.is_compatible(launch),
+                    i == j,
+                    "parent {i} against launch {j}"
+                );
+            }
+        }
+    }
+
+    /// The image digest stays in the key beside the artifact digest: a slot
+    /// rebuilt to different bytes under the same identity is a different image.
+    #[test]
+    fn a_rebuilt_image_under_the_same_artifact_identity_is_a_different_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"kernel").unwrap();
+        let before = tmp.path().join("before.ext4");
+        std::fs::write(&before, b"first build").unwrap();
+        let after = tmp.path().join("after.ext4");
+        std::fs::write(&after, b"second build").unwrap();
+        let slot = "d".repeat(64);
+        let mut first = eligible_cfg();
+        first.kernel_path = Some(kernel.display().to_string());
+        first.rootfs_path = before.display().to_string();
+        first.template_id = Some(slot.clone());
+        let mut second = first.clone();
+        second.rootfs_path = after.display().to_string();
+        assert_ne!(
+            compat_for_launch(&first).unwrap(),
+            compat_for_launch(&second).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_warm_source_comes_from_exactly_one_flag() {
+        assert_eq!(
+            WarmSource::from_flags(None, None, None, None).unwrap(),
+            WarmSource::Image(None)
+        );
+        assert_eq!(
+            WarmSource::from_flags(Some("alpine".into()), None, None, None).unwrap(),
+            WarmSource::Image(Some("alpine".into()))
+        );
+        assert_eq!(
+            WarmSource::from_flags(None, Some("./app.mvmpkg".into()), None, None).unwrap(),
+            WarmSource::Manifest("./app.mvmpkg".into())
+        );
+        assert_eq!(
+            WarmSource::from_flags(None, None, Some("./app".into()), Some("slim".into())).unwrap(),
+            WarmSource::Flake {
+                flake_ref: "./app".into(),
+                profile: Some("slim".into()),
+            }
+        );
+        assert!(
+            WarmSource::from_flags(Some("alpine".into()), Some("m".into()), None, None).is_err()
+        );
+    }
+
+    /// A slot hash the registry does not hold is refused before anything boots;
+    /// a warm request never invents a source the launch could not resolve.
+    #[test]
+    fn an_unknown_manifest_slot_is_refused() {
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let err = manifest_template_source(&"e".repeat(64)).unwrap_err();
+        assert!(format!("{err:#}").contains("not present"), "{err:#}");
     }
 
     #[test]
@@ -2614,13 +2788,29 @@ pub(in crate::commands) enum PoolAction {
         /// How many idle standbys to warm each image toward (default 1).
         count: Option<u32>,
         /// OCI image the warmed parents boot, matching the `--image` the launch
-        /// will pass.
-        #[arg(long, conflicts_with = "default_image")]
+        /// will pass. Omit every source flag to warm recently pulled images.
+        #[arg(long, conflicts_with_all = ["default_image", "manifest", "flake"])]
         image: Option<String>,
-        /// Warm the image a bare `machine run` boots, whatever was pulled
-        /// recently.
-        #[arg(long = "default")]
+        /// Warm the image a bare `machine run` boots, regardless of recent pulls.
+        #[arg(long = "default", conflicts_with_all = ["image", "manifest", "flake"])]
         default_image: bool,
+        /// Manifest, built slot, installed bundle sha256 or signed `.mvmpkg`
+        /// archive the warmed parents boot, matching the `--manifest` (or
+        /// positional `.mvmpkg`) the launch will pass. An archive is verified
+        /// and installed exactly as `machine run` does. Parents are keyed by
+        /// the verified bundle or slot digest and the built image digest, so a
+        /// launch of any other artifact never claims one. A bundle that pins
+        /// its own boot assets keeps its cold path.
+        #[arg(long, value_name = "PATH|SHA256", conflicts_with_all = ["image", "flake"])]
+        manifest: Option<String>,
+        /// Nix flake the warmed parents boot, built into a slot the same way
+        /// `machine run --flake` builds it. Parents are keyed by the built
+        /// image digest.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest"])]
+        flake: Option<String>,
+        /// Flake package variant, matching the launch's `--flake-profile`.
+        #[arg(long, value_name = "PROFILE", requires = "flake")]
+        flake_profile: Option<String>,
         /// vCPUs the warmed parents boot with; must match the launch's `--cpus`
         /// (default: the configured `default_cpus`).
         #[arg(long)]
@@ -2661,36 +2851,6 @@ pub(in crate::commands) enum PoolAction {
     },
 }
 
-/// What `pool warm` warms toward, expressed as the launch it must mirror.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct WarmRequest {
-    /// The OCI image, or `None` for the image a bare `machine run` boots.
-    pub(in crate::commands) image: Option<String>,
-    pub(in crate::commands) cpus: u32,
-    pub(in crate::commands) memory_mib: u32,
-    pub(in crate::commands) target: u32,
-    /// Whether the parents boot the guest's egress client.
-    pub(in crate::commands) egress: bool,
-}
-
-impl WarmRequest {
-    /// One standby of `image` at the configured default sizing — the shape a
-    /// `machine run` that passes no `--cpus`, `--memory` or egress grant claims.
-    pub(in crate::commands) fn one_at_default_sizing(image: Option<&str>, cfg: &MvmConfig) -> Self {
-        Self {
-            image: image.map(str::to_string),
-            cpus: cfg.default_cpus,
-            memory_mib: cfg.default_memory_mib,
-            target: 1,
-            egress: false,
-        }
-    }
-
-    fn label(&self) -> &str {
-        self.image.as_deref().unwrap_or("the default image")
-    }
-}
-
 /// The policy a warm request resolves its launch shape under.
 ///
 /// Only the enablement half reaches the parent: the compat key records whether
@@ -2722,7 +2882,9 @@ fn warm_network_policy(egress: bool) -> mvm_core::network_policy::NetworkPolicy 
 /// the pool is built to avoid. The launch that later claims the parent supplies
 /// its own admitted plan.
 fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch> {
-    let image = super::vm::exec::resolve_launch_image_source(req.image.as_deref(), false, None)
+    let image = req
+        .source
+        .resolve()
         .context("resolving the image the warm parents boot")?;
     // `StandbyCompat::vsock_egress` records whether the guest boots an egress
     // client, never a destination.
@@ -2778,29 +2940,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             count,
             image,
             default_image,
+            manifest,
+            flake,
+            flake_profile,
             cpus,
             memory,
             egress,
         } => {
+            let source = WarmSource::from_flags(image, manifest, flake, flake_profile)?;
             let memory_mib = match memory.as_deref() {
                 Some(raw) => mvm_core::util::parse_human_size(raw).context("Invalid --memory")?,
                 None => cfg.default_memory_mib,
             };
-            let selection = WarmSelection::from_flags(image, default_image);
-            let recent = match selection {
-                WarmSelection::Recent => {
-                    super::image::recent_image_references(&super::image::oci_cache_root())?
-                }
-                _ => Vec::new(),
+            let recent = if matches!(source, WarmSource::Image(None)) && !default_image {
+                super::image::recent_image_references(&super::image::oci_cache_root())?
+            } else {
+                Vec::new()
             };
-            let images = images_to_warm(selection.clone(), &recent, recent_image_limit());
-            if selection == WarmSelection::Recent {
-                announce_recent_selection(&images);
-            }
-            let requests: Vec<WarmRequest> = images
+            let sources = warm_sources(source, default_image, &recent, recent_image_limit());
+            let requests: Vec<_> = sources
                 .into_iter()
-                .map(|image| WarmRequest {
-                    image,
+                .map(|source| WarmRequest {
+                    source,
                     cpus: cpus.unwrap_or(cfg.default_cpus),
                     memory_mib,
                     target: count.unwrap_or(1),
@@ -2821,18 +2982,20 @@ pub(in crate::commands) fn warm_request(req: &WarmRequest) -> Result<()> {
 fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
     let target = req.target;
     let launch = resolve_warm_launch(req)?;
-    // Ensure the host signer exists — the standby re-verifies the attach plan against it.
-    let signer = host_signer::load_or_init()?;
-    let result = warm_to_target(
-        pool,
-        &WarmParams {
-            backend: &launch.backend,
-            signer_id: &host_signer::host_signer_id(),
-            signing_key_path: &signer.secret_path,
-            target,
-            launch: &launch.start_config,
-        },
-    )?;
+    let result = warm_if_eligible(&launch.start_config, || {
+        // Ensure the host signer exists only for a parent a launch can claim.
+        let signer = host_signer::load_or_init()?;
+        warm_to_target(
+            pool,
+            &WarmParams {
+                backend: &launch.backend,
+                signer_id: &host_signer::host_signer_id(),
+                signing_key_path: &signer.secret_path,
+                target,
+                launch: &launch.start_config,
+            },
+        )
+    })?;
     // A state-changing verb emits one audit record per attempt.
     mvm_core::audit_emit!(
         PoolWarm,
@@ -2866,8 +3029,10 @@ fn run_warm(pool: &SupervisorStandbyPool, req: &WarmRequest) -> Result<()> {
         ));
     }
     crate::ui::info(
-        "A run claims one of these when it matches on image, kernel, vCPUs, memory and \
-         egress enablement (`--egress` for runs that allow egress) and is not given a --name.",
+        "A launch claims one of these only if it matches on image, kernel, vCPUs, memory and \
+         egress enablement (`--egress` for launches that allow egress), is auto-named, and \
+         runs with a non-zero warm pool size (MVM_RESIDENCY=warm on hosts whose default is \
+         parked).",
     );
     Ok(())
 }
