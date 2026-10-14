@@ -58,6 +58,21 @@ jobs:
         with:
           platform: ${{ matrix.platform }}
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          python3 scripts/release/sign_macos.py --producer-adhoc \
+            --payload hostlib-out \
+            --report "${RUNNER_TEMP}/npm-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-producer-signing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/npm-producer-signing.json
+          if-no-files-found: warn
+
       - name: Developer ID sign and notarize macOS native payload
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
         env:

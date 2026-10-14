@@ -20,7 +20,9 @@ use mvm_core::vm_backend::{
     VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
-use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
+use mvm_vmm::host::hvf_supervisor::{
+    HostDialSocket, HvfDisk, HvfSupervisorConfig, StartupDiagnostics,
+};
 use mvm_vmm::hvf_handoff::{HANDOFF_RESPONSE_MAX_BYTES, HandoffReply, HvfHandoffRequest};
 
 use crate::driver::hvf_process::{
@@ -324,9 +326,12 @@ fn bounded_supervisor_command(
     supervisor: &Path,
     spec: &VmmSpec,
     state_dir: &Path,
+    diagnostics: Option<&StartupDiagnostics>,
 ) -> mvm_core::spawn_scope::BoundCommand {
+    let mut command = mvm_core::env_hygiene::helper_command(supervisor);
+    StartupDiagnostics::configure(&mut command, diagnostics);
     mvm_core::spawn_scope::bind_spawn(
-        mvm_core::env_hygiene::helper_command(supervisor),
+        command,
         &spec.name,
         state_dir,
         &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
@@ -361,19 +366,35 @@ fn boot_with_handoff(
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
-    let mut command = bounded_supervisor_command(&supervisor, spec, &paths.state_dir);
+    // Diagnostics are optional evidence, never a launch or readiness gate.
+    let mut diagnostics = StartupDiagnostics::new().ok();
+    let mut command =
+        bounded_supervisor_command(&supervisor, spec, &paths.state_dir, diagnostics.as_ref());
     let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
-    child
+    if let Some(diagnostics) = &mut diagnostics {
+        diagnostics.launched();
+    }
+    let configured = child
         .stdin
         .take()
         .ok_or_else(|| anyhow!("supervisor stdin was not piped"))?
         .write_all(json.as_bytes())
-        .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"))?;
+        .map_err(|e| anyhow!("pipe HvfSupervisorConfig to supervisor stdin: {e}"));
+    if let Err(error) = configured {
+        // A single exit observation on transport failure, not another wait loop.
+        let status = child.try_wait().ok().flatten();
+        let summary = diagnostics
+            .as_mut()
+            .map(StartupDiagnostics::snapshot)
+            .unwrap_or_default();
+        let _ = child.kill();
+        return Err(error).context(summary.child_status(status));
+    }
     let deadline = Instant::now() + PID_FILE_TIMEOUT;
     let mut attempt = 0u32;
     loop {
@@ -384,15 +405,25 @@ fn boot_with_handoff(
             .try_wait()
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
+            let summary = diagnostics
+                .as_mut()
+                .map(StartupDiagnostics::snapshot)
+                .unwrap_or_default();
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); {}",
+                "hvf supervisor exited before writing its PID file; {}; {}",
+                summary.exited(status),
                 mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         if Instant::now() >= deadline {
+            let summary = diagnostics
+                .as_mut()
+                .map(StartupDiagnostics::snapshot)
+                .unwrap_or_default();
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}",
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}; {}",
+                summary.timed_out(),
                 mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
@@ -401,15 +432,24 @@ fn boot_with_handoff(
     }
 
     let agent_socket = hvf_agent_socket(&paths.state_dir);
+    let mut observed_exit = None;
     if let Err(error) = wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
         child
             .try_wait()
-            .map(|status| status.is_none())
+            .map(|status| {
+                observed_exit = status;
+                status.is_none()
+            })
             .map_err(|e| anyhow!("poll hvf supervisor while waiting for agent socket: {e}"))
     }) {
+        let summary = diagnostics
+            .as_mut()
+            .map(StartupDiagnostics::snapshot)
+            .unwrap_or_default();
         let _ = child.kill();
         return Err(error).context(format!(
-            "HVF supervisor failed readiness; {}",
+            "HVF supervisor failed readiness; {}; {}",
+            summary.child_status(observed_exit),
             mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
         ));
     }
@@ -2441,6 +2481,12 @@ mod tests {
         assert!(cfg.builder_control_sockets.is_empty());
     }
 
+    /// Diagnostic evidence cannot change the existing launch deadline.
+    #[test]
+    fn startup_diagnostics_do_not_extend_the_five_second_pid_deadline() {
+        assert_eq!(PID_FILE_TIMEOUT, std::time::Duration::from_secs(5));
+    }
+
     /// Same contract as every other driver: the bound rides on the spawn.
     #[test]
     fn a_granted_share_wraps_the_supervisor_spawn() {
@@ -2455,6 +2501,7 @@ mod tests {
             Path::new("/usr/bin/mvm-hvf-supervisor"),
             &spec,
             scratch.path(),
+            None,
         );
         let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
 

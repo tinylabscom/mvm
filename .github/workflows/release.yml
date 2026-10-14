@@ -321,6 +321,22 @@ jobs:
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --producer-adhoc --require-cli-inventory \
+            --payload staging/mvmctl-aarch64-apple-darwin \
+            --report "${RUNNER_TEMP}/macos-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-producer-signing
+          path: ${{ runner.temp }}/macos-producer-signing.json
+          if-no-files-found: warn
+
       - name: Sign and notarize the staged macOS release
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
         env:

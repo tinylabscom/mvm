@@ -118,6 +118,21 @@ jobs:
           cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
           echo "embedded ${HOSTLIB}"
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          python3 scripts/release/sign_macos.py --producer-adhoc \
+            --payload crates/mvm-sdk/sdks/python/mvm/_native \
+            --report "${RUNNER_TEMP}/pypi-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && runner.os == 'macOS' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-producer-signing-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pypi-producer-signing.json
+          if-no-files-found: warn
+
       - name: Developer ID sign and notarize macOS native payload
         if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
         env:
