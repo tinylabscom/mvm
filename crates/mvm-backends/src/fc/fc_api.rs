@@ -210,8 +210,9 @@ pub struct FcSession {
 impl FcSession {
     /// Open a session to the Firecracker API socket at `socket`.
     pub fn connect(socket: &Path) -> Result<Self> {
-        let stream = UnixStream::connect(socket)
-            .with_context(|| format!("connecting to Firecracker API socket {}", socket.display()))?;
+        let stream = UnixStream::connect(socket).with_context(|| {
+            format!("connecting to Firecracker API socket {}", socket.display())
+        })?;
         stream
             .set_read_timeout(Some(IO_TIMEOUT))
             .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
@@ -475,8 +476,7 @@ mod tests {
         let resp1 = "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
         let resp2 = "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
         let resp3 = "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 16\r\n\r\n{\"vcpu_count\":2}";
-        let (sock, release, server) =
-            serve_keep_alive_multi(dir.path(), vec![resp1, resp2, resp3]);
+        let (sock, release, server) = serve_keep_alive_multi(dir.path(), vec![resp1, resp2, resp3]);
 
         let mut session = FcSession::connect(&sock).expect("connect");
         session
@@ -485,9 +485,7 @@ mod tests {
         session
             .call("PUT", "/machine-config", Some("{}"))
             .expect("second PUT");
-        let body = session
-            .call("GET", "/vm/config", None)
-            .expect("GET");
+        let body = session.call("GET", "/vm/config", None).expect("GET");
         assert_eq!(body, r#"{"vcpu_count":2}"#);
 
         let _ = release.send(());

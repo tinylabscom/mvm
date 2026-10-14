@@ -29,9 +29,8 @@ use mvm_core::vm_backend::{
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
-    FcCapabilities, FirecrackerGuard, api_put_socket, api_put_session, api_session,
-    fc_pid_path, firecracker_vsock_uds_path,
-    read_firecracker_pid, start_vm_firecracker_bounded,
+    FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,
+    firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
@@ -1124,8 +1123,8 @@ impl VmmDriver for FcDriver {
             &abs_dir,
             caps,
         );
-        let mut session = api_session(&socket)
-            .context("opening Firecracker API session for boot config")?;
+        let mut session =
+            api_session(&socket).context("opening Firecracker API session for boot config")?;
         for put in &puts {
             api_put_session(&mut session, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;

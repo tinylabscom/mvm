@@ -258,11 +258,10 @@ fn claim_token() -> String {
     // pool runs). Falls back to timestamp + pid, which is still not a bare
     // PID used for signalling.
     let mut buf = [0u8; 8];
-    match std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| {
-            use std::io::Read as _;
-            f.read_exact(&mut buf)
-        }) {
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| {
+        use std::io::Read as _;
+        f.read_exact(&mut buf)
+    }) {
         Ok(()) => {
             let mut hex = String::with_capacity(16);
             for b in &buf {
