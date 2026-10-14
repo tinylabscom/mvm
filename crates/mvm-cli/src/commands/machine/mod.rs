@@ -522,10 +522,11 @@ impl MachineRunArgs {
             && self.run.flake.is_none()
             && self.run.deployment.is_none()
             && !self.run.runtime_pack
+            && self.run.registry_pack_image.is_none()
         {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
-                 `--runtime-pack` to boot a new machine"
+                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, \
+                 `--runtime-pack`, or an image-bearing `--policy` pack to boot a new machine"
             );
         }
         Ok(())
