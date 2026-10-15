@@ -238,10 +238,13 @@ fn spawn_prepared(
     .context("spawn owned endpoint")?;
     let mut endpoint = OwnedEndpoint::new(child);
     let result: Result<()> = (|| {
-        // Write evidence before any fallible handshake operation. This file is
-        // never used to signal, and remains even when rollback is uncertain.
+        // Write evidence before any fallible handshake operation. The owned
+        // lifecycle never signals through this file — custody is direct — but
+        // it remains even when rollback is uncertain, and the start time
+        // beside the pid is what lets a later reap tell this process from
+        // whatever is handed its pid after it exits.
         create_evidence(&params.state_dir.join(SUBST_PID_FILE))?
-            .write_all(endpoint.id().to_string().as_bytes())?;
+            .write_all(EndpointPid::of_child(endpoint.id()).render().as_bytes())?;
         endpoint.arm()?;
         let handshake = exchange_until(&mut endpoint, config, deadline)?;
         if let Some(parent) = env_path.parent() {
