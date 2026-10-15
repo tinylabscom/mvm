@@ -47,6 +47,7 @@
 //!   TOML fields) attach the runtime overlay. The launch-time evidence gate
 //!   verifies that runtime against the checked source cache of the home this
 //!   runs under, so run it with an `MVM_HOME` whose cache built the overlay.
+//!   The runtime's initramfs is resolved from the same cache — no knob.
 //! - `MVM_RUNTIME_BOOT_GRANT=1` (or `grant = true` in the TOML config) to
 //!   provision each boot with the signed verb-grant sidecar an admitted run
 //!   carries. Every backend boots guests under `mvm.require_grant=1`, so a
@@ -362,6 +363,10 @@ struct BenchSpec {
     cpus: u32,
     memory_mib: u32,
     overlay: Option<OverlaySpec>,
+    /// The runtime's initramfs, resolved from the checked source cache the
+    /// overlay's version names. The launch-time evidence gate authenticates
+    /// the whole runtime set, so an overlay boot carries it.
+    runtime_initramfs: Option<PathBuf>,
     rootfs_integrity: Option<RootfsIntegritySpec>,
     /// Provision each boot with the signed verb-grant sidecar an admitted run
     /// carries, so the guest agent authorizes the stop-time flush verb and
@@ -404,6 +409,10 @@ impl BenchSpec {
         let mut evidence = config.evidence.clone();
         evidence.report_path = env_path_opt("MVM_RUNTIME_BOOT_REPORT", evidence.report_path);
         let overlay = overlay_spec(&config)?;
+        let runtime_initramfs = overlay
+            .as_ref()
+            .map(|overlay| resolve_runtime_initramfs(&overlay.version))
+            .transpose()?;
         let rootfs_integrity = rootfs_integrity_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
@@ -427,6 +436,7 @@ impl BenchSpec {
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
             overlay,
+            runtime_initramfs,
             rootfs_integrity,
             grant: env_bool(GRANT_VAR, config.grant, false)?,
             evidence,
@@ -808,10 +818,17 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
         name,
         rootfs_path: spec.rootfs.to_string_lossy().into_owned(),
         kernel_path: Some(spec.kernel.to_string_lossy().into_owned()),
+        // The sealed-rootfs mode names its own initramfs; an overlay boot's
+        // initramfs is the runtime's, resolved from the checked source cache.
         initrd_path: spec
             .rootfs_integrity
             .as_ref()
-            .map(|integrity| integrity.initrd.to_string_lossy().into_owned()),
+            .map(|integrity| integrity.initrd.to_string_lossy().into_owned())
+            .or_else(|| {
+                spec.runtime_initramfs
+                    .as_ref()
+                    .map(|initramfs| initramfs.to_string_lossy().into_owned())
+            }),
         verity_path: spec
             .rootfs_integrity
             .as_ref()
@@ -1054,6 +1071,33 @@ fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
             )
         }
     }
+}
+
+/// The runtime's initramfs, built from the same checked source cache the
+/// launch-time evidence gate verifies the overlay against. A real launch gets
+/// it from the runtime resolver; the bench resolves it the same way rather
+/// than taking a path a config file could point anywhere.
+fn resolve_runtime_initramfs(version: &str) -> Result<PathBuf> {
+    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let workspace = mvm_build::image_source::guest_runtime_source_checkout()
+        .context("the runtime initramfs resolves from the developer checkout's source cache")?;
+    let arch = mvm_core::arch::GuestArch::host();
+    let runtime =
+        mvm_build::guest_runtime::cached_source_guest_runtime(&cache, version, arch, &workspace)?
+            .with_context(|| {
+            format!(
+                "no checked source runtime for {version} in {}; assemble the runtime \
+                     overlay into this home first",
+                cache.display()
+            )
+        })?;
+    let initramfs = mvm_build::initramfs::build_initramfs_from_guest_runtime(
+        &mvm_build::runtime_pieces::initramfs_cache_root(&cache),
+        version,
+        arch,
+        &runtime,
+    )?;
+    Ok(initramfs.image_path)
 }
 
 /// Resolve the sealed-rootfs triple, refusing partial or malformed inputs.
@@ -1535,6 +1579,7 @@ fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
         cpus: 1,
         memory_mib: 256,
         overlay,
+        runtime_initramfs: None,
         rootfs_integrity: None,
         grant: false,
         evidence: evidence::Options::default(),
@@ -1579,6 +1624,27 @@ fn a_configured_overlay_declares_required_overlay() {}
 
 #[test]
 fn no_overlay_stays_rootfs_only() {}
+
+/// An overlay boot carries the runtime's initramfs resolved from the checked
+/// source cache; a sealed-rootfs boot keeps its own.
+#[test]
+fn start_config_carries_the_runtime_initramfs_for_an_overlay_boot() {
+    let mut spec = prod_shaped_spec(Some(overlay_fixture()));
+    spec.runtime_initramfs = Some(PathBuf::from("/cache/initramfs/0.24.0/initramfs.cpio.gz"));
+    let config = start_config(&spec, "bench".to_string());
+    assert_eq!(
+        config.initrd_path.as_deref(),
+        Some("/cache/initramfs/0.24.0/initramfs.cpio.gz")
+    );
+
+    spec.rootfs_integrity = Some(rootfs_integrity_fixture());
+    let config = start_config(&spec, "sealed-bench".to_string());
+    assert_eq!(
+        config.initrd_path.as_deref(),
+        Some("/img/initramfs.cpio.gz"),
+        "the sealed-rootfs mode's own initramfs wins"
+    );
+}
 
 /// The regression this file exists to prevent, asserted where it actually
 /// bites: on the kernel cmdline. Attaching the overlay drive is not the same as
