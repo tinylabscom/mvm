@@ -2044,7 +2044,7 @@ limits and the split registry/release inventory.
 
 On Linux and other non-HVF hosts, the default residency remains `parked`
 (`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
-policy. For a prepared, unnamed launch without extra volumes, enable claims
+policy. For a prepared, unnamed launch of a warm-eligible shape, enable claims
 explicitly:
 
 ```bash
@@ -2073,8 +2073,19 @@ Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
 when standbys are enabled. If no compatible standby is ready, the launch
 declares a cold boot rather than reporting it as a warm claim. Named launches,
-shapes with extra volumes (including directory mounts), and launches with
-standbys disabled retain their cold path.
+launches with standbys disabled, and volume shapes no late-volume slot can
+serve retain their cold path.
+
+On Firecracker, a launch with up to four read-only directory mounts
+(`--mount DIR:PATH:ro`) claims the same standby a launch without them would.
+Every standby boots four read-only placeholder slots; the claim re-checks each
+mount against the shares its signed plan admitted, including the content digest
+the plan pinned, points a slot at the launch's own materialized image before the
+child resumes, and has the guest mount it read-only by its label before the
+claim commits. The guest's mount helper exists only in a standby's guest and
+exits on that first restore, before any workload process starts. A writable
+mount, a disk volume, or more than four mounts keeps the cold path, as does
+every volume launch on other backends.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left

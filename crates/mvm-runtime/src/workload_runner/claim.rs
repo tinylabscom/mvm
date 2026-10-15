@@ -14,7 +14,7 @@ use anyhow::Result;
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
-use mvm_core::vm_backend::{StandbyError, StartMode, VmId, VmStartConfig};
+use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
 use crate::workload_runner::runner::FlowMuxIdentitySource;
@@ -184,31 +184,6 @@ pub fn bind_plan_to_parent_digest(
             got: parent_image_sha256.to_string(),
         })
     }
-}
-
-/// Write a saved-state claimed child's runtime metadata: the record a cold boot
-/// writes from its start config, plus the device anchors its materialized
-/// checkpoint carries, which its restored VMM keeps naming.
-pub fn record_claimed_child_runtime_meta(
-    child: &VmId,
-    child_cfg: &VmStartConfig,
-    child_dir: &Path,
-) -> std::result::Result<(), StandbyError> {
-    let record = || -> Result<()> {
-        let anchors = crate::base::runtime_meta::read_restored_device_anchors(child_dir)?;
-        crate::base::runtime_meta::record_restored_from_start_config(
-            &child.0,
-            StartMode::Detached,
-            child_cfg,
-            anchors,
-        )
-    };
-    record().map_err(|e| {
-        StandbyError::ClaimFailed(format!(
-            "recording claimed child '{}' runtime metadata: {e:#}",
-            child.0
-        ))
-    })
 }
 
 /// The per-VM substitution-endpoint spawn inputs a warm claim and a cold boot

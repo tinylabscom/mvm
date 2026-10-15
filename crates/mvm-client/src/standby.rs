@@ -16,7 +16,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
-use mvm_core::vm_backend::StandbyState;
+use mvm_core::vm_backend::{StandbyHandle, StandbyState};
 use mvm_runtime::standby_pool::SupervisorStandbyPool;
 
 /// How often the idle watcher looks at the pool.
@@ -160,6 +160,97 @@ fn pool_root_exists(root: &Path) -> bool {
     root.is_dir()
 }
 
+/// The standby pool's occupancy, for `mvmctl pool status` and SDK callers.
+#[derive(Debug, serde::Serialize)]
+pub struct PoolStatus {
+    /// Standbys ready to be claimed.
+    pub idle: usize,
+    /// Standbys serving a launch.
+    pub claimed: usize,
+    /// Aged out of the warm set but kept as a claimable saved-state snapshot.
+    pub parked: usize,
+    /// Recorded standbys whose process is gone and that hold no saved state.
+    pub dead: usize,
+    /// Every recorded standby, live or not.
+    pub standbys: Vec<PoolStatusEntry>,
+}
+
+/// One recorded standby as the pool knows it.
+#[derive(Debug, serde::Serialize)]
+pub struct PoolStatusEntry {
+    /// The standby's id — the name a claiming VM runs under.
+    pub id: String,
+    /// `idle`, `claimed`, `parked`, or `dead`.
+    pub state: &'static str,
+    /// The supervisor process; 0 for a saved-state standby.
+    pub pid: u32,
+    /// The compat key's kernel half: sha256 of the kernel the parent booted.
+    pub kernel_sha256: String,
+    pub vcpus: u8,
+    /// Guest RAM the standby holds, in MiB.
+    pub mem_mib: u32,
+    /// The image half of the compat key: sha256 of the rootfs the parent
+    /// booted. Every standby carries one, since a parent is only ever spawned
+    /// for a resolved launch shape; absent marks a record predating that.
+    pub image_sha256: Option<String>,
+}
+
+/// Read the pool and build its status report.
+///
+/// # Errors
+///
+/// If the pool cannot be opened or listed.
+pub fn pool_status() -> Result<PoolStatus> {
+    let pool = SupervisorStandbyPool::open()?;
+    let standbys = pool.list()?;
+    Ok(build_pool_status(&standbys))
+}
+
+fn build_pool_status(standbys: &[StandbyHandle]) -> PoolStatus {
+    let idle = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Idle && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let parked = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Parked && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let claimed = standbys
+        .iter()
+        .filter(|h| h.state == StandbyState::Claimed && SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    let dead = standbys
+        .iter()
+        .filter(|h| !SupervisorStandbyPool::is_live_or_saved(h))
+        .count();
+    PoolStatus {
+        idle,
+        claimed,
+        parked,
+        dead,
+        standbys: standbys
+            .iter()
+            .map(|h| PoolStatusEntry {
+                id: h.id.clone(),
+                state: if SupervisorStandbyPool::is_live_or_saved(h) {
+                    match h.state {
+                        StandbyState::Idle => "idle",
+                        StandbyState::Claimed => "claimed",
+                        StandbyState::Parked => "parked",
+                    }
+                } else {
+                    "dead"
+                },
+                pid: h.pid,
+                kernel_sha256: h.kernel_sha256.clone(),
+                vcpus: h.vcpus,
+                mem_mib: h.mem_mib,
+                image_sha256: h.image_sha256.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn stop_orphaned(seen: &BTreeMap<String, u32>) {
     for (id, pid) in seen {
         tracing::info!(standby = %id, pid, "stopping a standby whose pool was removed");
@@ -170,6 +261,44 @@ fn stop_orphaned(seen: &BTreeMap<String, u32>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn idle_handle(id: &str, pid: u32) -> StandbyHandle {
+        StandbyHandle {
+            id: id.into(),
+            template_id: None,
+            control_socket: format!("/p/{id}.sock"),
+            pid,
+            kernel_sha256: "aa".into(),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 1,
+            state: StandbyState::Idle,
+            image_sha256: None,
+            root_strategy: Default::default(),
+            parent_checkpoint: None,
+            preloaded_child_vm_name: None,
+            vsock_egress: false,
+        }
+    }
+
+    #[test]
+    fn pool_status_reports_dead_standbys_separately() {
+        let live = idle_handle("live", std::process::id());
+        let dead = idle_handle("dead", 999_999_999);
+        let mut saved = idle_handle("saved", 0);
+        saved.image_sha256 = Some("img".into());
+
+        let report = build_pool_status(&[live, dead, saved]);
+
+        assert_eq!(report.idle, 2, "live process + saved-state are idle");
+        assert_eq!(report.claimed, 0);
+        assert_eq!(report.parked, 0);
+        assert_eq!(report.dead, 1);
+        assert_eq!(report.standbys[0].state, "idle");
+        assert_eq!(report.standbys[1].state, "dead");
+        assert_eq!(report.standbys[2].state, "idle");
+    }
 
     #[test]
     fn a_standby_fits_the_standby_budget_after_what_is_already_held() {

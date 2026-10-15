@@ -268,6 +268,7 @@ pub fn post_restore_at(
             host_epoch_secs: None,
             grant_envelope: None,
             seccomp_tier: None,
+            volumes: Vec::new(),
         },
     )?;
     interpret_post_restore(resp)
@@ -301,6 +302,7 @@ pub fn post_restore_with_grant_and_clock_at(
             host_epoch_secs,
             grant_envelope,
             seccomp_tier: None,
+            volumes: Vec::new(),
         },
     )?;
     interpret_post_restore(resp)
@@ -690,6 +692,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier: None,
+            volumes_mounted: None,
         })
         .unwrap();
         assert!(r.acknowledged && r.reseeded && r.clock_resynced);
@@ -701,6 +704,7 @@ mod tests {
             clock_resynced: false,
             reseed_shortfall: Some(ReseedShortfall::Failed),
             seccomp_tier: None,
+            volumes_mounted: None,
         })
         .unwrap();
         assert!(r.acknowledged && !r.reseeded);
@@ -718,6 +722,7 @@ mod tests {
             clock_resynced: false,
             reseed_shortfall: None,
             seccomp_tier: None,
+            volumes_mounted: None,
         })
         .unwrap();
         assert!(!r.acknowledged && !r.reseeded);

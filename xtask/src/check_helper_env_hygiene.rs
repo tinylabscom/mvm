@@ -250,6 +250,12 @@ const RAW_SITES: &[RawSite] = &[
         "the CRNG reseed helper, started by the guest agent",
     ),
     guest(
+        "crates/mvm-agentd/src/late_volumes.rs",
+        "spawn",
+        "Command::new(\"/proc/self/exe\")",
+        "the one-shot late-volume helper, started by the guest agent",
+    ),
+    guest(
         "crates/mvm-agentd/src/entrypoint.rs",
         "execute_streaming",
         "Command::new(&program)",

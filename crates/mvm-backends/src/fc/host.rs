@@ -881,7 +881,99 @@ fn child_io(
     })
 }
 
+/// Point every late-volume slot a claim uses at its image on a paused child,
+/// tearing the child down if any of them cannot be.
+pub(crate) fn attach_late_volumes(
+    io: &super::io::FirecrackerIO,
+    late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+) -> anyhow::Result<()> {
+    for volume in late_volumes {
+        if let Err(error) = io.repoint_drive(&format!("blk{}", volume.slot), &volume.source) {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(io);
+            return Err(error.context("attaching a late volume to the restored child"));
+        }
+    }
+    Ok(())
+}
+
+/// The resume half of a preloaded fork: re-verify the paused child's restored
+/// layout against the claim's authenticated evidence, point its late-volume
+/// slots at the claim's images, and only then resume it. The preload verified
+/// this layout when it loaded, but the VMM has been paused and waiting on a
+/// claim since, so the resume re-authenticates the same manifest rather than
+/// trusting a VMM nobody has looked at. The layout check runs before the
+/// repoint because the capture records the parent's own paths, which attaching
+/// a late volume deliberately replaces; any failure tears the child down
+/// instead of letting an unverified or half-attached guest run.
+pub(crate) fn resume_preloaded_fork_child(
+    io: &super::io::FirecrackerIO,
+    child_dir: &std::path::Path,
+    runtime_artifacts_sha256: Option<&str>,
+    device_anchors_sha256: Option<&str>,
+    late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let expected = super::runtime_artifacts::authenticated_fork_capture(
+        child_dir,
+        &super::ForkRuntimeEvidence {
+            observation_sha256: runtime_artifacts_sha256
+                .context("Firecracker prepared claim requires authenticated runtime evidence")?,
+            anchors_sha256: device_anchors_sha256
+                .context("prepared claim requires authenticated device anchors")?,
+            reseeded_identity_sha256: None,
+        },
+    )?;
+    if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+    {
+        let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
+        return Err(error.context("prepared runtime verification"));
+    }
+    attach_late_volumes(io, late_volumes)?;
+    mvm_vmm::snapshot::resume_verified_or_teardown(io)
+}
+
 impl FcForkRestorer {
+    /// Stage the child's snapshot, verify the paused device layout against the
+    /// authenticated capture, point its late-volume slots at the claim's images
+    /// while it is still paused, and only then resume it. The layout check runs
+    /// before the repoint: the capture records the parent's own paths, which
+    /// attaching a late volume deliberately replaces.
+    pub fn restore_fork_attaching(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+        cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+        late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        if late_volumes.is_empty() {
+            return self.restore_fork(child_vm_name, child_dir, cpu_grant, runtime_evidence);
+        }
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
+        let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        if let Err(error) =
+            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            return Err(error);
+        }
+        attach_late_volumes(&io, late_volumes)?;
+        if let Err(error) = <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
+        {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            return Err(error.context("resume after attaching late volumes"));
+        }
+        Ok(())
+    }
+
     /// Stage the child's snapshot and resume it. The fork-restore callback
     /// `fork_vm_full_fc` takes.
     pub fn restore_fork(

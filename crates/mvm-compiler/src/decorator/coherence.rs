@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 
 use crate::decorator::{parse_python, parse_typescript};
-use crate::ir::{Entrypoint, Source, Workload, canonicalize};
+use mvm_contract::ir::{Entrypoint, Source, Workload, canonicalize};
 
 /// Marker the language-bound entrypoint field is normalized to so the
 /// rest of the IR can be compared for equality.

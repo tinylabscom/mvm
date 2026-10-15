@@ -924,6 +924,10 @@ impl VmmDriver for FcDriver {
         true
     }
 
+    fn late_volume_slots(&self) -> u8 {
+        mvm_agentd::late_volumes::MAX_SLOTS
+    }
+
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -941,6 +945,8 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             )));
         }
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|error| preload_spawn_error("create late-volume placeholders", error))?;
         crate::fc::FcForkRestorer
             .restore_fork_paused(
                 req.child_vm_name,
@@ -994,31 +1000,14 @@ impl VmmDriver for FcDriver {
             ))
         })?;
         let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
-        let verified = (|| -> anyhow::Result<()> {
-            let digest = req
-                .runtime_artifacts_sha256
-                .context("Firecracker prepared claim requires authenticated runtime evidence")?;
-            let expected = crate::fc::runtime_artifacts::authenticated_fork_capture(
-                req.child_dir,
-                &crate::fc::ForkRuntimeEvidence {
-                    observation_sha256: digest,
-                    anchors_sha256: req
-                        .device_anchors_sha256
-                        .context("prepared claim requires authenticated device anchors")?,
-                    reseeded_identity_sha256: None,
-                },
-            )?;
-            crate::fc::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
-        })();
-        if let Err(error) = verified {
-            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
-            return Err(StandbyError::ClaimFailed(format!(
-                "prepared runtime verification: {error:#}"
-            )));
-        }
-        mvm_vmm::snapshot::resume_verified_or_teardown(&io).map_err(|error| {
-            StandbyError::ClaimFailed(format!("resume preloaded child: {error:#}"))
-        })
+        crate::fc::host::resume_preloaded_fork_child(
+            &io,
+            req.child_dir,
+            req.runtime_artifacts_sha256,
+            req.device_anchors_sha256,
+            req.late_volumes,
+        )
+        .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))
     }
 
     fn fork_standby_child(
@@ -1070,11 +1059,19 @@ impl VmmDriver for FcDriver {
         // device-model guard between load and resume refuses any snapshot
         // carrying a network interface, so a restored child cannot reintroduce a
         // path off the box that bypasses vsock.
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': creating late-volume placeholders: {e:#}",
+                req.child_vm_name
+            ))
+        })?;
         crate::fc::FcForkRestorer
-            .restore_fork(
+            .restore_fork_attaching(
                 req.child_vm_name,
                 req.child_dir,
                 req.cpu_grant,
+                req.late_volumes,
                 &crate::fc::ForkRuntimeEvidence {
                     observation_sha256: req.runtime_artifacts_sha256.ok_or_else(|| {
                         StandbyError::ClaimFailed(
@@ -2649,6 +2646,7 @@ mod tests {
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2677,6 +2675,7 @@ mod tests {
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2715,6 +2714,7 @@ mod tests {
             channels: &channels,
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         // The restore has no Firecracker to talk to and no device anchors to

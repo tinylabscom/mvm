@@ -2045,6 +2045,7 @@ class PostRestoreAck:
     reseed_shortfall: Optional[ReseedShortfall] = None
     reseeded: Optional[bool] = False
     seccomp_tier: Optional[SeccompTier] = None
+    volumes_mounted: Optional[int] = None
 
 
 @dataclass
@@ -2178,6 +2179,7 @@ class PostRestore:
     token: Optional[List[TokenItem]] = field(
         default_factory=lambda: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     )
+    volumes: Optional[List[VolumeConfig]] = None
 
 
 @dataclass
