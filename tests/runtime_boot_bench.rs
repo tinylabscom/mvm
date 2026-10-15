@@ -962,14 +962,18 @@ fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
 }
 
 fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
+    // Resolve through the shared per-VM socket namespace, which moves every
+    // socket to the short fallback when a deep MVM_HOME would overflow a Unix
+    // socket path — the same endpoints the driver binds and its RPC clients
+    // dial, so a deep home cannot split the two.
     match backend {
-        "firecracker" => Ok(mvm_core::config::vm_state_dir(name)
-            .join("runtime")
-            .join("v.sock")),
-        "libkrun" | "krun" => Ok(mvm_core::config::vm_state_dir(name).join(format!(
-            "vsock-{}.sock",
-            mvm_agentd::vsock::GUEST_AGENT_PORT
+        "firecracker" => Ok(PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
+            &mvm_core::config::vm_state_dir(name).to_string_lossy(),
         ))),
+        "libkrun" | "krun" => Ok(mvm_core::config::vm_vsock_port_socket(
+            name,
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+        )),
         other => bail!(
             "{READY_VAR}=guest-agent is not wired for backend {other:?}; use {READY_VAR}=start-return"
         ),
@@ -1643,6 +1647,24 @@ fn start_config_carries_the_runtime_initramfs_for_an_overlay_boot() {
         config.initrd_path.as_deref(),
         Some("/img/initramfs.cpio.gz"),
         "the sealed-rootfs mode's own initramfs wins"
+    );
+}
+
+/// The bench dials the guest agent at the endpoint the shared resolver names —
+/// the one the driver binds — including when a deep home moves every socket
+/// into the short fallback namespace. Hand-rolling `state_dir/runtime/v.sock`
+/// here once meant the bench polled a path nothing created.
+#[test]
+fn the_bench_dials_the_vsock_endpoint_the_driver_binds() {
+    let name = "mvm-bench-socket-resolution";
+    let dir = mvm_core::config::vm_state_dir(name);
+    assert_eq!(
+        guest_agent_socket_path("firecracker", name).unwrap(),
+        PathBuf::from(mvm_agentd::vsock::vsock_uds_path(&dir.to_string_lossy()))
+    );
+    assert_eq!(
+        guest_agent_socket_path("libkrun", name).unwrap(),
+        mvm_core::config::vm_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT)
     );
 }
 
