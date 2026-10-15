@@ -1028,6 +1028,10 @@ pub fn try_warm_claim(
     if let Err(reason) = claim_gate(cfg, user_named, backend.late_volume_slots()) {
         return Ok(WarmClaimOutcome::Cold(reason));
     }
+    // A claimed standby was activated when it was prepared, so nothing on the
+    // claim path holds the workload behind the admission's sync. Wait for it
+    // before claiming.
+    cfg.wait_for_admission_durability()?;
     let Some(tenant) = cfg.tenant_id.clone() else {
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::Unadmitted));
     };

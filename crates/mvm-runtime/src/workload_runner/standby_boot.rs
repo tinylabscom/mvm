@@ -157,6 +157,9 @@ pub fn factory_parent_config(
         warm_pool_size: _,
         network_policy: _,
         dev_console: _,
+        // A parent is admitted under no plan, so no admission of the launch's
+        // has anything to say about when it may be activated.
+        admission_durability: _,
         // ── The guest's boot shape: carried verbatim, because a child inherits
         // all of it from the parent's restored memory. `gpu` rides here for
         // the same reason: the GPU channel is part of the device model a
@@ -235,6 +238,7 @@ pub fn factory_parent_config(
         warm_pool_size: 0,
         network_policy: parent_egress_enablement(spec.vsock_egress),
         dev_console: false,
+        admission_durability: None,
     };
 
     ensure_parent_can_reach_an_agent(&spec.id, &parent)?;

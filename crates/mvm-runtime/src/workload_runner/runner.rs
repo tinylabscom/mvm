@@ -58,6 +58,7 @@ mod backend;
 mod broker;
 mod claim_lease;
 mod console_boot;
+mod durability;
 mod parent_verify;
 mod preload;
 mod refusal;
@@ -458,6 +459,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
+        durability::wait_for_unactivated_boot(inputs.config)?;
         let streamer = Arc::clone(&self.console_streamer);
         let vm = console_boot::boot_while_starting_console(
             || self.driver.boot(&spec),
@@ -472,6 +474,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // on failure. A rootfs boot whose universal initramfs could not be
         // resolved was refused at launch resolution, before the VMM started.
         if crate::microvm::booted_with_universal_initramfs(inputs.config) {
+            durability::wait_for_activation(inputs.config, &*vm, &*self.console_streamer)?;
+            trace.mark("admission_durable");
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
         }
@@ -2953,6 +2957,192 @@ mod tests {
                 .take_guest_end(&VmId("runner-legacy-initrd".into()), GUEST_AGENT_PORT)
                 .is_none(),
             "a legacy initramfs boot must not connect for activation"
+        );
+    }
+
+    /// An initramfs under the shared cache: the universal-initramfs boot whose
+    /// guest waits for `ActivateEnvironment`.
+    fn seeded_universal_initramfs() -> String {
+        let initrd = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
+            .join("initramfs")
+            .join("test-version")
+            .join("initramfs.cpio.gz");
+        std::fs::create_dir_all(initrd.parent().expect("initramfs cache parent")).unwrap();
+        std::fs::write(&initrd, b"initramfs").unwrap();
+        initrd.to_string_lossy().into_owned()
+    }
+
+    fn launch(runner_cfg: &VmStartConfig) -> WorkloadLaunchInputs<'_> {
+        static POLICY: std::sync::OnceLock<NetworkPolicy> = std::sync::OnceLock::new();
+        static REDACTION: std::sync::OnceLock<RedactionPolicy> = std::sync::OnceLock::new();
+        WorkloadLaunchInputs {
+            config: runner_cfg,
+            tenant: "local",
+            secrets: &[],
+            redaction: REDACTION.get_or_init(RedactionPolicy::default),
+            network_policy: POLICY.get_or_init(NetworkPolicy::deny_all),
+            cmdline: String::new(),
+        }
+    }
+
+    /// The VMM may boot while the admission's audit sync is still running, but
+    /// the guest is not activated until it has finished: the sync is held well
+    /// past the moment the boot returns, and the guest checks it had completed
+    /// once `ActivateEnvironment` has been answered.
+    #[test]
+    fn activation_waits_for_the_admission_sync() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let synced = Arc::new(AtomicBool::new(false));
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let durability = mvm_core::admission_durability::AdmissionDurability::spawn({
+            let synced = Arc::clone(&synced);
+            move || {
+                held.recv().expect("released");
+                synced.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        })
+        .expect("spawn the sync");
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            release.send(()).expect("release the sync");
+        });
+
+        let driver = MockDriver::default();
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = VmStartConfig {
+            name: "runner-durable-activation".into(),
+            initrd_path: Some(seeded_universal_initramfs()),
+            admission_durability: Some(durability),
+            ..config("runner-durable-activation")
+        };
+
+        let guest = {
+            let synced = Arc::clone(&synced);
+            let activation = spawn_activation_guest(driver.clone(), "runner-durable-activation");
+            std::thread::spawn(move || {
+                activation.join().expect("activation guest");
+                synced.load(Ordering::SeqCst)
+            })
+        };
+        // The guest thread reads the flag as soon as it has acknowledged
+        // activation. A runner that did not wait would be acknowledged within
+        // milliseconds, long before the sync is released.
+        runner
+            .start_workload(&launch(&cfg))
+            .expect("the launch activates once the sync succeeds");
+        assert!(
+            guest.join().expect("guest thread"),
+            "ActivateEnvironment was sent before the admission sync finished"
+        );
+        releaser.join().expect("releaser");
+        assert_eq!(driver.booted_specs().len(), 1);
+    }
+
+    /// A sync that fails means the admission cannot be shown afterwards. The
+    /// booted guest is never sent `ActivateEnvironment` — the runner never
+    /// even connects to its agent — and the VMM is killed, not left running.
+    #[test]
+    fn a_failed_admission_sync_tears_the_guest_down_unactivated() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let driver = MockDriver::default();
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let vm = "runner-undurable-admission";
+        let cfg = VmStartConfig {
+            name: vm.into(),
+            initrd_path: Some(seeded_universal_initramfs()),
+            admission_durability: Some(
+                mvm_core::admission_durability::AdmissionDurability::spawn(|| {
+                    anyhow::bail!("fdatasync audit/local.jsonl: input/output error")
+                })
+                .expect("spawn the sync"),
+            ),
+            ..config(vm)
+        };
+
+        let error = match runner.start_workload(&launch(&cfg)) {
+            Ok(_) => panic!("a launch whose admission did not reach the log must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("input/output error"),
+            "the sync failure is what the launch reports: {error:#}"
+        );
+        assert_eq!(
+            driver.booted_specs().len(),
+            1,
+            "the VMM booted beside the sync"
+        );
+        assert!(
+            driver
+                .take_guest_end(&VmId(vm.into()), GUEST_AGENT_PORT)
+                .is_none(),
+            "the runner must not connect to the agent of a guest it will not activate"
+        );
+        assert_eq!(
+            driver.killed_vms(),
+            vec![vm.to_string()],
+            "the unactivated guest is killed"
+        );
+    }
+
+    /// A guest that is not activated over vsock runs its workload on its own
+    /// as soon as it boots, so it waits for the admission's sync before the
+    /// VMM starts, and a failed sync boots nothing.
+    #[test]
+    fn a_boot_without_activation_waits_for_the_admission_sync_before_booting() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let legacy = home.path().join("rootfs.initrd");
+        std::fs::write(&legacy, b"initrd").unwrap();
+        let driver = MockDriver::default();
+        let runner = WorkloadRunner::new(
+            driver.clone(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = VmStartConfig {
+            name: "runner-legacy-undurable".into(),
+            initrd_path: Some(legacy.to_string_lossy().into_owned()),
+            admission_durability: Some(
+                mvm_core::admission_durability::AdmissionDurability::settled(Err(anyhow::anyhow!(
+                    "fdatasync failed"
+                ))),
+            ),
+            ..config("runner-legacy-undurable")
+        };
+
+        assert!(runner.start_workload(&launch(&cfg)).is_err());
+        assert!(
+            driver.booted_specs().is_empty(),
+            "nothing boots on an admission that is not durable"
         );
     }
 
