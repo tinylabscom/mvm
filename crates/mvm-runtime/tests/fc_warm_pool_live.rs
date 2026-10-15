@@ -454,6 +454,7 @@ fn restore_child_and_read_random(
         channels: &[],
         cpu_grant: None,
         admitted_plan: None,
+        late_volumes: &[],
     });
     if let Err(ref e) = resume_result {
         eprintln!("preloaded child resume failed: {e:#}");
@@ -478,6 +479,7 @@ fn restore_child_and_read_random(
                 token: generation_token,
                 grant_envelope: None,
                 seccomp_tier: Some(SeccompTier::Standard),
+                volumes: Vec::new(),
             },
         )
         .expect("the restored child must complete the authenticated identity handshake");

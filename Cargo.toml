@@ -12,6 +12,7 @@ members = [
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
+    "crates/mvm-fc-lifecycle",
     "crates/mvm-backends",
     "crates/mvm-build",
     # Seals built artifacts into a signed `.mvmpkg` under any Ed25519 signer.
@@ -271,7 +272,6 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # Serialization
 serde = { version = "1", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "1", default-features = false, features = ["std"] }
-serde_yaml = "0.9"
 thiserror = "2"
 toml = "0.8"
 toml_edit = "0.22"
@@ -539,7 +539,6 @@ predicates.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 toml.workspace = true

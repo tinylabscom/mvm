@@ -86,6 +86,11 @@ fn main() -> Result<()> {
         .init();
 
     let raw = read_stdin_blocking()?;
+    if let Some(only) = mvm_hostd::telemetry_collector::TelemetryOnlyConfig::parse(&raw)
+        .context("mvm-network-endpoint collector-only config parse failed")?
+    {
+        return run_telemetry_only(only);
+    }
     let cfg = parse(&raw).context("mvm-network-endpoint config parse failed")?;
     validate_flowmux_limits(&cfg)?;
     info!(
@@ -145,6 +150,8 @@ fn main() -> Result<()> {
             .context("fingerprinting the endpoint's secrets")?,
     };
     let fingerprinted = handshake.input_fingerprints.len();
+    // The embedded collector scrubs records against the same set.
+    let telemetry_fingerprints = handshake.input_fingerprints.clone();
     let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
 
     // One configured deadline for the forward leg. The UDS/vsock path honors it
@@ -195,14 +202,19 @@ fn main() -> Result<()> {
         // this VM its telemetry, never its egress: the ready handshake has
         // already gone out and the guest is booting against this process.
         let _telemetry = cfg.telemetry.as_ref().and_then(|telemetry| {
-            mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
-                .inspect_err(|error| {
-                    warn!(
-                        error = format!("{error:#}"),
-                        "embedded telemetry collector did not start; serving without it"
-                    );
-                })
-                .ok()
+            mvm_hostd::telemetry_collector::start_embedded(
+                &cfg.instance_id,
+                telemetry,
+                telemetry_fingerprints,
+                mvm_hostd::stream::redact::StreamRedaction::curated(&cfg.redaction),
+            )
+            .inspect_err(|error| {
+                warn!(
+                    error = format!("{error:#}"),
+                    "embedded telemetry collector did not start; serving without it"
+                );
+            })
+            .ok()
         });
         serve(
             ServeParams::builder()
@@ -219,6 +231,40 @@ fn main() -> Result<()> {
         )
         .await
     })
+}
+
+/// Collector-only mode: the VM-lifetime home of the telemetry collector for a
+/// VM that has no egress to mediate and so no endpoint to embed it in. It
+/// holds no secrets, binds nothing, reports no handshake and serves no guest
+/// flow — it dials the guest's telemetry listener and writes the sealed
+/// records file, confined to the VM's state directory, until the keeper
+/// stops it with the VM.
+fn run_telemetry_only(only: mvm_hostd::telemetry_collector::TelemetryOnlyConfig) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use mvm_hostd::jailer::{ConfinementSpec, confine_self};
+        let spec = ConfinementSpec::telemetry_collector(
+            &only.telemetry.state_dir,
+            only.telemetry.telemetry_sock.parent(),
+            mvm_core::config::mvm_keys_dir(),
+        );
+        confine_self(&spec).context("confine the telemetry collector")?;
+        info!("telemetry collector self-confined (landlock + seccomp)");
+    }
+    let collector = mvm_hostd::telemetry_collector::start_embedded(
+        &only.instance_id,
+        &only.telemetry,
+        Vec::new(),
+        mvm_hostd::stream::redact::StreamRedaction::curated(&only.redaction),
+    )
+    .context("starting the telemetry collector")?;
+    info!(vm = %only.instance_id, "telemetry collector serving");
+    // The collector's threads do the work; this thread only keeps the process
+    // alive. The keeper ends it when the VM is gone.
+    let _collector = collector;
+    loop {
+        std::thread::park();
+    }
 }
 
 fn validate_flowmux_limits(cfg: &EndpointConfig) -> Result<()> {

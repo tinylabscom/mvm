@@ -32,6 +32,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 /// independently of the logical workload named by an admitted plan.
 pub enum CaptureAuthority<'a> {
     Admitted(&'a ExecutionPlan),
+    /// Verified and durably consumed before trusted cold-start setup.
+    CallerRegistered(Box<crate::supervisor::caller_registration::ConsumedCallerLaunch>),
     /// Only a validated builder/standby launch role may select this variant.
     OperationalLiveOnly,
 }
@@ -46,6 +48,7 @@ pub struct CaptureOwner {
     worker: Option<JoinHandle<()>>,
     exited: mpsc::Receiver<()>,
     failed: Arc<AtomicBool>,
+    caller: Option<crate::supervisor::caller_registration::RegisteredCaller>,
     #[cfg(test)]
     rotations: mpsc::Receiver<()>,
 }
@@ -65,9 +68,14 @@ impl CaptureOwner {
             authority,
             redaction,
         } = params;
-        let (plan, retention) = match authority {
-            CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention),
-            CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral),
+        let (plan, retention, caller) = match authority {
+            CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention, None),
+            CaptureAuthority::CallerRegistered(launch) => {
+                let (plan, caller) = launch.into_owner(vm)?;
+                let retention = plan.stream_retention;
+                (Some(plan), retention, Some(caller))
+            }
+            CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral, None),
         };
         mvm_core::naming::validate_vm_name(vm)?;
         let keys = config::mvm_keys_dir();
@@ -96,7 +104,10 @@ impl CaptureOwner {
             .as_nanos();
         let run = ProtectedRun {
             version: 1,
-            run: format!("{stamp}-{}", std::process::id()),
+            run: caller.as_ref().map_or_else(
+                || format!("{stamp}-{}", std::process::id()),
+                |caller| caller.capture_run(),
+            ),
             persists: retention.persists(),
         };
         let run_dir = run.directory(&root)?;
@@ -177,11 +188,20 @@ impl CaptureOwner {
                 worker: Some(worker),
                 exited,
                 failed,
+                caller,
                 #[cfg(test)]
                 rotations,
             },
             producer,
         ))
+    }
+
+    /// The caller identity is immutable for this owner's whole lifetime. This
+    /// accessor provides no installation, replacement, or producer-ready action.
+    pub fn registered_caller(
+        &self,
+    ) -> Option<&crate::supervisor::caller_registration::RegisteredCaller> {
+        self.caller.as_ref()
     }
 
     /// The producer must be dropped first, including the UART's final partial

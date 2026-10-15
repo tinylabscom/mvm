@@ -10,6 +10,8 @@ pub(super) struct RefillSource<'a> {
     pub(super) hypervisor: Option<&'a str>,
     pub(super) cpus: u32,
     pub(super) memory_mib: u32,
+    /// Whether the run boots the guest's egress client.
+    pub(super) egress: bool,
 }
 
 /// The standby a run of this source leaves behind, or `None` when its image is
@@ -29,6 +31,7 @@ pub(super) fn standby_refill_for(
         image: source.image_ref.map(str::to_string),
         cpus: source.cpus,
         memory_mib: source.memory_mib,
+        egress: source.egress,
     })
 }
 
@@ -44,6 +47,7 @@ mod tests {
             hypervisor: None,
             cpus: 2,
             memory_mib: 512,
+            egress: false,
         }
     }
 
@@ -55,7 +59,16 @@ mod tests {
                 image: Some("alpine".into()),
                 cpus: 2,
                 memory_mib: 512,
+                egress: false,
             })
+        );
+        assert!(
+            standby_refill_for(&RefillSource {
+                egress: true,
+                ..refill_source(Some("alpine"))
+            })
+            .is_some_and(|r| r.egress),
+            "an egress-allowing run leaves a standby that boots the egress client"
         );
         assert_eq!(
             standby_refill_for(&refill_source(None)).map(|r| r.image),

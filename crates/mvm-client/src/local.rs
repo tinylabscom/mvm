@@ -672,12 +672,10 @@ fn wake_audit_detail(warm: bool, backend: &str, outcome: &ResumeOutcome) -> Stri
 /// so the guest rotates its VMGenID and reseeds its CSPRNG, and the machine's
 /// name as the guest hostname.
 fn post_restore_signal(name: &str) -> VsockPostRestoreSignal {
-    VsockPostRestoreSignal {
-        token: mvm_core::crypto::vmgenid::fresh_generation_token(name).token,
-        hostname: Some(name.to_string()),
-        grant_envelope: None,
-        seccomp_tier: None,
-    }
+    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+    let mut signal = VsockPostRestoreSignal::for_resumed_child(token, None);
+    signal.hostname = Some(name.to_string());
+    signal
 }
 
 /// The primed-barrier timeout to enforce before sealing, or `None` when the
@@ -1613,6 +1611,7 @@ mod tests {
                     clock_resynced,
                     reseed_shortfall,
                     seccomp_tier: None,
+                    volumes_mounted: None,
                 })
             };
             match *self {
@@ -2399,6 +2398,7 @@ mod tests {
                 status: "collecting".into(),
                 generation: Some(3),
                 shed: 1,
+                losses: Default::default(),
             })
             .unwrap(),
         )
@@ -2415,7 +2415,14 @@ mod tests {
             })
             .build()
             .unwrap();
-        let line = ReceivedRecord::encode_line(1_700_000_000_000, &record).unwrap();
+        // Sealed the way the collector seals them, under the key the spawner
+        // provisions and the reader unwraps.
+        let key = mvm_vmm::host::telemetry_provisioning::provision_records_key(
+            &state_dir,
+            &mvm_core::config::mvm_keys_dir(),
+        )
+        .unwrap();
+        let line = ReceivedRecord::seal_line(&key, 1_700_000_000_000, &record).unwrap();
         std::fs::write(&records_path, [line.clone(), line.clone()].concat()).unwrap();
 
         let id = MachineId("telemetry-web".into());

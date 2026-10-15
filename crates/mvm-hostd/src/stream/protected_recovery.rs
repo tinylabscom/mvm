@@ -2,7 +2,7 @@
 //! exclusive generation lease. Signed opening evidence is attribution, not
 //! evidence that a still-running producer has stopped.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -105,7 +105,7 @@ pub(super) fn stage(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     )?;
     #[cfg(test)]
     stage_fault(StageFault::DirectorySync)?;
-    File::open(dir)?.sync_all()?;
+    mvm_core::private_fs::sync_managed_directory_chain(&mvm_core::config::mvm_home_strict()?, dir)?;
     Ok(())
 }
 

@@ -251,6 +251,10 @@ pub struct HvfSupervisorConfig {
     /// a bounded workload whose kill it could not audit.
     #[serde(default)]
     pub plan: Option<serde_json::Value>,
+    /// Immutable caller registration installed only on trusted cold startup.
+    /// Omission preserves the exact legacy config bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// `~/.mvm/audit/` — where the chain-signed wall-clock kill entry lands.
     #[serde(default)]
     pub audit_dir: Option<PathBuf>,
@@ -451,6 +455,7 @@ mod tests {
             restore_fds: None,
             timeout_secs: 30,
             plan: None,
+            caller_registration: None,
             audit_dir: None,
             signing_key_path: None,
             agent_socket: Some("/state/hvf-agent.sock".into()),
@@ -611,6 +616,7 @@ mod tests {
             restore_fds: None,
             timeout_secs: 30,
             plan: None,
+            caller_registration: None,
             audit_dir: None,
             signing_key_path: None,
             agent_socket: None,

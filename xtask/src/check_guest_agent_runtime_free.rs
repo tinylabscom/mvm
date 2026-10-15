@@ -36,12 +36,22 @@ use std::process::Command;
 /// optional, off-by-default `schema`-feature dep used only by the
 /// `emit_protocol_schema` bin at build time, and must never reach the
 /// runtime agent's default closure.
+///
+/// The OpenTelemetry family is here for a different reason: guest
+/// telemetry leaves only through the authenticated vsock telemetry session
+/// to the host collector, and an exporter in the agent would be a second,
+/// direct path out of the guest.
 const FORBIDDEN: &[&str] = &[
     "tokio",
     "async-trait",
     "rtnetlink",
     "netlink-packet-route",
     "schemars",
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry-otlp",
+    "opentelemetry-proto",
+    "tracing-opentelemetry",
 ];
 
 /// The guest's real build target. The async stack above is
@@ -139,6 +149,15 @@ mod tests {
         // the parser must collapse them to one hit.
         let tree = "mvm-agentd v0.15.2\ntokio v1.49.0\ntokio v1.49.0 (*)\n";
         assert_eq!(forbidden_hits(tree, FORBIDDEN), vec!["tokio"]);
+    }
+
+    #[test]
+    fn a_direct_guest_exporter_is_flagged() {
+        let tree = "mvm-agentd v0.15.2\nopentelemetry v0.31.0\nopentelemetry-otlp v0.31.0\n";
+        assert_eq!(
+            forbidden_hits(tree, FORBIDDEN),
+            vec!["opentelemetry", "opentelemetry-otlp"]
+        );
     }
 
     #[test]

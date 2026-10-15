@@ -2039,12 +2039,13 @@ fn run_logged(mut cmd: Command, log_path: &Path, verbose: bool) -> Result<(), Bu
                 ))
             })?;
         }
-        let stdout_file = std::fs::File::create(log_path).map_err(|e| {
-            BuilderVmError::LibkrunUnavailable(format!(
-                "create log file {}: {e}",
-                log_path.display()
-            ))
-        })?;
+        let stdout_file =
+            mvm_core::util::atomic_io::open_private_truncated(log_path).map_err(|e| {
+                BuilderVmError::LibkrunUnavailable(format!(
+                    "create log file {}: {e}",
+                    log_path.display()
+                ))
+            })?;
         let stderr_file = stdout_file.try_clone().map_err(|e| {
             BuilderVmError::LibkrunUnavailable(format!(
                 "clone log file handle for {}: {e}",
@@ -2249,18 +2250,20 @@ fn spawn_supervisor_in_background(
     persist_supervisor_config_dump(vm_state_dir, &json)?;
     let stdout_log_path = supervisor_stdout_log_path(vm_state_dir);
     let stderr_log_path = supervisor_stderr_log_path(vm_state_dir);
-    let stdout_log = std::fs::File::create(&stdout_log_path).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating supervisor stdout log {}: {e}",
-            stdout_log_path.display()
-        ))
-    })?;
-    let stderr_log = std::fs::File::create(&stderr_log_path).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "creating supervisor stderr log {}: {e}",
-            stderr_log_path.display()
-        ))
-    })?;
+    let stdout_log =
+        mvm_core::util::atomic_io::open_private_truncated(&stdout_log_path).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "creating supervisor stdout log {}: {e}",
+                stdout_log_path.display()
+            ))
+        })?;
+    let stderr_log =
+        mvm_core::util::atomic_io::open_private_truncated(&stderr_log_path).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "creating supervisor stderr log {}: {e}",
+                stderr_log_path.display()
+            ))
+        })?;
 
     let mut command = mvm_core::env_hygiene::helper_command(supervisor_path);
     command
@@ -2968,7 +2971,7 @@ fn persist_supervisor_config_dump(vm_state_dir: &Path, json: &str) -> Result<(),
     let pretty = serde_json::from_str::<serde_json::Value>(json)
         .and_then(|value| serde_json::to_vec_pretty(&value))
         .unwrap_or_else(|_| json.as_bytes().to_vec());
-    std::fs::write(&config_path, pretty).map_err(|e| {
+    mvm_core::util::atomic_io::write_private_ephemeral(&config_path, &pretty).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "writing supervisor config dump {}: {e}",
             config_path.display()
@@ -5251,6 +5254,25 @@ mod tests {
         let body = std::fs::read_to_string(&log).unwrap();
         assert!(body.contains("out-line"), "stdout captured: {body}");
         assert!(body.contains("err-line"), "stderr captured: {body}");
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "build output is a private diagnostic");
+    }
+
+    #[test]
+    fn run_logged_replaces_a_link_at_the_log_path_instead_of_writing_through_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let log = tmp.path().join("build.log");
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        run_logged(sh_command("echo SYNTHETIC_MARKER"), &log, false).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .contains("SYNTHETIC_MARKER")
+        );
     }
 
     #[test]
@@ -6086,6 +6108,13 @@ mod tests {
             contents.contains('\n'),
             "config dump should be pretty-printed for witness readability"
         );
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the supervisor configuration is private");
     }
 
     #[test]

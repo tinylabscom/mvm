@@ -15,6 +15,7 @@ use serde::Deserialize;
 use tempfile::TempDir;
 
 use mvm_client::policy_profiles::{PolicyRef, ProfileFile, builtin};
+use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
     RegistryPackVerification, VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
@@ -26,12 +27,11 @@ use mvm_core::registry_pack_store::{
 
 /// Environment override for the pack registry base URL.
 pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
-/// Default registry: the mvm-packs repository, same source the template
-/// registry uses.
+/// Default registry: the mvm-packs repository.
 pub const DEFAULT_PACK_REGISTRY: &str =
     "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
 
-const PACK_INDEX_SCHEMA_VERSION: u32 = 1;
+const PACK_INDEX_SCHEMA_VERSION: u32 = 2;
 const PACKS_DIR: &str = "packs";
 const MANIFEST_FILE: &str = "manifest.json";
 const SIGNATURE_FILE: &str = "manifest.sigstore.json";
@@ -79,8 +79,15 @@ pub struct PackIndexEntry {
     pub namespace: String,
     pub name: String,
     pub description: String,
-    #[serde(default)]
-    pub versions: Vec<String>,
+    pub versions: Vec<PackIndexVersion>,
+}
+
+/// Untrusted discovery metadata; the digest does not authorize a publisher.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PackIndexVersion {
+    pub version: String,
+    pub manifest_sha256: Sha256Hex,
 }
 
 impl PackIndexEntry {
@@ -98,7 +105,7 @@ struct PackIndexWire {
 
 /// Fetch and parse the pack index.
 pub fn fetch_index(config: &PackRegistryConfig) -> Result<Vec<PackIndexEntry>> {
-    let url = format!("{}/{PACKS_DIR}/index.json", config.base());
+    let url = format!("{}/index.json", config.base());
     let text = block_on(fetch_text(&url))?;
     let wire: PackIndexWire =
         serde_json::from_str(&text).with_context(|| format!("parsing pack index from {url}"))?;
@@ -107,6 +114,30 @@ pub fn fetch_index(config: &PackRegistryConfig) -> Result<Vec<PackIndexEntry>> {
             "pack index at {url} has schema version {}, expected {PACK_INDEX_SCHEMA_VERSION}",
             wire.schema_version
         );
+    }
+    let mut coordinates = std::collections::BTreeSet::new();
+    for entry in &wire.packs {
+        let coordinate = entry.coordinate();
+        let reference: PackReference = coordinate.parse().context("invalid catalog coordinate")?;
+        if reference.version().is_some()
+            || reference.namespace() != entry.namespace
+            || reference.name() != entry.name
+            || !coordinates.insert(coordinate.clone())
+        {
+            bail!("duplicate or invalid catalog coordinate {coordinate}");
+        }
+        if entry.versions.is_empty() {
+            bail!("pack {coordinate} publishes no versions");
+        }
+        let mut versions = std::collections::BTreeSet::new();
+        for version in &entry.versions {
+            let _: PackReference = format!("{coordinate}@{}", version.version)
+                .parse()
+                .context("invalid catalog version")?;
+            if !versions.insert(&version.version) {
+                bail!("duplicate catalog version {coordinate}@{}", version.version);
+            }
+        }
     }
     Ok(wire.packs)
 }
@@ -132,6 +163,9 @@ pub fn search_index<'a>(
 /// Pick the exact versioned reference to pull: the requested version must be
 /// published, and an unversioned request takes the highest version.
 pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Result<PackReference> {
+    if entry.namespace != requested.namespace() || entry.name != requested.name() {
+        bail!("catalog coordinate does not match requested pack {requested}");
+    }
     let versions = &entry.versions;
     if versions.is_empty() {
         bail!("pack {} publishes no versions", entry.coordinate());
@@ -145,21 +179,30 @@ pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Res
     let spelling = match requested.version() {
         Some(version) => {
             let spelling = version.to_string();
-            if !versions.iter().any(|published| published == &spelling) {
+            if !versions
+                .iter()
+                .any(|published| published.version == spelling)
+            {
                 bail!(
                     "pack {} is not published at version {spelling} (published: {})",
                     entry.coordinate(),
-                    versions.join(", ")
+                    versions
+                        .iter()
+                        .map(|v| v.version.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
             }
             spelling
         }
         None => versions
             .iter()
-            .filter_map(|spelling| released(spelling).map(|version| (version, spelling)))
+            .filter_map(|published| {
+                released(&published.version).map(|version| (version, &published.version))
+            })
             .max_by(|(a, _), (b, _)| a.cmp(b))
             .map(|(_, spelling)| spelling.clone())
-            .expect("PackVersion already validated every published version as strict semver"),
+            .context("catalog contains no valid published versions")?,
     };
     format!("{}@{spelling}", entry.coordinate())
         .parse()
@@ -352,7 +395,20 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
         &requested,
         &mut seen,
         &mut active,
-        &mut pull_one,
+        &mut |config, reference| {
+            let advertised = index
+                .iter()
+                .find(|entry| entry.coordinate() == reference.coordinate_string())
+                .and_then(|entry| {
+                    entry.versions.iter().find(|version| {
+                        reference
+                            .version()
+                            .is_some_and(|resolved| resolved.to_string() == version.version)
+                    })
+                })
+                .context("resolved version is missing catalog digest")?;
+            pull_one(config, reference, &advertised.manifest_sha256)
+        },
     )?
     .context("the requested pack was already visited before its pull")
 }
@@ -485,8 +541,17 @@ where
 fn pull_one(
     config: &PackRegistryConfig,
     reference: &PackReference,
+    advertised_digest: &Sha256Hex,
 ) -> Result<(PullSummary, Vec<PackReference>)> {
     let fetched = download_pack(config, reference)?;
+    let actual = Sha256Hex::from_bytes(&fetched.manifest_bytes);
+    if &actual != advertised_digest {
+        bail!(
+            "catalog manifest digest mismatch for {reference}: expected {}, fetched {}",
+            advertised_digest.as_str(),
+            actual.as_str()
+        );
+    }
 
     let policy_path = mvm_core::config::registry_pack_publisher_policy_path();
     let loaded = load_publisher_policy_or_official_default(&policy_path)?;
@@ -637,7 +702,13 @@ mod tests {
             namespace: namespace.to_string(),
             name: name.to_string(),
             description: format!("the {name} pack"),
-            versions: versions.iter().map(|version| version.to_string()).collect(),
+            versions: versions
+                .iter()
+                .map(|version| PackIndexVersion {
+                    version: version.to_string(),
+                    manifest_sha256: Sha256Hex::from_bytes(b"test manifest"),
+                })
+                .collect(),
         }
     }
 
@@ -680,6 +751,122 @@ mod tests {
         let requested: PackReference = "runtime/python".parse().expect("reference");
         let error = resolve_version(&entry, &requested).expect_err("no versions");
         assert!(error.to_string().contains("publishes no versions"));
+    }
+
+    fn catalog() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "packs": [{
+                "namespace": "runtime", "name": "python", "description": "Python policy",
+                "versions": [{"version": "1.2.3", "manifest_sha256": "a".repeat(64)}]
+            }]
+        })
+    }
+
+    fn fetch_catalog(value: &serde_json::Value) -> Result<Vec<PackIndexEntry>> {
+        let root = tempfile::tempdir().expect("registry");
+        std::fs::write(root.path().join("index.json"), serde_json::to_vec(value)?)
+            .expect("root catalog");
+        fetch_index(&PackRegistryConfig {
+            registry_url: format!("file://{}/", root.path().display()),
+        })
+    }
+
+    #[test]
+    fn root_catalog_parses_version_objects_and_resolves_exact_versions() {
+        let entries = fetch_catalog(&catalog()).expect("root catalog");
+        assert_eq!(
+            entries[0].versions[0].manifest_sha256.as_str(),
+            "a".repeat(64)
+        );
+        let requested = "runtime/python@1.2.3".parse().expect("reference");
+        assert_eq!(
+            resolve_version(&entries[0], &requested).expect("resolve"),
+            requested
+        );
+    }
+
+    #[test]
+    fn catalog_hashes_are_required_lowercase_exact_sha256() {
+        for hash in [
+            "",
+            "abc",
+            &"A".repeat(64),
+            &"g".repeat(64),
+            &"a".repeat(63),
+            &"a".repeat(65),
+        ] {
+            let mut value = catalog();
+            value["packs"][0]["versions"][0]["manifest_sha256"] = serde_json::json!(hash);
+            assert!(fetch_catalog(&value).is_err(), "{hash}");
+        }
+        let mut value = catalog();
+        value["packs"][0]["versions"][0]
+            .as_object_mut()
+            .expect("object")
+            .remove("manifest_sha256");
+        assert!(fetch_catalog(&value).is_err());
+    }
+
+    #[test]
+    fn catalog_refuses_old_schema_shapes_duplicates_and_invalid_references() {
+        let mut invalid = Vec::new();
+        let mut value = catalog();
+        value["schema_version"] = serde_json::json!(1);
+        invalid.push(value);
+        let mut value = catalog();
+        value["packs"][0]["versions"] = serde_json::json!(["1.2.3"]);
+        invalid.push(value);
+        let mut value = catalog();
+        let duplicate = value["packs"][0].clone();
+        value["packs"]
+            .as_array_mut()
+            .expect("array")
+            .push(duplicate);
+        invalid.push(value);
+        let mut value = catalog();
+        let duplicate = value["packs"][0]["versions"][0].clone();
+        value["packs"][0]["versions"]
+            .as_array_mut()
+            .expect("array")
+            .push(duplicate);
+        invalid.push(value);
+        for version in ["v1.2.3", "01.2.3", "../escape", "latest"] {
+            let mut value = catalog();
+            value["packs"][0]["versions"][0]["version"] = serde_json::json!(version);
+            invalid.push(value);
+        }
+        for namespace in ["../runtime", "runtime/other", "Runtime", ""] {
+            let mut value = catalog();
+            value["packs"][0]["namespace"] = serde_json::json!(namespace);
+            invalid.push(value);
+        }
+        let mut value = catalog();
+        value["packs"][0]["versions"] = serde_json::json!([]);
+        invalid.push(value);
+        let mut value = catalog();
+        value["packs"][0]["versions"][0]["extra"] = serde_json::json!(true);
+        invalid.push(value);
+        for value in invalid {
+            assert!(fetch_catalog(&value).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn obsolete_nested_catalog_is_not_a_fallback() {
+        let root = tempfile::tempdir().expect("registry");
+        std::fs::create_dir(root.path().join("packs")).expect("packs directory");
+        std::fs::write(
+            root.path().join("packs/index.json"),
+            serde_json::to_vec(&catalog()).expect("JSON"),
+        )
+        .expect("nested catalog");
+        assert!(
+            fetch_index(&PackRegistryConfig {
+                registry_url: format!("file://{}", root.path().display())
+            })
+            .is_err()
+        );
     }
 
     #[test]

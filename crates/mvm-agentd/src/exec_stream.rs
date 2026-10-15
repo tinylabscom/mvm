@@ -48,16 +48,21 @@ where
 fn spawn_drain<R: Read + Send + 'static>(
     mut reader: R,
     buf: Arc<Mutex<Vec<u8>>>,
+    stream: mvm_core::protocol::telemetry::StdioStream,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let mut chunk = [0u8; DRAIN_BUF];
         loop {
             match reader.read(&mut chunk) {
                 Ok(0) => break,
-                Ok(n) => buf
-                    .lock()
-                    .expect("exec drain buf")
-                    .extend_from_slice(&chunk[..n]),
+                Ok(n) => {
+                    // Also to guest capture, so the VM's collector keeps the
+                    // output whoever is reading this call.
+                    crate::telemetry_capture::offer_stdio(stream, &chunk[..n]);
+                    buf.lock()
+                        .expect("exec drain buf")
+                        .extend_from_slice(&chunk[..n]);
+                }
                 Err(_) => break,
             }
         }
@@ -332,8 +337,20 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
 
     let out_buf = Arc::new(Mutex::new(Vec::new()));
     let err_buf = Arc::new(Mutex::new(Vec::new()));
-    let mut out_handle = child.stdout.take().map(|o| spawn_drain(o, out_buf.clone()));
-    let mut err_handle = child.stderr.take().map(|e| spawn_drain(e, err_buf.clone()));
+    let mut out_handle = child.stdout.take().map(|o| {
+        spawn_drain(
+            o,
+            out_buf.clone(),
+            mvm_core::protocol::telemetry::StdioStream::Stdout,
+        )
+    });
+    let mut err_handle = child.stderr.take().map(|e| {
+        spawn_drain(
+            e,
+            err_buf.clone(),
+            mvm_core::protocol::telemetry::StdioStream::Stderr,
+        )
+    });
 
     let mut sent_out = 0usize;
     let mut sent_err = 0usize;

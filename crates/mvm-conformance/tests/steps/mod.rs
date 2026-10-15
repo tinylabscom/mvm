@@ -33,6 +33,7 @@ mod service_plane;
 mod signed_artifact;
 mod snapshot;
 pub(crate) mod stream_capture;
+mod telemetry_collection;
 mod transcript;
 mod verified_boot;
 mod volume;

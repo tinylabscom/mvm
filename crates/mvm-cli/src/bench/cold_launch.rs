@@ -427,7 +427,10 @@ pub fn validate_matrix_report(report: &ColdLaunchReport) -> Result<(), LaneViola
         validate_lane(report.lane, &sample_to_launch_sample(sample))?;
     }
     let canonical = build_cold_launch_report(report.lane, report.warmup, report.raw.clone());
-    if report.stats != canonical.stats || report.hard_requirement != canonical.hard_requirement {
+    if report.stats != canonical.stats
+        || report.hard_requirement != canonical.hard_requirement
+        || report.startup_requirement != canonical.startup_requirement
+    {
         return Err(LaneViolation::NonCanonicalSummary);
     }
     validate_hard_boot_requirement(report)?;
@@ -469,6 +472,29 @@ pub fn validate_hard_boot_requirement(report: &ColdLaunchReport) -> Result<(), L
     };
     if let Some(found_ms) = requirement.observed_max_ms {
         validate_hard_boot_timing(report.lane, found_ms)?;
+    }
+
+    // The startup-from-invocation ceiling: a launch can clear the dispatch
+    // window while the caller waited far longer. Validate the stored
+    // requirement matches what the raw samples produce, then enforce it.
+    let startup_max_ms = report
+        .raw
+        .iter()
+        .filter_map(|s| s.phases.startup_ms)
+        .reduce(f64::max);
+    let expected_startup = HardBootRequirement::startup_for_lane(report.lane, startup_max_ms);
+    if report.startup_requirement != expected_startup {
+        return Err(LaneViolation::NonCanonicalSummary);
+    }
+    if let Some(startup) = report.startup_requirement.as_ref()
+        && let Some(found_ms) = startup.observed_max_ms
+        && found_ms >= STARTUP_HARD_MAX_MS
+    {
+        return Err(LaneViolation::StartupCeilingExceeded {
+            lane: report.lane,
+            found_ms,
+            limit_ms: STARTUP_HARD_MAX_MS,
+        });
     }
     Ok(())
 }
@@ -870,6 +896,7 @@ impl SpanStats {
 #[serde(rename_all = "snake_case")]
 pub enum TimingMetric {
     DispatchWindowMs,
+    StartupMs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -890,8 +917,8 @@ pub struct HardBootRequirement {
 }
 
 impl HardBootRequirement {
-    /// The requirement `lane` is held to, or `None` for a lane with no
-    /// per-sample ceiling.
+    /// The dispatch-window requirement `lane` is held to, or `None` for a
+    /// lane with no per-sample ceiling.
     fn for_lane(lane: LaunchLane, observed_max_ms: Option<f64>) -> Option<Self> {
         let limit_ms = lane.budgets().hard_max_ms?;
         Some(Self {
@@ -901,6 +928,24 @@ impl HardBootRequirement {
             observed_max_ms,
             met: observed_max_ms.is_some_and(|value| value < limit_ms),
             remark: format!("{} {limit_ms:.0} ms.", lane.hard_ceiling_remark()),
+        })
+    }
+
+    /// The startup-from-invocation requirement for lanes that enforce one,
+    /// or `None` for lanes that do not.
+    fn startup_for_lane(lane: LaunchLane, observed_max_ms: Option<f64>) -> Option<Self> {
+        // Only lanes with a dispatch ceiling also carry a startup ceiling.
+        let _ = lane.budgets().hard_max_ms?;
+        Some(Self {
+            metric: TimingMetric::StartupMs,
+            comparison: RequirementComparison::LessThan,
+            limit_ms: STARTUP_HARD_MAX_MS,
+            observed_max_ms,
+            met: observed_max_ms.is_some_and(|value| value < STARTUP_HARD_MAX_MS),
+            remark: format!(
+                "Every prepared or warm sample must reach the guest in under {:.0} ms from invocation.",
+                STARTUP_HARD_MAX_MS
+            ),
         })
     }
 }
@@ -965,9 +1010,12 @@ pub struct ColdLaunchReport {
     pub lane: LaunchLane,
     pub warmup: u32,
     pub stats: LaneStats,
-    /// Present on lanes governed by a strict per-sample ceiling.
+    /// Present on lanes governed by a strict per-sample dispatch ceiling.
     #[serde(default)]
     pub hard_requirement: Option<HardBootRequirement>,
+    /// Present on lanes governed by the startup-from-invocation ceiling.
+    #[serde(default)]
+    pub startup_requirement: Option<HardBootRequirement>,
     pub raw: Vec<ColdLaunchSample>,
 }
 
@@ -1013,6 +1061,11 @@ pub fn build_cold_launch_report(
     };
     let dispatch_window_ms = col(|s| s.phases.dispatch_window_ms());
     let hard_requirement = HardBootRequirement::for_lane(lane, dispatch_window_ms.max);
+    let startup_max_ms = raw
+        .iter()
+        .filter_map(|s| s.phases.startup_ms)
+        .reduce(f64::max);
+    let startup_requirement = HardBootRequirement::startup_for_lane(lane, startup_max_ms);
     ColdLaunchReport {
         schema_version: COLD_LAUNCH_SCHEMA_VERSION,
         lane,
@@ -1056,6 +1109,7 @@ pub fn build_cold_launch_report(
             }),
         },
         hard_requirement,
+        startup_requirement,
         raw,
     }
 }

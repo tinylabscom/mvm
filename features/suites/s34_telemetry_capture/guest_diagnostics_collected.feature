@@ -1,25 +1,40 @@
-Feature: Guest agent and helper diagnostics reach the host collector
+@telemetry_collection
+Feature: Guest agent diagnostics reach the host collector
 
-  Diagnostics the guest agent and its helpers emit must reach authenticated
-  host collection across cold start, restore and exit — not a local console
-  nobody captures, and not a facade with no subscriber behind it.
+  Diagnostics the guest agent emits must reach authenticated host collection,
+  not a local console nobody captures. Every session also announces the
+  agent's coverage, so an operator can tell a quiet agent from a missing one.
 
-  # BLOCKED — no guest capture path exists. This is not an unwritten test; it
-  # is an unimplemented feature, and the scenario keeps the gap visible:
-  #
-  #   * The sealed guest agent emits real diagnostics through the `tracing`
-  #     facade and installs no subscriber, so every one of them is discarded —
-  #     pinned by the gap regression
-  #     `boot_diagnostics_are_emitted_but_the_sealed_agent_discards_them`,
-  #     which asserts today's deficient behavior and must flip into the
-  #     positive contract in the same change that lands guest capture.
-  #   * The addon helpers that do install subscribers write to the guest
-  #     console only; the telemetry source inventory
-  #     (`specs/telemetry/sources.toml`) classifies every one of these as an
-  #     explicit runtime gap with its required witness.
-  #
-  # Un-tag this and write the steps in the same change that lands the guest
-  # capture subscriber and its authenticated delivery to the host collector.
-  @wip
-  Scenario: Sealed-agent boot diagnostics arrive at the authenticated collector
-    Given a scenario awaiting its step implementation
+  Scenario: Guest agent diagnostics arrive at the authenticated collector
+    Given an isolated mvm home
+    And a machine "diag" whose guest agent emitted boot diagnostics
+    When I run mvmctl in the isolated mvm home with "machine telemetry diag"
+    Then the command exits with code 0
+    And the output contains "coverage started guest-agent"
+    And the output contains "bdd agent boot diagnostic"
+
+  Scenario: One machine's telemetry is not shown for another
+    Given an isolated mvm home
+    And a machine "first" whose guest agent emitted boot diagnostics
+    And a machine "second" whose guest agent emitted an event outside any span
+    When I run mvmctl in the isolated mvm home with "machine telemetry first"
+    Then the command exits with code 0
+    And the output contains "bdd agent boot diagnostic"
+    And the output does not contain "bdd standalone event"
+
+  Scenario: A record carrying a secret bound to the machine is withheld and counted
+    Given an isolated mvm home
+    And a machine "leaky" whose guest agent logged a secret bound to it
+    When I run mvmctl in the isolated mvm home with "machine telemetry leaky"
+    Then the command exits with code 0
+    And the output contains "bdd clean diagnostic"
+    And the output contains "secret withheld 1"
+    And the output does not contain "bdd-telemetry-secret-5f2a9c71e0"
+
+  Scenario: A guest that outruns its host loses records visibly, never waits
+    Given an isolated mvm home
+    And a machine "flooded" whose guest flooded diagnostics while no host was reading
+    When I run mvmctl in the isolated mvm home with "machine telemetry flooded"
+    Then the command exits with code 0
+    And the output contains "guest lost"
+    And the output contains "bdd flood"

@@ -86,6 +86,14 @@ impl Key {
         Key::from_slice(&bytes)
     }
 
+    /// The raw key bytes, for handing a data key to a confined helper
+    /// process over a private pipe — the one case where the helper cannot
+    /// reach the key-encryption key to unwrap it itself. Never log or
+    /// persist the result; persist [`Key::wrap_under`] instead.
+    pub fn expose_bytes(&self) -> &[u8; KEY_SIZE] {
+        &self.0
+    }
+
     /// Whether this key's bytes equal `other`, compared in constant time.
     /// Lets a caller refuse to use one secret for two primitives without the
     /// raw bytes leaving this type.

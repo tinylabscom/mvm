@@ -31,8 +31,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def stream_output(pipe: object, log_path: Path) -> None:
+    # `read1`, not `read`: `read(n)` on a buffered pipe blocks until n bytes
+    # arrive, so the suite's output reached the log in 64 KiB bursts with no
+    # useful timestamps, and the partial block at a timeout was lost whenever
+    # a detached descendant still held the pipe. `read1` returns what is there.
     with log_path.open("wb") as log:
-        while chunk := pipe.read(64 * 1024):
+        while chunk := pipe.read1(64 * 1024):
             log.write(chunk)
             log.flush()
             sys.stdout.buffer.write(chunk)
