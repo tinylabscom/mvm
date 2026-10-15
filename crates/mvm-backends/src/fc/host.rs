@@ -547,6 +547,41 @@ fn comm_path_is_firecracker(path: &std::path::Path) -> Result<bool> {
 /// Name of the Firecracker VM-state file produced by `PUT /snapshot/create`.
 pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
 
+/// Read the rootfs path from a running Firecracker VM's live configuration.
+///
+/// Queries `GET /vm/config` through the VM's API socket and returns the
+/// `path_on_host` of the drive whose `drive_id` is `"rootfs"`. This is the
+/// path Firecracker actually has open, which may differ from the one
+/// `mode.json` recorded at start time when the image was since evicted and
+/// re-pulled at a different content-addressed path.
+fn rootfs_from_vm_config(vm_name: &str) -> Result<PathBuf> {
+    let vm_dir = super::resolve_running_vm_dir(vm_name)?;
+    let socket = PathBuf::from(super::fc_api_socket_path(&vm_dir));
+    let body = super::call(&socket, "GET", "/vm/config", None)
+        .with_context(|| format!("GET /vm/config for VM '{vm_name}'"))?;
+    #[derive(serde::Deserialize)]
+    struct Drives {
+        #[serde(default)]
+        drives: Vec<Drive>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Drive {
+        drive_id: String,
+        #[serde(default)]
+        path_on_host: Option<String>,
+    }
+    let drives: Drives = serde_json::from_str(&body)
+        .with_context(|| format!("parsing GET /vm/config for VM '{vm_name}'"))?;
+    for drive in &drives.drives {
+        if drive.drive_id == "rootfs"
+            && let Some(path) = &drive.path_on_host
+        {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    anyhow::bail!("GET /vm/config for VM '{}' has no rootfs drive", vm_name)
+}
+
 /// Bridges the checkpoint `VmFullControl` trait to a running Firecracker VM.
 ///
 /// `save_memory(memory_path)` pauses the VM (via `PATCH /vm`), creates a full
@@ -562,7 +597,8 @@ pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
 /// blob when the sidecar file is absent.
 ///
 /// `rootfs_path()` is read from the `mode.json` sidecar that `record_from_rootfs`
-/// writes at FC start time.
+/// writes at FC start time; if that path no longer exists on disk, falls back
+/// to `GET /vm/config` for the live rootfs Firecracker has open.
 pub struct FcVmFullControl {
     vm_name: String,
 }
@@ -629,7 +665,27 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
                 self.vm_name
             )
         })?;
-        Ok(PathBuf::from(rootfs_str))
+        let recorded = PathBuf::from(&rootfs_str);
+        if recorded.is_file() {
+            return Ok(recorded);
+        }
+        // The rootfs path recorded at start time can become stale when the
+        // image is evicted and re-pulled at a different content-addressed
+        // path. Fall back to the actual rootfs Firecracker has open, read
+        // from its API so the device anchors a fork builds from point at a
+        // path that exists.
+        tracing::info!(
+            vm = %self.vm_name,
+            recorded = %rootfs_str,
+            "recorded rootfs path missing; querying Firecracker for the live rootfs"
+        );
+        rootfs_from_vm_config(&self.vm_name).with_context(|| {
+            format!(
+                "recorded rootfs {} is gone and Firecracker's live config did not \
+             name an alternative for VM '{}'",
+                rootfs_str, self.vm_name
+            )
+        })
     }
 
     /// The paths this VM's Firecracker names. A restored VM's Firecracker still

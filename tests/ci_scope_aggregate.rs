@@ -77,12 +77,11 @@ const GATE_LANES: [&str; 4] = [
 
 /// Full-matrix lanes: skipped on every pull request, and following the
 /// `code` scope in the merge queue and on a manual dispatch.
-const FULL_LANES: [&str; 11] = [
+const FULL_LANES: [&str; 10] = [
     "FEATURES_RESULT",
     "FEATURES_SUPPORT_RESULT",
     "FEATURES_EMBED_RESULT",
     "WORKSPACE_EXTRAS_RESULT",
-    "WORKSPACE_AARCH64_BUILD_RESULT",
     "WORKSPACE_AARCH64_RESULT",
     "LINUX_RESULT",
     "RELEASE_WITNESS_RESULT",
