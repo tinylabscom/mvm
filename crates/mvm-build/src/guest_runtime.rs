@@ -328,6 +328,12 @@ pub fn is_archive_digest(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+/// Validated source SDK member sets, keyed by `(archive digest, workspace root)`.
+/// `validate_source_sdk_members` walks the Python SDK source tree on every call;
+/// memoizing the result avoids re-walking it on each of the three lookups a
+/// single source-checkout launch makes.
+static VALIDATED_SOURCE_SDK: ProcessMemo<(String, PathBuf), ()> = ProcessMemo::new();
+
 fn load_cached_source(
     base: &Path,
     digest: &str,
@@ -336,7 +342,10 @@ fn load_cached_source(
     workspace_root: &Path,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     let runtime = load_cached(base, digest, version, arch)?;
-    validate_source_sdk_members(&runtime.manifest, workspace_root)?;
+    VALIDATED_SOURCE_SDK
+        .get_or_try_insert((digest.to_string(), workspace_root.to_path_buf()), || {
+            validate_source_sdk_members(&runtime.manifest, workspace_root)
+        })?;
     Ok(runtime)
 }
 

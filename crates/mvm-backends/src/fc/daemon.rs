@@ -382,6 +382,27 @@ pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     fc_api_call("PUT", socket, path, Some(data))
 }
 
+/// Open a keep-alive session to the Firecracker API socket, reusing one
+/// connection across multiple calls. The boot config sequence sends ~11 PUTs;
+/// pipelining them through one connection saves 10 connect round trips.
+pub fn api_session(socket: &str) -> Result<crate::fc::fc_api::FcSession> {
+    crate::fc::fc_api::FcSession::connect(std::path::Path::new(socket))
+}
+
+/// Send an API PUT through an open session, with the same path validation as
+/// [`api_put_socket`].
+#[instrument(skip_all, fields(path))]
+pub fn api_put_session(
+    session: &mut crate::fc::fc_api::FcSession,
+    path: &str,
+    data: &str,
+) -> Result<()> {
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        anyhow::bail!("refusing malformed Firecracker API path {path:?}");
+    }
+    session.call("PUT", path, Some(data)).map(|_body| ())
+}
+
 /// Hand the Firecracker-created vsock multiplexer socket to the mvmctl user.
 ///
 /// Firecracker runs as root and consequently creates this socket as root. Only
