@@ -27,8 +27,9 @@ use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
 
 use self::audit::{
-    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_posture_refused,
-    emit_policy_audit_invalid, emit_policy_resolve_failure, emit_policy_resolved,
+    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_environment_refused,
+    emit_bundle_posture_refused, emit_policy_audit_invalid, emit_policy_resolve_failure,
+    emit_policy_resolved,
 };
 use self::policy::{
     InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
@@ -37,6 +38,7 @@ use self::policy::{
 pub mod agent_verbs;
 mod audit;
 mod bundle_binding;
+pub mod bundle_environment;
 pub mod bundle_posture;
 pub mod entrypoint_resolve;
 pub mod instructions;
@@ -65,6 +67,27 @@ pub enum AssetSpec {
 }
 
 pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
+
+/// Add the tool-decision service binding when the plan declares tools.
+///
+/// Keeps caller order and deduplicates: a caller that already bound
+/// `host.tool.v1` does not get a duplicate entry.
+fn services_with_tool_decision(
+    mut services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    tools: &mvm_contract::policy::tool_rules::ToolRules,
+) -> Vec<mvm_contract::protocol::broker::ServiceId> {
+    if tools.is_empty() {
+        return services;
+    }
+    let tool_decision = mvm_contract::protocol::broker::ServiceId::parse(
+        mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE,
+    )
+    .expect("host.tool.v1 is a valid ServiceId");
+    if !services.contains(&tool_decision) {
+        services.push(tool_decision);
+    }
+    services
+}
 
 pub struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
@@ -177,6 +200,7 @@ pub struct AdmitPlanForBootParams<'a> {
     /// template default, or deny-all default). Non-deny
     /// policies are lowered into a generated PolicyBundle and referenced by the
     /// signed plan so the bridge never relies on an unsigned bare carrier to
+
     /// authorize outbound traffic.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
@@ -421,7 +445,8 @@ pub fn admit_plan_for_boot_configured_ingress(
             // Fail closed. The alternative — admit and hope — is what leaves a
             // refusal that reports present and can never fire, which is worse
             // than no refusal at all because it is believed.
-            ResolvedEntrypoint::Unresolved { because } => anyhow::bail!(
+            ResolvedEntrypoint::Unresolved { because }
+            | ResolvedEntrypoint::AdHocOverride { because } => anyhow::bail!(
                 "refusing the workload input grant: this launch cannot say what the \
                  workload runs ({because}), so it cannot rule out a shell — and under \
                  a sealed production posture streaming stdin to a shell is interactive \
@@ -470,6 +495,9 @@ pub fn admit_plan_for_boot_configured_ingress(
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let mut postures: Vec<mvm_core::plan::BundleSecurityPosture> =
         p.bundle_posture.into_iter().collect();
+    // The pinned bundle's signed environment, checked against this launch
+    // once the plan is admitted (below), beside the posture.
+    let mut pinned_environment: Option<mvm_core::plan::EnvironmentDescriptor> = None;
     let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
         match p.bundle_pin {
             Some(bundle) => {
@@ -511,6 +539,7 @@ pub fn admit_plan_for_boot_configured_ingress(
                 }
                 let has_embedded_images = !verified.embedded_image_sets.is_empty();
                 postures.extend(verified.manifest.security_posture().copied());
+                pinned_environment = verified.manifest.environment().cloned();
                 let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
                     || format!("extracting signature from bundle at {}", path.display()),
                 )?;
@@ -660,12 +689,7 @@ pub fn admit_plan_for_boot_configured_ingress(
     // reference name, so the caller adds the resolved bytes' hash — an
     // operator comparing identities sees which exact policy content was
     // admitted, not just its name.
-    let network_policy_digest = {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(serde_json::to_vec(&p.network_policy).expect("policy serializes"));
-        hex::encode(hasher.finalize())
-    };
+    let network_policy_digest = mvm_core::policy::network_policy::content_sha256(&p.network_policy);
 
     let seccomp_tier = mvm_core::plan::workload_seccomp_tier(
         p.seccomp_tier,
@@ -734,7 +758,13 @@ pub fn admit_plan_for_boot_configured_ingress(
                 mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
-        services: p.services.clone(),
+        // Tool rules need a guest-origin decision channel: the in-guest spawn
+        // helper asks `host.tool.v1` over the broker, and the broker refuses
+        // any service the signed plan does not bind. Injecting the binding
+        // here (before signing) means an authored `[tools]` section always
+        // carries its enforcement channel; an author cannot forget it, and
+        // dropping it while tools remain is not expressible.
+        services: services_with_tool_decision(p.services.clone(), &p.tools),
         extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent
@@ -786,7 +816,22 @@ pub fn admit_plan_for_boot_configured_ingress(
             Some(kind) => RunPosture::on_backend(variant, kind),
             None => RunPosture::without_backend(variant),
         },
-    )?;
+    )
+    .or_else(|err| -> Result<_> {
+        if let Some(refused) =
+            err.downcast_ref::<mvm_hostd::plan_admission::BundleEnvironmentRefused>()
+        {
+            let signer = match p.keys_dir {
+                Some(dir) => load_or_init_at(dir),
+                None => mvm_hostd::audit::host_keypair::load_or_init(),
+            }
+            .context("loading host signer for the environment refusal")?;
+            let emitter = build_default_audit_emitter(signer.signing, p.audit_dir)
+                .context("opening audit chain emitter for the environment refusal")?;
+            emit_bundle_environment_refused(refused.plan(), &emitter, &err);
+        }
+        Err(err)
+    })?;
     let t_signed = std::time::Instant::now();
     tracing::debug!(
         ms = (t_signed - t_pre_sign).as_secs_f64() * 1000.0,
@@ -845,6 +890,25 @@ pub fn admit_plan_for_boot_configured_ingress(
             .context("opening audit chain emitter for the posture refusal")?;
         emit_bundle_posture_refused(admitted.plan(), &emitter, &err);
         return Err(err);
+    }
+    // The pinned bundle's signed environment, measured against what this
+    // launch binds and runs. Refused and audited the same way as the posture.
+    if let Some(environment) = &pinned_environment {
+        let refused = bundle_environment::environment_refusals(
+            environment,
+            &bundle_environment::EnvironmentRequest {
+                secrets: &p.secrets,
+                entrypoint: &p.entrypoint,
+                postures: &postures,
+            },
+        );
+        if !refused.is_empty() {
+            let err = anyhow::anyhow!(bundle_environment::refusal_message(&refused));
+            let emitter = build_default_audit_emitter(signer.signing.clone(), p.audit_dir)
+                .context("opening audit chain emitter for the environment refusal")?;
+            emit_bundle_environment_refused(admitted.plan(), &emitter, &err);
+            return Err(err);
+        }
     }
     let t_signer = std::time::Instant::now();
     tracing::debug!(
@@ -920,13 +984,25 @@ pub fn admit_plan_for_boot_configured_ingress(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    // One batch, one fsync. These entries all have to be durable before the
-    // same thing — this plan booting — and nothing between them acts on the
-    // one before it, so syncing each separately bought no ordering. It cost
-    // one `F_FULLFSYNC` each, which is 7.4ms on an Apple-silicon host and
-    // ~42ms on the KVM box's array. The batch closes here, before the caller
-    // gets an `AdmissionContext` to boot from, and a failed flush is an error
-    // rather than a warning.
+    // The validated tenant bundle is loaded once and delivered to the bridge
+    // for the live L4 enforcement path. Local-default plans retain the bridge's
+    // mandatory-deny posture by carrying no bundle.
+    let policy_bundle = resolved.bundle;
+
+    // The admitted L7 egress boundary recorded in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+
+    // One batch, one fsync. Every admission-path entry has to be durable
+    // before the same thing — this plan booting — and nothing between them
+    // acts on the one before it, so syncing each separately bought no
+    // ordering. The batch covers the admission record, its decision record,
+    // the grant, the shares, the asset identities, the policy resolution
+    // and the egress destinations: all entries that used to trigger their
+    // own fsync now share the single flush.
     emitter.batched(|| {
         mvm_hostd::audit::durability::record_admission(
             Some(&emitter),
@@ -952,29 +1028,20 @@ pub fn admit_plan_for_boot_configured_ingress(
         emitter
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
+        // Policy resolution and egress destinations are non-fatal records
+        // that used to live outside the batch, each triggering its own
+        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
+        emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
+        if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+            tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+        }
         Ok(())
     })?;
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
         "admit: record_admission (batched fsync)"
     );
-
-    emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
-
-    // The validated tenant bundle is loaded once and delivered to the bridge
-    // for the live L4 enforcement path. Local-default plans retain the bridge's
-    // mandatory-deny posture by carrying no bundle.
-    let policy_bundle = resolved.bundle;
-
-    // Record the admitted L7 egress boundary in the chain-signed log so a
-    // receipt can name the destinations without re-resolving policy refs.
-    let egress_destinations = policy_bundle
-        .as_ref()
-        .map(|b| b.egress.allow_list.clone())
-        .unwrap_or_default();
-    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
-        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
-    }
 
     let context = AdmissionContext {
         admitted,
@@ -1288,6 +1355,25 @@ pub fn enforce_shares(
         .context("admission share check")
 }
 
+/// The claim-time sibling of [`enforce_shares`]: re-check every volume a warm
+/// claim will attach against the shares its signed plan admitted, immediately
+/// before the claim, exactly as a cold boot checks them before it attaches
+/// anything. The volume must be named by the plan, and a directory whose
+/// content digest the plan pinned must still hash to it. A launch with no
+/// volumes attaches nothing, so its plan is never decoded here.
+pub fn enforce_shares_for_claim(
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan_json: &str,
+) -> Result<()> {
+    if volumes.is_empty() {
+        return Ok(());
+    }
+    let plan = mvm_core::plan::plan_from_admitted_json(plan_json)
+        .context("a warm claim attaching volumes needs its admitted plan")?;
+    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &plan)
+        .context("checking the volumes a warm claim attaches against its admitted shares")
+}
+
 /// Refuse to boot if the kernel about to be loaded is not the one the verified
 /// `ExecutionPlan` pinned.
 ///
@@ -1538,6 +1624,71 @@ mod host_signer_pubkey_config_tests {
             AgentProfile::SealedProd
         );
         assert_eq!(guest_profile_for_boot(true, &rootfs), AgentProfile::Dev);
+    }
+}
+
+#[cfg(test)]
+mod claim_shares_tests {
+    use super::*;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::vm_backend::VmVolume;
+
+    fn read_only_mount(guest: &str) -> VmVolume {
+        VmVolume {
+            host: "/workspace".into(),
+            guest: guest.into(),
+            materialized_image: Some(format!("/cache{guest}.ext4")),
+            read_only: true,
+            ..Default::default()
+        }
+    }
+
+    /// A volume the signed plan never admitted is refused before any parent is
+    /// touched, and so is a launch with volumes whose plan cannot be read.
+    #[test]
+    fn a_volume_the_plan_did_not_admit_is_refused_before_the_claim() {
+        let volumes = vec![read_only_mount("/data")];
+        let plan = PlanFixture::new().build();
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        let err = enforce_shares_for_claim(&volumes, &plan_json).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not named in the signed"),
+            "{err:#}"
+        );
+        assert!(enforce_shares_for_claim(&volumes, "not a plan").is_err());
+        assert!(enforce_shares_for_claim(&[], "not a plan").is_ok());
+    }
+
+    /// The content digest a plan pinned for a mount is re-checked right before
+    /// the claim, as a cold boot re-checks it: an image whose bytes changed
+    /// after admission is refused, the unchanged one is attached.
+    #[test]
+    fn a_mount_whose_bytes_changed_after_admission_is_refused_before_the_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("mount.ext4");
+        std::fs::write(&image, b"admitted bytes").unwrap();
+        let mut volume = read_only_mount("/data");
+        volume.materialized_image = Some(image.display().to_string());
+        let volumes = vec![volume.clone()];
+
+        let mut plan = PlanFixture::new().build();
+        plan.shares = vec![mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: volume.host.clone(),
+            guest_path: volume.guest.clone(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
+        }];
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        enforce_shares_for_claim(&volumes, &plan_json).expect("unchanged bytes are attached");
+
+        std::fs::write(&image, b"changed after admission").unwrap();
+        assert!(
+            enforce_shares_for_claim(&volumes, &plan_json).is_err(),
+            "bytes the plan never vouched for must not reach a claimed child"
+        );
     }
 }
 
@@ -2925,6 +3076,24 @@ pub(crate) mod admit_plan_tests {
         assert!(
             rendered.contains("shell-shaped"),
             "the refusal must name the reason: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_ad_hoc_override_does_not_bypass_the_sealed_input_grant_gate() {
+        let rootfs_dir = tempfile::tempdir().unwrap();
+        let rootfs = write_rootfs(rootfs_dir.path(), b"unit-only rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.restrict_agent_verbs = true;
+        params.services = vec![stream_grant_service()];
+        params.entrypoint = ResolvedEntrypoint::ad_hoc_override();
+
+        let err = admit_plan_for_boot(params)
+            .expect_err("an explicit override is not evidence for a sealed input grant");
+        assert!(
+            format!("{err:#}").contains("cannot say what the workload runs"),
+            "{err:#}"
         );
     }
 

@@ -47,6 +47,7 @@ impl Default for RunArgs {
             cpu_limit: None,
             grants_file: None,
             memory: "512M".to_string(),
+            explicit_resources: Default::default(),
             profile: RunProfile::Standard,
             mounts: Vec::new(),
             env: Vec::new(),

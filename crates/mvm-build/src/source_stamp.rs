@@ -349,6 +349,46 @@ mod tests {
         SystemTime::now() + Duration::from_secs(3600)
     }
 
+    /// The newest change time of `path` and everything under it.
+    fn newest_ctime(path: &Path) -> (i64, i64) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        let mut newest = EntryStamp::of(&metadata).ctime;
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                newest = newest.max(newest_ctime(&entry.unwrap().path()));
+            }
+        }
+        newest
+    }
+
+    /// Return once a write on this filesystem is stamped later than every entry
+    /// under `tree`.
+    ///
+    /// File timestamps come from a coarse clock, so an edit made in the same
+    /// tick as the fixture can leave every stamped field unchanged. A real
+    /// launch never vouches for such a tree: it waits out [`SETTLE`]. These
+    /// tests look at the tree "later" through an injected clock instead, so
+    /// each edit has to land in a later tick on its own, or the test measures
+    /// the filesystem's clock rather than the stamp.
+    fn wait_for_a_later_timestamp(tree: &Path) {
+        let newest = newest_ctime(tree);
+        // Beside the tree, on the same filesystem, but outside every root.
+        let probe_dir = tempfile::tempdir_in(tree.parent().unwrap()).unwrap();
+        let probe = probe_dir.path().join("tick");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            std::fs::write(&probe, b"").unwrap();
+            if EntryStamp::of(&std::fs::metadata(&probe).unwrap()).ctime > newest {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the filesystem clock did not advance within five seconds"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// Digest the tree's actual bytes, standing in for the real fingerprint.
     fn content_digest(root: &Path) -> String {
         let mut hasher = Sha256::new();
@@ -396,6 +436,7 @@ mod tests {
         let computed = Cell::new(0);
         let before = ask(tree.path(), records.path(), later(), &computed);
         // Same size, so only the timestamps and content differ.
+        wait_for_a_later_timestamp(tree.path());
         std::fs::write(tree.path().join("crates/guest/src/lib.rs"), b"fn b() {}").unwrap();
         let after = ask(tree.path(), records.path(), later(), &computed);
         assert_ne!(before, after, "the edit must reach the answer");
@@ -411,6 +452,7 @@ mod tests {
         let file = tree.path().join("crates/guest/src/lib.rs");
         let mtime = std::fs::metadata(&file).unwrap().modified().unwrap();
         let before = ask(tree.path(), records.path(), later(), &computed);
+        wait_for_a_later_timestamp(tree.path());
         std::fs::write(&file, b"fn c() {}").unwrap();
         std::fs::File::options()
             .write(true)
@@ -430,9 +472,11 @@ mod tests {
         let computed = Cell::new(0);
         let original = ask(tree.path(), records.path(), later(), &computed);
         let added = tree.path().join("crates/guest/src/new.rs");
+        wait_for_a_later_timestamp(tree.path());
         std::fs::write(&added, b"x").unwrap();
         let with_file = ask(tree.path(), records.path(), later(), &computed);
         assert_ne!(original, with_file);
+        wait_for_a_later_timestamp(tree.path());
         std::fs::remove_file(&added).unwrap();
         let without = ask(tree.path(), records.path(), later(), &computed);
         assert_eq!(without, original);

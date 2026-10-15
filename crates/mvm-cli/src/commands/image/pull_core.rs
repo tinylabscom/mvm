@@ -169,10 +169,18 @@ fn resolve_run_image_with(
     ensure_prod_digest_pin(reference, prod)?;
     let image_ref: ImageReference = reference.parse()?;
     let canonical = image_ref.canonical();
-    let runtime_tag = oci_runtime_tag(cache_root);
     let cached_entry = load_index(cache_root)
         .ok()
         .and_then(|index| find_image(&index, &canonical).cloned());
+    // A launch never pulls, so an image with no cache entry is refused before
+    // anything is derived for it. The runtime tag identifies the injected guest
+    // runtime by hashing its binaries, which a refusal does not need, and on a
+    // loaded host that hashing alone could take a refused launch past the
+    // startup budget.
+    if cached_entry.is_none() && acquisition == RunImageAcquisition::PreparedOnly {
+        bail!("OCI image {reference} is not prepared; run `mvmctl image pull {reference}` first");
+    }
+    let runtime_tag = oci_runtime_tag(cache_root);
     // Trust first. Nothing is materialized, and no provenance mark is signed,
     // for a production run of an image the policy has not verified: a refusal
     // after the fact would leave a signed, sealed image in the cache.

@@ -267,6 +267,7 @@ mod tests {
                     executable: Some("/bin/gh".into()),
                     argv: "gh api".into(),
                 },
+                mvm_contract::protocol::network_flow::tool::ToolOrigin::Host,
             )
             .await
             .expect("audit")

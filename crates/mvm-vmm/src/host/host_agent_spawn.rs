@@ -54,17 +54,7 @@ const CONTROL_RETRY_BASE_DELAY_MS: u64 = 100;
 const CONTROL_RETRY_CAP_DELAY_MS: u64 = 500;
 
 fn warm_claim_debug(message: &str) {
-    let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") else {
-        return;
-    };
-    let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
-        return;
-    };
-    let _ = writeln!(file, "[host-agent-registration] {message}");
+    crate::agent_debug::line("host-agent-registration", message);
 }
 
 fn control_retry_delay(attempt: u32) -> Duration {
@@ -446,6 +436,12 @@ pub fn register_host_agent_services_if_admitted(
                     .into_owned(),
             ),
             audit_signer_uds_path: None,
+            tool_decision_socket: Some(
+                mvm_core::config::vm_socket_dir_at(state_dir)
+                    .join(crate::host::network_endpoint_spawn::SUBST_CONNECTOR_SOCKET)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             services_bindings: services.to_vec(),
             capability_bindings: capability_bindings.to_vec(),
             service_proxies: service_proxies.to_vec(),
@@ -746,6 +742,7 @@ mod tests {
             audit_signer_uds_path: Some(
                 dir.join("audit-signer.sock").to_string_lossy().into_owned(),
             ),
+            tool_decision_socket: None,
             services_bindings: vec![],
             capability_bindings: vec![],
             assurance: None,

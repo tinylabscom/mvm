@@ -72,7 +72,7 @@ impl BuiltPackBootContract {
     ///
     /// The list type is the authenticated image-set feed, so neither the
     /// registry-pack feed nor an empty checker can stand in for it.
-    pub fn open(
+    fn open(
         pin: &PackPin,
         host: &HostProtocolSupport,
         image_revocations: &VerifiedImageSetRevocations,

@@ -41,6 +41,8 @@ pub struct DeliveredChildIdentity {
     pub grant_envelope: Option<VerbGrantEnvelope>,
     /// Seccomp tier the child was told to admit.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Late volumes the child was told to mount.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 /// A clean post-restore answer: the guest acknowledged, rotated its generation
@@ -54,6 +56,7 @@ fn rotated_child_identity() -> PostRestoreOutcome {
         clock_resynced: true,
         reseed_shortfall: None,
         seccomp_tier: None,
+        volumes_mounted: None,
     }
 }
 
@@ -68,6 +71,7 @@ pub struct MockChildFork {
     pub genid: GenerationToken,
     pub channels: Vec<VsockPort>,
     pub admitted_plan: Option<String>,
+    pub late_volumes: Vec<mvm_vmm::driver::traits::LateVolumeAttach>,
 }
 
 /// Hypervisor-free `VmmDriver` test double.
@@ -120,6 +124,8 @@ pub struct MockDriver {
     /// When set, `fork_standby_child` answers `Unrestorable` with this reason,
     /// as a real driver does for a snapshot another VMM version wrote.
     unrestorable_fork: Option<String>,
+    /// Late-volume slots this driver's parents boot.
+    late_volume_slots: u8,
 }
 
 impl Default for MockDriver {
@@ -148,6 +154,7 @@ impl MockDriver {
             resident_handoff: false,
             preloaded_standby: false,
             unrestorable_fork: None,
+            late_volume_slots: 0,
         }
     }
 
@@ -178,6 +185,12 @@ impl MockDriver {
     #[must_use]
     pub fn with_preloaded_standby(mut self) -> Self {
         self.preloaded_standby = true;
+        self
+    }
+
+    /// Boot parents with `slots` late-volume slots, as Firecracker does.
+    pub fn with_late_volume_slots(mut self, slots: u8) -> Self {
+        self.late_volume_slots = slots;
         self
     }
 
@@ -295,6 +308,9 @@ impl VmmDriver for MockDriver {
     fn supports_preloaded_standby(&self) -> bool {
         self.preloaded_standby
     }
+    fn late_volume_slots(&self) -> u8 {
+        self.late_volume_slots
+    }
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -394,6 +410,7 @@ impl VmmDriver for MockDriver {
             genid: req.genid.clone(),
             channels: req.channels.to_vec(),
             admitted_plan: req.admitted_plan.map(str::to_string),
+            late_volumes: req.late_volumes.to_vec(),
         });
         Ok(())
     }
@@ -418,6 +435,7 @@ impl VmmDriver for MockDriver {
         identity: ChildIdentity,
     ) -> Result<PostRestoreOutcome> {
         let seccomp_tier = identity.seccomp_tier;
+        let requested_volumes = identity.volumes.len();
         self.delivered_identities
             .lock()
             .unwrap()
@@ -426,6 +444,7 @@ impl VmmDriver for MockDriver {
                 token: identity.token,
                 grant_envelope: identity.grant_envelope,
                 seccomp_tier,
+                volumes: identity.volumes,
             });
         let mut outcome = self.child_identity.clone().ok_or_else(|| {
             anyhow!("mock guest agent for '{child_vm_name}' did not answer the post-restore signal")
@@ -434,6 +453,7 @@ impl VmmDriver for MockDriver {
         // handed and says so. A scripted answer is reported exactly as written.
         if !self.child_identity_scripted {
             outcome.seccomp_tier = seccomp_tier;
+            outcome.volumes_mounted = (requested_volumes > 0).then_some(requested_volumes as u32);
         }
         Ok(outcome)
     }

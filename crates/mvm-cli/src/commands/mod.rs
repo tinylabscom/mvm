@@ -340,11 +340,41 @@ pub fn run() -> Result<()> {
     result
 }
 
+/// Record which of `--cpus` / `--memory` a `run` or `machine run` command line
+/// named. The typed arguments cannot say: both flags carry clap defaults, and a
+/// default is indistinguishable from the same value typed. A signed bundle's
+/// advisory resources fill only the unnamed ones.
+fn record_explicit_run_resources(matches: &clap::ArgMatches, cli: &mut Cli) {
+    let (run_args, run_matches) = match &mut cli.command {
+        Commands::Run(verb) => (&mut verb.machine.run, matches.subcommand_matches("run")),
+        Commands::Machine(machine) => {
+            let machine::MachineAction::Run(run) = &mut machine.action else {
+                return;
+            };
+            (
+                &mut run.run,
+                matches
+                    .subcommand_matches("machine")
+                    .and_then(|m| m.subcommand_matches("run")),
+            )
+        }
+        _ => return,
+    };
+    if let Some(run_matches) = run_matches {
+        run_args.explicit_resources =
+            vm::exec::environment_defaults::ExplicitResources::from_matches(run_matches);
+    }
+}
+
 fn run_command() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = match cli_command().try_get_matches_from(std::env::args_os()) {
-        Ok(matches) => Cli::from_arg_matches(&matches)
-            .expect("generated CLI arguments must convert into the typed command"),
+        Ok(matches) => {
+            let mut cli = Cli::from_arg_matches(&matches)
+                .expect("generated CLI arguments must convert into the typed command");
+            record_explicit_run_resources(&matches, &mut cli);
+            cli
+        }
         Err(error)
             if matches!(
                 error.kind(),

@@ -104,6 +104,7 @@ pub mod host_time;
 pub mod icmp_client;
 pub mod icmp_mediator;
 pub mod integrations;
+pub mod late_volumes;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole
@@ -152,6 +153,15 @@ pub mod telemetry_service;
 /// Linux only: it reads `/proc`, and no egress client runs anywhere else.
 #[cfg(any(target_os = "linux", test))]
 pub mod tool_attribution;
+/// Same gate as `tool_attribution`: the decision socket exists to coordinate
+/// with the attribution registry, and both read `/proc`.
+#[cfg(any(target_os = "linux", test))]
+pub mod tool_decision_socket;
+/// The declared-command tool helper. The spawn path is Linux-only; the policy
+/// core (`approve`, `verify_stash`) compiles and tests everywhere.
+pub mod tool_helper;
+pub mod tool_install;
+pub mod tool_map;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

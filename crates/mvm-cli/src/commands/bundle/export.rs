@@ -12,6 +12,11 @@
 //! `--allow-*` flags) that any launch of the bundle may only narrow. A
 //! template built on this host also records its build provenance: the flake
 //! it came from, bound to the digests of the kernel and rootfs sealed.
+//!
+//! `--environment FILE.json` seals a signed environment descriptor: the
+//! entrypoint, advisory resources, volumes, secret slot names, required
+//! capabilities and application services a launch of the bundle is held to.
+//! Every capability it requires must be permitted by `--posture`.
 
 use std::path::PathBuf;
 
@@ -21,8 +26,8 @@ use mvm_client::bundle::{
     BundleExportInputs, HostBundleSigner, PostureInputs, export_bundle_with_signer,
 };
 
-use mvm_core::plan::BundleResources;
 use mvm_core::plan::types::{BuildProvenance, InputKind};
+use mvm_core::plan::{BundleResources, EnvironmentDescriptor};
 use mvm_core::security::AgentProfile;
 use mvm_core::user_config::MvmConfig;
 use mvm_runtime::vm::template::lifecycle as tmpl;
@@ -62,6 +67,26 @@ pub(in crate::commands) struct Args {
     /// Refused for `--posture sealed-prod`.
     #[arg(long, requires = "posture")]
     pub allow_unauthenticated: bool,
+    /// JSON file holding the environment descriptor to seal: entrypoint,
+    /// advisory resources, volumes, secret slot names, required capabilities
+    /// and application services. Capabilities need a `--posture` that
+    /// permits them.
+    #[arg(long, value_name = "FILE.json")]
+    pub environment: Option<PathBuf>,
+}
+
+/// Read and check the descriptor at `path` before any artifact is hashed, so
+/// a malformed file is refused with its own name rather than as a verifier
+/// error about the sealed manifest.
+fn read_environment(path: &std::path::Path) -> Result<EnvironmentDescriptor> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading environment descriptor at {}", path.display()))?;
+    let descriptor: EnvironmentDescriptor = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing environment descriptor at {}", path.display()))?;
+    descriptor
+        .validate()
+        .with_context(|| format!("checking environment descriptor at {}", path.display()))?;
+    Ok(descriptor)
 }
 
 /// Guest profile named by `--posture`.
@@ -151,6 +176,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 .with_context(|| format!("reading kernel command line at {}", path.display()))
         })
         .transpose()?;
+    let environment = args
+        .environment
+        .as_deref()
+        .map(read_environment)
+        .transpose()?;
 
     // ---- 2. Seal, sign under the host key, and write the archive ----
     let signer = HostBundleSigner::load()?;
@@ -174,6 +204,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             cmdline: cmdline.as_deref(),
             posture: args.posture_inputs(),
             provenance,
+            environment,
             boot_assets: None,
             out: &args.out,
             debug_out: None,
@@ -243,6 +274,45 @@ mod tests {
     fn allow_flags_require_a_posture() {
         assert!(parse(&["--allow-egress"]).is_err());
         assert!(parse(&["--allow-volumes"]).is_err());
+    }
+
+    #[test]
+    fn environment_flag_names_a_file() {
+        let args = parse(&["--environment", "env.json"]).unwrap();
+        assert_eq!(args.environment, Some(PathBuf::from("env.json")));
+        assert_eq!(parse(&[]).unwrap().environment, None);
+    }
+
+    #[test]
+    fn an_environment_file_is_parsed_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.json");
+        std::fs::write(
+            &good,
+            br#"{"descriptor_version":1,"target":"x86_64-linux","entrypoint":{"argv":["/bin/app"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_environment(&good).unwrap().entrypoint.argv,
+            vec!["/bin/app".to_string()]
+        );
+
+        let unknown = dir.path().join("unknown.json");
+        std::fs::write(
+            &unknown,
+            br#"{"descriptor_version":1,"target":"x86_64-linux","entrypoint":{"argv":["/bin/app"]},"capabilities":["root"]}"#,
+        )
+        .unwrap();
+        assert!(read_environment(&unknown).is_err());
+
+        let empty = dir.path().join("empty.json");
+        std::fs::write(
+            &empty,
+            br#"{"descriptor_version":1,"target":"x86_64-linux","entrypoint":{"argv":[]}}"#,
+        )
+        .unwrap();
+        let err = read_environment(&empty).unwrap_err();
+        assert!(format!("{err:#}").contains("argv"), "{err:#}");
     }
 
     #[test]

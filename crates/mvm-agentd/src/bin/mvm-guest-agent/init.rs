@@ -14,6 +14,8 @@
 //! Linux-only.  On non-Linux targets the functions are no-ops so the
 //! workspace still compiles on macOS.
 
+use std::path::Path;
+
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
 use mvm_core::plan::{ToolMediationGrant, VerbGrant};
@@ -164,6 +166,15 @@ pub(crate) fn apply_activation(
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
     bootstrap_guest_environment()?;
+    // Declared-command mediation: substitute every runnable path to a signed
+    // tool's bytes with the shim, stash the bytes root-only, and start the
+    // tool helper. Runs while still root; any failure refuses activation, so
+    // a declared command never boots half mediated.
+    if let Err(error) = mvm_agentd::tool_install::install(&env.tool_commands, Path::new("/")) {
+        return Err(guest_mount::MountError::InvalidConfig(format!(
+            "declared tool commands are not enforceable: {error}"
+        )));
+    }
     let validated_extensions = mvm_agentd::extension::validate_extensions(
         &env.extensions,
         std::path::Path::new("/run/mvm/extension-markers"),
@@ -180,6 +191,10 @@ pub(crate) fn apply_activation(
     // first. Without it the guest still boots, and its restores are refused.
     #[cfg(target_os = "linux")]
     mvm_agentd::crng_reseed::start_helper();
+    // A warm parent's guest gets the one helper that can mount the read-only
+    // volumes a claim attaches after restore; any other guest starts none.
+    #[cfg(target_os = "linux")]
+    mvm_agentd::late_volumes::start_helper_if_slotted();
     // The telemetry signing key is the egress client's, mode 0400; read it now
     // or the listener can never answer a session.
     crate::telemetry::capture_session_keys_before_privilege_drop();

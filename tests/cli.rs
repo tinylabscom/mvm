@@ -2108,14 +2108,14 @@ fn stage_pack_registry(root: &std::path::Path) {
     let packs = root.join("packs");
     std::fs::create_dir_all(&packs).unwrap();
     std::fs::write(
-        packs.join("index.json"),
+        root.join("index.json"),
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "packs": [{
                 "namespace": "runtime",
                 "name": "python",
                 "description": "Python runtime pack",
-                "versions": ["1.2.3"],
+                "versions": [{"version":"1.2.3", "manifest_sha256":"0".repeat(64)}],
             }],
         }))
         .unwrap(),
@@ -2139,6 +2139,12 @@ fn stage_pack_registry(root: &std::path::Path) {
     )
     .unwrap();
     std::fs::write(pack.join("manifest.sigstore.json"), b"test bundle").unwrap();
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap()).unwrap();
+    index["packs"][0]["versions"][0]["manifest_sha256"] = serde_json::json!(
+        mvm_core::packs::Sha256Hex::from_bytes(&std::fs::read(pack.join("manifest.json")).unwrap())
+    );
+    std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
     std::fs::write(
         pack.join("files/pack/profile.toml"),
         b"[tools]\nallow = [\"git\"]\n",
@@ -2182,8 +2188,8 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     let pack = registry.path().join("packs/runtime/go/1.0.0");
     std::fs::create_dir_all(pack.join("files/pack")).expect("pack directory");
     std::fs::write(
-        registry.path().join("packs/index.json"),
-        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":["1.0.0"]}]}"#,
+        registry.path().join("index.json"),
+        br#"{"schema_version":2,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":[{"version":"1.0.0","manifest_sha256":"ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50"}]}]}"#,
     )
     .expect("registry index");
     std::fs::write(

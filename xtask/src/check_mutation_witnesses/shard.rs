@@ -185,43 +185,50 @@ pub fn parse_shard_spec(raw: &str) -> Result<ShardSpec> {
 /// order — otherwise a file could migrate between shards without the
 /// baseline changing, and a survivor would appear and vanish by shard.
 ///
-/// Shards are packed longest-first by source size rather than sliced by
+/// Shards are packed longest-first by mutant count rather than sliced by
 /// stride. Mutation cost spans more than an order of magnitude across one
 /// package's surface, and a cost-blind split parks the expensive files
 /// together: `mvm-hostd` shards 2 and 4 were killed at the lane's timeout
 /// nightly, each holding two ~150-minute files, while shard 3 finished its
-/// three cheapest in 24 minutes. Size is a coarse stand-in for cost, but
-/// any cost-aware packing beats a blind one, and it needs nothing recorded
-/// or maintained alongside the surface.
+/// three cheapest in 24 minutes.
+///
+/// Every mutant in a package runs the same suite, so the number of mutants
+/// is what a file costs. Source size stood in for it until it stopped
+/// tracking: `audit/session.rs` is a third the size of `audit/emitter.rs`
+/// and carries twice its mutants, so size packing put it beside two more
+/// files and the shard outran its deadline. The count comes from
+/// `cargo mutants --list` under the same selection the run uses, so it is
+/// derived, not recorded, and cannot drift from what the shard executes.
 pub fn for_shard(
     workspace: &Path,
     surface: &[SurfaceFile],
     spec: Option<&ShardSpec>,
-) -> Vec<SurfaceFile> {
-    for_shard_by_weight(surface, spec, &|f| source_weight(workspace, f))
-}
-
-/// A surface file's stand-in for mutation cost.
-///
-/// Never zero: a file the workspace cannot stat still has to land
-/// somewhere, and equal weights make the packing fall back to plain
-/// round-robin rather than piling every file onto the first shard.
-fn source_weight(workspace: &Path, file: &SurfaceFile) -> u64 {
-    std::fs::metadata(workspace.join(&file.path))
-        .map(|m| m.len())
-        .unwrap_or(0)
-        .max(1)
+    pinned: &str,
+) -> Result<Vec<SurfaceFile>> {
+    if spec.is_some_and(|s| s.shard.is_some()) {
+        // A different mutator lists different mutants, and the two steps
+        // that derive a shard's files must agree on them.
+        ensure_cargo_mutants(pinned)?;
+    }
+    for_shard_by_weight(surface, spec, &|f| {
+        listed_mutant_count(workspace, f).map(|n| n.max(1))
+    })
 }
 
 /// [`for_shard`] against a caller-supplied cost, so the packing can be
-/// tested without a workspace on disk.
+/// tested without a workspace on disk. The cost is asked for only when the
+/// package is cut into shards.
+///
+/// A cost of zero is raised to one: a file still has to land somewhere, and
+/// equal weights make the packing fall back to plain round-robin rather
+/// than piling every file onto the first shard.
 fn for_shard_by_weight(
     surface: &[SurfaceFile],
     spec: Option<&ShardSpec>,
-    weight: &dyn Fn(&SurfaceFile) -> u64,
-) -> Vec<SurfaceFile> {
+    weight: &dyn Fn(&SurfaceFile) -> Result<u64>,
+) -> Result<Vec<SurfaceFile>> {
     let Some(spec) = spec else {
-        return surface.to_vec();
+        return Ok(surface.to_vec());
     };
     let mut owned: Vec<SurfaceFile> = surface
         .iter()
@@ -230,12 +237,15 @@ fn for_shard_by_weight(
         .collect();
     owned.sort_by(|a, b| a.path.cmp(&b.path));
     let Some((index, total)) = spec.shard else {
-        return owned;
+        return Ok(owned);
     };
 
     // Heaviest file onto the lightest shard, ties by path then by shard
     // index, so the assignment is a pure function of the surface.
-    let mut ordered: Vec<(u64, SurfaceFile)> = owned.into_iter().map(|f| (weight(&f), f)).collect();
+    let mut ordered: Vec<(u64, SurfaceFile)> = owned
+        .into_iter()
+        .map(|f| Ok((weight(&f)?.max(1), f)))
+        .collect::<Result<_>>()?;
     ordered.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.path.cmp(&b.1.path)));
 
     let mut loads = vec![0u64; total];
@@ -253,7 +263,7 @@ fn for_shard_by_weight(
         }
     }
     mine.sort_by(|a, b| a.path.cmp(&b.path));
-    mine
+    Ok(mine)
 }
 
 #[cfg(test)]
@@ -274,7 +284,7 @@ mod tests {
     /// round-robin when every file weighs the same, which is what these
     /// tests pin: membership, disjointness, coverage, order-independence.
     fn even(surface: &[SurfaceFile], spec: Option<&ShardSpec>) -> Vec<SurfaceFile> {
-        for_shard_by_weight(surface, spec, &|_| 1)
+        for_shard_by_weight(surface, spec, &|_| Ok(1)).unwrap()
     }
 
     const SHARD_WORKFLOW: &str = "\
@@ -561,7 +571,8 @@ jobs:
                 package: "mvm-hostd".to_string(),
                 shard: Some((index, total)),
             };
-            let files = for_shard_by_weight(&surface, Some(&spec), &|f| cost[f.path.as_str()]);
+            let files =
+                for_shard_by_weight(&surface, Some(&spec), &|f| Ok(cost[f.path.as_str()])).unwrap();
             let load: u64 = files.iter().map(|f| cost[f.path.as_str()]).sum();
             assert!(
                 load <= ceiling,

@@ -360,6 +360,7 @@ fn restore_forked_child_and_read_random(
                 token: genid.token,
                 grant_envelope: None,
                 seccomp_tier: None,
+                volumes: Vec::new(),
             },
         )
         .expect("the restored child must complete the authenticated identity handshake");

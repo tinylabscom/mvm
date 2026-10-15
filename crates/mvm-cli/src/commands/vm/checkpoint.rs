@@ -40,7 +40,7 @@ mod revert;
 mod timeline;
 mod vm_state;
 pub(in crate::commands) use fork_vm_full::{ForkVmFullArmParams, fork_vm_full_arm};
-pub(in crate::commands) use lineage::SignedChainAnchor;
+pub(in crate::commands) use lineage::{ClaimChainAnchor, SignedChainAnchor};
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
     run_revert, run_rewind,
@@ -2084,6 +2084,7 @@ mod tests {
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -2114,6 +2115,7 @@ mod tests {
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();

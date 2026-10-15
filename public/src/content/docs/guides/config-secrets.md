@@ -1,41 +1,29 @@
 ---
 title: Config & Secrets Injection
-description: Inject custom config files and tightly scoped secret files onto microVM drives at boot time.
+description: Deliver config files and file-shaped secrets to a microVM through shares and volumes.
 ---
 
-mvm supports injecting custom files onto the guest's config and secrets drives at boot time. Files are written to the drive images before the VM starts.
+Config files and file-shaped secrets reach a workload through host directory
+shares and registered volumes under `/data` or `/work`, described below.
 
-:::caution[This is a library API, not a `--mount` flag]
-The config and secrets drives are read-only ext4 **drive images** that guest
-`/init` mounts from `/dev/vdb` and `/dev/vdc`. They are not host directory
-shares, and `--mount` cannot populate them: `/mnt/config` and `/mnt/secrets`
-are *protected* paths in the host mount policy, and bare `/mnt` is refused
-because a share there would shadow them. A `--mount` guest path must be under
-`/data` or `/work`.
-
-The supported way to place files on these drives is the `config_files` /
-`secret_files` fields on `FlakeRunConfig` (see [Library API](#library-api)
-below). There is no `mvmctl` flag that does it today.
+:::caution[No config or secrets drive is attached]
+Earlier releases mounted a read-only config drive at `/mnt/config` and a
+secrets drive at `/mnt/secrets` from the image's own init. Images no longer
+carry an init — the universal initramfs agent is PID 1 on every boot — and no
+boot attaches either drive. The `config_files` / `secret_files` fields on
+`FlakeRunConfig` are accepted and deliver nothing to the guest. `/mnt/config`
+and `/mnt/secrets` stay reserved: the host mount policy refuses a share there,
+and bare `/mnt` is refused because a share there would shadow them.
 :::
 
-Prefer managed secret references for credentials. Use secrets drives when a
+Prefer managed secret references for credentials. Use a share or volume when a
 workload genuinely needs file-shaped material such as certificates or a
 compatibility config file. See [Secrets and credentials](/guides/secrets-and-credentials/)
 for the reference-first model.
 
-## The drives
-
-| Guest path | Drive | Permissions | Purpose |
-|---|---|---|---|
-| `/mnt/config` | `/dev/vdb` | Read-only (0444) | Application configuration |
-| `/mnt/secrets` | `/dev/vdc` | Read-only (0400) | File-shaped secret material |
-
-Both are mounted `ro,noexec,nosuid,nodev` by guest `/init` before the
-entrypoint starts.
-
 ## Host directory shares
 
-Separately from the drives above, `--mount host_dir:/guest/path[:ro]` shares
+`--mount host_dir:/guest/path[:ro]` shares
 a host directory into a **transient** run. The guest path must be
 under `/data` or `/work`. Directory shares are read-only snapshots: the
 directory is materialized into a throwaway image at boot, so a `:rw` request
@@ -66,35 +54,6 @@ mvmctl machine volume mount app --volume config \
 # Any profile that allows volumes accepts it; `--profile dev` is not needed.
 mvmctl machine run --manifest my-app --name app -d \
     --mount app-data.img:/data/state:4G:rw
-```
-
-## Library API
-
-The same functionality is available programmatically for library consumers:
-
-```rust
-use mvm_runtime::microvm::FlakeRunConfig;
-use mvm_vmm::host::drive_file::DriveFile;
-
-fn with_config_and_secrets(
-    base_config: FlakeRunConfig,
-    app_config: &serde_json::Value,
-    api_key: &str,
-) -> Result<FlakeRunConfig, serde_json::Error> {
-    Ok(FlakeRunConfig {
-        config_files: vec![DriveFile {
-            name: "app.json".into(),
-            content: serde_json::to_string(app_config)?,
-            mode: 0o444,
-        }],
-        secret_files: vec![DriveFile {
-            name: "app.env".into(),
-            content: format!("API_KEY={api_key}"),
-            mode: 0o400,
-        }],
-        ..base_config
-    })
-}
 ```
 
 ## Managed Secrets
@@ -134,14 +93,6 @@ See the
 [agent sandbox guide](/guides/agent-sandbox/) for what the guest receives,
 what the host checks, and what the audit chain records.
 
-## Design
-
-The `DriveFile` type is content-agnostic — it's just `{name, content, mode}`. It knows nothing about specific file formats or keys. This means:
-
-- Any file format works (JSON, TOML, YAML, env files, certificates, etc.)
-- Adding support for new applications doesn't require code changes
-- NixOS `EnvironmentFile` can load `.env` files directly as systemd environment variables
-
 ## Example: generic flake with config + secrets mounts
 
 The pattern below works with any `mkGuest` flake that reads
@@ -166,11 +117,7 @@ attach a live host directory, so the directories are registered rather than
 passed with `--mount`. Each registration snapshots its directory into a
 read-only ext4 image at every start: host edits appear after the machine's
 next stop and start. `--host` must be absolute and on encrypted storage, and
-the registration can come before the machine exists. Material placed on the *secrets drive* (`/mnt/secrets/`, mode 0440
-root:mvm by the init script) is additionally re-staged to
-`/run/mvm-secrets/<svc>/` with mode 0400 owned by the per-service uid
-(ADR-001 claim 1) so sibling services on the same microVM can't cross-read.
-That re-staging applies to the drive, not to a registered directory.
+the registration can come before the machine exists.
 
 ### Custom config + API keys at runtime
 
@@ -209,16 +156,14 @@ mvmctl machine build --flake ./openclaw
 mvmctl machine run --flake ./openclaw --name oc --port 3000:3000
 ```
 
-When restoring from a snapshot with registered directory volumes, the guest agent
-automatically remounts config/secrets drives and restarts services
-with the fresh data.
+When restoring from a snapshot with registered directory volumes, each
+volume is snapshotted from its host directory again at start.
 
 #### Snapshots + dynamic mounts
 
 **Key insight:** the snapshot stores OS and application state
-(memory, running processes, compiled code caches), but **config and
-secrets drives are created fresh at runtime** from your host
-directories. This means:
+(memory, running processes, compiled code caches), but **registered
+volumes are snapshotted fresh at start** from your host directories. This means:
 
 - ✅ **Same snapshot** can serve multiple instances with different
   configs.

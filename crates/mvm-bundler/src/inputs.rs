@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use mvm_core::plan::BundleResources;
+use mvm_core::plan::EnvironmentDescriptor;
 use mvm_core::plan::types::BuildProvenance;
 use mvm_core::policy::security::AgentProfile;
 
@@ -54,6 +55,12 @@ pub struct BundleExportInputs<'a> {
     /// digests are replaced with those of the bytes actually sealed, so the
     /// record cannot describe a build other than the one shipped.
     pub provenance: Option<BuildProvenance>,
+    /// What the workload requires from its launch. Sealed as the bundle's
+    /// environment member, which stamps the manifest with the schema that
+    /// introduced it; the verifier refuses a descriptor whose target is not
+    /// `arch_label` or whose capabilities the posture does not permit, so a
+    /// descriptor that needs a capability needs a posture beside it.
+    pub environment: Option<EnvironmentDescriptor>,
     /// Where the archive is written. Missing parent directories are created;
     /// an existing file is overwritten.
     pub out: &'a Path,
@@ -78,6 +85,7 @@ impl<'a> BundleExportInputs<'a> {
             cmdline: None,
             posture: None,
             provenance: None,
+            environment: None,
             out,
             debug_out: None,
         }
@@ -122,6 +130,11 @@ impl<'a> BundleExportInputs<'a> {
 
     pub fn provenance(mut self, provenance: BuildProvenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    pub fn environment(mut self, environment: EnvironmentDescriptor) -> Self {
+        self.environment = Some(environment);
         self
     }
 

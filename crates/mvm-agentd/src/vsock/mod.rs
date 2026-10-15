@@ -157,6 +157,12 @@ const _: () = assert!(EGRESS_PORT == 5253);
 /// pre-broker secrets channel once held (that channel was removed), so there
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
+/// Connect and request deadline for the in-guest tool shim and helper.
+pub const TOOL_REQUEST_TIMEOUT_SECS: u64 = 10;
+/// Read deadline for one host tool decision. The endpoint can hold an `ask`
+/// for its full approval timeout, so this waits just past it and never
+/// mistakes a slow approval for a transport failure.
+pub const TOOL_DECISION_TIMEOUT_SECS: u64 = 125;
 
 /// Base vsock port for interactive console PTY sessions.
 pub const CONSOLE_PORT_BASE: u32 = 20000;

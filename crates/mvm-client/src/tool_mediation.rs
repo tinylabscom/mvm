@@ -12,8 +12,9 @@ use anyhow::{Context, Result, ensure};
 use mvm_contract::protocol::network_flow::attribution::{
     ToolInvocationBinding, ToolInvocationRelease,
 };
-use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply, ToolOrigin};
 use mvm_core::net::session::{read_json_frame, write_json_frame};
+use mvm_core::protocol::host_tool::ToolReleaseResponse;
 
 const MAX_TOOL_FRAME_BYTES: usize = 20 * 1024;
 const TOOL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,6 +36,7 @@ pub fn decide_declared_tool(
 
 /// Retire an invocation's binding, so a flow opened after the command ended
 /// cannot use the tool's routes or secrets.
+/// Success requires the endpoint's acknowledgement after retirement.
 pub fn release_declared_tool(vm_name: &str, binding: &ToolInvocationBinding) -> Result<()> {
     release_at(&connector_socket(vm_name)?, binding)
 }
@@ -57,11 +59,28 @@ fn connect(socket: &Path) -> Result<UnixStream> {
     Ok(stream)
 }
 
+/// Frame the connector listener expects for a tool question: the invocation
+/// plus the host-attested ingress origin. The connector socket is host-local,
+/// so a caller labelling its question `Host` is making a claim only a
+/// host-local process can make; the broker path labels `GuestBroker`.
+#[derive(serde::Serialize)]
+struct ToolConnectorRequest<'a> {
+    question: &'a ToolCheckRequest,
+    origin: ToolOrigin,
+}
+
 fn decide_at(socket: &Path, question: &ToolCheckRequest) -> Result<ToolDecisionReply> {
     ensure!(question.is_valid(), "invalid declared tool invocation");
     let mut stream = connect(socket)?;
-    write_json_frame(&mut stream, question, MAX_TOOL_FRAME_BYTES)
-        .context("sending declared tool question")?;
+    write_json_frame(
+        &mut stream,
+        &ToolConnectorRequest {
+            question,
+            origin: ToolOrigin::Host,
+        },
+        MAX_TOOL_FRAME_BYTES,
+    )
+    .context("sending declared tool question")?;
     read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).context("reading declared tool decision")
 }
 
@@ -74,7 +93,14 @@ fn release_at(socket: &Path, binding: &ToolInvocationBinding) -> Result<()> {
         },
         MAX_TOOL_FRAME_BYTES,
     )
-    .context("releasing the declared tool invocation")
+    .context("releasing the declared tool invocation")?;
+    let response: ToolReleaseResponse = read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES)
+        .context("reading declared tool release acknowledgement")?;
+    ensure!(
+        response.released,
+        "endpoint did not release the tool invocation"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -106,9 +132,15 @@ mod tests {
             let listener = UnixListener::bind(&socket).expect("bind socket");
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept question");
-                let reported: ToolCheckRequest =
+                let reported: serde_json::Value =
                     read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read question");
-                assert_eq!(reported, question());
+                // The host-local client labels its own question `Host`: only
+                // a host-local process can make that claim on this socket.
+                assert_eq!(
+                    reported["question"],
+                    serde_json::to_value(question()).unwrap()
+                );
+                assert_eq!(reported["origin"], serde_json::json!("host"));
                 write_json_frame(&mut stream, &reply, MAX_TOOL_FRAME_BYTES)
                     .expect("write decision");
             });
@@ -126,7 +158,7 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("bind socket");
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept question");
-            let _: ToolCheckRequest =
+            let _: serde_json::Value =
                 read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read question");
             write_json_frame(&mut stream, &"invalid", MAX_TOOL_FRAME_BYTES)
                 .expect("write malformed decision");
@@ -147,9 +179,40 @@ mod tests {
             let release: ToolInvocationRelease =
                 read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read release");
             assert_eq!(release.release, expected);
+            write_json_frame(
+                &mut stream,
+                &ToolReleaseResponse { released: true },
+                MAX_TOOL_FRAME_BYTES,
+            )
+            .expect("write release acknowledgement");
         });
         release_at(&socket, &binding).expect("release");
         server.join().expect("server join");
+    }
+
+    #[test]
+    fn release_requires_a_positive_endpoint_acknowledgement() {
+        for reply in [
+            None,
+            Some(serde_json::json!("invalid")),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!({"released": false})),
+        ] {
+            let dir = tempfile::tempdir().expect("temporary socket directory");
+            let socket = dir.path().join("tool.sock");
+            let listener = UnixListener::bind(&socket).expect("bind socket");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept release");
+                let _: ToolInvocationRelease =
+                    read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read release");
+                if let Some(reply) = reply {
+                    write_json_frame(&mut stream, &reply, MAX_TOOL_FRAME_BYTES)
+                        .expect("write reply");
+                }
+            });
+            assert!(release_at(&socket, &ToolInvocationBinding::from_random([6; 16])).is_err());
+            server.join().expect("server join");
+        }
     }
 
     #[test]

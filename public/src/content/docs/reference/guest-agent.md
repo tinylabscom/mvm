@@ -6,13 +6,10 @@ description: The mvm guest agent provides host visibility and control over micro
 Every microVM built with `mkGuest` exposes **mvm-guest-agent**, a lightweight
 Rust daemon that runs inside the guest on vsock port 5252.
 
-How the agent reaches the guest depends on the image policy:
-
-- **Dev / preferred-overlay images** keep a baked copy in the rootfs.
-- **Sealed / required-overlay images** boot through the read-only,
-  verity-protected runtime overlay mounted at `/mvm/runtime`; `/init` execs the
-  overlay-resident agent from there instead of falling back to a baked rootfs
-  copy.
+The agent reaches every guest the same way: the universal initramfs carries a
+static copy that runs as PID 1, activates over vsock and mounts the root and
+the read-only, verity-protected runtime overlay at `/mvm/runtime`. No image
+carries an init or an agent of its own.
 
 The runtime overlay is the one the host `mvmctl` build resolves: the member of
 the image set it pins, whose compatibility the signed root declares, or on a

@@ -39,6 +39,11 @@ const TARGET_ARCH: TargetArch = TargetArch::aarch64;
 pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
+    // rustls/tokio-rustls drain coalesced handshake records with one vectored
+    // write per flush; the first flow that reaches TLS termination (a
+    // substituted secret on an attributed tool invocation) takes SIGSYS on
+    // `writev` without it. Found via the live KVM witness.
+    ("writev", libc::SYS_writev),
     ("fsync", libc::SYS_fsync),
     // The audit recorder locks the per-tenant log before appending, so the
     // first chain-signed event this endpoint emits calls `flock`. That event is
@@ -179,6 +184,11 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
 pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("read", libc::SYS_read),
     ("write", libc::SYS_write),
+    // rustls/tokio-rustls drain coalesced handshake records with one vectored
+    // write per flush; the first flow that reaches TLS termination (a
+    // substituted secret on an attributed tool invocation) takes SIGSYS on
+    // `writev` without it. Found via the live KVM witness.
+    ("writev", libc::SYS_writev),
     ("fsync", libc::SYS_fsync),
     // The audit recorder locks the per-tenant log before appending, so the
     // first chain-signed event this endpoint emits calls `flock`. That event is

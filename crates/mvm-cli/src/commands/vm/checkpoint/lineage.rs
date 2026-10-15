@@ -189,12 +189,15 @@ fn index_creation_digest(
     recorded: &mut std::collections::HashMap<String, RecordedCreation>,
     envelope: &mvm_hostd::supervisor::SignedEnvelope,
 ) -> Result<()> {
+    index_creation_entry(recorded, &envelope.entry)
+}
+
+/// The (id-label, digest-label, namespace) a creation event keys on, or `None`
+/// for an event that records no creation.
+fn creation_keys(event: &str) -> Option<(&'static str, &'static str, &'static str)> {
     use mvm_hostd::audit::emitter::checkpoint_audit as k;
     use mvm_hostd::audit::emitter::image_audit as ik;
-    let event = envelope.entry.event.as_str();
-    // The (id-label, digest-label, namespace) a creation event keys on;
-    // non-creation events carry none.
-    let keys = if event == k::CREATED_EVENT {
+    if event == k::CREATED_EVENT {
         Some((k::LABEL_CHECKPOINT_ID, k::LABEL_META_DIGEST, CHECKPOINT_NS))
     } else if event == k::FORKED_EVENT {
         Some((k::LABEL_CHILD_ID, k::LABEL_CHILD_DIGEST, CHECKPOINT_NS))
@@ -202,22 +205,161 @@ fn index_creation_digest(
         Some((ik::LABEL_NODE_DIGEST, ik::LABEL_NODE_DIGEST, IMAGE_NS))
     } else {
         None
-    };
-    let Some((id_key, digest_key, namespace)) = keys else {
+    }
+}
+
+/// [`index_creation_digest`] for an entry already authenticated.
+fn index_creation_entry(
+    recorded: &mut std::collections::HashMap<String, RecordedCreation>,
+    entry: &mvm_core::audit_verify::PlanAuditEntry,
+) -> Result<()> {
+    let Some((id_key, digest_key, namespace)) = creation_keys(entry.event.as_str()) else {
         return Ok(());
     };
-    let labels = &envelope.entry.labels;
+    let labels = &entry.labels;
     if let (Some(id), Some(digest)) = (labels.get(id_key), labels.get(digest_key)) {
         recorded.insert(
             anchor_key(namespace, id),
             RecordedCreation {
                 digest: CheckpointDigest::parse(digest.clone())?,
-                tenant: envelope.entry.tenant.0.clone(),
-                plan_id: envelope.entry.plan_id.0.clone(),
+                tenant: entry.tenant.0.clone(),
+                plan_id: entry.plan_id.0.clone(),
             },
         );
     }
     Ok(())
+}
+
+/// The anchor a warm claim verifies its parent against.
+///
+/// [`SignedChainAnchor::load`] verifies every host-lifecycle chain end to end,
+/// and that walk grows with every entry the host has ever written: on a host
+/// with about 11 MB of audit history it alone put warm claims past the 300 ms
+/// ceiling. A claim needs one answer — the creation entry of the parent it is
+/// about to restore — and that parent was captured and audited recently, so its
+/// entry is almost always in a live segment. This anchor authenticates that one
+/// entry in place ([`mvm_core::audit_verify::live::authenticate_live_entries`]):
+/// its host signature over the exact signed bytes and its chain link to the
+/// line before it. Any other question, and the parent's own question whenever
+/// the live segments do not answer it with exactly one authenticated creation
+/// entry, falls back to the full walk, so every verdict the full anchor would
+/// reach on those paths is unchanged.
+///
+/// What a claim no longer does is re-attest the rest of the history on every
+/// launch. That stays verified where history is the question:
+/// `mvmctl trust audit verify`, doctor's chain check, `mvmctl vm checkpoint
+/// verify`, and the pool refill, which still use [`SignedChainAnchor::load`].
+pub struct ClaimChainAnchor {
+    /// Creation entries authenticated in place in a live segment.
+    preverified: std::collections::HashMap<String, RecordedCreation>,
+    /// The full walk, loaded only when a lookup is not answered above.
+    full: std::sync::OnceLock<std::result::Result<SignedChainAnchor, String>>,
+}
+
+impl ClaimChainAnchor {
+    /// An anchor that answers `checkpoint`'s creation from the live segments
+    /// when they hold exactly one authenticated creation entry for it.
+    pub fn for_checkpoint(checkpoint: &mvm_core::checkpoint::CheckpointId) -> Result<Self> {
+        use mvm_hostd::audit::emitter::default_audit_dir;
+        let dir = default_audit_dir()?;
+        let signer = super::super::host_signer::load_or_init()
+            .context("loading host signer to anchor a warm claim's parent")?;
+        let mut preverified = std::collections::HashMap::new();
+        if let Some(found) = live_creation_entry(&dir, &signer.verifying, checkpoint.as_str()) {
+            preverified.insert(anchor_key(CHECKPOINT_NS, checkpoint.as_str()), found);
+        }
+        Ok(Self {
+            preverified,
+            full: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// Whether a lookup for `checkpoint` will be answered without the full walk.
+    #[cfg(test)]
+    fn answers_in_place(&self, checkpoint: &str) -> bool {
+        self.preverified
+            .contains_key(&anchor_key(CHECKPOINT_NS, checkpoint))
+    }
+
+    fn lookup(&self, key: &str) -> Result<Option<RecordedCreation>> {
+        if let Some(recorded) = self.preverified.get(key) {
+            return Ok(Some(recorded.clone()));
+        }
+        match self
+            .full
+            .get_or_init(|| SignedChainAnchor::load().map_err(|e| format!("{e:#}")))
+        {
+            Ok(full) => full.lookup(key),
+            Err(e) => Err(anyhow::anyhow!("{e}")),
+        }
+    }
+}
+
+/// The one authenticated creation entry for `checkpoint` across every tenant's
+/// live segment, or `None` when there is not exactly one — no entry, several,
+/// or one that cannot be read or authenticated. `None` sends the caller to the
+/// full walk, which reaches its own verdict on every one of those cases.
+fn live_creation_entry(
+    dir: &std::path::Path,
+    key: &ed25519_dalek::VerifyingKey,
+    checkpoint: &str,
+) -> Option<RecordedCreation> {
+    let tenants = live_chain_tenants(dir).ok()?;
+    let mut found = Vec::new();
+    for tenant in tenants {
+        let matches = mvm_core::audit_verify::live::authenticate_live_entries(
+            dir,
+            &tenant,
+            key,
+            checkpoint,
+            |entry| creation_keys(&entry.event).is_some(),
+        )
+        .ok()?;
+        for entry in matches.entries {
+            let mut recorded = std::collections::HashMap::new();
+            index_creation_entry(&mut recorded, &entry).ok()?;
+            if let Some(hit) = recorded.remove(&anchor_key(CHECKPOINT_NS, checkpoint)) {
+                found.push(hit);
+            }
+        }
+    }
+    let only = found.pop()?;
+    found.is_empty().then_some(only)
+}
+
+/// Every tenant with a live host-lifecycle chain in `dir`.
+fn live_chain_tenants(dir: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut tenants = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if !mvm_core::config::is_host_lifecycle_chain(&path) {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.contains(mvm_core::config::AUDIT_SEGMENT_INFIX) {
+            continue;
+        }
+        if let Some(tenant) = name.strip_suffix(".jsonl") {
+            tenants.push(tenant.to_string());
+        }
+    }
+    Ok(tenants)
+}
+
+impl CheckpointChainAnchor for ClaimChainAnchor {
+    fn recorded_creation_digest(&self, meta: &CheckpointMeta) -> Result<Option<CheckpointDigest>> {
+        Ok(self
+            .lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))?
+            .map(|recorded| recorded.digest))
+    }
+
+    fn recorded_creation_tenant(&self, meta: &CheckpointMeta) -> Result<Option<String>> {
+        Ok(self
+            .lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))?
+            .map(|recorded| recorded.tenant))
+    }
 }
 
 impl CheckpointChainAnchor for SignedChainAnchor {
@@ -589,5 +731,123 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /// Append `count` copies of the chain's first line: valid-looking signed
+    /// entries that no longer chain, so any walk over them fails, standing in
+    /// for a long history the claim must not walk. None names a checkpoint.
+    fn pad_history(path: &std::path::Path, count: usize) {
+        use std::io::Write as _;
+        let content = std::fs::read_to_string(path).unwrap();
+        let first = content.lines().next().unwrap().to_string();
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        for _ in 0..count {
+            writeln!(file, "{first}").unwrap();
+        }
+    }
+
+    /// A warm claim answers its parent's creation from the live segment and
+    /// does not walk the history before it: with that history damaged, the
+    /// full anchor can no longer answer, and the claim anchor still does.
+    #[test]
+    fn a_claim_answers_its_parent_in_place_without_walking_the_history() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        seed_signed_chain("cp-old");
+        break_chain(&chain_path(tmp.path()));
+        let digest = seed_signed_chain("cp-parent");
+
+        let parent = meta("cp-parent");
+        assert!(
+            CheckpointChainAnchor::recorded_creation_digest(
+                &SignedChainAnchor::load().unwrap(),
+                &parent
+            )
+            .is_err(),
+            "only a walk of the history sees the damaged entry"
+        );
+        let claim = ClaimChainAnchor::for_checkpoint(&parent.id).unwrap();
+        assert!(claim.answers_in_place("cp-parent"));
+        assert_eq!(
+            claim.recorded_creation_digest(&parent).unwrap(),
+            Some(digest)
+        );
+        assert_eq!(
+            claim.recorded_creation_tenant(&parent).unwrap(),
+            Some("local".to_string())
+        );
+    }
+
+    /// The claim-path work grows with the entries that name the parent, not
+    /// with the history: about 10 MB of history before the parent's entry is
+    /// searched but never parsed or verified.
+    #[test]
+    fn a_large_history_adds_no_parsing_or_verification_to_a_claim() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        seed_signed_chain("cp-history");
+        let chain = chain_path(tmp.path());
+        let line_len = std::fs::metadata(&chain).unwrap().len() as usize;
+        pad_history(&chain, (10 * 1024 * 1024) / line_len.max(1));
+        assert!(std::fs::metadata(&chain).unwrap().len() >= 10 * 1024 * 1024 - 2 * line_len as u64);
+        let digest = seed_signed_chain("cp-parent");
+
+        let key = load_or_init().unwrap().verifying;
+        let live = mvm_core::audit_verify::live::authenticate_live_entries(
+            &tmp.path().join("audit"),
+            "local",
+            &key,
+            "cp-parent",
+            |entry| creation_keys(&entry.event).is_some(),
+        )
+        .unwrap();
+        assert_eq!(live.parsed, 1, "only the line naming the parent is parsed");
+        assert_eq!(live.entries.len(), 1);
+
+        let parent = meta("cp-parent");
+        let claim = ClaimChainAnchor::for_checkpoint(&parent.id).unwrap();
+        assert!(claim.answers_in_place("cp-parent"));
+        assert_eq!(
+            claim.recorded_creation_digest(&parent).unwrap(),
+            Some(digest)
+        );
+    }
+
+    /// A parent entry that does not authenticate is never answered in place:
+    /// the claim falls back to the full walk, which refuses it exactly as it
+    /// always has.
+    #[test]
+    fn a_tampered_parent_entry_falls_back_to_the_full_walk_and_is_refused() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        seed_signed_chain("cp-parent");
+        break_chain(&chain_path(tmp.path()));
+
+        let parent = meta("cp-parent");
+        let claim = ClaimChainAnchor::for_checkpoint(&parent.id).unwrap();
+        assert!(!claim.answers_in_place("cp-parent"));
+        let err = claim
+            .recorded_creation_digest(&parent)
+            .expect_err("a forged parent entry must not anchor a claim");
+        assert!(format!("{err:#}").contains(mvm_runtime::lineage::LEDGER_UNVERIFIABLE));
+    }
+
+    /// Anything the live segments do not answer is the full walk's question,
+    /// with the full walk's verdict: an unaudited parent is still refused as
+    /// never audited.
+    #[test]
+    fn a_parent_the_live_segment_does_not_name_gets_the_full_walks_verdict() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_HOME", tmp.path());
+        seed_signed_chain("cp-other");
+
+        let absent = meta("cp-unaudited");
+        let claim = ClaimChainAnchor::for_checkpoint(&absent.id).unwrap();
+        assert!(!claim.answers_in_place("cp-unaudited"));
+        assert_eq!(claim.recorded_creation_digest(&absent).unwrap(), None);
     }
 }

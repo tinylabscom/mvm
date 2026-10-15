@@ -672,12 +672,10 @@ fn wake_audit_detail(warm: bool, backend: &str, outcome: &ResumeOutcome) -> Stri
 /// so the guest rotates its VMGenID and reseeds its CSPRNG, and the machine's
 /// name as the guest hostname.
 fn post_restore_signal(name: &str) -> VsockPostRestoreSignal {
-    VsockPostRestoreSignal {
-        token: mvm_core::crypto::vmgenid::fresh_generation_token(name).token,
-        hostname: Some(name.to_string()),
-        grant_envelope: None,
-        seccomp_tier: None,
-    }
+    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+    let mut signal = VsockPostRestoreSignal::for_resumed_child(token, None);
+    signal.hostname = Some(name.to_string());
+    signal
 }
 
 /// The primed-barrier timeout to enforce before sealing, or `None` when the
@@ -1613,6 +1611,7 @@ mod tests {
                     clock_resynced,
                     reseed_shortfall,
                     seccomp_tier: None,
+                    volumes_mounted: None,
                 })
             };
             match *self {

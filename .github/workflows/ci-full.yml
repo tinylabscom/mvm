@@ -13,6 +13,12 @@ on:
   schedule:
     - cron: "51 4 * * *"
   workflow_dispatch:
+    inputs:
+      tool_live_only:
+        description: Run only the tool_live KVM witness in the live BDD track
+        required: false
+        default: false
+        type: boolean
 
 # One Extended CI run at a time, across every ref and trigger. The
 # organization's hosted-runner pool is 20 concurrent jobs shared with the merge
@@ -138,6 +144,7 @@ jobs:
   # the Extended CI tracking issue through security-lane-watch.yml.
   bdd-live-warm-claim:
     name: BDD live warm claim (Linux, Firecracker)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.tool_live_only }}
     runs-on: ubuntu-latest
     # The scenario enforces the 300 ms startup ceiling, so the recipe builds an
     # optimized mvmctl beside the debug test harness; the second profile is
@@ -219,7 +226,10 @@ jobs:
     # timeout, and nothing should wait behind that.
     needs: bdd-live-warm-claim
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
+    # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
+    # the one self-hosted certification machine.
+    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
@@ -228,17 +238,12 @@ jobs:
       # runner budget above.
       max-parallel: 1
       matrix:
-        include:
-          - witness: ci_live
-            # Cold compilation needs about 35 minutes, then the lifecycle up to 40.
-            timeout: 90
-          - witness: tool_live
-            timeout: 60
-          # Seals an OCI image into a signed .mvmpkg with the home's own
-          # signer and boots it as `machine run ./witness.mvmpkg`: the
-          # Firecracker boot witness for the single-file artifact.
-          - witness: bundle_boot_live
-            timeout: 60
+        # bundle_boot_live seals an OCI image into a signed .mvmpkg with the
+        # home's own signer and boots it as `machine run ./witness.mvmpkg`: the
+        # Firecracker boot witness for the single-file artifact.
+        # slot is the per-witness digit in the isolated state base the
+        # always-run cleanup removes; the job-cleanup script validates it.
+        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60,"slot":1}]' || '[{"witness":"ci_live","timeout":90,"slot":2},{"witness":"tool_live","timeout":60,"slot":1},{"witness":"bundle_boot_live","timeout":60,"slot":3}]') }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
@@ -287,6 +292,51 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
+      # The witness can run on the shared self-hosted KVM box: isolate its
+      # HOME/MVM_HOME/TMPDIR so the always-run cleanup at the end can kill
+      # exactly what this job started and remove exactly what it wrote.
+      - name: Isolate test state
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
+          mkdir -m 700 -- "$base"
+          mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
+          {
+            printf 'RUNNER_ORIGINAL_HOME=%s\n' "$HOME"
+            printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"
+            printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify tool credential boundaries on Linux
+        if: matrix.witness == 'tool_live'
+        run: |
+          set -euo pipefail
+          cargo test -p mvm-agentd --lib --no-run --message-format=json > "$RUNNER_TEMP/tool-tests.jsonl"
+          test_binary="$(python3 - "$RUNNER_TEMP/tool-tests.jsonl" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as records:
+              binaries = [
+                  item["executable"]
+                  for line in records
+                  if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                  and item.get("executable")
+                  and item["target"]["name"] == "mvm_agentd"
+              ]
+          assert len(binaries) == 1, binaries
+          print(binaries[0])
+          PY
+          )"
+          for test in \
+            tool_helper::capability_tests::helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege \
+            tool_helper::capability_tests::installed_stash_executes_only_through_helper_descriptor \
+            tool_attribution::tests::relay_provenance_reads_the_isolated_group_and_restores_credentials; do
+            "$test_binary" --list --exact "$test" | grep -Fx "$test: test"
+            sudo env MVM_GUEST_PRIVILEGED_TESTS=1 "$test_binary" --exact "$test" --nocapture
+          done
+          "$test_binary" tool_ --nocapture
+          cargo test -p mvm-agentd --bin mvm-tool-shim
+
       - name: Run the selected live witness
         if: matrix.witness != 'bundle_boot_live'
         run: just bdd::live-ci ${{ matrix.witness }}
@@ -301,7 +351,7 @@ jobs:
       - name: Dump VMM diagnostics on failure
         if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "${MVM_HOME:-$HOME/.mvm}"/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
             for f in firecracker.log console.log; do
@@ -311,6 +361,19 @@ jobs:
               fi
             done
           done
+
+      # Last step, always: kill by PID whatever this job started (a VMM
+      # launched through `sudo setsid` outlives the job's process tree), then
+      # remove the isolated HOME/MVM_HOME/TMPDIR it used. Required on every
+      # job that can run on the KVM pool.
+      - name: Clean isolated state
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
+            printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
+          fi
+          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here

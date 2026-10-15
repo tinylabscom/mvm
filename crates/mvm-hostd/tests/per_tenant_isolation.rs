@@ -164,6 +164,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
                 .into_owned(),
         ),
         audit_signer_uds_path: None,
+        tool_decision_socket: None,
         services_bindings: vec![ServiceId::parse("host.audit.v1").expect("service id")],
         capability_bindings: vec![],
         assurance: None,

@@ -447,7 +447,7 @@ rules and discovery order, and the [policy schema](/reference/policy-schema/).
 | --- | --- |
 | `mvmctl policy show [PROFILE...] [--format toml\|json\|plan] [--project DIR] [--backend KIND]` | Print the merged policy: TOML with its layers, JSON with per-item provenance, or the grants, egress rules, routes and bindings the signed plan would carry. Without `PROFILE`, reads the project's `mvm.toml` `[policy]` table |
 | `mvmctl policy resolve [PROFILE...] [-o FILE] [--project DIR] [--backend KIND]` | Write the resolved manifest `run --plan` accepts |
-| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning, the unenforced `[tools]` section, and secrets the store would not bind |
+| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning and every secret the store would not bind |
 | `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
 | `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
 | `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile NAME\|PATH... \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. A routed host needs method and path for a request-level decision; a tool marked `ask` needs runtime approval and is not pre-authorized |
@@ -947,7 +947,7 @@ guest, on any tier.
 | `mvmctl machine rm --all --yes`                                                                | Remove every persisted named machine spec                                                                                                                                                                                                                                                                                            |
 | `mvmctl machine rm <name>... --yes --json`                                                     | Print a JSON array deletion summary                                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine exec <name> -- <cmd>...`                                                       | Run a command in an already-started named machine                                                                                                                                                                                                                                                                                    |
-| `mvmctl machine exec <name> --tool TOOL -- <cmd>...`                                           | Run a declared non-interactive command only after the admitted per-VM tool policy and endpoint audit allow its exact argv. The policy must bind `TOOL` to the exact absolute guest executable path passed as `<cmd>`; aliases, relative commands, a missing endpoint, or a missing approval are refused before spawn. |
+| `mvmctl machine exec <name> --tool TOOL -- <cmd>...`                                           | Run a declared non-interactive command only after the admitted per-VM tool policy and endpoint audit allow its exact argv. The policy must bind `TOOL` to the exact absolute guest executable path passed as `<cmd>`; aliases, relative commands, a missing endpoint, or a missing approval are refused before spawn. The same declared command spawned by the workload itself is intercepted in-guest and decided by the same endpoint gate before it runs (see the tool-policy guide). |
 | `mvmctl machine exec <name> -it -- <cmd>...`                                                   | Run a command in an already-started named machine attached to a PTY                                                                                                                                                                                                                                                                  |
 | `mvmctl machine exec <name>`                                                                   | Omit the command to drop into an interactive shell (same as `machine shell`)                                                                                                                                                                                                                                                         |
 | `mvmctl machine shell <name>`                                                                  | Attach an interactive shell/console to an already-started named machine — persistent or transient (a `machine run --name <name>` VM is reachable while it runs)                                                                                                                                                                      |
@@ -1124,7 +1124,7 @@ mvmctl machine run -it --image <dev-image> -- htop      # exits with htop, VM go
 For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
 `mvmctl` selects only backends that can keep the guest NIC-less and route
 traffic through the host-side vsock mediation endpoint. On that path the
-injected guest `/init` starts `mvm-egress-client` and the runtime injects proxy
+guest agent starts `mvm-egress-client` and the runtime injects proxy
 env vars pointing at its loopback SOCKS listener automatically. Today that
 means `hvf`; incapable backends are refused rather than silently
 falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
@@ -1364,6 +1364,62 @@ The posture never grants anything: a bundle that allows egress still boots
 deny-all unless the launch asks for egress. A manifest edited on disk after
 install fails the signature check and refuses the boot.
 
+#### Environment descriptor
+
+`bundle export --environment FILE.json` seals a signed environment descriptor
+as the bundle's `environment` member. The descriptor is typed JSON with its own
+`descriptor_version` (currently `1`); unknown fields, capabilities, or versions
+are refused rather than ignored:
+
+```json
+{
+  "descriptor_version": 1,
+  "pack": { "name": "acme/agent", "version": "1.2.3" },
+  "target": "x86_64-linux",
+  "entrypoint": { "argv": ["/usr/bin/agent"], "working_dir": "/workspace" },
+  "resources": { "cpu_cores": 2, "memory_mb": 2048 },
+  "volumes": [{ "name": "workspace", "guest_path": "/workspace" }],
+  "secret_slots": [{ "name": "AGENT_TOKEN", "required": true }],
+  "capabilities": ["egress", "host_volumes"],
+  "services": [{ "name": "indexer", "argv": ["/usr/bin/indexer"] }]
+}
+```
+
+A bundle carrying the descriptor is stamped bundle schema 5; readers that
+predate it refuse it at the schema check. Bundles without one keep the schema
+their other members need and verify and launch as before. Verification refuses
+a descriptor whose `target` is not the bundle's architecture, and any required
+capability (`egress`, `host_volumes`, `interactive_terminal`) the bundle's
+`--posture` does not permit — a descriptor that requires a capability needs a
+posture beside it. Volumes require `host_volumes`. Secret slots are names only:
+a slot carrying a value, or an argv that passes a secret-shaped flag or a slot
+inline (`TOKEN=...`, `--api-key=...`), is refused.
+
+At launch of an installed bundle:
+
+- the descriptor's resources become the defaults for whichever of `--cpus` and
+  `--memory` the command line did not name; the host's memory ceiling and
+  admission budget still apply and refuse rather than clamp;
+- a required secret slot with no `--secret` binding refuses the launch; the
+  value stays on the host and is substituted at the endpoint, as for any
+  binding;
+- an image whose recorded entrypoint differs from the descriptor's refuses the
+  launch; missing, malformed, or empty entrypoint metadata also refuses an
+  ordinary launch. An ad-hoc command replaces the entrypoint explicitly and is
+  not compared, but remains subject to the launch's posture and command rules;
+- a capability beyond a posture the launch is held to refuses the launch.
+
+Transient and persistent starts use the same entrypoint checks. Checkpoint and
+fork paths that cannot establish the image entrypoint refuse a descriptor-bearing
+bundle rather than treating failed resolution as an explicit override.
+
+These refusals are recorded as `plan.failed` with class
+`bundle-environment-refused`. Application `services` are guest processes,
+distinct from the broker's host services named by `--host-service`; they are
+recorded and shown by `bundle fetch` but not yet started by the launcher.
+Volumes are the mount points the workload expects; the launch still attaches
+them with `--volume` under the posture's ceiling.
+
 `.mvmpkg` is the one extension for a runnable artifact. Being runnable is a
 property of the command, not of the file: the same archive `bundle export`,
 `bundle build`, and `artifact pack` write is the one `bundle install`,
@@ -1468,7 +1524,7 @@ concept over a different store.
 | `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--retain-for <duration>] [--expected-generation <n>] [--json]`                                                                | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier and the default retention deadline. Emits a `session.parked` chain entry.    |
 | `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                                                        |
 | `mvmctl agent-session renew <id> --for <duration> [--expected-generation <n>] [--expected-deadline <unix>] [--json]`                                                                                                                   | Move a parked session's retention deadline to `--for` from now. Extend-only. Emits a `session.renewed` chain entry.                                                                                                                             |
-| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched |
+| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched. The fork is a machine in its own right: a prompt to it is recorded and step-checkpointed under the fork's own session, which replays in turn |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -1817,6 +1873,12 @@ running microVM.
 
 ## Packs, Bundles, and Dependencies
 
+Pack discovery reads only root `index.json` with `schema_version: 2`. Versions
+are catalog objects containing `version` and `manifest_sha256`; search displays
+their version strings. Pull checks the catalog digest against exact manifest
+bytes before adoption or installation. This untrusted discovery hash does not
+replace publisher signatures or existing authenticated installed pins.
+
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
@@ -1843,6 +1905,7 @@ running microVM.
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
 | `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
+| `mvmctl bundle export <t> --environment <file.json>`      | Seal a signed environment descriptor (entrypoint, advisory resources, volumes, secret slot names, required capabilities, application services); capabilities must be permitted by `--posture` |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`, streaming each artifact through its hash check rather than loading the archive into memory                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
@@ -1865,20 +1928,59 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-`pool warm` is optional. Unnamed runs already leave one standby of each image
-they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
-of an image is warm without it; `pool warm` makes the first one warm too, or
-holds more than one standby of an image:
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch of a warm-eligible shape, enable claims
+explicitly:
 
 ```bash
 mvmctl image pull alpine
 mvmctl pool warm --image alpine          # optional pre-warm
-mvmctl machine run --image alpine -- /bin/true   # claims it
+MVM_RESIDENCY=warm mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
-A launch with no matching standby cold-boots rather than failing. Named launches
-and shapes with extra volumes (including directory mounts) or allowed egress
-always take the cold path. `MVM_RESIDENCY=cold` turns implicit standbys off.
+Without a source flag, `pool warm` warms the most recently pulled images,
+bounded by the residency standby target (at least one). With no pull history
+it warms the default image. `pool warm --default` selects the default image
+regardless of pull history; it conflicts with the explicit source flags.
+
+`pool warm` takes the same source a launch names: `--image`, `--manifest`
+(a manifest, a built slot, an installed bundle sha256 or a signed `.mvmpkg`
+archive) or `--flake` with an optional `--flake-profile`. An archive is
+verified and installed exactly as `machine run` does it. Standbys are keyed by
+the verified bundle or slot digest and the image digest, so a launch of a
+different artifact, or of the same rootfs under the host runtime, never claims
+one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
+path: the guest runtime it pins predates the claim handshake. `pool warm`
+refuses that bundle before preparing a standby, rather than creating capacity
+that no launch can claim.
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
+when standbys are enabled. If no compatible standby is ready, the launch
+declares a cold boot rather than reporting it as a warm claim. Named launches,
+launches with standbys disabled, and volume shapes no late-volume slot can
+serve retain their cold path.
+
+On Firecracker, a launch with up to four read-only directory mounts
+(`--mount DIR:PATH:ro`) claims the same standby a launch without them would.
+Every standby boots four read-only placeholder slots; the claim re-checks each
+mount against the shares its signed plan admitted, including the content digest
+the plan pinned, points a slot at the launch's own materialized image before the
+child resumes, and has the guest mount it read-only by its label before the
+claim commits. The guest's mount helper exists only in a standby's guest and
+exits on that first restore, before any workload process starts. A writable
+mount, a disk volume, or more than four mounts keeps the cold path, as does
+every volume launch on other backends.
+
+A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
+with `pool warm --egress`, or the one an earlier egress-allowing run left
+behind. That standby's guest starts its egress client but holds no policy and
+no destinations; the claim spawns the child's own endpoint under the policy its
+signed plan recorded, and refuses any other. A launch whose endpoint must
+terminate TLS for its own destinations (a bound secret or an intercepted route)
+keeps its cold path, because a shared standby cannot hold a certificate minted
+for them.
 
 Pack inspection reports `official_status: "established"` only for a fully verified
 `mvm/` pack whose signer matches the reserved MVM publisher identity and whose

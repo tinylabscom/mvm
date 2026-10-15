@@ -146,6 +146,14 @@ pub(super) fn boot_transient_vm(
 
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
+        if mvm_runtime::catalog::descriptor(attempt.backend.kind()).is_workload
+            && let Err(error) =
+                mvm_hostd::plan_admission::stash_plan_for_bridge(attempt.start_config)
+        {
+            remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
+            return Err(error)
+                .context("persisting admitted transient plan and guest verb grant before boot");
+        }
         let phase = mvm_runtime::ui::activity::start(format!(
             "Booting the VM ({})",
             attempt.backend.name()
@@ -534,6 +542,7 @@ mod tests {
             image: Some("alpine".into()),
             cpus: 2,
             memory_mib: 512,
+            egress: false,
         };
         // A claim replaces what it took; a launch that found none prepares one.
         assert_eq!(standby_to_leave(Some(&refill), None), Some(&refill));

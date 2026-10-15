@@ -21,6 +21,7 @@ pub mod helper_contract;
 pub mod helper_exit;
 pub mod host_agent_spawn;
 pub mod hvf_supervisor;
+pub mod late_volumes;
 pub mod linux_env;
 pub mod network_endpoint_spawn;
 pub mod observability_target;

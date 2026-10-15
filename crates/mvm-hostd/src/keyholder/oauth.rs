@@ -1053,11 +1053,19 @@ mod tests {
         })
     }
 
-    /// A port nothing is listening on.
+    /// A token endpoint that hangs up on every connection before answering.
+    ///
+    /// The port stays bound for the rest of the process. A port merely
+    /// released would be free for a sibling test's mock server to take, and
+    /// that server answers every request with a fresh token.
     fn refused_token_url() -> String {
         let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
         let addr = listener.local_addr().unwrap();
-        drop(listener);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                drop(stream);
+            }
+        });
         format!("http://{addr}/token")
     }
 
