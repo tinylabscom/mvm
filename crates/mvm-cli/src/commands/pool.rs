@@ -1027,7 +1027,7 @@ pub fn try_warm_claim(
     // A claimed standby was activated when it was prepared, so nothing on the
     // claim path holds the workload behind the admission's sync. Wait for it
     // before claiming.
-    mvm_core::admission_durability::wait_for(cfg.admission_durability.as_ref())?;
+    cfg.wait_for_admission_durability()?;
     let Some(tenant) = cfg.tenant_id.clone() else {
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::Unadmitted));
     };

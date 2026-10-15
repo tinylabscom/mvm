@@ -239,6 +239,16 @@ pub struct VmStartConfig {
     pub admission_durability: Option<crate::admission_durability::AdmissionDurability>,
 }
 
+impl VmStartConfig {
+    /// Wait for the admission's audit sync when it is still in flight; see
+    /// [`Self::admission_durability`]. Waiting again once the sync has
+    /// finished costs nothing, so every path that is about to let the
+    /// workload run waits, whether or not an earlier step already did.
+    pub fn wait_for_admission_durability(&self) -> Result<()> {
+        crate::admission_durability::wait_for(self.admission_durability.as_ref())
+    }
+}
+
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.
 ///
 /// The host base64-encodes the JSON so the value is a single space/newline-free

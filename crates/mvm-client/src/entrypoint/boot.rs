@@ -51,6 +51,20 @@ pub struct SessionAuditSubstrate {
     pub durability: Option<mvm_core::admission_durability::AdmissionDurability>,
 }
 
+impl SessionAuditSubstrate {
+    /// Move the admitted substrate onto the start config its boot runs from,
+    /// returning the materialized images admission hardened to read-only so a
+    /// caller with volumes can fold them into its volume flags.
+    pub fn apply_to(self, start_config: &mut mvm_core::vm_backend::VmStartConfig) -> Vec<String> {
+        start_config.tenant_id = Some(self.tenant_id);
+        start_config.plan_json = Some(self.plan_json);
+        start_config.bundle_json = self.bundle_json;
+        start_config.config_files.extend(self.config_files);
+        start_config.admission_durability = self.durability;
+        self.read_only_materialized_images
+    }
+}
+
 /// Admission callback: given what the boot resolved, produce the substrate the
 /// admitted plan contributes, or `None` when the caller admits nothing.
 ///
@@ -286,11 +300,7 @@ pub fn boot_session_vm(
         bundle_archive: bundle_archive.as_deref(),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
-    start_config.tenant_id = Some(substrate.tenant_id);
-    start_config.plan_json = Some(substrate.plan_json);
-    start_config.bundle_json = substrate.bundle_json;
-    start_config.config_files.extend(substrate.config_files);
-    start_config.admission_durability = substrate.durability;
+    substrate.apply_to(&mut start_config);
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;

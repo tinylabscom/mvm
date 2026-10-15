@@ -59,6 +59,7 @@ mod backend;
 mod broker;
 mod claim_lease;
 mod console_boot;
+mod durability;
 mod refusal;
 mod sockets;
 mod spawner;
@@ -404,12 +405,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             redaction: inputs.redaction,
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
-        // A guest that is not activated over vsock runs its workload as soon as
-        // it boots, so it cannot boot beside the admission's audit sync.
-        let activates = crate::microvm::booted_with_universal_initramfs(inputs.config);
-        if !activates {
-            mvm_core::admission_durability::wait_for(inputs.config.admission_durability.as_ref())?;
-        }
+        durability::wait_for_unactivated_boot(inputs.config)?;
         let streamer = Arc::clone(&self.console_streamer);
         let vm = console_boot::boot_while_starting_console(
             || self.driver.boot(&spec),
@@ -423,18 +419,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // while the broker registration below still has a guard that rolls back
         // on failure. A rootfs boot whose universal initramfs could not be
         // resolved was refused at launch resolution, before the VMM started.
-        //
-        // Activation is what lets workload code run, so it is also where the
-        // admission's audit sync is waited for when the boot ran beside it. A
-        // sync that failed means the admission cannot be shown afterwards: the
-        // guest is torn down unactivated, having run nothing.
-        if activates {
-            if let Err(error) = mvm_core::admission_durability::wait_for(
-                inputs.config.admission_durability.as_ref(),
-            ) {
-                self.abandon_unactivated(&*vm, &inputs.config.name, &state_dir);
-                return Err(error);
-            }
+        if crate::microvm::booted_with_universal_initramfs(inputs.config) {
+            durability::wait_for_activation(inputs.config, &*vm, &*self.console_streamer)?;
             trace.mark("admission_durable");
             crate::microvm::activate_workload(&*vm, inputs.config)
                 .context("activate workload after boot")?;
@@ -461,23 +447,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
         trace.write_to(&state_dir);
         Ok(vm)
-    }
-
-    /// Tear down a guest that booted but must never be activated.
-    ///
-    /// Best-effort by necessity — the caller is already failing the launch —
-    /// but each step is logged rather than dropped, because a VMM left behind
-    /// here is a booted guest nobody owns.
-    fn abandon_unactivated(&self, vm: &dyn RunningVm, name: &str, state_dir: &std::path::Path) {
-        if let Err(error) = vm.kill() {
-            tracing::warn!(
-                vm = %name,
-                error = %format!("{error:#}"),
-                "could not stop a guest refused activation"
-            );
-        }
-        mvm_vmm::host::vm_helpers::reap_vm_host_helpers(state_dir, name);
-        self.console_streamer.stop(name);
     }
 
     /// Fork a clean standby parent into a fresh, admitted child, gated exactly as

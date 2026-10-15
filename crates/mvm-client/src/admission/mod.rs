@@ -40,6 +40,7 @@ mod audit;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+mod durability;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod policy;
@@ -51,6 +52,7 @@ pub mod run_secrets;
 pub mod secrets;
 
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use durability::admit_plan_for_boot_syncing_beside_boot;
 pub use instructions::InstructionSources;
 
 /// A content-bound asset. Operator-declared files and internally selected
@@ -396,32 +398,6 @@ pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionCon
     // of it; later boots are served from the digest cache and stay silent.
     let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
     let admitted = admit_plan_for_boot_configured_ingress(p, Vec::new())?;
-    phase.finish();
-    Ok(admitted)
-}
-
-/// [`admit_plan_for_boot`], with the admission's audit sync left running
-/// instead of waited for.
-///
-/// Every refusal admission can make — image source, entrypoint, grants, host
-/// budget, signing, verification, nonce, validity window, bundle posture,
-/// policy — has been made, and every audit record written, before this
-/// returns. What is still outstanding is the one `fdatasync` round that makes
-/// those records survive a power loss. The returned [`AdmissionDurability`]
-/// is that round: the caller may start the VMM beside it, and must not let the
-/// workload run until it has waited for it successfully. Carrying it on
-/// [`VmStartConfig::admission_durability`] is how a boot does that.
-///
-/// [`AdmissionDurability`]: mvm_core::admission_durability::AdmissionDurability
-/// [`VmStartConfig::admission_durability`]: mvm_core::vm_backend::VmStartConfig::admission_durability
-pub fn admit_plan_for_boot_syncing_beside_boot(
-    p: AdmitPlanForBootParams<'_>,
-) -> Result<(
-    AdmissionContext,
-    mvm_core::admission_durability::AdmissionDurability,
-)> {
-    let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
-    let admitted = admit(p, Vec::new(), AdmissionSync::BesideBoot)?;
     phase.finish();
     Ok(admitted)
 }

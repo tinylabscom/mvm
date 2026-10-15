@@ -795,7 +795,7 @@ impl AnyBackend {
     /// it starts anything.
     pub fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         if !self.activation_waits_for_admission() {
-            mvm_core::admission_durability::wait_for(config.admission_durability.as_ref())?;
+            config.wait_for_admission_durability()?;
         }
         self.inner().start(config)
     }
