@@ -4,35 +4,188 @@ All notable changes to mvm are documented in this file.
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-10-12
+
+v0.23.0 was tagged but never published: its release run did not pass the live gates. v0.23.1 was prepared but never tagged. This is the first release since v0.22.0, so it also ships everything listed under 0.23.0 below.
+
+**Upgrade note — `mvmctl env cleanup` in v0.22.0 (and earlier) emptied the host's `/tmp`.** On native Linux and on macOS 13–25 the dev-VM maintenance script ran as a plain host shell, so `mvmctl env cleanup` deleted everything under the host's `/tmp` and `/var/tmp` (with `sudo`) and collected the host's Nix store. Do not run `env cleanup` from v0.22.0 or older on those hosts. From this release the maintenance runs only when the Linux environment is a VM; on the host the command leaves `/tmp` and the Nix store alone and still prunes `~/.mvm/dev/builds` (#4334).
+
+### Added
+- **cli**: Leave a standby behind every run instead of requiring one first: the first run of an image boots cold and prepares a standby, and `pool warm` is no longer a required step (#4392)
+- **images**: Consume the Linux-only base image contract (#4366)
+- **release**: Pair signed runtimes with native distributions (#4238)
+- **packs**: Admit built packs only under the host's image-set revocation list (#4365)
+- **packs**: Materialize copies and npm lockfiles, and add pack lock/compile (#4368)
+- **packs**: Add digest-bound scenarios with host-side grading (#4360)
+- **packs**: Add Rust and Kotlin PackSpec builders over shared goldens (#4361)
+- **bench**: Hold prepared-cold samples to the ceiling from invocation (#4359)
+- **images**: Check a base-image contract instead of the guest-agent range (#4349)
+- **volumes**: `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` accepts unverified storage on development hosts, for managed volumes, writable disk images, and directory snapshots alike. Off by default, recorded as `volume_storage_override` in the local audit log on every use (refused if it cannot be recorded), and refused by `--prod`.
+- **runtime**: Assemble source guest artifacts from one archive
+- **image**: Verify selected signed base-set artifacts
+- **build**: Version the builder job contract and classify its outcome
+- **packs**: Verify signed registry-pack revocation documents
+- **packs**: Persist verified revocation checkpoints
+- **cli**: Unify named-machine lifecycle surface
+- **agent**: Bind declared command map to signed guest grant
+- **packs**: Resolve signed pack includes in template scaffolds
+- **packs**: Enforce operator-configured revocations
+- Build deterministic unsigned application layers offline
+- **cli**: Expose workload pack search and pull aliases
+- **packs**: Report verified signer in pack inspection
+- **packs**: Define neutral PackSpec v1 authoring contract
+- **packs**: Verify built-image provenance and base pin
+- **packs**: Make workload pack commands first-class
+- **packs**: Admit built-image manifest declarations
+- **packs**: Authenticate built image release assets before install
+- Supervisor-owned protected HVF console capture
+- **packs**: Lock and lower PackSpec through the workload compiler
+- **build**: Builder boot ABI 2 carries mvm-setpriv in the boot payload
+- **images**: Load the signed image-set revocation list for offline admission
+- **cli**: Take the boot source positionally on run and machine run
+- **runtime**: Require encryption for instance snapshot persistence
+- **bundle**: Package OCI workloads with signed offline boot assets
+- **crypto**: Authenticated checkpoint object envelopes
+- **packs**: Install and authenticate built-image release assets
+- **images**: Retain signed root proofs for offline pack admission
+- **claims**: Register verify-and-boot for signed .mvmpkg artifacts
+- **bench**: Measure booting a signed .mvmpkg in its own lane
+- **agentd**: Give initramfs-path workloads the overlay env and addon DNS
+- **checkpoint**: Encrypt checkpoints at rest
+- **release**: Ship the guest runtime as a signed CLI release asset
+- **guest**: Fix mkGuest identities to the initramfs set; ship mvm-setpriv in the overlay
+- **guest-runtime**: Assemble every piece from one archive on every route
+- **packs**: Add the built-pack boot contract verifier
+- **guest-runtime**: Assemble a release binary's pieces from its own release runtime
+- **telemetry**: Seedable mock telemetry and served-shape fixtures
+- **images**: Take the guest runtime out of the image-set contract
+
 ### Changed
 - **volumes**: Refuse to place managed-volume plaintext on storage that is not verified encrypted. `machine volume create`, `unlock`, `mount`, just-in-time unlock, and every start that leases a managed volume now check the plaintext directory first (FileVault on macOS; ext4 over dm-crypt/LUKS with an internal journal on Linux, which needs `tune2fs` read access to the device). A host that cannot show this — including a Linux host whose volume root is not on a verified encrypted ext layout — is refused with the reason and the fix. Locked volumes stay sealed and unlocked images are never deleted by a refusal.
 - **volumes**: Writable `HOST.img:/GUEST:SIZE:rw` disk images get the same storage check, are created `0600` (missing parent directories `0700`), and an existing image other users can access, or one in a directory others can write to, is refused rather than used. Existing files are never chmodded.
 - **volumes**: Sealing a managed volume streams ciphertext into a private staging directory; no plaintext copy is written beside the archive.
 - **doctor**: Add a `volume storage (encrypted backing)` line. The path-specific detector is now shared by `doctor`, the volume service, and directory snapshots (`--mount DIR:/GUEST`, `volume mount --host`), so on Linux those now also need an ext4-over-LUKS layout with an internal journal that `tune2fs` can confirm.
-
-### Added
-- **volumes**: `MVM_ALLOW_UNENCRYPTED_VOLUME_STORAGE=1` accepts unverified storage on development hosts, for managed volumes, writable disk images, and directory snapshots alike. Off by default, recorded as `volume_storage_override` in the local audit log on every use (refused if it cannot be recorded), and refused by `--prod`.
-
-## [0.23.1] — 2026-10-07
-
-### Added
-- Verify selected signed base-set artifacts with `mvmctl image boot verify --artifact`.
-- Verify signed registry-pack revocation documents and persist verified checkpoints.
-- Bind mediated tool calls to signed executable paths and tool-scoped routes and secrets.
-
-### Changed
-- Make named-machine lifecycle guidance and commands consistent.
-- Parallelize release optimization builds.
-- Assemble source guest artifacts from one archive.
+- **core**: Refuse owner-only state on non-Unix hosts and cross-check Windows
+- **agentd**: Fold flowmux-async into addons
+- **trust**: Commit keyless instruction bundles beside the files
+- **release**: Publish only mvm-contract to crates.io
 
 ### Fixed
-- Accept immutable sealed entrypoints while refusing writable entrypoint modes.
-- Show prompt-replay completion in default CLI output.
-- Fail closed when detached-machine readiness cannot be confirmed.
-- Preserve tool attribution for the egress-client identity.
-- Keep builder and telemetry outcome reporting bound to the active run.
+- **fc**: Point a forked child at its own devices without a mount namespace, so warm standbys work without root (#4390)
+- **agent-prompt**: Provision the snapshot key before a prompt's step checkpoint (#4376)
+- **vmm**: Signal an endpoint only while it confirms the pid file's record (#4397)
+- **agentd**: Bound every wait in the telemetry capture session (#4383)
+- **packs**: Reserve the mvm namespace with mandatory revocation checks (#4246)
+- **conformance**: Stop every VM a scenario started, on every exit path (#4370)
+- **cli**: Give doctor's live builder-daemon tests a deadline the runner can meet (#4373)
+- **cleanup**: Never sweep the host's `/tmp` from `env cleanup` (#4334)
+- **snapshot**: Provision the host snapshot key on bootstrap and first warm (#4320)
+- **release**: Report the adopted guest runtime on a plain bootstrap (#4336)
+- **runtime**: Keep a saved-state standby's state dir out of the orphan sweep (#4340)
+- **cli**: Refuse an over-budget warm launch before its workload is sent (#4341)
+- **build**: Acquire a missing builder image on every build path (#4355)
+- **seccomp**: Admit AF_VSOCK sockets for GPU-granted workloads (#4357)
+- **release**: Run the README's quick start in the fresh-install smoke (#4353)
+- **xtask**: Judge the last completed scheduled run, not one still in flight (#4358)
+- **cli**: Expose egress review pointers in JSON runs
+- **jailer**: Confine every thread of the network endpoint, not just one
+- **sessions**: Enforce idle expiry on every backend and release host state on supervisor stops
+- **agentd**: Run the egress client as its own identity on the initramfs path
+- **telemetry**: Tie guest assertion to boot provisioning
+- Authorize egress identity for tool attribution
+- **client**: Fail closed on detached start readiness
+- **agent**: Accept hardened sealed entrypoint mode
+- Parallelize release optimization
+- Cap default Cargo build concurrency
+- **ci**: Repair security mutation lanes
+- **packs**: Require asset identity audit before boot
+- Pin compatible just for disposable GCP tests
+- **packs**: Refuse to create read-only disk images
+- Make scanned host snapshots read-only
+- **conformance**: Clear replay sessions between live runs
+- **admission**: Require materialized mount identities
+- **ci**: Transfer source runtime cache to QEMU smoke
+- **build**: Seed verified guest runtimes into isolated BDD homes
+- **build**: Consolidate runtime overlay cache admission witnesses
+- Prepare tracked-source GCP live witness
+- **core**: Create private directory chains with restrictive modes
+- **diagnostics**: Harden managed capture and export boundaries
+- **packs**: Require independent revocation trust for built images
+- **packs**: Bind provenance lock digest to compiled images lock
+- **cli**: Enforce prepared sub-300ms launches
+- **ci**: Reconcile manual main recovery runs
+- **ci**: Shard the complete Linux documented-surface witness
+- **ci**: Sign source host helpers in the Sigstore bundle format
+- Retain protected capture evidence during audit pruning
+- **update**: Verify the checksum manifest's signature before trusting it
+- **bdd**: Prepare live homes before prepared-only launches
+- Restore sourceless `run` and build the no-KVM guest runtime from source
+- **build**: Read builder output only as regular files, and sign only verified output
+- **guest**: Close the initramfs-path gaps the shell init used to cover
+- **build**: One checkout, one archive for every source guest artifact
+- **ci**: Build the source guest runtime in the no-KVM bootstrap
+- **ci**: Repair the no-KVM verity fixture and the e2e lane's cold launches
+- **build**: Seal one-shot flake builds on the host and carry their initrd
+- **qemu**: Refuse an x86_64 ELF kernel without a PVH entry note
+- Attach infers no boot source; e2e prepares the images its live scenarios boot
+- **hvf**: Accept a pre-activation agent as a ready standby parent
+- **guest**: Install the admitted seccomp tier in every workload process
+- **snapshot**: Stage captures privately and reconcile interrupted staging
+- **builder**: Run the builder agent under a uid its image names; drop the egress client to mvm-egress
+- **e2e**: Prepare live images under the runtime each scenario boots; library launches resolve the CLI's guest runtime
+- **guest**: Admit the claiming plan's seccomp tier in a warm-claimed child
+- **ci**: Stamp the no-KVM fixture's entrypoint marker at the mode the agent requires
+- **client**: Keep local.rs within the production line budget
+- **client**: Remove the definition a failed persistent launch wrote
 
-## [0.23.0] — 2026-10-07
+### Performance
+- **capture**: Confirm a fresh transcript opening without re-walking the audit chain (#4401)
+- **launch**: Reuse guest-runtime checks across launches, and stop syncing per-run plan copies (#4398)
+- **fc**: Hold kernel errors off the serial console until PID 1 runs (#4385)
+- **fc**: Probe the VMM pid without a shell, and poll local launch events finely (#4362)
+- **agent**: Keep a healthy activation off the serial console (#4386)
+- **audit**: Flush a run's exit records once and seal from the live segment (#4387)
+- **audit**: Publish the admission root inside the admission flush (#4351)
+- **vmm**: Write the per-boot identity drive without fsync (#4350)
+- **build**: Resolve the source guest runtime once per launch
+- **warm**: Keep warm claims off the decrypt path and under 300 ms
+
+### Refactored
+- **client**: Own checkpoint diff and replay seams
+- **api**: Close out ambiguous public sibling names
+- **api**: Remove final sibling-name exceptions
+- **client**: Share manifest inspection across CLI and SDKs
+- **compiler**: Extract shared workload compiler
+
+### Documentation
+- **telemetry**: Decide the capture-queue overflow rule from a fixed-storage noisy-producer measurement (#4384)
+- **plans**: Rank the ways to start a cold workload under 300 ms (#4352)
+- **cli**: Make machine lifecycle guidance consistently canonical
+- Propose key custody and confidential execution boundary
+- **claims**: Describe claims 3, 6 and 20 as main implements them
+- Rewrite the README
+- Stop promising unnamed runs boot without a prepared standby
+- **claims**: Source claim 3's overlay roothash from host assembly; cover the guest runtime under claim 20
+
+### Testing
+- **compiler**: Pin that no signing key can enter compilation (#4377)
+- **hostd**: Fail when musl's legacy open or rename is refused under confinement (#4367)
+- Speed up the test suite (#4364, #4371, #4380, #4381)
+- Exercise signed registry dependency pull from local mirror
+- Witness PS-11 signed instruction provenance
+- **telemetry**: Evaluate overflow retention policies
+- **claims**: Close the mutation-witness survivors behind #4275
+- **snapshot**: Witness the plaintext mode tightening on its own
+- **cli**: Pin the run alias falling through to the bundled default
+
+### Other
+- **ci**: Drop the duplicated no-KVM build-arm env (#4310)
+- **ci**: Clean up after every job on the self-hosted KVM box (#4335)
+- Enforce tool-scoped routes and secrets against an attributed tool invocation
+- Bind mediated tool calls to signed executable paths
+- Fix assurance guest runtime and extension mounts
+
+## [0.23.0] — 2026-10-07 (tagged, not published)
 
 ### Added
 - **builder-vm**: Prefer published builder image; opt-in local build …

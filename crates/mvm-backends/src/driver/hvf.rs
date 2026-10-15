@@ -454,7 +454,7 @@ fn boot_with_handoff(
             }
             // External readiness is reconciled; only authenticated control is
             // termination authority. No PID-file disappearance proves exit.
-            std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+            std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
             attempt = attempt.saturating_add(1);
         }
         wait_for_agent_socket(&agent_socket, AGENT_SOCKET_TIMEOUT, || {
@@ -962,7 +962,7 @@ fn wait_for_agent_socket(
                 socket.display()
             );
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
 }
@@ -1017,7 +1017,7 @@ fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result
         if deadline.saturating_duration_since(Instant::now()).is_zero() {
             break;
         }
-        std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
+        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
     let reason = last_error.map_or_else(
@@ -2172,6 +2172,7 @@ mod tests {
             rootfs_path: Some(rootfs.display().to_string()),
             runtime_overlay_version: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         mvm_vmm::host::runtime_meta::write("anchor-vm", &meta).unwrap();
 

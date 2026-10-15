@@ -354,9 +354,27 @@ pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
 /// A live process whose identity cannot be confirmed — its `/proc` entry
 /// hidden, its command line unreadable, no `--api-sock` on it — is an error,
 /// because a caller treats "not ours" as "already stopped".
+///
+/// A VMM claimed from the idle pool was started with the pool's socket on its
+/// command line; its claim recorded that path beside the VM's socket, and it is
+/// accepted too.
 pub fn is_firecracker_for_socket(pid: u32, api_socket: &Path) -> Result<bool> {
-    identity_from(observe_process(pid)?, api_socket)
+    let view = observe_process(pid)?;
+    let origin = super::idle_pool::claim_origin_for(api_socket);
+    identity_from_any(view, api_socket, origin.as_deref())
         .with_context(|| format!("confirming which VM pid {pid} serves"))
+}
+
+/// [`identity_from`] against the VM's socket, or the pool socket its VMM was
+/// claimed from.
+fn identity_from_any(view: ProcessView, api_socket: &Path, origin: Option<&Path>) -> Result<bool> {
+    if identity_from(view.clone(), api_socket)? {
+        return Ok(true);
+    }
+    match origin {
+        Some(origin) => identity_from(view, origin),
+        None => Ok(false),
+    }
 }
 
 /// What the process table says about one pid.
@@ -555,6 +573,22 @@ impl FcVmFullControl {
             vm_name: vm_name.into(),
         }
     }
+
+    fn runtime_meta(&self) -> Result<mvm_vmm::host::runtime_meta::VmRuntimeMeta> {
+        mvm_vmm::host::runtime_meta::read(&self.vm_name)
+            .with_context(|| {
+                format!(
+                    "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
+                    self.vm_name
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no mode.json found for VM '{}'; was it started with `mvmctl machine run`?",
+                    self.vm_name
+                )
+            })
+    }
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
@@ -589,20 +623,7 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
     }
 
     fn rootfs_path(&self) -> Result<PathBuf> {
-        let meta = mvm_vmm::host::runtime_meta::read(&self.vm_name)
-            .with_context(|| {
-                format!(
-                    "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
-                    self.vm_name
-                )
-            })?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no mode.json found for VM '{}'; was it started with `mvmctl machine run`?",
-                    self.vm_name
-                )
-            })?;
-        let rootfs_str = meta.rootfs_path.ok_or_else(|| {
+        let rootfs_str = self.runtime_meta()?.rootfs_path.ok_or_else(|| {
             anyhow::anyhow!(
                 "mode.json for VM '{}' has no rootfs_path field (started before rootfs tracking?)",
                 self.vm_name
@@ -611,7 +632,18 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
         Ok(PathBuf::from(rootfs_str))
     }
 
+    /// The paths this VM's Firecracker names. A restored VM's Firecracker still
+    /// names the paths its snapshot embedded, which its restore made resolve to
+    /// this VM's own copies; a snapshot of it embeds them again.
     fn device_anchors(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
+        let files = self.device_anchor_files()?;
+        Ok(self
+            .runtime_meta()?
+            .restored_device_anchors
+            .unwrap_or(files))
+    }
+
+    fn device_anchor_files(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
         let vm_dir = super::resolve_running_vm_dir(&self.vm_name)
             .with_context(|| format!("resolving VM dir for '{}'", self.vm_name))?;
         // A fork finds the parent's state dir as the vsock socket's
@@ -900,6 +932,28 @@ mod tests {
         assert!(identity_from(equals, mine).unwrap());
     }
 
+    /// A VMM claimed from the idle pool still names the pool socket it was
+    /// started with. The claim's record makes it this VM's; without one, or
+    /// for another pool socket, it is not.
+    #[test]
+    fn a_claimed_vmm_is_identified_by_the_pool_socket_its_claim_recorded() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        let origin = std::path::Path::new("/state/fc-idle/idle-1f/fc.socket");
+        let claimed = || {
+            firecracker(&[
+                "firecracker",
+                "--api-sock",
+                "/state/fc-idle/idle-1f/fc.socket",
+            ])
+        };
+        assert!(identity_from_any(claimed(), mine, Some(origin)).unwrap());
+        assert!(!identity_from_any(claimed(), mine, None).unwrap());
+        let other = std::path::Path::new("/state/fc-idle/idle-2a/fc.socket");
+        assert!(!identity_from_any(claimed(), mine, Some(other)).unwrap());
+        let own = firecracker(&["firecracker", "--api-sock", "/state/vms/vm-a/fc.socket"]);
+        assert!(identity_from_any(own, mine, Some(origin)).unwrap());
+    }
+
     /// Only a positively different answer is "not ours": a process that is
     /// gone, is not Firecracker, or serves another VM's socket.
     #[test]
@@ -1182,6 +1236,45 @@ mod tests {
                 &vm_dir.to_string_lossy()
             ))
         );
+    }
+
+    /// A VM restored from a snapshot reports, as the paths its snapshot embeds,
+    /// the ones its restore inherited, because its Firecracker still names
+    /// them; the files a capture copies are still its own.
+    #[test]
+    fn a_restored_vm_embeds_its_inherited_anchors_and_copies_its_own_files() {
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = socket_short_home();
+        env.set("MVM_HOME", tmp.path());
+
+        let vm_name = "restored-anchor-test";
+        let vm_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let rootfs = vm_dir.join("rootfs.ext4");
+        std::fs::File::create(&rootfs).unwrap();
+        std::fs::File::create(vm_dir.join("config.ext4")).unwrap();
+        let inherited = mvm_core::checkpoint::DeviceAnchors {
+            rootfs: "/parent/rootfs.ext4".into(),
+            rootfs_verity: None,
+            config: Some("/parent/vm/config.ext4".into()),
+            secrets: None,
+            identity: None,
+            vsock: "/parent/vm/runtime/v.sock".into(),
+        };
+        let mut meta =
+            mvm_vmm::host::runtime_meta::dev_attached(mvm_core::vm_backend::StartMode::Detached);
+        meta.rootfs_path = Some(rootfs.to_string_lossy().into_owned());
+        meta.restored_device_anchors = Some(inherited.clone());
+        mvm_vmm::host::runtime_meta::write(vm_name, &meta).unwrap();
+
+        let ctl = FcVmFullControl::new(vm_name);
+        assert_eq!(ctl.device_anchors().unwrap(), inherited);
+        let files = ctl.device_anchor_files().unwrap();
+        assert_eq!(files.rootfs, rootfs);
+        assert_eq!(files.config, Some(vm_dir.join("config.ext4")));
     }
 
     /// `device_anchors` fails with a clear message when the VM has no persisted

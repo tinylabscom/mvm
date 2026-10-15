@@ -119,6 +119,20 @@ standbys_per_run_image=N, released after Nm idle`.
   error instead of silently changing to another tier. `mvmctl pool status` reports `idle`,
   `claimed`, and `parked` counts when the selected backend provides that pool.
 
+### Idle Firecracker processes
+
+On Firecracker, a cold launch takes an idle VMM process instead of starting one when the
+pool holds one of its shape. After a workload boots, `mvmctl` starts a replacement in the
+background: the same launch line and privilege posture, already inside a systemd scope
+carrying the memory and task ceilings a launch of that guest size gets, with no kernel,
+drive, vsock, guest memory or plan. A launch with the same guest memory and no CPU grant
+claims it, moves it into its state directory, and configures it over the API exactly as it
+would a process it had just started; the scope's limits read back into
+`plan.grants_enforced` the same way. A claimed process is stopped with its VM, never
+returned. Each idle process is stopped after 20 minutes unclaimed. The pool keeps one
+process per guest size and two in all, under `$MVM_HOME/fc-idle`; it is off under
+`MVM_RESIDENCY=cold` and when `MVM_FC_IDLE_POOL=0`.
+
 ## Workspace Structure
 
 The workspace is organized by responsibility rather than by platform:

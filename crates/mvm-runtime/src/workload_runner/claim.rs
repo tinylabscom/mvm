@@ -64,6 +64,69 @@ pub enum ClaimRefusal {
         requested: u64,
         ceiling: u64,
     },
+    /// The network policy the claim would install in the child's endpoint is
+    /// not the one its admitted plan recorded. A child's destinations come from
+    /// its own signed plan and nowhere else, so a policy the plan does not name
+    /// is refused before the endpoint exists.
+    #[error(
+        "the claim's network policy (sha256 {got}) is not the policy its admitted plan \
+         recorded; a claimed child's endpoint enforces only its own plan's policy"
+    )]
+    PolicyNotAdmitted { got: String },
+}
+
+/// Refuse a claim whose network policy is not the one its admitted plan
+/// recorded.
+///
+/// Admission records the resolved policy's digest among the plan's policy
+/// asset identities, and the plan is signed. The claim hands the runner the
+/// policy it will install in the child's own endpoint, so this binds that
+/// policy to the signed plan: a parent's policy, a sibling's, or any other the
+/// caller supplied is refused. A plan that records no policy identity admits
+/// only a claim that allows nothing outbound, because there is then nothing to
+/// bind a permissive policy to.
+pub fn bind_claim_policy_to_plan(
+    asset_identities: &[mvm_core::plan::AssetIdentity],
+    policy: &NetworkPolicy,
+) -> Result<(), ClaimRefusal> {
+    let got = mvm_core::policy::network_policy::content_sha256(policy);
+    let mut recorded = asset_identities
+        .iter()
+        .filter(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+        .peekable();
+    let bound = match recorded.peek() {
+        None => !policy.admits_outbound(),
+        Some(_) => recorded.any(|asset| asset.digest == got),
+    };
+    if bound {
+        Ok(())
+    } else {
+        Err(ClaimRefusal::PolicyNotAdmitted { got })
+    }
+}
+
+/// The grant a claimed child's admitted plan is compared against.
+///
+/// A factory parent is sealed with no grant: it ran no workload and holds no
+/// authority to pass on, and an absent grant is deny-all egress. For a parent
+/// booted without the guest egress client that is exactly right. A parent booted
+/// with it carries the client and no destinations, and it never has an endpoint
+/// of its own. Every destination a child of it may reach is resolved from the
+/// child's own signed plan into the child's own endpoint, the same way a cold
+/// boot of that plan resolves it, so the egress half of the bound is the child's
+/// admitted allow-list. Every other dimension keeps the parent's sealed value.
+pub fn claim_parent_grant_bound(
+    parent: Option<&mvm_contract::grants::Grants>,
+    parent_boots_egress_client: bool,
+    child: Option<&mvm_contract::grants::Grants>,
+) -> Option<mvm_contract::grants::Grants> {
+    if !parent_boots_egress_client || parent.is_some() {
+        return parent.cloned();
+    }
+    Some(mvm_contract::grants::Grants {
+        egress: child.and_then(|grants| grants.egress.clone()),
+        ..mvm_contract::grants::Grants::default()
+    })
 }
 
 /// Refuse a claimed child whose admitted plan asks for more than this host's
@@ -262,6 +325,81 @@ impl<'a> ClaimGuards<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_identity(policy: &NetworkPolicy) -> mvm_core::plan::AssetIdentity {
+        mvm_core::plan::AssetIdentity::new(
+            mvm_core::plan::AssetKind::Policy,
+            "tenant:vm",
+            mvm_core::policy::network_policy::content_sha256(policy),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_claim_policy_binds_only_to_the_policy_its_plan_recorded() {
+        let admitted =
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]);
+        let recorded = [policy_identity(&admitted)];
+        assert!(bind_claim_policy_to_plan(&recorded, &admitted).is_ok());
+        for other in [
+            NetworkPolicy::unrestricted(),
+            NetworkPolicy::deny_all(),
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                8443,
+            )]),
+        ] {
+            assert!(
+                matches!(
+                    bind_claim_policy_to_plan(&recorded, &other),
+                    Err(ClaimRefusal::PolicyNotAdmitted { .. })
+                ),
+                "{other:?} must not bind to a plan that recorded another policy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_recording_no_policy_admits_only_a_claim_that_reaches_nothing() {
+        assert!(bind_claim_policy_to_plan(&[], &NetworkPolicy::deny_all()).is_ok());
+        assert!(matches!(
+            bind_claim_policy_to_plan(&[], &NetworkPolicy::unrestricted()),
+            Err(ClaimRefusal::PolicyNotAdmitted { .. })
+        ));
+    }
+
+    #[test]
+    fn only_an_egress_parent_with_no_sealed_grant_takes_the_childs_allow_list() {
+        let child = mvm_contract::grants::Grants {
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![mvm_core::policy::network_policy::HostPort::new(
+                    "api.example.com",
+                    443,
+                )],
+            }),
+            ..Default::default()
+        };
+        let bound = claim_parent_grant_bound(None, true, Some(&child)).unwrap();
+        assert_eq!(bound.egress, child.egress);
+        assert_eq!(bound.cpu, None);
+        assert_eq!(bound.drive, None);
+        assert_eq!(bound.display_input, None);
+
+        assert_eq!(
+            claim_parent_grant_bound(None, false, Some(&child)),
+            None,
+            "a parent without the client stays sealed deny-all"
+        );
+        let sealed = mvm_contract::grants::Grants::default();
+        assert_eq!(
+            claim_parent_grant_bound(Some(&sealed), true, Some(&child)),
+            Some(sealed),
+            "a parent that sealed a grant keeps it"
+        );
+    }
 
     #[test]
     fn bind_accepts_matching_and_rejects_mismatched_rootfs() {
