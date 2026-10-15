@@ -136,6 +136,9 @@ pub(super) fn boot_transient_vm(
             ui::info(&format!(
                 "Restoring transient VM '{vm_name}' from template '{tmpl}' snapshot..."
             ));
+            // A restored guest resumes already running; there is no activation
+            // left to hold it behind the admission's sync.
+            attempt.start_config.wait_for_admission_durability()?;
             match restore_via_snapshot(&vm_name, tmpl, snap, attempt.start_config) {
                 Ok(()) => true,
                 Err(e) => return Err(e).context("restoring transient VM snapshot"),

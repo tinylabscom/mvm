@@ -249,6 +249,7 @@ mod tests {
             dev_console: false,
             gpu: false,
             gpu_device: None,
+            admission_durability: None,
         }
     }
 

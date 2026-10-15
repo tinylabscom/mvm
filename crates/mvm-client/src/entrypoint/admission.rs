@@ -258,6 +258,7 @@ impl EntrypointAdmission {
                     .filter(|share| share.read_only)
                     .map(|share| share.host_path.clone())
                     .collect(),
+                durability: None,
             },
             context: ctx,
         })

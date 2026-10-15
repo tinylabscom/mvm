@@ -15,7 +15,7 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run,
+    SystemClock, admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -40,6 +40,7 @@ mod audit;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+mod durability;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod policy;
@@ -51,6 +52,7 @@ pub mod run_secrets;
 pub mod secrets;
 
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use durability::admit_plan_for_boot_syncing_beside_boot;
 pub use instructions::InstructionSources;
 
 /// A content-bound asset. Operator-declared files and internally selected
@@ -406,6 +408,22 @@ pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
+    let (context, durability) = admit(p, ingress, durability::AdmissionSync::Inline)?;
+    debug_assert!(
+        durability.is_settled(),
+        "an inline admission is already durable"
+    );
+    Ok(context)
+}
+
+fn admit(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    sync: durability::AdmissionSync,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
     // A production boot runs only verified released images, for every
     // managed artifact it resolves. The tiers recorded with those images
     // decide (below): a local-dev managed image is refused however it was
@@ -806,19 +824,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        // A caller that already resolved its backend hands the typed kind over,
-        // and the grant gate measures against the mechanisms that tier really
-        // has. A caller that has not resolved one yet passes `None` and gets
-        // the fail-closed answer: a sealed run refuses a grant whose
-        // enforceability nothing can confirm, a dev run is warned. The plan's
-        // own `runtime_profile` is never consulted for this — it is a label its
-        // author chose, and believing it would let a mislabelled plan pick the
-        // controls it is measured against.
-        match p.backend_kind {
-            Some(kind) => RunPosture::on_backend(variant, kind),
-            None => RunPosture::without_backend(variant),
-        }
-        .with_runtime(p.runtime_config),
+        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config),
     )
     .or_else(|err| -> Result<_> {
         if let Some(refused) =
@@ -1000,13 +1006,16 @@ pub fn admit_plan_for_boot_configured_ingress(
         .unwrap_or_default();
 
     // One batch, one fsync. Every admission-path entry has to be durable
-    // before the same thing — this plan booting — and nothing between them
-    // acts on the one before it, so syncing each separately bought no
-    // ordering. The batch covers the admission record, its decision record,
-    // the grant, the shares, the asset identities, the policy resolution
-    // and the egress destinations: all entries that used to trigger their
-    // own fsync now share the single flush.
-    emitter.batched(|| {
+    // before the same thing — this plan's workload running — and nothing
+    // between them acts on the one before it, so syncing each separately
+    // bought no ordering. The batch covers the admission record, its decision
+    // record, the grant, the shares, the asset identities, the policy
+    // resolution and the egress destinations: all entries that used to
+    // trigger their own fsync now share the single flush. A failed write
+    // inside the batch is an error here; a failed sync is an error wherever
+    // the caller waits for it, which is here unless it asked to sync beside
+    // the boot.
+    let record = || {
         mvm_hostd::audit::durability::record_admission(
             Some(&emitter),
             admitted.plan(),
@@ -1040,9 +1049,17 @@ pub fn admit_plan_for_boot_configured_ingress(
             tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
         }
         Ok(())
-    })?;
+    };
+    let durability = match sync {
+        durability::AdmissionSync::Inline => {
+            emitter.batched(record)?;
+            mvm_core::admission_durability::AdmissionDurability::settled(Ok(()))
+        }
+        durability::AdmissionSync::BesideBoot => emitter.batched_sync_detached(record)?.1,
+    };
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
+        ?sync,
         "admit: record_admission (batched fsync)"
     );
 
@@ -1066,7 +1083,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         return Err(err);
     }
 
-    Ok(context)
+    Ok((context, durability))
 }
 
 /// Resolve a local deployment record only when it sits beside the exact
@@ -1823,6 +1840,68 @@ pub(crate) mod admit_plan_tests {
 
         let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    /// Admission that leaves its sync beside the boot still writes the whole
+    /// admission before it returns; the handle it hands back is only the sync.
+    #[test]
+    fn a_beside_boot_admission_is_written_before_it_returns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let rootfs = write_rootfs(dir.path(), b"beside-boot rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let (context, durability) =
+            admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain");
+        assert!(
+            chain.contains("plan.admitted")
+                && chain.contains(context.admitted.plan_id().0.as_str()),
+            "the admission is on the chain before the sync is waited for: {chain}"
+        );
+        durability.wait().expect("the sync succeeds");
+    }
+
+    /// The host budget is a refusal, and refusals do not wait for a boot: a
+    /// beside-boot admission over budget fails before it returns, so there is
+    /// no config for a VMM to start from and nothing is recorded as admitted.
+    #[test]
+    fn a_beside_boot_admission_refuses_an_over_budget_boot_before_returning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let config = mvm_core::user_config::MvmConfig {
+            host_budget_memory_mib: Some(64),
+            ..Default::default()
+        };
+        mvm_core::user_config::save(&config, None).expect("host config");
+        let rootfs = write_rootfs(dir.path(), b"over-budget rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let error = match admit_plan_for_boot_syncing_beside_boot(params) {
+            Ok(_) => panic!("a 512 MiB boot must not fit a 64 MiB host budget"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("budget"),
+            "the refusal names the budget: {error:#}"
+        );
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).unwrap_or_default();
+        assert!(
+            !chain.contains("plan.admitted"),
+            "a refused boot is not recorded as admitted: {chain}"
+        );
     }
 
     #[test]

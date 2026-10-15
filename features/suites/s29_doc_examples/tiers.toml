@@ -129,6 +129,11 @@ tier = "exec"
 fixture = "release-signature"
 
 [[command]]
+path = "env verify-runtime"
+tier = "parse"
+reason = "authenticates a Sigstore-signed guest-runtime release archive and the selected overlay, verity and initramfs bytes against its declaration; the tree carries a signed fixture for a checksum manifest (`env verify-release`) but none for a runtime release archive, so there is nothing an isolated home could execute this against"
+
+[[command]]
 path = "explain"
 tier = "parse"
 reason = "names a completed machine whose refusal history belongs to the caller"
