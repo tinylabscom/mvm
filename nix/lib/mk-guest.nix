@@ -295,7 +295,6 @@ let
     ]
     ++ lib.optional withSetpriv setprivPkg
     ++ packages
-    ++ nativeRuntimeRoots
     ++ extraFileSourceRoots;
   };
 

@@ -269,7 +269,11 @@ class NativeRuntime(unittest.TestCase):
         self.assertIn("rootPaths = nativeRuntimeRoots;", source)
         self.assertIn("${lib.optionalString nativeRuntimeEnabled ''", source)
         self.assertIn("== toString (lib.getLib pkgs.glibc)", source)
-        self.assertIn("++ nativeRuntimeRoots", source)
+        # The roots stay out of the registered rootfs closure: an enabled
+        # runtime means the pinned glibc is already registered through
+        # `packages`, and the ext4 materializer retains the alias targets via
+        # the absolute store-path symlinks the planner installs.
+        self.assertNotIn("++ nativeRuntimeRoots", source)
 
 
 if __name__ == "__main__":
