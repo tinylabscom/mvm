@@ -6,11 +6,11 @@
 //! a workload declared in either language produces the same signed
 //! environment.
 
+use mvm_contract::pack_spec::{PackIdentity, PackResources, PackTarget};
 use mvm_contract::plan::environment::{
     EnvironmentCapability, EnvironmentDescriptor, EnvironmentEntrypoint, EnvironmentVolume,
     SecretSlot,
 };
-use mvm_contract::pack_spec::{PackIdentity, PackResources, PackTarget};
 
 /// Claude Code environment — the first signed environment shipped
 /// through multilingual authoring SDKs.
@@ -18,10 +18,7 @@ use mvm_contract::pack_spec::{PackIdentity, PackResources, PackTarget};
 /// The Claude binary is pinned by version. The archive installs and
 /// boots on a fresh host. Python and TypeScript definitions both
 /// resolve to this same descriptor.
-pub fn claude_code_environment(
-    claude_version: &str,
-    target: PackTarget,
-) -> EnvironmentDescriptor {
+pub fn claude_code_environment(claude_version: &str, target: PackTarget) -> EnvironmentDescriptor {
     EnvironmentDescriptor {
         descriptor_version: 1,
         pack: Some(PackIdentity {
@@ -30,10 +27,7 @@ pub fn claude_code_environment(
         }),
         target,
         entrypoint: EnvironmentEntrypoint {
-            argv: vec![
-                "/usr/bin/claude".to_string(),
-                "--serve".to_string(),
-            ],
+            argv: vec!["/usr/bin/claude".to_string(), "--serve".to_string()],
             working_dir: Some("/workspace".to_string()),
         },
         resources: Some(PackResources {
@@ -75,8 +69,7 @@ mod tests {
     fn claude_code_descriptor_round_trips_through_json() {
         let desc = claude_code_environment("1.2.3", PackTarget::X86_64Linux);
         let json = serde_json::to_string_pretty(&desc).expect("serialize");
-        let back: EnvironmentDescriptor =
-            serde_json::from_str(&json).expect("deserialize");
+        let back: EnvironmentDescriptor = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(desc, back);
     }
 

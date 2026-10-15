@@ -51,10 +51,7 @@ pub fn retain_archive(
         if existing_size == size {
             let existing_digest = mvm_core::crypto::image_verify::sha256_file(&retained_path)
                 .with_context(|| {
-                    format!(
-                        "verifying retained archive {}",
-                        retained_path.display()
-                    )
+                    format!("verifying retained archive {}", retained_path.display())
                 })?;
             if existing_digest == digest {
                 return Ok(RetainedArchive {
@@ -75,8 +72,8 @@ pub fn retain_archive(
         copied_size == size,
         "retained archive size mismatch: expected {size}, copied {copied_size}"
     );
-    let copied_digest = mvm_core::crypto::image_verify::sha256_file(&retained_path)
-        .with_context(|| {
+    let copied_digest =
+        mvm_core::crypto::image_verify::sha256_file(&retained_path).with_context(|| {
             format!(
                 "computing digest of retained archive {}",
                 retained_path.display()
@@ -127,12 +124,7 @@ pub fn reauthenticate_retained_archive(
     );
 
     let actual_digest = mvm_core::crypto::image_verify::sha256_file(&retained_path)
-        .with_context(|| {
-            format!(
-                "verifying retained archive {}",
-                retained_path.display()
-            )
-        })?;
+        .with_context(|| format!("verifying retained archive {}", retained_path.display()))?;
     ensure!(
         actual_digest == digest,
         "retained archive digest changed: expected {digest}, found {actual_digest}"
@@ -162,13 +154,12 @@ mod tests {
         let contents = b"test archive contents for retention";
         write_file(&source, contents);
 
-        let digest =
-            mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
         let size = contents.len() as u64;
 
         let cache = tmp.path().join("cache");
-        let retained = retain_archive(&source, &digest, size, &cache)
-            .expect("retain should succeed");
+        let retained =
+            retain_archive(&source, &digest, size, &cache).expect("retain should succeed");
         assert_eq!(retained.digest, digest);
         assert_eq!(retained.size, size);
         assert!(retained.path.exists());
@@ -187,8 +178,7 @@ mod tests {
         let contents = b"original bytes";
         write_file(&source, contents);
 
-        let digest =
-            mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
         let size = contents.len() as u64;
 
         let cache = tmp.path().join("cache");
@@ -216,10 +206,7 @@ mod tests {
             tmp.path(),
         )
         .expect_err("should detect missing");
-        assert!(
-            format!("{err:#}").contains("not present"),
-            "got: {err:#}"
-        );
+        assert!(format!("{err:#}").contains("not present"), "got: {err:#}");
     }
 
     #[test]
@@ -229,8 +216,7 @@ mod tests {
         let contents = b"reuse test contents";
         write_file(&source, contents);
 
-        let digest =
-            mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
+        let digest = mvm_core::crypto::image_verify::sha256_file(&source).unwrap();
         let size = contents.len() as u64;
 
         let cache = tmp.path().join("cache");

@@ -92,7 +92,7 @@ const NIC_GUARDED_PATHS: &[&str] = &[
 /// compatibility decoders that return a migration error.
 const LEGACY_INPUT_BOUNDARIES: &[&str] = &[
     "crates/mvm-contract/src/ir/workload.rs",
-    "crates/mvm-sdk/src/decorator/value.rs",
+    "crates/mvm-compiler/src/decorator/value.rs",
 ];
 
 const ENDPOINT_SOCKET_OWNERS: &[&str] = &[
