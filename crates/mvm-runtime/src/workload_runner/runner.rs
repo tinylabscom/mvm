@@ -490,13 +490,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         use std::io::Write;
 
         let claim_started = Instant::now();
-        let mut claim_debug = std::env::var_os("MVM_HVF_AGENT_DEBUG").and_then(|path| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .ok()
-        });
+        let mut claim_debug = mvm_vmm::agent_debug::open();
         macro_rules! claim_phase {
             ($phase:expr) => {
                 warm_claim::record_phase(claim_started, &mut claim_debug, $phase);
@@ -592,7 +586,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     child_dir.display()
                 ))
             })?;
-            resident_parent_rootfs_dir(handle.id.as_str())?
+            warm_claim::resident_parent_rootfs_dir(handle.id.as_str())?
         } else if preloaded_child_name.is_some() {
             child_dir.clone()
         } else {
@@ -634,6 +628,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // the overlay contract, then the child's own 0700 substitution endpoint
         // keyed on its fresh id (never a sibling's; the factory parent has none).
         let child_cfg = child_start_config(claim, &child, &child_rootfs_dir);
+        // Recorded before the fork, as a cold boot records before it boots, so
+        // a step checkpoint of the claimed child resolves its own rootfs and
+        // the device paths its restored VMM names. A resident handoff keeps the
+        // parent's live machine and has no materialized copy of its own to
+        // describe; its record stays with the parent's.
+        if !resident_handoff {
+            warm_claim::record_claimed_child_runtime_meta(&child, &child_cfg, &child_dir)?;
+        }
         // The launch's read-only volumes go behind the late-volume slots the
         // parent booted, and the guest is told to mount them before the claim
         // commits. A launch with none attaches nothing.
@@ -1458,34 +1460,6 @@ fn child_start_config(claim: &StandbyClaim, child: &VmId, rootfs_dir: &Path) -> 
     cfg
 }
 
-/// Resolve the launch source recorded for a resident standby parent. The live
-/// HVF supervisor already has this image attached; the path is used only for
-/// the same host-side overlay admission gate a cold workload boot performs.
-fn resident_parent_rootfs_dir(parent_vm_name: &str) -> std::result::Result<PathBuf, StandbyError> {
-    let metadata = crate::base::runtime_meta::read(parent_vm_name)
-        .map_err(|e| StandbyError::ClaimFailed(format!("read resident parent metadata: {e:#}")))?
-        .ok_or_else(|| {
-            StandbyError::ClaimFailed(format!(
-                "resident parent '{parent_vm_name}' has no runtime metadata"
-            ))
-        })?;
-    let rootfs = metadata
-        .rootfs_path
-        .ok_or_else(|| StandbyError::ClaimFailed("resident parent has no rootfs path".into()))?;
-    let rootfs = PathBuf::from(rootfs);
-    if !rootfs.is_file() {
-        return Err(StandbyError::ClaimFailed(format!(
-            "resident parent rootfs {} is not a regular file",
-            rootfs.display()
-        )));
-    }
-    rootfs.parent().map(Path::to_path_buf).ok_or_else(|| {
-        StandbyError::ClaimFailed(format!(
-            "resident parent rootfs {} has no containing directory",
-            rootfs.display()
-        ))
-    })
-}
 /// Whether the backend's own supervisor holds the console capture for the
 /// VM's whole life, so the launcher must not start a competing writer.
 ///
@@ -4526,6 +4500,16 @@ mod tests {
         };
 
         let child = runner.claim_standby(&ctx, &handle, &claim).expect("claim");
+
+        // The child records the runtime metadata a cold boot records, naming
+        // its own materialized rootfs, so a step checkpoint of it resolves.
+        let meta = crate::base::runtime_meta::read(&child.0)
+            .expect("read child runtime metadata")
+            .expect("a claimed child records its runtime metadata");
+        assert_eq!(
+            meta.rootfs_path.map(PathBuf::from),
+            Some(vm_state_dir(&child.0).join("rootfs.ext4"))
+        );
 
         // Fresh identity: the child differs from the parent and gets a fresh name.
         assert_ne!(child.0, handle.id, "child VmId must differ from the parent");

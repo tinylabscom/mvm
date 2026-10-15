@@ -151,6 +151,12 @@ fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Re
 }
 
 /// Where the launch script sends Firecracker's stderr, relative to the VM dir.
+///
+/// It and `console.log` carry guest and VMM diagnostics, so the script
+/// replaces both with fresh 0600 files before Firecracker's redirections open
+/// them: a link left at either path is removed rather than written through, and
+/// neither file is ever created under the caller's umask. The umask is set in a
+/// subshell so Firecracker's own sockets keep the modes it chooses.
 const FIRECRACKER_STDERR_LOG: &str = "firecracker.log";
 
 /// How much of that log a startup failure quotes. Firecracker reports a
@@ -315,7 +321,7 @@ fn launch_script(
         mkdir -p {q_dir} {q_socket_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
-        touch {q_dir}/console.log {q_dir}/firecracker.log
+        (umask 077 && rm -f {q_dir}/console.log {q_dir}/firecracker.log && touch {q_dir}/console.log {q_dir}/firecracker.log)
         {scope}{sudo}setsid nohup sh -c {payload} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
         {record_launcher}
@@ -483,8 +489,12 @@ mod tests {
             idle.contains("umask 077"),
             "root keeps its records owner-only"
         );
+        // Every launch line creates its log files owner-only; only root's
+        // payload also narrows the identity record it writes under sudo.
         let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
-        assert!(!as_user.contains("umask"), "{as_user}");
+        assert!(idle.contains("'umask 077; s=$("), "{idle}");
+        assert!(!as_user.contains("'umask 077; s=$("), "{as_user}");
+        assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
@@ -567,6 +577,70 @@ mod tests {
             "{err}"
         );
         ensure_api_socket_fits("/srv/vms/w/fc.socket").expect("a short path fits");
+    }
+
+    /// Runs the real script with a stand-in for Firecracker. The launch's
+    /// redirections run in the background, so the assertions read what the
+    /// foreground creation guaranteed before any of them could open a file.
+    #[test]
+    fn the_launch_script_creates_private_logs_and_never_writes_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let vm = root.path().join("vm");
+        std::fs::create_dir(&vm).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let victim_mode = std::fs::metadata(&victim).unwrap().permissions().mode();
+        std::os::unix::fs::symlink(&victim, vm.join("console.log")).unwrap();
+        std::fs::write(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            b"SYNTHETIC_MARKER from a prior run",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let script = firecracker_launch_script_as(
+            vm.to_str().unwrap(),
+            vm.join("fc.socket").to_str().unwrap(),
+            "",
+            0,
+        );
+        let stubs = root.path().join("bin");
+        std::fs::create_dir(&stubs).unwrap();
+        std::fs::write(stubs.join("firecracker"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            stubs.join("firecracker"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+            .status()
+            .expect("run launch script");
+        assert!(status.success());
+
+        for name in ["console.log", FIRECRACKER_STDERR_LOG] {
+            let meta = std::fs::symlink_metadata(vm.join(name)).unwrap();
+            assert!(meta.file_type().is_file(), "{name} is a fresh regular file");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{name}");
+            let body = std::fs::read(vm.join(name)).unwrap();
+            assert!(
+                !body.windows(16).any(|w| w == b"SYNTHETIC_MARKER"),
+                "{name} kept a prior run's payload"
+            );
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode(),
+            victim_mode
+        );
     }
 
     #[test]

@@ -491,16 +491,10 @@ fn record_usage_at_exit(vm_state_dir: &std::path::Path) {
 
 fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
     let path = vm_state_dir.join("supervisor.lifecycle.log");
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    let _ = mvm_core::config::create_private_dir(vm_state_dir);
     let timestamp = chrono::Utc::now().to_rfc3339();
     let line = format!("{timestamp} {stage}: {detail}\n");
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut file) = mvm_core::util::atomic_io::open_private_append(&path) {
         let _ = std::io::Write::write_all(&mut file, line.as_bytes());
     }
 }
@@ -600,6 +594,29 @@ mod tests {
         let body = std::fs::read_to_string(dir.path().join("supervisor.lifecycle.log"))
             .expect("read lifecycle log");
         assert!(body.contains("dispatch_config: detail"), "body: {body}");
+    }
+
+    #[test]
+    fn supervisor_breadcrumbs_are_private_and_never_written_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("supervisor.lifecycle.log");
+        append_supervisor_breadcrumb(dir.path(), "first", "SYNTHETIC_MARKER".to_string());
+        append_supervisor_breadcrumb(dir.path(), "second", "kept".to_string());
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.contains("first: SYNTHETIC_MARKER") && body.contains("second: kept"));
+
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let target = elsewhere.path().join("victim");
+        std::fs::write(&target, b"untouched").unwrap();
+        let linked = tempfile::tempdir().expect("tempdir");
+        std::os::unix::fs::symlink(&target, linked.path().join("supervisor.lifecycle.log"))
+            .unwrap();
+        append_supervisor_breadcrumb(linked.path(), "stage", "SYNTHETIC_MARKER".to_string());
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
     }
 
     #[test]

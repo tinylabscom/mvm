@@ -1521,7 +1521,7 @@ concept over a different store.
 | `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--retain-for <duration>] [--expected-generation <n>] [--json]`                                                                | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier and the default retention deadline. Emits a `session.parked` chain entry.    |
 | `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                                                        |
 | `mvmctl agent-session renew <id> --for <duration> [--expected-generation <n>] [--expected-deadline <unix>] [--json]`                                                                                                                   | Move a parked session's retention deadline to `--for` from now. Extend-only. Emits a `session.renewed` chain entry.                                                                                                                             |
-| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched |
+| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched. The fork is a machine in its own right: a prompt to it is recorded and step-checkpointed under the fork's own session, which replays in turn |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -1870,6 +1870,12 @@ running microVM.
 
 ## Packs, Bundles, and Dependencies
 
+Pack discovery reads only root `index.json` with `schema_version: 2`. Versions
+are catalog objects containing `version` and `manifest_sha256`; search displays
+their version strings. Pull checks the catalog digest against exact manifest
+bytes before adoption or installation. This untrusted discovery hash does not
+replace publisher signatures or existing authenticated installed pins.
+
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
@@ -1921,14 +1927,19 @@ limits and the split registry/release inventory.
 
 On Linux and other non-HVF hosts, the default residency remains `parked`
 (`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
-policy. For a prepared, unnamed launch without extra volumes, enable claims
+policy. For a prepared, unnamed launch of a warm-eligible shape, enable claims
 explicitly:
 
 ```bash
 mvmctl image pull alpine
 mvmctl pool warm --image alpine          # optional pre-warm
-mvmctl machine run --image alpine -- /bin/true   # claims it
+MVM_RESIDENCY=warm mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
+
+Without a source flag, `pool warm` warms the most recently pulled images,
+bounded by the residency standby target (at least one). With no pull history
+it warms the default image. `pool warm --default` selects the default image
+regardless of pull history; it conflicts with the explicit source flags.
 
 `pool warm` takes the same source a launch names: `--image`, `--manifest`
 (a manifest, a built slot, an installed bundle sha256 or a signed `.mvmpkg`
@@ -1937,13 +1948,16 @@ verified and installed exactly as `machine run` does it. Standbys are keyed by
 the verified bundle or slot digest and the image digest, so a launch of a
 different artifact, or of the same rootfs under the host runtime, never claims
 one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
-path: the guest runtime it pins predates the claim handshake.
+path: the guest runtime it pins predates the claim handshake. `pool warm`
+refuses that bundle before preparing a standby, rather than creating capacity
+that no launch can claim.
 
 Remove any explicit `warm_pool_size=0` configuration override: an explicit
-size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
-capacity and fail rather than silently cold-booting. Named launches and shapes
-with writable volumes or allowed egress retain their cold path, including when
-the pool size is zero.
+size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
+when standbys are enabled. If no compatible standby is ready, the launch
+declares a cold boot rather than reporting it as a warm claim. Named launches,
+launches with standbys disabled, and volume shapes no late-volume slot can
+serve retain their cold path.
 
 On Firecracker, a launch with up to four read-only directory mounts
 (`--mount DIR:PATH:ro`) claims the same standby a launch without them would.

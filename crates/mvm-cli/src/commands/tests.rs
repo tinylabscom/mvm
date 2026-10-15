@@ -5119,11 +5119,39 @@ fn test_pool_warm_takes_one_source() {
         ][..],
         &["mvmctl", "pool", "warm", "--manifest", "m", "--flake", "."][..],
         &["mvmctl", "pool", "warm", "--flake-profile", "slim"][..],
+        &["mvmctl", "pool", "warm", "--default", "--image", "alpine"][..],
+        &["mvmctl", "pool", "warm", "--default", "--manifest", "m"][..],
+        &["mvmctl", "pool", "warm", "--default", "--flake", "."][..],
     ] {
         assert!(
             Cli::try_parse_from(argv).is_err(),
             "{argv:?} must not parse"
         );
+    }
+}
+
+#[test]
+fn test_pool_warm_preserves_default_and_recent_selection_flags() {
+    for (argv, expected) in [
+        (&["mvmctl", "pool", "warm"][..], false),
+        (&["mvmctl", "pool", "warm", "--default"][..], true),
+    ] {
+        match Cli::try_parse_from(argv).unwrap().command {
+            Commands::Pool(pool::Args {
+                action:
+                    pool::PoolAction::Warm {
+                        default_image,
+                        image,
+                        manifest,
+                        flake,
+                        ..
+                    },
+            }) => {
+                assert_eq!(default_image, expected);
+                assert!(image.is_none() && manifest.is_none() && flake.is_none());
+            }
+            _ => panic!("Expected Pool Warm command"),
+        }
     }
 }
 
@@ -6298,6 +6326,7 @@ fn machine_console_refused_on_sealed_image() {
             rootfs_path: None,
             runtime_overlay_version: None,
             observability_target: None,
+            restored_device_anchors: None,
         },
     )
     .expect("write");

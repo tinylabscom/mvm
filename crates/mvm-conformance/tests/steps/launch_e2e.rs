@@ -147,6 +147,7 @@ fn run_in_e2e_home(args: &str, extra_env: &[(&str, &str)]) -> LaunchRecord {
 /// without duplicating the environment this sets up.
 fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRecord {
     let home = e2e_home();
+    mvm_conformance::vmm_reaper::register_launched_home(&home);
     let mut command: Command = mvmctl_command();
     command
         .current_dir(workspace_root())

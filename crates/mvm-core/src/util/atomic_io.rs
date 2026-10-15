@@ -273,6 +273,61 @@ pub fn open_private_truncated(path: &Path) -> std::io::Result<fs::File> {
     tmp.persist(path).map_err(|err| err.error)
 }
 
+/// Open `path` for appending, creating it at 0600 when it does not exist.
+///
+/// For managed diagnostics that accumulate across writers or across one
+/// process's life — a lifecycle breadcrumb log, an opt-in debug trace — where
+/// [`open_private_truncated`]'s fresh inode would discard earlier lines.
+///
+/// The open does not follow a symbolic link at `path`, and refuses anything
+/// other than a regular file with exactly one link: appending through another
+/// hard link would write diagnostics into an inode this process does not
+/// manage. An existing file this user owns with wider permissions is narrowed
+/// to 0600 through the open descriptor before the first byte lands; one owned
+/// by another user is refused rather than written. The parent must already
+/// exist and be trusted.
+#[cfg(unix)]
+pub fn open_private_append(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    let file = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let meta = file.metadata()?;
+    let refuse = |why: &str| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "refusing to append diagnostics to {}: {why}",
+                path.display()
+            ),
+        )
+    };
+    if !meta.file_type().is_file() {
+        return Err(refuse("not a regular file"));
+    }
+    if meta.nlink() != 1 {
+        return Err(refuse("the file has another hard link"));
+    }
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        return Err(refuse("the file belongs to another user"));
+    }
+    if meta.mode() & 0o777 != PRIVATE_FILE_MODE {
+        file.set_permissions(fs::Permissions::from_mode(PRIVATE_FILE_MODE))?;
+    }
+    Ok(file)
+}
+
+/// [`open_private_append`] on a host without Unix permission bits: refused,
+/// like every other private-file helper.
+#[cfg(not(unix))]
+pub fn open_private_append(path: &Path) -> std::io::Result<fs::File> {
+    Err(private_fs::unsupported_platform_error(path))
+}
+
 /// Replace `path` with `data` at mode 0600, so that every reader sees either
 /// the whole old file or the whole new one.
 ///
@@ -829,6 +884,78 @@ mod tests {
         assert_eq!(fs::read(tmp.path()).unwrap(), b"SYNTHETIC_PRIVATE_MARKER");
         drop(tmp);
         assert!(dir_entries(dir.path()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_append_creates_an_owner_only_file_and_keeps_earlier_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lifecycle.log");
+        open_private_append(&path)
+            .unwrap()
+            .write_all(b"first\n")
+            .unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+        open_private_append(&path)
+            .unwrap()
+            .write_all(b"SYNTHETIC_PRIVATE_MARKER\n")
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "first\nSYNTHETIC_PRIVATE_MARKER\n"
+        );
+        assert_eq!(dir_entries(dir.path()), vec!["lifecycle.log"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_append_refuses_a_symlink_and_leaves_its_target_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        fs::write(&target, b"untouched").unwrap();
+        let path = dir.path().join("lifecycle.log");
+        let target_mode = mode_of(&target);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        assert!(open_private_append(&path).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"untouched");
+        assert_eq!(mode_of(&target), target_mode);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_append_refuses_a_hard_linked_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other-owner-of-the-inode");
+        fs::write(&other, b"untouched").unwrap();
+        let path = dir.path().join("lifecycle.log");
+        fs::hard_link(&other, &path).unwrap();
+
+        let err = open_private_append(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(fs::read(&other).unwrap(), b"untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_append_narrows_a_loose_file_and_refuses_a_directory() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let loose = dir.path().join("loose.log");
+        fs::write(&loose, b"kept\n").unwrap();
+        fs::set_permissions(&loose, fs::Permissions::from_mode(0o644)).unwrap();
+        open_private_append(&loose)
+            .unwrap()
+            .write_all(b"more\n")
+            .unwrap();
+        assert_eq!(mode_of(&loose), 0o600);
+        assert_eq!(fs::read_to_string(&loose).unwrap(), "kept\nmore\n");
+
+        let directory = dir.path().join("a-directory");
+        fs::create_dir(&directory).unwrap();
+        assert!(open_private_append(&directory).is_err());
+        assert!(open_private_append(&dir.path().join("missing/parent.log")).is_err());
     }
 
     #[cfg(unix)]
