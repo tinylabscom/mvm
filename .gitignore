@@ -92,6 +92,7 @@ __pycache__/
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 graft/
+/.graft/
 ./weblinux-pack-out/
 
 # Qwen Code session directory
