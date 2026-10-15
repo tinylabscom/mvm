@@ -1,0 +1,251 @@
+name: Pack signing smoke
+
+# Nightly gate that checks the keyless pack signing round-trip works
+# against a REAL cosign bundle, not just the offline fixtures the unit
+# suite exercises. It produces a throwaway keyless manifest over dummy
+# artifacts, signs it with `cosign sign-blob` using this job's own GitHub
+# Actions OIDC identity, then feeds the real bundle through the Rust
+# sigstore-verify stack the pack verifier uses in production. Signs nothing
+# a real user consumes and publishes no artifacts.
+#
+# It also runs on release-tag pushes, because that is the only run whose
+# signing identity is tag-bound — and an image lock can name nothing else.
+# See the image-set step below.
+
+on:
+  # Ran zero times between being written and 2026-08-21, because
+  # workflow_dispatch was its only trigger and nobody dispatched it. A
+  # signing round-trip nobody runs proves nothing about the release it is
+  # supposed to protect, so it now runs on the same nightly cadence as the
+  # rest of the security lanes. Offset from Security's :17 so a slow
+  # nightly is not mistaken for a missing one.
+  schedule:
+    - cron: "43 4 * * *"
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Full pack signing round-trip test
+        # This single step combines all pack signing checks into one run block
+        # so shell variables and helper functions remain available throughout.
+        # Workspace files persist across steps, but shell state does not.
+        # This combined script:
+        # - Produces builder and runtime pack manifests
+        # - Signs them with real cosign OIDC bundles
+        # - Verifies them through the Rust sigstore-verify stack
+        # - Produces and verifies an image set
+        # - Produces and verifies a revocation list
+        # - Produces and verifies a release archive
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          # A release build embeds the Linux host binaries by default. This
+          # step verifies an image set and boots nothing, and the runner has no
+          # cross-compile toolchain, so say so rather than probe for one.
+          MVM_EMBED: "0"
+        run: |
+          set -euo pipefail
+
+          # Construct the identity string that cosign will embed in the certificate.
+          # For a nightly/run-on-branch, the identity is bound to this workflow
+          # file and the current SHA. For a release-tag push, it's bound to the tag.
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/pack-signing-smoke.yml@${REF}"
+
+          # Keep input artifacts outside the output directory: copying a file
+          # onto itself truncates it on Linux before it can be signed.
+          mkdir -p smoke/inputs smoke/image-set
+          printf 'dummy-kernel'   > smoke/inputs/vmlinux
+          printf 'dummy-rootfs'   > smoke/inputs/rootfs.ext4
+          printf 'dummy-sbom'     > smoke/inputs/sbom.txt
+
+          # Step 1: Produce and sign a builder pack manifest
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --vmlinux smoke/inputs/vmlinux --rootfs smoke/inputs/rootfs.ext4 --arch x86_64 --channel stable --keyless \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/inputs/sbom.txt \
+            --revocation-channel "https://example.test/rev.json"
+          mv smoke/manifest.json smoke/pack-manifest.json
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/pack-manifest.json.bundle \
+            smoke/pack-manifest.json
+          # Verify the builder pack through the Rust verifier
+          cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
+            --manifest smoke/pack-manifest.json --bundle smoke/pack-manifest.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+          # Step 2: Produce and sign a runtime pack manifest
+          printf 'dummy-verity'   > smoke/inputs/rootfs.verity
+          printf '%064d' 0        > smoke/inputs/rootfs.roothash
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --kind runtime \
+            --vmlinux smoke/inputs/vmlinux --rootfs smoke/inputs/rootfs.ext4 \
+            --verity smoke/inputs/rootfs.verity --roothash smoke/inputs/rootfs.roothash \
+            --arch x86_64 --channel stable --keyless \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/inputs/sbom.txt \
+            --revocation-channel "https://example.test/rev.json"
+          mv smoke/manifest.json smoke/runtime-pack-manifest.json
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/runtime-pack-manifest.json.bundle \
+            smoke/runtime-pack-manifest.json
+          cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
+            --manifest smoke/runtime-pack-manifest.json --bundle smoke/runtime-pack-manifest.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+          # Step 3: Produce and verify an image set
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            tag="${REF_NAME}"
+            expected_stage="none"
+          else
+            tag="v0.0.0-smoke"
+            expected_stage="signature"
+          fi
+          workflow=".github/workflows/pack-signing-smoke.yml"
+          cp smoke/inputs/vmlinux smoke/image-set/vmlinux
+          kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
+          cat > smoke/image-set.json <<JSON
+          {
+            "schema_version": 2,
+            "set_version": "${tag#v}",
+            "issued_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "producer": {
+              "repository": "${REPOSITORY}",
+              "workflow": "${workflow}",
+              "release_tag": "${tag}",
+              "source_commit": "${GITHUB_SHA}"
+            },
+            "mvm_source_commit": "${GITHUB_SHA}",
+            "compatibility": {"builder_cache_contract": 1},
+            "nix_inputs": {
+              "flake_locks": [{"reference": "smoke", "lock_hash": "${kernel_sha}"}],
+              "source_revisions": []
+            },
+            "revocation_channel": "https://example.test/revocations.json",
+            "members": [{
+              "role": {"workload_kernel": "default_tenant"},
+              "target": {"arch": "x86_64"},
+              "boot_protocol": "linux_direct",
+              "artifacts": [{
+                "name": "vmlinux",
+                "format": {"kernel": "elf"},
+                "sha256": "${kernel_sha}",
+                "size": 12
+              }],
+              "required_capabilities": ["virtio_vsock"],
+              "pack_hash": "${kernel_sha}",
+              "sbom": {"uri": "https://example.test/sbom.txt", "sha256": "${kernel_sha}"}
+            }]
+          }
+          JSON
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/image-set.json.bundle \
+            smoke/image-set.json
+          manifest_sha="$(sha256sum smoke/image-set.json | cut -d' ' -f1)"
+          cat > smoke/images.lock <<TOML
+          schema_version = 1
+          repository = "${REPOSITORY}"
+          release_tag = "${tag}"
+          manifest_asset = "image-set.json"
+          manifest_sha256 = "${manifest_sha}"
+
+          [signing_identity]
+          workflow = "${workflow}"
+          tag_ref = "refs/tags/${tag}"
+          TOML
+
+          verify() {
+            cargo run --quiet --release -p mvmctl --features user -- image boot verify --json \
+              --manifest smoke/image-set.json --bundle smoke/image-set.json.bundle \
+              --lock smoke/images.lock --artifacts smoke/image-set
+          }
+          expect() {
+            local want="$1" verdict status
+            set +e
+            verdict="$(verify)"
+            status=$?
+            set -e
+            echo "${verdict}"
+            if [ "${want}" = "none" ]; then
+              [ "${status}" -eq 0 ] && jq -e '.verified == true' <<<"${verdict}" >/dev/null
+            else
+              [ "${status}" -ne 0 ] && jq -e --arg stage "${want}" \
+                '.verified == false and .stage == $stage' <<<"${verdict}" >/dev/null
+            fi
+          }
+
+          expect "${expected_stage}"
+          if [ "${expected_stage}" = "none" ]; then
+            printf 'x' >> smoke/image-set/vmlinux
+            expect "artifacts"
+          fi
+
+          # Step 4: Produce and verify a pack revocation list
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > smoke/pack-revocations.json <<JSON
+          {"schema_version":1,"revocations":[],"issued_at":"${now}","not_after":"2099-01-01T00:00:00Z"}
+          JSON
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/pack-revocations.json.bundle \
+            smoke/pack-revocations.json
+          cargo run --release -p mvm-core --example verify-pack-revocation-list --features manifest-verify -- \
+            --list smoke/pack-revocations.json --bundle smoke/pack-revocations.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+          # Step 5: Produce and verify a release archive
+          mkdir -p smoke/sidecar
+          printf 'dummy-ext4'   > smoke/sidecar/sdk.ext4
+          printf '0.0.0-smoke'  > smoke/sidecar/VERSION
+          ( cd smoke/sidecar && sha256sum sdk.ext4 VERSION > checksums-sha256.txt )
+          tar -C smoke/sidecar -czf smoke/sdk-sidecar-x86_64.tar.gz \
+            sdk.ext4 VERSION checksums-sha256.txt
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
+            smoke/sdk-sidecar-x86_64.tar.gz
+          cargo run --release -p mvm-build --example verify-release-archive-signature \
+            --features manifest-verify -- \
+            --archive smoke/sdk-sidecar-x86_64.tar.gz \
+            --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+          # Step 6: Verify that a legacy-format bundle is refused
+          cosign sign-blob \
+            --yes \
+            --bundle smoke/legacy.bundle \
+            smoke/sdk-sidecar-x86_64.tar.gz
+          if cargo run --release -p mvm-build --example verify-release-archive-signature \
+            --features manifest-verify -- \
+            --archive smoke/sdk-sidecar-x86_64.tar.gz \
+            --bundle smoke/legacy.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"; then
+            echo "::error::a legacy-format bundle verified — the format gate is not discriminating" >&2
+            exit 1
+          fi
+          echo "ok: legacy-format bundle refused, as the release contract requires"

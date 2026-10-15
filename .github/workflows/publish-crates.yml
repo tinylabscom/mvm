@@ -1,0 +1,164 @@
+name: Publish to crates.io
+
+# The crates and their order come from the manifests, not from this file:
+# `xtask publish-plan` prints the shipped-dependency closure of the roots in
+# [workspace.metadata.mvm.publish], dependencies first, minus the crates
+# declared blocked and everything above them (it says which, and why).
+#
+# The plan is the public crates only (today `mvm-contract`); every internal
+# crate says `publish = false`, and a root that cannot be published takes its
+# whole closure out of the plan rather than leaving its dependencies to be
+# uploaded alone.
+#
+# release.yml dispatches this with dry_run=false on every tag push, because a
+# GITHUB_TOKEN-raised release event starts no downstream workflow. A dry run
+# needs no token: it packages and build-verifies the whole plan with
+# `cargo package`, which resolves the plan's crates against each other
+# instead of against crates.io, so it works before any of them is published.
+# It runs on pull requests that change the publish machinery and nightly from
+# Extended CI.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Package and verify only; upload nothing"
+        required: true
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      tag:
+        description: "Git tag to dry-run against; empty packages the checked-out tree"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - .github/workflows/publish-crates.yml
+      - scripts/deploy-guard.sh
+      - xtask/src/publish_plan.rs
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: publish-crates-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+# Only a direct dispatch with dry_run explicitly false uploads. A reusable
+# workflow sees its caller's event, so `github.event_name` is
+# `workflow_dispatch` whenever Extended CI was started by hand; and
+# `workflow_call` declares no `dry_run`, so `inputs.dry_run` is null there and
+# `!inputs.dry_run` is true. Guarded on those two alone, the upload job (and
+# the BDD suite before it) starts from a nightly dry run, which passes no
+# secret, and fails its token check. `format` renders null as '' and only a
+# real boolean false as 'false'.
+jobs:
+  bdd:
+    if: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) == 'false' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/bdd.yml
+
+  # Token-free: every crate in the plan is packaged exactly as it would be
+  # uploaded and built from the packaged sources, so a crate that reads a file
+  # outside its directory or lost a dependency's version fails here.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG_NAME: ${{ inputs.tag }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out the tag
+        if: ${{ inputs.tag != '' }}
+        run: |
+          git fetch --tags --force
+          git checkout --quiet "refs/tags/${TAG_NAME}"
+
+      - name: Run the deploy guard
+        run: bash scripts/deploy-guard.sh "${TAG_NAME}"
+
+      - name: Package and verify the publish plan
+        run: |
+          set -euo pipefail
+          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          args=()
+          for crate in "${crates[@]}"; do args+=(--package "${crate}"); done
+          cargo package "${args[@]}"
+          ls -la target/package/*.crate
+
+  publish:
+    needs: [bdd, package]
+    if: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+      TAG_NAME: ${{ inputs.tag }}
+    steps:
+      - name: Check token
+        run: |
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::Missing CRATES_IO_TOKEN secret."
+            exit 1
+          fi
+
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out the tag
+        run: |
+          git fetch --tags --force
+          git checkout --quiet "refs/tags/${TAG_NAME}"
+
+      - name: Run the deploy guard
+        run: bash scripts/deploy-guard.sh "${TAG_NAME}"
+
+      # Idempotent: a version already on crates.io is skipped, so a run that
+      # stopped part way is finished by dispatching it again. `cargo publish`
+      # waits until each crate is in the index before returning, so the next
+      # crate in the plan can resolve it.
+      - name: Publish the plan in dependency order
+        run: |
+          set -euo pipefail
+          version="${TAG_NAME#v}"
+          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          published() {
+            curl -fsS -A "mvm-publish-crates (https://github.com/${GITHUB_REPOSITORY})" \
+              "https://crates.io/api/v1/crates/$1/${version}" >/dev/null 2>&1
+          }
+          for crate in "${crates[@]}"; do
+            if published "${crate}"; then
+              echo "${crate} ${version} is already on crates.io; skipping"
+              continue
+            fi
+            echo "::group::cargo publish ${crate} ${version}"
+            cargo publish --package "${crate}"
+            echo "::endgroup::"
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### crates.io publish of ${TAG_NAME}"
+            echo
+            cargo run --quiet --package xtask -- publish-plan 2>&1 | sed 's/^/    /'
+          } >> "${GITHUB_STEP_SUMMARY}"

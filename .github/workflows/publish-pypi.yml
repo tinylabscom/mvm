@@ -1,0 +1,253 @@
+name: Publish SDK to PyPI
+
+on:
+  workflow_call:
+    inputs:
+      dry_run:
+        description: "Build + smoke only; skip the PyPI upload"
+        required: true
+        type: boolean
+    secrets:
+      APPLE_DEVELOPER_ID_P12_BASE64:
+        required: false
+      APPLE_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      APPLE_DEVELOPER_ID_IDENTITY:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    # One wheel per platform: the wheel embeds that platform's host library,
+    # so its tag must say which hosts can load it. Each leg runs on a runner
+    # of its own architecture, so the library it builds is loaded by the
+    # same job before anything is uploaded.
+    #
+    # Linux wheels are repaired by auditwheel into the policy tag the
+    # library actually satisfies — PyPI refuses a plain `linux_<arch>` wheel.
+    # The gnu library is built against glibc 2.17, so it carries the
+    # manylinux2014 tag and is smoke-tested inside the manylinux2014 image,
+    # on glibc 2.17 itself; the musl one is smoke-tested on Alpine. Both run
+    # in a container rather than on the runner, whose newer glibc would load
+    # a library that the tag oversold.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+            policy: manylinux_2_17_x86_64
+            image: quay.io/pypa/manylinux2014_x86_64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            policy: manylinux_2_17_aarch64
+            image: quay.io/pypa/manylinux2014_aarch64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-x64-musl
+            runner: ubuntu-latest
+            policy: musllinux_1_2_x86_64
+            image: python:3.12-alpine
+            python: python3
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            policy: musllinux_1_2_aarch64
+            image: python:3.12-alpine
+            python: python3
+          - platform: darwin-arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate SDK release manifest and package metadata
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path("crates/mvm-sdk")
+          release = tomllib.loads((root / "sdks" / "release.toml").read_text())
+          project = tomllib.loads((root / "sdks" / "python" / "pyproject.toml").read_text())
+
+          manifest_version = release["version"]
+          package_version = project["project"]["version"]
+          package_name = project["project"]["name"]
+          package_path = "sdks/python"
+
+          assert release["python"]["name"] == package_name, (
+              f"sdks/release.toml python.name ({release['python']['name']}) != "
+              f"pyproject project.name ({package_name})"
+          )
+          assert release["python"]["path"] == package_path, (
+              f"sdks/release.toml python.path ({release['python']['path']}) != {package_path}"
+          )
+          assert manifest_version == package_version, (
+              f"sdks/release.toml version ({manifest_version}) != "
+              f"sdks/python/pyproject.toml version ({package_version})"
+          )
+          PY
+
+      - name: Build the in-process host library
+        id: hostlib
+        uses: ./.github/actions/build-hostlib
+        with:
+          platform: ${{ matrix.platform }}
+
+      - name: Embed the host library in the package
+        env:
+          HOSTLIB: ${{ steps.hostlib.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p crates/mvm-sdk/sdks/python/mvm/_native
+          cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
+          echo "embedded ${HOSTLIB}"
+
+      - name: Developer ID sign and notarize macOS native payload
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --payload crates/mvm-sdk/sdks/python/mvm/_native \
+            --skip-unconfigured \
+            --report "${RUNNER_TEMP}/pypi-notarization.json"
+
+      - name: Retain macOS notarization evidence
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-notarization-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pypi-notarization.json
+          if-no-files-found: error
+
+      - name: Mark unsigned branch rehearsal
+        if: ${{ runner.os == 'macOS' && inputs.dry_run && github.ref_type != 'tag' }}
+        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
+
+      - name: Build sdist + wheel
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          python -m pip install build==1.6.1 twine==7.0.0
+          # The wheel is built from the tree, never from the sdist: the sdist
+          # deliberately omits mvm/_native, so a wheel built from it carries
+          # no host library and comes out universal. Plain `python -m build`
+          # does exactly that, which is why the two are built separately.
+          #
+          # A Linux wheel lands in raw-dist/ tagged linux_<arch> and only
+          # reaches dist/ through the auditwheel repair below.
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            python -m build --wheel crates/mvm-sdk/sdks/python --outdir raw-dist
+          else
+            python -m build --wheel crates/mvm-sdk/sdks/python --outdir dist
+          fi
+          # One sdist, from one leg; every leg builds its own wheel.
+          if [[ "${PLATFORM}" == "linux-x64-gnu" ]]; then
+            python -m build --sdist crates/mvm-sdk/sdks/python --outdir dist
+          fi
+
+      # auditwheel reads which libc symbols the library needs and refuses a
+      # policy it does not satisfy, then rewrites the tag; the repaired wheel
+      # is installed into a fresh venv in the same image and loaded. The
+      # image's own interpreter runs the tools, so nothing from the runner's
+      # newer userland is involved.
+      - name: Repair the wheel to ${{ matrix.policy }} and smoke it in ${{ matrix.image }}
+        if: ${{ runner.os == 'Linux' }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          POLICY: ${{ matrix.policy }}
+          PY: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}:/w" -w /w -e POLICY -e PY "${IMAGE}" sh -euc '
+            "${PY}" -m venv /tmp/tools
+            /tmp/tools/bin/pip install --quiet auditwheel==6.8.2 patchelf==0.19.1.0
+            # auditwheel runs patchelf by name.
+            export PATH="/tmp/tools/bin:${PATH}"
+            auditwheel show raw-dist/*.whl
+            auditwheel repair --plat "${POLICY}" --wheel-dir dist raw-dist/*.whl
+            "${PY}" -m venv /tmp/smoke
+            /tmp/smoke/bin/pip install --quiet dist/*.whl
+            cd /
+            /tmp/smoke/bin/python /w/crates/mvm-sdk/sdks/python/scripts/smoke_installed.py
+          '
+          ls -la dist/
+
+      - name: Smoke the wheel in a fresh venv
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/smoke"
+          "${RUNNER_TEMP}/smoke/bin/pip" install --quiet dist/*.whl
+          cd "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/smoke/bin/python" "${GITHUB_WORKSPACE}/crates/mvm-sdk/sdks/python/scripts/smoke_installed.py"
+
+      - name: Check the distributions PyPI will receive
+        shell: bash
+        env:
+          POLICY: ${{ matrix.policy }}
+        run: |
+          set -euo pipefail
+          # Exactly one wheel per leg, and on Linux it must carry the policy
+          # tag: a `linux_<arch>` wheel here is one PyPI would reject.
+          wheels=(dist/*.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "::error::expected one wheel, got ${wheels[*]}" >&2; exit 1; }
+          if [[ "${RUNNER_OS}" == "Linux" ]] && [[ "${wheels[0]}" != *"${POLICY}"* ]]; then
+            echo "::error::${wheels[0]} is not tagged ${POLICY}" >&2
+            exit 1
+          fi
+          python -m twine check dist/*
+
+      # One artifact per leg: two matrix legs uploading the same name
+      # collide, and the second upload fails.
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-dist-${{ matrix.platform }}
+          path: dist/*
+          retention-days: 1
+
+  publish:
+    if: ${{ !inputs.dry_run }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: pypi-dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true

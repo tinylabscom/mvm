@@ -1,0 +1,358 @@
+name: Documented surface e2e
+
+# Every documented example, executed against a real host on both backends mvm
+# ships: Firecracker on Linux/KVM and HVF on macOS.
+#
+# Reusable rather than inlined, because two callers need the *same* lane and had
+# been getting different ones. Extended CI runs it nightly. `release.yml` waits
+# on it before it will cut a tag — until then a release blocked only on the
+# hermetic BDD gate, which drives `--help` and refusal paths and boots nothing.
+# That is how `machine run -it`, printed in the README, shipped for as long as
+# it did with a guest console that failed on every OCI image: no lane that could
+# see it ran before a release, and the lane that could see it ran at 04:51 and
+# gated nothing.
+#
+# Both backends, deliberately. That defect reproduced on HVF, the macOS default,
+# and a Linux-only gate would have shipped it.
+
+on:
+  workflow_call:
+    inputs:
+      macos_blocks_on_unusable_host:
+        description: >-
+          Whether a macOS host that cannot run any workload backend has to be
+          backed by a committed evidence record before this workflow passes.
+          `release.yml` leaves it true, so a tag still cannot be cut without
+          live macOS evidence — either from a runner that booted a guest, or
+          from a recorded local run covering this exact tree. Extended CI
+          passes false so its nightly red means a regression rather than the
+          standing hardware gap.
+        type: boolean
+        required: false
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  e2e-docs-linux:
+    name: Documented surface e2e (Linux, Firecracker, shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    # Both required matrix jobs partition the complete scenario inventory;
+    # neither shard is a substitute for the other. Separate hosted runners
+    # retain the full live witness without one serial suite exhausting its
+    # deadline before the scenario summary can be produced.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["0/2", "1/2"]
+    # The job must have time for checkout, toolchain setup, mvmctl compilation,
+    # builder-image acquisition and cleanup in addition to the suite deadline.
+    # Keep the suite's own deadline below the job's so a genuine hang prints
+    # the scenario where it stopped rather than an opaque job cancellation.
+    #
+    # The unsharded 120-minute suite reached 287 of 367 scenarios and the
+    # 180-minute retry reached about 290, both without a final summary. Both
+    # shards are required below. Keep a generous per-shard deadline below the
+    # job budget so a genuine hang still names the scenario where it stopped.
+    timeout-minutes: 240
+    env:
+      # Raised with `timeout-minutes` above; the two are one budget and drifted
+      # apart once already.
+      MVM_E2E_TIMEOUT_SECS: "10800"
+      MVM_BDD_SHARD: ${{ matrix.shard }}
+      # Must track `FC_VERSION_DEFAULT` in mvm-core. The workload launch path
+      # passes flags older Firecracker releases reject before opening the API
+      # socket, which otherwise surfaces as an unhelpful socket timeout.
+      FC_VERSION: v1.17.0
+      # The published builder/default-image paths fail closed unless the
+      # source-built binary can verify their signed checksum manifests.
+      MVM_E2E_FEATURES: user,release-artifact-bootstrap
+      # Hosted runners protect their distro kernel under /boot. Use the
+      # published, hash-verified workload kernel rather than a Stage 0 source
+      # build that attempts to boot that unreadable host file.
+      MVM_KERNEL_SOURCE: download
+      # Fetch the pinned, signed builder image, as the macOS lane does. Building
+      # it from source here put 37 minutes of Stage 0 ahead of every scenario on
+      # a good run, and a two-hour hang ahead of none on a bad one; no scenario
+      # examines the image itself, and building images is mvm-images' job.
+      #
+      # There are deliberately no Stage 0 grants below: no readable /boot
+      # kernel, no vhost-vsock, no QEMU. A regression that drifts this lane back
+      # into a source bootstrap fails in seconds instead of spending the budget.
+      MVM_BOOT_IMAGE: fetch
+      # Firecracker is already the Linux/KVM default. Named, because the helper
+      # the unembedded binary re-executes chooses QEMU when the variable is
+      # unset, and QEMU can only reach a builder through Stage 0.
+      MVM_BUILDER_BACKEND: firecracker
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-linux
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
+
+      - name: Install firecracker
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 \
+            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
+            /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the documented surface cannot boot." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Run the documented surface end to end
+        run: just e2e::docs
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            for f in firecracker.log console.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"
+                tail -50 "$d$f"
+              fi
+            done
+          done
+
+  # Split out of the job below so the same detection can mean two things to two
+  # callers. A nightly that stops dead on the hardware gap every single night
+  # reports the same red for it as for a real regression, and a lane whose red
+  # never varies is one nobody reads. Neither caller gets to weaken the other:
+  # this job reports `supported=false` off one probe, and what that costs is
+  # decided by `macos_blocks_on_unusable_host` in the evidence job below.
+  e2e-docs-macos-host-check:
+    name: Documented surface e2e (macOS, host check)
+    # The self-hosted Apple Silicon runner (issue #3011). While it is offline
+    # this job waits in the queue rather than falling back to the evidence job
+    # below — a release blocks until the runner is back, which is the intended
+    # cost of a macOS gate that has to boot something.
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    timeout-minutes: 10
+    outputs:
+      supported: ${{ steps.preflight.outputs.supported }}
+    steps:
+      # Fail in seconds, naming the real constraint, instead of spending ~35
+      # minutes building and then dying on "pipe inject config to supervisor" —
+      # which reads as a supervisor bug rather than as a host that cannot run
+      # one.
+      #
+      # No GitHub-hosted macOS runner can boot an mvm guest:
+      #
+      #   arm64 (macos-latest)    Hypervisor.framework is nested and reports
+      #                           HV_UNSUPPORTED. libkrun goes through the same
+      #                           framework, so it does not escape this either.
+      #   x86_64 (macos-15-intel) `mvm-hvf-supervisor` is Apple-Silicon-only
+      #                           and links as a stub.
+      #
+      # Hence the self-hosted runner. The probe stays a live `uname` rather
+      # than trusting the label, so pointing `runs-on` back at a hosted image
+      # degrades to the evidence job instead of to a 35-minute confusing red.
+      - name: Preflight — this host can run the workload backend
+        id: preflight
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          echo "runner arch: $arch"
+          if [ "$arch" = "arm64" ]; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "supported=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::mvm-hvf-supervisor is Apple-Silicon-only and links as a stub on $arch, and the libkrun Homebrew formula is ARM-only. No workload backend can start here. This lane needs a self-hosted Apple Silicon runner; see issue #3011. A release still requires a recorded local run — see the evidence job."
+
+  # The macOS half of the release gate, when no runner can produce it live.
+  #
+  # Until issue #3011 lands there is no hosted macOS runner that can boot an mvm
+  # guest, so the run happens on a maintainer's Apple Silicon machine and gets
+  # committed as `specs/evidence/e2e/macos-hvf.json`. This job is what stops
+  # that from being a promise: `check-release-evidence` recomputes a digest over
+  # every path that could change what the suite proves — `crates/`, `features/`,
+  # `examples/`, `nix/`, `src/`, `scripts/`, the README, the manifests — and
+  # fails unless the record describes this exact tree.
+  #
+  # It retires itself. The moment the host check above reports `supported=true`,
+  # the real lane runs and this one is skipped, with nothing to remember to
+  # flip back.
+  e2e-docs-macos-evidence:
+    name: Documented surface e2e (macOS, recorded local run)
+    needs: e2e-docs-macos-host-check
+    if: >-
+      inputs.macos_blocks_on_unusable_host &&
+      needs.e2e-docs-macos-host-check.outputs.supported != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Full history: on a mismatch the gate diffs the recorded commit against
+      # HEAD to name the files that moved, and a shallow clone reduces that to
+      # "could not diff the two trees".
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-evidence
+
+      - name: The macOS lane's evidence covers this tree
+        run: cargo run -p xtask -- check-release-evidence macos-hvf
+
+  e2e-docs-macos:
+    name: Documented surface e2e (macOS, HVF)
+    needs: e2e-docs-macos-host-check
+    if: needs.e2e-docs-macos-host-check.outputs.supported == 'true'
+    # The macOS default backend is HVF, and every guest-booting BDD scenario
+    # before this one carried `@firecracker` — so the backend most users run
+    # had no lane that booted anything. This is that lane.
+    #
+    # Self-hosted, because no hosted macOS image can boot a guest — see the
+    # host check above.
+    runs-on: [self-hosted, macOS, ARM64, m1]
+    # The same one-budget rule as the Linux job: the job must outlast the
+    # suite's own deadline by the whole of setup, or a slow run is cancelled
+    # before it can print a summary and proves nothing. A cold artifact home
+    # on the runner spends its first stretch acquiring images.
+    timeout-minutes: 180
+    env:
+      MVM_E2E_TIMEOUT_SECS: "7200"
+      # The documented surface includes signed release downloads. Build the
+      # exact binary under test with their verifier enabled.
+      MVM_E2E_FEATURES: user,release-artifact-bootstrap
+      # The source-checkout kernel build depends on the same Stage 0 image this
+      # witness deliberately fetches. Use the separately published, verified
+      # workload kernel so the live lane never falls back into that cycle.
+      MVM_KERNEL_SOURCE: download
+      # A source checkout otherwise defaults to building the builder image.
+      # HVF can run the published image but cannot prepare it through Stage 0,
+      # so make the signed release-artifact path explicit on this lane.
+      MVM_BOOT_IMAGE: fetch
+      # The runner has no libkrun installed and must not need it: HVF is the
+      # macOS 26+ default, and the fetched builder image is self-contained, so
+      # source artifact jobs run inside it under HVF.
+      MVM_BUILDER_BACKEND: hvf
+      # Every warm launch here is held to the 300 ms startup ceiling, which is
+      # a property of an optimized build. Unoptimized, plan admission alone
+      # took 268 ms of it on this runner. The Linux warm-claim witness builds
+      # the same profile for the same reason.
+      MVM_E2E_PROFILE: release-witness
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: e2e-docs-macos
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.12.5"
+
+      - name: Run the documented surface end to end
+        # HVF reports snapshot tier `save-restore`, so the pause/resume and
+        # checkpoint scenarios can run here. The Linux lane leaves this unset:
+        # Firecracker reports `unsupported` and those verbs refuse by capability.
+        #
+        # HVF also carries `WallClockControl::SupervisorTimer` — a per-VM
+        # supervisor of ours outlives the launch and can hold a deadline — so
+        # `--timeout` is admitted here rather than refused as an unenforceable
+        # grant. The Linux lane leaves this unset too: Firecracker detaches its
+        # session and is orphaned to init before the launch returns, leaving no
+        # process of ours to fire a timer.
+        #
+        # The suite script deletes its own log on exit, so keep a copy for the
+        # upload below. `pipefail` is load-bearing: without it the step's
+        # status is `tee`'s, and a red suite reports a green step.
+        env:
+          MVM_BDD_SNAPSHOT: "1"
+          MVM_BDD_WALL_CLOCK: "1"
+        run: |
+          set -o pipefail
+          just e2e::docs 2>&1 | tee "$RUNNER_TEMP/e2e-docs.log"
+
+      # Nobody logs in to the runner to read a log. Upload on success too: a
+      # green run's "did NOT run" tally is how a skipped scenario gets noticed.
+      - name: Upload the suite log and VM logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-docs-macos-logs
+          path: |
+            ${{ runner.temp }}/e2e-docs.log
+            ~/.mvm/vms/*/console.log
+            ~/.mvm/vms/*/supervisor.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Dump VMM diagnostics on failure
+        if: failure()
+        run: |
+          for d in "$HOME"/.mvm/vms/*/; do
+            echo "===== $d ====="
+            ls -la "$d" || true
+            # HVF flushes console.log only when the supervisor exits, so an
+            # empty file here is not evidence of a silent guest.
+            for f in console.log supervisor.log; do
+              if [ -s "$d$f" ]; then
+                echo "--- $f ---"
+                tail -50 "$d$f"
+              fi
+            done
+          done

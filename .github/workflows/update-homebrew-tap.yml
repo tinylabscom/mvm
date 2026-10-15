@@ -1,0 +1,112 @@
+name: Update Homebrew tap
+
+# GITHUB_TOKEN release events do not trigger this workflow. The release
+# workflow calls it explicitly after promotion and observes its full result.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Promoted stable CLI release tag (e.g. v0.15.2)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-homebrew-tap
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v') }}
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Resolve stable tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="${EVENT_TAG:-$INPUT_TAG}"
+          [[ "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: resolve
+    uses: ./.github/workflows/homebrew-smoke.yml
+    with:
+      tag: ${{ needs.resolve.outputs.tag }}
+
+  update-tap:
+    needs: [resolve, smoke]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@v3
+      - name: Authenticate promoted release and render formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: bash nix/packaging/homebrew/prepare-formula.sh "$TAG" "$RUNNER_TEMP/formula"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: homebrew-tested-*
+          path: ${{ runner.temp }}/tested
+
+      - name: Require the exact formula tested on every target
+        run: |
+          set -euo pipefail
+          for runner in ubuntu-latest ubuntu-24.04-arm macos-26; do
+            cmp "$RUNNER_TEMP/formula/mvmctl.rb" "$RUNNER_TEMP/tested/homebrew-tested-$runner/mvmctl.rb"
+          done
+
+      - name: Push validated formula to tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is required for tap publication" >&2
+            exit 1
+          fi
+          # The helper contains no credential; Git receives it only over the
+          # askpass pipe. Never persist a token in a URL or Git config.
+          export GIT_ASKPASS="$RUNNER_TEMP/tap-askpass"
+          export GIT_TERMINAL_PROMPT=0
+          cat > "$GIT_ASKPASS" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$TAP_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          SH
+          chmod 700 "$GIT_ASKPASS"
+          trap 'rm -f "$GIT_ASKPASS"' EXIT
+          git -c credential.helper= clone https://github.com/tinylabscom/homebrew-mvm.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          mkdir -p Formula
+          cp "$RUNNER_TEMP/formula/mvmctl.rb" Formula/mvmctl.rb
+          git config user.name mvm-release-bot
+          git config user.email release-bot@users.noreply.github.com
+          git add Formula/mvmctl.rb
+          if git diff --staged --quiet; then echo "no change"; exit 0; fi
+          GIT_EDITOR=true git commit -m "mvmctl ${TAG#v}"
+          git -c credential.helper= push

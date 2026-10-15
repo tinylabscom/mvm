@@ -1,0 +1,31 @@
+name: Free up runner disk
+description: |
+  Reclaim the preinstalled tooling that GitHub's ubuntu-latest image ships
+  but this Rust workspace never uses (Android SDK, .NET, GHC, CodeQL, the
+  Docker image cache). Frees ~25-30 GB so a full `cargo build --all-targets`
+  plus the cargo caches can't exhaust the runner — the intermittent
+  "No space left on device" failures were a borderline-full root volume,
+  not a real build/test fault.
+
+runs:
+  using: composite
+  steps:
+    - name: Reclaim preinstalled tooling
+      shell: bash
+      run: |
+        set -uxo pipefail
+        # Best-effort: a missing path on a future image must not fail the job.
+        before=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+        sudo rm -rf \
+          /usr/share/dotnet \
+          /opt/ghc \
+          /usr/local/.ghcup \
+          /usr/local/lib/android \
+          /opt/hostedtoolcache/CodeQL \
+          /usr/local/share/boost \
+          /usr/local/share/powershell \
+          /usr/lib/jvm || true
+        sudo docker image prune --all --force >/dev/null 2>&1 || true
+        after=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+        echo "Root volume free: ${before}G -> ${after}G"
+        df -h /

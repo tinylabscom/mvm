@@ -1,0 +1,74 @@
+name: First run after a fresh install
+
+# Installs a published tag the way a new user would and runs the README's first
+# command, a second boot from the same HOME, and a boot that binds an SDK host
+# service on each backend: HVF on the self-hosted Apple Silicon runner,
+# Firecracker on a hosted Linux runner with KVM.
+#
+# `release.yml` calls this for the tag it just published, and `promote-release`
+# waits on it. Dispatch it by hand to prove a lane before a tag depends on it:
+# against an already-published tag (a release candidate), the scripts and
+# installer come from the dispatched ref, so a change to either is exercised
+# on the real runners before it gates a release.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Published release tag to install
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to install, e.g. v0.18.0-rc.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  first-run-smoke:
+    name: First run after a fresh install (${{ matrix.lane }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: macOS, HVF
+            runner: [self-hosted, macOS, ARM64, m1]
+            artifact: first-run-macos-hvf
+          - lane: Linux, Firecracker
+            runner: ubuntu-latest
+            artifact: first-run-linux-firecracker
+    runs-on: ${{ matrix.runner }}
+    # Above the smoke's summed budgets (install 20 min, three boots 20 min), so
+    # a slow step fails on its own budget with a transcript, not on this.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      # What `install/linux.md` asks of a user: write access to /dev/kvm.
+      - name: Grant /dev/kvm access for the job
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — a first run cannot boot here." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Install the tag as a new user and run the first command
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
+        run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/first-run
+          if-no-files-found: warn
+          retention-days: 30

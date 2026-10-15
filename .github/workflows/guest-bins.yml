@@ -1,0 +1,51 @@
+name: Guest bins
+
+# Builds the mvm-guest-bins artifact (the static guest executables, the
+# initramfs agent, the host-services and GPU shared objects for glibc and musl,
+# for aarch64 and x86_64, plus the Python SDK and the manifest pinning them)
+# from the dispatched ref, and uploads it with its `.sha256` sidecar as a
+# workflow artifact. The archive is the guest runtime each CLI release
+# publishes for mvmctl: release.yml calls this workflow, and its release job
+# signs, attests and publishes what was uploaded. Dispatched on its own, the
+# lane produces an unsigned copy for inspection. Nothing here publishes or
+# signs.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# Dispatch-only, so a second dispatch queues behind the first instead of
+# killing a build that is already most of the way through.
+concurrency:
+  group: guest-bins-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  guest-bins:
+    runs-on: ubuntu-latest
+    # A cold debug build of mvmctl plus every guest cross-compile for both
+    # arches: two overlay builds, the OCI set, setpriv, the initramfs agent and
+    # eight shared objects per arch.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # The guest artifacts are cross-compiled with cargo-zigbuild under the
+      # pinned toolchain, for the musl and glibc targets of both arches; this
+      # action installs zig, cargo-zigbuild and all four targets.
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Build the guest-bins artifact
+        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvm-guest-bins
+          path: dist/
+          if-no-files-found: error

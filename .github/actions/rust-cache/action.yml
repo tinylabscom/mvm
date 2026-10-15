@@ -1,0 +1,55 @@
+name: Rust build cache
+description: >
+  Restore the shared Rust build cache for this workspace. Restore-only by
+  default; only the cache-warm workflow on main writes it.
+
+inputs:
+  save:
+    description: >
+      Whether this job may write the cache. Leave false everywhere except the
+      warm job — see the note below on why writers are centralised.
+    required: false
+    default: "false"
+  key:
+    description: >
+      Extra discriminator for jobs whose target dir is genuinely different
+      (a cross-compiled target, a different feature set). Jobs sharing a value
+      share a cache.
+    required: false
+    default: "workspace"
+
+runs:
+  using: composite
+  steps:
+    # Why one writer:
+    #
+    # GitHub scopes a cache to the ref that wrote it, and only caches written on
+    # the default branch are readable from every other ref. Merge-queue refs are
+    # ephemeral — one run each, then gone — so an entry written by a queue run
+    # can never be read again. Pull-request runs can only ever hit their own
+    # branch's entries.
+    #
+    # So the useful cache is the one main writes, and every other job restores
+    # it. Letting PR jobs write as well would not help them (they already
+    # restore main's) and would actively hurt: the repo cache is capped at 10 GB
+    # with LRU eviction, and a Rust target directory this size means a busy day
+    # of PR writes would evict the very entry everything else depends on.
+    - name: Restore Rust build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        # Bumped when workspace-crate caching was enabled so an immutable
+        # dependency-only entry cannot masquerade as the new warm cache.
+        prefix-key: v1-rust
+        shared-key: ${{ inputs.key }}
+        # The toolchain and lockfile are already part of the key that
+        # rust-cache computes, so nightly and stable jobs never collide.
+        save-if: ${{ inputs.save }}
+        # The only writer is trusted main, so preserve workspace artifacts as
+        # well as dependencies. Queue and pull-request refs restore this entry
+        # read-only and let Cargo's fingerprints rebuild changed crates. This
+        # avoids recompiling every unchanged workspace crate in every sibling
+        # lane while keeping untrusted refs out of the shared write boundary.
+        cache-all-crates: "false"
+        cache-workspace-crates: "true"
+        # The eBPF lane's pinned bpf-linker install also benefits from this.
+        cache-bin: "true"
