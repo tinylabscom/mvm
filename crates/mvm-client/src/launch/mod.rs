@@ -1413,7 +1413,6 @@ impl LocalBackend {
         let memory_limit_exceeded =
             mvm_core::spawn_scope::ScopeProbe::default().memory_limit_exceeded(&state_dir);
         if let Some(emitter) = build_audit_emitter() {
-            // One flush for the run's closing records; see `seal_transient_end`.
             let closing = ClosingRecords {
                 plan: &outcome.plan,
                 machine: name,
@@ -1424,16 +1423,14 @@ impl LocalBackend {
                     usage,
                 },
             };
-            match emitter.batched(|| Ok(closing.record(&emitter))) {
-                Ok(true) => mvm_hostd::audit::witness::flush_configured(
+            // `record` owns the batch: one flush for the run's closing
+            // records, a failed flush recorded there as an unsealed end.
+            // Batching here again would nest, which the emitter refuses.
+            if closing.record(&emitter) {
+                mvm_hostd::audit::witness::flush_configured(
                     emitter.audit_dir(),
                     &outcome.plan.tenant.0,
-                ),
-                Ok(false) => {}
-                Err(e) => record_unsealed_end(
-                    Some((&emitter, &outcome.plan)),
-                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
-                ),
+                );
             }
         }
         if outcome.mode == LifecycleMode::Transient {
