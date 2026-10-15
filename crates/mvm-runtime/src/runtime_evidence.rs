@@ -234,7 +234,7 @@ pub fn checked_source_runtime_fixture(
     vm_name: &str,
     rootfs: &Path,
 ) -> Result<(VmStartConfig, RuntimeLaunchBinding)> {
-    let cache = Path::new(&mvm_core::config::mvm_home()).join("cache");
+    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let workspace = mvm_build::image_source::guest_runtime_source_checkout()
         .context("a checked-source fixture requires the developer checkout")?;
     let version = env!("CARGO_PKG_VERSION");

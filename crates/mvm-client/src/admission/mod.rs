@@ -15,7 +15,7 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run,
+    SystemClock, admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -806,19 +806,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        // A caller that already resolved its backend hands the typed kind over,
-        // and the grant gate measures against the mechanisms that tier really
-        // has. A caller that has not resolved one yet passes `None` and gets
-        // the fail-closed answer: a sealed run refuses a grant whose
-        // enforceability nothing can confirm, a dev run is warned. The plan's
-        // own `runtime_profile` is never consulted for this — it is a label its
-        // author chose, and believing it would let a mislabelled plan pick the
-        // controls it is measured against.
-        match p.backend_kind {
-            Some(kind) => RunPosture::on_backend(variant, kind),
-            None => RunPosture::without_backend(variant),
-        }
-        .with_runtime(p.runtime_config),
+        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config),
     )
     .or_else(|err| -> Result<_> {
         if let Some(refused) =
