@@ -797,6 +797,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            caller_registration: None,
             bundle_json,
             config_files: start_config.config_files,
             read_only_materialized_images: c
@@ -808,10 +809,9 @@ pub(in crate::commands) fn run_secure_started(
                 .map(|share| share.host_path.clone())
                 .collect(),
         };
-        // Bind the OCI provenance to the plan that was just admitted, before
-        // the backend starts. Claim 14 wants the image's origin in the chain
-        // for the admission that booted it, and this is the first point where
-        // that plan exists.
+        // Bind the OCI provenance to the plan just admitted, before the backend
+        // starts: claim 14 wants the image's origin in the chain for the
+        // admission that booted it, and this is the first point that plan exists.
         if let Some(labels) = provenance_for_admit.borrow_mut().take() {
             c.emitter
                 .emit_oci_provenance(c.admitted.plan(), labels)

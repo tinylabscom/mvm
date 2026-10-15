@@ -3121,6 +3121,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -3304,6 +3305,7 @@ dependencies = [
  "aya",
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
  "etherparse",
@@ -3313,6 +3315,7 @@ dependencies = [
  "hmac",
  "httparse",
  "ipnet",
+ "keyring",
  "landlock",
  "leakguard",
  "libc",
@@ -3335,6 +3338,7 @@ dependencies = [
  "rustls",
  "seccompiler",
  "secrecy",
+ "security-framework",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -3347,6 +3351,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xtask",
  "zeroize",
 ]
@@ -3523,6 +3528,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tracing",
  "virtio-queue",

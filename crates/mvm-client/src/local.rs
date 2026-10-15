@@ -2398,6 +2398,7 @@ mod tests {
                 status: "collecting".into(),
                 generation: Some(3),
                 shed: 1,
+                losses: Default::default(),
             })
             .unwrap(),
         )
@@ -2414,7 +2415,14 @@ mod tests {
             })
             .build()
             .unwrap();
-        let line = ReceivedRecord::encode_line(1_700_000_000_000, &record).unwrap();
+        // Sealed the way the collector seals them, under the key the spawner
+        // provisions and the reader unwraps.
+        let key = mvm_vmm::host::telemetry_provisioning::provision_records_key(
+            &state_dir,
+            &mvm_core::config::mvm_keys_dir(),
+        )
+        .unwrap();
+        let line = ReceivedRecord::seal_line(&key, 1_700_000_000_000, &record).unwrap();
         std::fs::write(&records_path, [line.clone(), line.clone()].concat()).unwrap();
 
         let id = MachineId("telemetry-web".into());

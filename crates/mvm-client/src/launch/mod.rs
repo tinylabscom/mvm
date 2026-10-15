@@ -289,40 +289,39 @@ struct ClosingRecords<'a> {
 
 impl ClosingRecords<'_> {
     /// Write them, and say whether the closing root was published.
+    ///
+    /// The exit record, the seal and the closing root reach the disk in one
+    /// flush, as admission's records and the transient path do. Nothing acts
+    /// on any of them before this returns, so syncing each on its own bought
+    /// no ordering; it bought one serial fsync per record on a path the
+    /// caller waits on.
     fn record(&self, emitter: &AuditEmitter) -> bool {
         let (plan, name) = (self.plan, self.machine);
-        if let Some(exceeded) = self.memory_limit_exceeded
-            && let Err(e) = emitter.emit_memory_limit_exceeded(plan, exceeded)
-        {
-            tracing::warn!(
-                error = %e,
-                machine = name,
-                "audit emit_memory_limit_exceeded failed (non-fatal)"
-            );
-        }
-        if let Err(e) = emitter.emit_exit_record(plan, self.exit) {
-            tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
-        }
-        // Seal before the closing root, so the root covers the seal.
-        if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Exited) {
-            record_unsealed_end(
-                Some((emitter, plan)),
-                UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
-            );
-        }
-        // The closing bracket of the run. Admission published the opening
-        // one, so a verifier can prove the log only grew across the whole
-        // execution rather than changing underneath it. Best-effort for the
-        // same reason as at admission: a workload that already ran must not
-        // fail its exit report over a weakened later check.
-        match emitter.publish_root(&plan.tenant.0) {
-            Ok(_) => true,
-            Err(e) => {
+        let closed = emitter.batched(|| {
+            if let Some(exceeded) = self.memory_limit_exceeded {
+                emitter.emit_memory_limit_exceeded(plan, exceeded)?;
+            }
+            emitter.emit_exit_record(plan, self.exit)?;
+            emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Exited)?;
+            Ok(emitter.publish_root(&plan.tenant.0).map(drop))
+        });
+        match closed {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     error = %format!("{e:#}"),
                     machine = name,
                     "could not publish an audit root at exit; the log stays intact but a later \
                      consistency check has one fewer point to verify against"
+                );
+                // The seal is on disk; only the root failed.
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), machine = name, "audit closing records failed (non-fatal)");
+                record_unsealed_end(
+                    Some((emitter, plan)),
+                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
                 );
                 false
             }
@@ -1416,7 +1415,6 @@ impl LocalBackend {
         let memory_limit_exceeded =
             mvm_core::spawn_scope::ScopeProbe::default().memory_limit_exceeded(&state_dir);
         if let Some(emitter) = build_audit_emitter() {
-            // One flush for the run's closing records; see `seal_transient_end`.
             let closing = ClosingRecords {
                 plan: &outcome.plan,
                 machine: name,
@@ -1427,16 +1425,14 @@ impl LocalBackend {
                     usage,
                 },
             };
-            match emitter.batched(|| Ok(closing.record(&emitter))) {
-                Ok(true) => mvm_hostd::audit::witness::flush_configured(
+            // `record` owns the batch: one flush for the run's closing
+            // records, a failed flush recorded there as an unsealed end.
+            // Batching here again would nest, which the emitter refuses.
+            if closing.record(&emitter) {
+                mvm_hostd::audit::witness::flush_configured(
                     emitter.audit_dir(),
                     &outcome.plan.tenant.0,
-                ),
-                Ok(false) => {}
-                Err(e) => record_unsealed_end(
-                    Some((&emitter, &outcome.plan)),
-                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
-                ),
+                );
             }
         }
         if outcome.mode == LifecycleMode::Transient {

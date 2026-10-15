@@ -21,9 +21,12 @@ use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use std::sync::Arc;
+
+use mvm_core::crypto::aead;
 use mvm_core::protocol::telemetry::served::{
-    CollectorState, MAX_PERSISTED_LINE_BYTES, ReceivedRecord, TelemetryCursor,
-    TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
+    CollectorState, MAX_SEALED_LINE_BYTES, ReceivedRecord, TelemetryCursor, TelemetryReadRequest,
+    TelemetryReadResponse, TelemetryStatus,
 };
 use mvm_hostd::telemetry_collector::CollectorStatusSnapshot;
 use mvm_vmm::host::telemetry_provisioning::{
@@ -51,19 +54,66 @@ pub enum TelemetryReadError {
     /// consumer starts over from [`TelemetryCursor::START`].
     #[error("telemetry cursor offset {offset} is not a line boundary of a {len}-byte stream")]
     CursorInvalid { offset: u64, len: u64 },
+    /// The records exist but this host holds no key to open them: the
+    /// wrapped records key or the host key-encryption key is missing.
+    #[error("no key on this host opens the telemetry records in {state_dir}")]
+    KeyUnavailable { state_dir: PathBuf },
 }
 
 /// Reads one machine's collector outputs from its state directory.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LocalTelemetryReader {
     state_dir: PathBuf,
+    keys_dir: PathBuf,
+    records_key: Option<Arc<aead::Key>>,
+}
+
+impl std::fmt::Debug for LocalTelemetryReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalTelemetryReader")
+            .field("state_dir", &self.state_dir)
+            .field("keys_dir", &self.keys_dir)
+            .finish_non_exhaustive()
+    }
 }
 
 impl LocalTelemetryReader {
-    /// A reader over an explicit VM state directory.
+    /// A reader over an explicit VM state directory, opening its records
+    /// with the host's own keys.
     pub fn for_state_dir(state_dir: impl Into<PathBuf>) -> Self {
         Self {
             state_dir: state_dir.into(),
+            keys_dir: mvm_core::config::mvm_keys_dir(),
+            records_key: None,
+        }
+    }
+
+    /// Open records with this data key instead of unwrapping the VM's own
+    /// under the host key-encryption key. For a caller that already holds it.
+    pub fn with_records_key(mut self, key: aead::Key) -> Self {
+        self.records_key = Some(Arc::new(key));
+        self
+    }
+
+    /// The key the records are sealed under.
+    fn records_key(&self) -> Result<Arc<aead::Key>, TelemetryReadError> {
+        if let Some(key) = &self.records_key {
+            return Ok(Arc::clone(key));
+        }
+        match mvm_vmm::host::telemetry_provisioning::load_records_key(
+            &self.state_dir,
+            &self.keys_dir,
+        ) {
+            Ok(Some(key)) => Ok(Arc::new(key)),
+            Ok(None) => Err(TelemetryReadError::KeyUnavailable {
+                state_dir: self.state_dir.clone(),
+            }),
+            Err(source) => Err(TelemetryReadError::Io {
+                path: self
+                    .state_dir
+                    .join(mvm_vmm::host::telemetry_provisioning::TELEMETRY_RECORDS_KEY_FILE),
+                source,
+            }),
         }
     }
 
@@ -122,6 +172,7 @@ impl LocalTelemetryReader {
             vm_name: snapshot.vm_name,
             state,
             shed: snapshot.shed,
+            losses: snapshot.losses,
             snapshot_age_ms,
             records_bytes,
         })
@@ -160,6 +211,11 @@ impl LocalTelemetryReader {
         };
         let len = file.metadata().map_err(io)?.len();
         validate_boundary(&file, cursor, len).map_err(io)??;
+        let key = if len > 0 {
+            Some(self.records_key()?)
+        } else {
+            None
+        };
 
         let mut reader = std::io::BufReader::new(file);
         reader.seek(SeekFrom::Start(cursor.offset)).map_err(io)?;
@@ -169,7 +225,7 @@ impl LocalTelemetryReader {
             line.clear();
             let read = reader
                 .by_ref()
-                .take(MAX_PERSISTED_LINE_BYTES as u64 + 1)
+                .take(MAX_SEALED_LINE_BYTES as u64 + 2)
                 .read_until(b'\n', &mut line)
                 .map_err(io)?;
             if read == 0 {
@@ -177,7 +233,7 @@ impl LocalTelemetryReader {
                 break;
             }
             if !line.ends_with(b"\n") {
-                if line.len() > MAX_PERSISTED_LINE_BYTES {
+                if line.len() > MAX_SEALED_LINE_BYTES + 1 {
                     // An overlong line: skip to its end so one corrupt line
                     // cannot pin the cursor, counting it once.
                     let rest = skip_to_newline(&mut reader).map_err(io)?;
@@ -189,7 +245,10 @@ impl LocalTelemetryReader {
                 page.exhausted = true;
                 break;
             }
-            match ReceivedRecord::decode_line(&line) {
+            let opened = key
+                .as_deref()
+                .and_then(|key| ReceivedRecord::open_line(key, &line));
+            match opened {
                 Some(record) => page.push(record, read as u64),
                 None => page.skip(read as u64),
             }
@@ -332,14 +391,18 @@ mod tests {
             .unwrap()
     }
 
+    fn test_key() -> aead::Key {
+        aead::Key::from_bytes([5; 32])
+    }
+
     fn line(sequence: u64) -> Vec<u8> {
-        ReceivedRecord::encode_line(1_000 + sequence, &record(sequence)).unwrap()
+        ReceivedRecord::seal_line(&test_key(), 1_000 + sequence, &record(sequence)).unwrap()
     }
 
     fn stage(dir: &Path, lines: &[Vec<u8>]) -> LocalTelemetryReader {
         let (_, records) = collector_files(dir);
         std::fs::write(records, lines.concat()).unwrap();
-        LocalTelemetryReader::for_state_dir(dir)
+        LocalTelemetryReader::for_state_dir(dir).with_records_key(test_key())
     }
 
     fn write_status(dir: &Path, status: &str, generation: Option<u64>, shed: u64) {
@@ -349,6 +412,7 @@ mod tests {
             status: status.into(),
             generation,
             shed,
+            losses: Default::default(),
         };
         std::fs::write(path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
     }
@@ -398,6 +462,7 @@ mod tests {
                 shed,
                 snapshot_age_ms,
                 records_bytes: served_bytes,
+                ..
             } = reader.status().unwrap()
             else {
                 panic!("{label}: provisioned");
@@ -520,6 +585,41 @@ mod tests {
     }
 
     #[test]
+    fn records_need_the_hosts_key_and_a_line_under_another_key_is_not_served() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("vm");
+        let keys = dir.path().join("keys");
+        std::fs::create_dir_all(&state).unwrap();
+        let key =
+            mvm_vmm::host::telemetry_provisioning::provision_records_key(&state, &keys).unwrap();
+        let foreign = aead::Key::from_bytes([6; 32]);
+        let (_, records) = collector_files(&state);
+        std::fs::write(
+            &records,
+            [
+                ReceivedRecord::seal_line(&key, 1, &record(1)).unwrap(),
+                ReceivedRecord::seal_line(&foreign, 2, &record(2)).unwrap(),
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        let mut reader = LocalTelemetryReader::for_state_dir(&state);
+        reader.keys_dir = keys.clone();
+        let page = reader.read(&TelemetryReadRequest::default()).unwrap();
+        assert_eq!(sequences(&page), vec![1]);
+        assert_eq!(page.undecodable, 1);
+
+        // A host without the key-encryption key reads nothing at all.
+        let mut keyless = LocalTelemetryReader::for_state_dir(&state);
+        keyless.keys_dir = dir.path().join("no-keys");
+        assert!(matches!(
+            keyless.read(&TelemetryReadRequest::default()),
+            Err(TelemetryReadError::KeyUnavailable { .. })
+        ));
+    }
+
+    #[test]
     fn undecodable_lines_are_counted_skipped_and_never_served() {
         let dir = tempfile::tempdir().unwrap();
         let bare = {
@@ -538,12 +638,10 @@ mod tests {
             ],
         );
         let page = reader.read(&TelemetryReadRequest::default()).unwrap();
-        assert_eq!(sequences(&page), vec![1, 2, 3]);
-        assert_eq!(
-            page.records[1].received_at_ms, None,
-            "a bare pre-envelope line decodes without a receive time"
-        );
-        assert_eq!(page.undecodable, 2);
+        // A plaintext line — even a well-formed record — is never served:
+        // only lines that open under the records key are records.
+        assert_eq!(sequences(&page), vec![1, 3]);
+        assert_eq!(page.undecodable, 3);
         assert!(page.exhausted);
         let (_, records) = collector_files(dir.path());
         assert_eq!(
@@ -556,7 +654,7 @@ mod tests {
     #[test]
     fn an_overlong_line_is_skipped_whole_and_counted_once() {
         let dir = tempfile::tempdir().unwrap();
-        let mut huge = vec![b'x'; MAX_PERSISTED_LINE_BYTES * 3];
+        let mut huge = vec![b'x'; MAX_SEALED_LINE_BYTES * 3];
         huge.push(b'\n');
         let reader = stage(dir.path(), &[line(1), huge.clone(), line(2)]);
         let page = reader.read(&TelemetryReadRequest::default()).unwrap();

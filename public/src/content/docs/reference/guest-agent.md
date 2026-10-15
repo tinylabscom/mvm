@@ -51,41 +51,59 @@ and version-pinned for the life of a running VM.
 
 ## Protocol
 
-### Telemetry transport foundation (not enabled)
+### Guest telemetry
 
-The shared libraries define a separate `Telemetry` service on reserved vsock
-port **5254**. It is not yet installed as a guest listener or supervised host
-collector: this does **not** provide detached tracing today.
+Every workload boot carries telemetry from the guest to the host by default.
+The guest agent serves a listener on the reserved `Telemetry` vsock port
+**5254**; a host collector that lives as long as the VM dials it,
+authenticates, and keeps what it receives. Nothing in the guest exports
+directly: there is no OTLP exporter and no network path for telemetry inside
+a microVM. Set `MVM_TELEMETRY_COLLECT=0` on the host to turn collection off.
+An OTLP endpoint is optional either way.
+
+The collector runs inside the VM's network endpoint when the workload has
+one (egress, ingress, secrets or tools), and otherwise as the same binary in
+collector-only mode — no secrets, no listeners, confined to the VM's state
+directory — under a keeper that stops it with the VM. Starting it never
+waits on the guest: on the Firecracker reference host, cold boots measured a
+median of 860 ms with collection on and 872 ms with it off over 15 pairs, and
+the warm-claim path does no telemetry work until the claim has succeeded. On Firecracker
+the collector reaches the guest through the VM's vsock mux; on HVF and
+libkrun through the per-port socket the VMM bridges.
 
 Its `mvm.telemetry.v1` records cover span open/update/close, standalone or
 span-associated events, logs, binary stdout/stderr chunks, producer coverage,
-and explicit guest loss summaries. Records reuse the existing authenticated,
-encrypted session machinery. The host receiver requires a registered guest
-public key; guest-authored VM/tenant/boot identity fields are rejected.
+and explicit guest loss summaries. They travel over the existing
+authenticated, encrypted session machinery. The host requires the guest key it
+registered for this boot; guest-authored VM, tenant or boot identity fields
+are rejected. There is no per-record acknowledgement: producers hand records
+to a bounded queue without waiting, a full queue sheds the newest record and
+counts it, and the session reports those losses on a reserved path.
 
-The worker protocol has no per-record ACK. Socket I/O still belongs on a
-dedicated worker, never a tracing callback. The current library is an
-allocation-conscious wire boundary. A prepared-record outbox now provides fixed
-storage with count/byte limits and single-attempt admission; it never waits for
-a contended queue lock. Preparation still allocates outside that admission path.
-Independent cumulative counters retain capacity, contention and unavailable
-losses, and failed writes mark transport delivery uncertain. The outbox is not
-yet connected to runtime source adapters or an event-driven worker supervisor.
-The receiver supports a receive-only session authenticated through an external
-signer, without retaining the host signing key. Guest identity is checked before
-requesting that signature. The resident signer accepts a typed telemetry handshake,
-validates its service domain and guest proof, and returns only a signature. Its
-async client bounds socket I/O with one deadline and verifies the response before
-use. VM-lifetime collection and authoritative generation registration are not yet
-connected to this interface.
+Before anything is written the host withholds any record carrying a secret
+bound to the VM and masks what the stream plane's redaction rules mask. The
+records file is sealed at rest under a per-VM key wrapped by the host's
+transcript key, owner-only. `mvmctl machine telemetry <name>` reads it back:
+status, losses by reason, incomplete spans and recent records, for a running
+or a detached machine alike.
 
-The workload runner provisions guest credentials even for a secret-free,
-deny-all network policy. That path uses only the host's public anchor, creates
-no network endpoint, and grants no egress. Cold boots receive a fresh guest key
-through the existing private identity drive; warm claims retain the registered
-key already held in restored memory. Missing or malformed required identity
-material refuses launch. This credential provisioning does not itself start
-telemetry capture or collection.
+A VM claimed from a warm standby is collected too: the standby boots with the
+telemetry assertion, and the child's collector starts once the claim has
+succeeded, so it never sits on the claim's path. Records the standby queued
+before it was snapshotted arrive first, under the same producer epoch.
+
+Workload stdout and stderr are collected too: every path that reads a
+workload's pipes offers each chunk to capture as it reads it, so a detached
+machine's output is readable with `mvmctl machine telemetry` long after the
+command that started it has gone.
+
+What is not collected today:
+
+- spans: the record contract carries them, with parents and links, but no
+  guest producer emits them yet;
+- the interval before the guest agent starts, which is reported as
+  unavailable rather than covered.
+
 Records are capped at 32 KiB encoded, with eight JSON nesting levels, 16
 primitive attributes, eight span links, 128-byte labels, 2 KiB text fields,
 and 4 KiB stdio chunks. Malformed input terminates the connection without

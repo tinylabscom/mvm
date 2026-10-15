@@ -701,6 +701,7 @@ mod tests {
     fn binding() -> mvm_vmm::driver::spec::PlanBinding {
         mvm_vmm::driver::spec::PlanBinding {
             plan_json: serde_json::json!({"resources": {"timeouts": {"exec_secs": 30}}}),
+            caller_registration: None,
             audit_dir: "/fixture/audit".into(),
             signing_key_path: "/fixture/keys/host-signer.ed25519".into(),
         }

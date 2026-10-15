@@ -139,6 +139,72 @@ pub fn ensure_private_dir(dir: impl AsRef<Path>) -> io::Result<()> {
     Err(unsupported_platform_error(dir.as_ref()))
 }
 
+/// Sync a known managed directory and its finite namespace ancestry.
+///
+/// The configured root is trusted; descendants must be at most eight normal
+/// components and are opened descriptor-relatively without following symlinks.
+/// No directory is listed. Ancestors of the configured root are also synced so
+/// first-use creation of that root's parents cannot leave an unsynced link.
+/// This relies on the filesystem honoring directory fsync; it does not certify
+/// hardware power-loss behavior.
+#[cfg(unix)]
+pub fn sync_managed_directory_chain(root: &Path, directory: &Path) -> io::Result<()> {
+    sync_managed_directory_chain_with(root, directory, |_, file| file.sync_all())
+}
+
+#[cfg(not(unix))]
+pub fn sync_managed_directory_chain(root: &Path, _directory: &Path) -> io::Result<()> {
+    Err(unsupported_platform_error(root))
+}
+
+#[cfg(unix)]
+fn sync_managed_directory_chain_with(
+    root: &Path,
+    directory: &Path,
+    mut sync: impl FnMut(&Path, &File) -> io::Result<()>,
+) -> io::Result<()> {
+    use rustix::fs::{Mode, OFlags};
+    use std::path::Component;
+    let relative = directory
+        .strip_prefix(root)
+        .map_err(|_| io::Error::other("directory is outside managed root"))?;
+    let components: Vec<_> = relative.components().collect();
+    if components.len() > 8
+        || components
+            .iter()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err(io::Error::other(
+            "invalid managed directory depth or component",
+        ));
+    }
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root_file = File::from(rustix::fs::open(root, flags, Mode::empty())?);
+    let canonical_root = root.canonicalize()?;
+    if canonical_root.ancestors().count() > 128 {
+        return Err(io::Error::other("managed root ancestry exceeds bound"));
+    }
+    let mut chain = vec![(canonical_root.clone(), root_file)];
+    for component in components {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::other("invalid managed directory component"));
+        };
+        let (path, parent) = chain
+            .last()
+            .ok_or_else(|| io::Error::other("managed root missing"))?;
+        let child = File::from(rustix::fs::openat(parent, name, flags, Mode::empty())?);
+        chain.push((path.join(name), child));
+    }
+    for (path, directory) in chain.iter().rev() {
+        sync(path, directory)?;
+    }
+    for parent in canonical_root.ancestors().skip(1) {
+        let file = File::from(rustix::fs::open(parent, flags, Mode::empty())?);
+        sync(parent, &file)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -146,6 +212,61 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn managed_namespace_sync_is_leaf_first_for_new_and_existing_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let generation = home.path().join("vms/demo/protected/run/000");
+        ensure_private_dir(&generation).unwrap();
+        let expected: Vec<_> = generation
+            .canonicalize()
+            .unwrap()
+            .ancestors()
+            .map(Path::to_path_buf)
+            .collect();
+        for _ in 0..2 {
+            let mut visited = Vec::new();
+            sync_managed_directory_chain_with(home.path(), &generation, |path, file| {
+                visited.push(path.to_path_buf());
+                file.sync_all()
+            })
+            .unwrap();
+            assert_eq!(visited, expected);
+        }
+    }
+
+    #[test]
+    fn managed_namespace_sync_failure_stops_before_parent_publication() {
+        let home = tempfile::tempdir().unwrap();
+        let generation = home.path().join("run/000");
+        ensure_private_dir(&generation).unwrap();
+        let fail = home.path().join("run").canonicalize().unwrap();
+        let mut visited = Vec::new();
+        assert!(
+            sync_managed_directory_chain_with(home.path(), &generation, |path, _| {
+                visited.push(path.to_path_buf());
+                if path == fail {
+                    Err(io::Error::other("injected ancestor failure"))
+                } else {
+                    Ok(())
+                }
+            })
+            .is_err()
+        );
+        assert_eq!(visited.len(), 2);
+        assert_eq!(visited.last(), Some(&fail));
+        assert!(generation.is_dir());
+    }
+
+    #[test]
+    fn managed_namespace_refuses_escape_and_symlink_descendants() {
+        let home = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), home.path().join("link")).unwrap();
+        assert!(sync_managed_directory_chain(home.path(), outside.path()).is_err());
+        assert!(sync_managed_directory_chain(home.path(), &home.path().join("../escape")).is_err());
+        assert!(sync_managed_directory_chain(home.path(), &home.path().join("link")).is_err());
     }
 
     #[test]

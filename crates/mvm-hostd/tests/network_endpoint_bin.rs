@@ -1078,6 +1078,7 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
             signer_sock,
             host_anchor_path: anchor_path,
             records_byte_cap: 64 * 1024,
+            records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
         tenant_id: "local".into(),
         instance_id: VM.into(),
@@ -1140,8 +1141,16 @@ fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         assert_alive("while the collector was starting");
-        let recorded = std::fs::read_to_string(&records_path)
-            .is_ok_and(|records| records.contains("guest-agent"));
+        let key = mvm_core::crypto::aead::Key::from_bytes([0x42; 32]);
+        let recorded = std::fs::read(&records_path).is_ok_and(|records| {
+            records
+                .split(|&b| b == b'\n')
+                .filter(|line| !line.is_empty())
+                .any(|line| {
+                    mvm_core::protocol::telemetry::served::ReceivedRecord::open_line(&key, line)
+                        .is_some()
+                })
+        });
         let collecting =
             std::fs::read_to_string(&status_path).is_ok_and(|status| status.contains("collecting"));
         if recorded && collecting {
@@ -1198,6 +1207,7 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
             signer_sock: state_dir.join("audit-signer.sock"),
             host_anchor_path: dir.path().join("no-such-anchor.pub"),
             records_byte_cap: 64 * 1024,
+            records_key_b64: "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=".into(),
         }),
         tenant_id: "local".into(),
         instance_id: "collector-refused-vm".into(),

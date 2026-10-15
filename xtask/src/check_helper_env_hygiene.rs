@@ -578,6 +578,10 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
         "fn spawn_network_endpoint(",
     ),
     (
+        "crates/mvm-vmm/src/host/network_endpoint_spawn/owned.rs",
+        "fn spawn_prepared(",
+    ),
+    (
         "crates/mvm-vmm/src/host/gpu_endpoint_spawn.rs",
         "fn endpoint_command(",
     ),

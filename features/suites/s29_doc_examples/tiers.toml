@@ -332,6 +332,11 @@ path = "machine stop"
 tier = "live"
 
 [[command]]
+path = "machine telemetry"
+tier = "parse"
+reason = "reads the records a booted machine's collector kept, so the documented form needs a VM that ran; the hermetic s34_telemetry_capture scenarios execute it in an isolated home against records their fixtures collected, and a live witness is follow-on work"
+
+[[command]]
 path = "machine undo"
 tier = "parse"
 reason = "needs a machine with an apply journal; the s26 BDD scenarios exercise the empty-history path hermetically, exec-tier fixtures are follow-on"

@@ -18,7 +18,9 @@ use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
 use crate::workload_runner::runner::FlowMuxIdentitySource;
-use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
+use crate::workload_runner::runner::{
+    NetworkEndpointSpawnRequest, NetworkEndpointSpawner, TelemetryStart,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimRefusal {
@@ -217,7 +219,21 @@ pub struct EndpointSpawnInputs<'a> {
 pub struct EndpointHandle {
     egress_uds: Option<PathBuf>,
     identity_drive: Option<PathBuf>,
+    telemetry: TelemetryStart,
     guard: EndpointGuard,
+}
+
+impl Drop for EndpointHandle {
+    fn drop(&mut self) {
+        if self.guard.vm_name.is_none() {
+            // Defused: the VM is up, so a held collector start may begin.
+            self.telemetry.release();
+        } else {
+            // Armed: the launch failed. Begin nothing new, and let a running
+            // start finish before the guard reaps what it started.
+            self.telemetry.abandon();
+        }
+    }
 }
 
 impl EndpointHandle {
@@ -235,6 +251,8 @@ impl EndpointHandle {
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
     pub fn defuse(&mut self) {
+        // The collector start stays in flight: joining here would put it on
+        // the launch path it was moved off. Dropping the handle joins it.
         self.guard.defuse();
     }
 }
@@ -302,10 +320,19 @@ impl<'a> ClaimGuards<'a> {
             && inputs.ingress.is_empty()
             && inputs.tools.is_empty()
         {
+            let identity_drive = self.spawner.prepare_identity(&request)?;
+            // No endpoint, but still a VM-lifetime collector: telemetry does
+            // not depend on whether the workload has egress to mediate.
+            let telemetry = self.spawner.start_telemetry_without_endpoint(&request);
             return Ok(EndpointHandle {
                 egress_uds: None,
-                identity_drive: self.spawner.prepare_identity(&request)?,
-                guard: EndpointGuard::defused(),
+                identity_drive,
+                guard: if telemetry.provisioned {
+                    EndpointGuard::new(&vm.0)
+                } else {
+                    EndpointGuard::defused()
+                },
+                telemetry,
             });
         }
         // No protocol choice is made here any more. Whether a workload carries
@@ -317,6 +344,7 @@ impl<'a> ClaimGuards<'a> {
         Ok(EndpointHandle {
             egress_uds: Some(spawned.egress_uds),
             identity_drive: spawned.identity_drive,
+            telemetry: TelemetryStart::default(),
             guard: EndpointGuard::new(&vm.0),
         })
     }
@@ -445,9 +473,19 @@ mod tests {
         seen_vm: Mutex<Option<String>>,
         identity_vm: Mutex<Option<String>>,
         fail_identity: bool,
+        collect_telemetry: bool,
+        telemetry_vm: Mutex<Option<String>>,
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
+        fn start_telemetry_without_endpoint(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> TelemetryStart {
+            *self.telemetry_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            TelemetryStart::provisioned(self.collect_telemetry)
+        }
+
         fn prepare_identity(
             &self,
             req: &NetworkEndpointSpawnRequest<'_>,
@@ -524,6 +562,36 @@ mod tests {
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
 
         // Disarm the reaper so drop doesn't chase a nonexistent endpoint.
+        child.defuse();
+    }
+
+    #[test]
+    fn a_boot_without_an_endpoint_still_starts_its_telemetry_collector() {
+        let spawner = FakeSpawner {
+            collect_telemetry: true,
+            ..FakeSpawner::default()
+        };
+        let guards = ClaimGuards::new(&spawner);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let state = tempfile::tempdir().unwrap();
+
+        let mut child = guards
+            .spawn_endpoint(
+                &VmId("child-collected".into()),
+                &endpoint_inputs(state.path(), &redaction, &policy),
+            )
+            .expect("deny-all fast path succeeds");
+
+        assert_eq!(child.egress_uds(), None, "still no egress channel");
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
+        assert_eq!(
+            spawner.telemetry_vm.lock().unwrap().as_deref(),
+            Some("child-collected"),
+            "the collector is started for this boot"
+        );
+        // A started collector arms the guard, so a failed launch reaps it.
+        assert!(child.guard.vm_name.is_some());
         child.defuse();
     }
 
