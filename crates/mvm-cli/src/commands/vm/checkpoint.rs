@@ -2088,6 +2088,7 @@ mod tests {
             runtime_overlay_version: None,
             runtime_launch_binding: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -2119,6 +2120,7 @@ mod tests {
             runtime_overlay_version: None,
             runtime_launch_binding: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();

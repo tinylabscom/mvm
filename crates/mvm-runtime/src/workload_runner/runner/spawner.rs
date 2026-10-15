@@ -260,16 +260,6 @@ fn prepare_observation_identity(
 #[derive(Debug)]
 struct BootEgressCa(Option<EgressTlsDelivery>);
 
-/// Hosts whose routes the plan grants interception for, in route order.
-fn intercepted_route_hosts(policy: &NetworkPolicy) -> Vec<String> {
-    policy
-        .routes()
-        .iter()
-        .filter(|route| route.intercept && route.inspects())
-        .map(|route| route.host.clone())
-        .collect()
-}
-
 impl BootEgressCa {
     /// Resolve the CA for this boot, or nothing when it terminates nothing.
     ///
@@ -290,7 +280,7 @@ impl BootEgressCa {
                 .context("resolving the destinations this workload's secrets are bound to")?;
         // A route whose rules the plan grants interception for is terminated
         // too, so the certificate has to cover it.
-        for host in intercepted_route_hosts(req.network_policy) {
+        for host in req.network_policy.intercepted_route_hosts() {
             if !hosts.contains(&host) {
                 hosts.push(host);
             }
@@ -438,7 +428,7 @@ mod tests {
             route("b", "b.example.com", false, true),
             route("c", "c.example.com", true, false),
         ]);
-        assert_eq!(intercepted_route_hosts(&policy), ["a.example.com"]);
+        assert_eq!(policy.intercepted_route_hosts(), ["a.example.com"]);
     }
 
     fn prepare_test_identity(

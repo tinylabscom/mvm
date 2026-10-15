@@ -111,6 +111,28 @@ fn bounded_qemu_command(
     )
 }
 
+/// Make the state directory private and give this launch fresh diagnostic
+/// sinks.
+///
+/// Clears any prior run's captured exit code and usage record so `wait` and
+/// the exit report read only this launch's. Pre-creates the write-only console
+/// sink so the invariant and truncate-on-boot match the other backends, and
+/// the `-D` log too: QEMU opens that itself, under this process's umask and
+/// through any link at the path, so a fresh private inode there first means
+/// its truncating open lands on a 0600 file this launch created.
+fn prepare_qemu_sinks(state_dir: &Path, console_log: &Path) -> Result<()> {
+    mvm_core::config::create_private_dir(state_dir)
+        .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
+    crate::run_sidecars::clear_prior_run(state_dir);
+    for sink in [console_log.to_path_buf(), state_dir.join(QEMU_LOG_FILE)] {
+        drop(
+            mvm_vmm::host::console_capture::open_console_capture(&sink)
+                .map_err(|e| anyhow!("open diagnostic sink {}: {e}", sink.display()))?,
+        );
+    }
+    Ok(())
+}
+
 /// Assemble the `qemu-system` argv for a spec boot (everything after the
 /// binary name). Pure so the whole spec→argv mapping is unit-testable
 /// without a hypervisor. Explicit `-nic none` disables QEMU's implicit NIC.
@@ -444,18 +466,7 @@ impl VmmDriver for QemuDriver {
         let qemu_bin = qemu_process::locate_qemu()?;
 
         let state_dir = vm_state_dir(&spec.name);
-        std::fs::create_dir_all(&state_dir)
-            .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-        // Clear any prior run's captured exit code and usage record so `wait`
-        // and the exit report read only this launch's, and pre-create the
-        // write-only console sink so the invariant + truncate-on-boot match
-        // the other backends.
-        crate::run_sidecars::clear_prior_run(&state_dir);
-        drop(
-            mvm_vmm::host::console_capture::open_console_capture(&spec.console.log_path).map_err(
-                |e| anyhow!("open console sink {}: {e}", spec.console.log_path.display()),
-            )?,
-        );
+        prepare_qemu_sinks(&state_dir, &spec.console.log_path)?;
 
         let kvm = qemu_process::kvm_available();
         if !kvm {
@@ -664,6 +675,46 @@ mod tests {
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_core::vm_backend::SnapshotCapability;
     use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VirtioFsShare};
+
+    #[test]
+    fn qemu_diagnostic_sinks_are_fresh_private_files_and_links_are_replaced() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("vm");
+        std::fs::create_dir(&state).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&victim, state.join(QEMU_LOG_FILE)).unwrap();
+        let console = state.join("console.log");
+        std::fs::write(&console, b"SYNTHETIC_MARKER from a prior run").unwrap();
+
+        prepare_qemu_sinks(&state, &console).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&state), 0o700);
+        for sink in [console.clone(), state.join(QEMU_LOG_FILE)] {
+            assert!(
+                std::fs::symlink_metadata(&sink)
+                    .unwrap()
+                    .file_type()
+                    .is_file()
+            );
+            assert_eq!(mode(&sink), 0o600, "{}", sink.display());
+            assert!(std::fs::read(&sink).unwrap().is_empty());
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+    }
+
+    #[test]
+    fn qemu_sinks_refuse_a_state_directory_that_cannot_be_created() {
+        let root = tempfile::tempdir().unwrap();
+        let blocker = root.path().join("not-a-dir");
+        std::fs::write(&blocker, b"").unwrap();
+        let state = blocker.join("vm");
+        assert!(prepare_qemu_sinks(&state, &state.join("console.log")).is_err());
+    }
 
     fn host_dials(service: GuestService, uds: &str) -> VsockPort {
         VsockPort {

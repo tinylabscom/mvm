@@ -1,33 +1,30 @@
 //! Structure checks for the instruction-file signing workflow and the
 //! composite action other repositories call.
 
-use serde::Deserialize;
-
 const WORKFLOW: &str = include_str!("../.github/workflows/sign-instructions.yml");
 const ACTION: &str = include_str!("../.github/actions/sign-instructions/action.yml");
 
-#[derive(Deserialize)]
-struct CompositeAction {
-    runs: CompositeRuns,
-}
-
-#[derive(Deserialize)]
-struct CompositeRuns {
-    steps: Vec<CompositeStep>,
-}
-
-#[derive(Deserialize)]
-struct CompositeStep {
-    uses: Option<String>,
+/// Every `uses:` target in the action, read line by line, without the
+/// trailing `# vN` comment the pins carry.
+///
+/// A composite action's only `uses:` keys are its steps', so a YAML parser
+/// would add a dependency to the workspace and nothing to the check.
+fn step_targets(yaml: &str) -> impl Iterator<Item = &str> {
+    yaml.lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            line.strip_prefix("- ")
+                .unwrap_or(line)
+                .strip_prefix("uses:")
+        })
+        .map(|target| {
+            let target = target.split(" #").next().unwrap_or_default();
+            target.trim().trim_matches(['"', '\''])
+        })
 }
 
 fn validate_action_pins(yaml: &str) -> Result<(), String> {
-    let action: CompositeAction =
-        serde_yaml::from_str(yaml).map_err(|error| format!("invalid action YAML: {error}"))?;
-    for step in action.runs.steps {
-        let Some(target) = step.uses else {
-            continue;
-        };
+    for target in step_targets(yaml) {
         if target.starts_with("./") {
             continue;
         }

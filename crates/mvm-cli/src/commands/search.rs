@@ -38,7 +38,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         .map(|entry| SearchRow {
             pack: entry.coordinate(),
             description: entry.description.clone(),
-            versions: entry.versions.clone(),
+            versions: entry
+                .versions
+                .iter()
+                .map(|version| version.version.clone())
+                .collect(),
             installed: lock.pins().iter().any(|pin| {
                 pin.reference().namespace() == entry.namespace
                     && pin.reference().name() == entry.name

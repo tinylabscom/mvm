@@ -11,6 +11,7 @@
 //! `mvm-backends` can implement backends without depending on the workload
 //! orchestration in `mvm-runtime`.
 
+pub mod agent_debug;
 pub mod checkpoint;
 pub mod driver;
 pub mod host;
