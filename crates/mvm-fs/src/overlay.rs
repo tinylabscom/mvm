@@ -103,6 +103,62 @@ pub const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/VERSION",
 ];
 
+/// Entries of [`REQUIRED_OVERLAY_GUEST_PATHS`] that joined the list after the
+/// overlay format's first release, each with the overlay version that first
+/// carried it.
+///
+/// An overlay older than an entry's version never had it, so a resolver that
+/// demanded it of that overlay would refuse a payload that is complete for its
+/// own version. That is not hypothetical: a portable bundle pins its boot
+/// assets to the published image set's overlay, which can sit several
+/// releases behind the CLI that boots it. A path absent from this table is
+/// required of every version.
+pub const OVERLAY_GUEST_PATHS_SINCE: &[(&str, &str)] = &[
+    // Declared-command mediation shipped in the 0.23.1 workspace, after the
+    // overlay the published image set still carries.
+    ("/tool-shim", "0.23.1"),
+    ("/tool-helper", "0.23.1"),
+];
+
+/// The guest paths an overlay payload labelled `version` must carry: every
+/// entry of [`REQUIRED_OVERLAY_GUEST_PATHS`] except those that joined after
+/// that version. A label that does not read as `MAJOR.MINOR.PATCH` is held to
+/// the full list, so an overlay is never waved through on the strength of a
+/// version the resolver cannot read.
+pub fn required_overlay_guest_paths_for(version: &str) -> Vec<&'static str> {
+    let Some(overlay) = release_triple(version) else {
+        return REQUIRED_OVERLAY_GUEST_PATHS.to_vec();
+    };
+    REQUIRED_OVERLAY_GUEST_PATHS
+        .iter()
+        .copied()
+        .filter(|path| {
+            OVERLAY_GUEST_PATHS_SINCE
+                .iter()
+                .find(|(since_path, _)| since_path == path)
+                .and_then(|(_, since)| release_triple(since))
+                .is_none_or(|since| overlay >= since)
+        })
+        .collect()
+}
+
+/// The `MAJOR.MINOR.PATCH` triple a version label starts with, ignoring any
+/// pre-release or build suffix (`0.18.0-rc.2+build_7` reads as `0.18.0`).
+fn release_triple(version: &str) -> Option<(u64, u64, u64)> {
+    let release = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = release.split('.').map(|part| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u64>().ok())
+            .flatten()
+    });
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Some(major)), Some(Some(minor)), Some(Some(patch)), None) => {
+            Some((major, minor, patch))
+        }
+        _ => None,
+    }
+}
+
 /// Failure resolving or validating a cached runtime-overlay artifact.
 #[derive(Debug, Error)]
 pub enum OverlayError {
@@ -348,7 +404,8 @@ impl RuntimeOverlayResolver {
     /// 2. `VERSION` file matches the resolver's expected version.
     /// 3. Every file matches its manifest checksum.
     /// 4. `overlay.roothash` parses as 64 lowercase hex chars.
-    /// 5. The ext4 payload carries every required guest binary.
+    /// 5. The ext4 payload carries every guest binary its version promises
+    ///    (the full required list for an overlay as new as this CLI).
     ///
     /// Returns a [`RuntimeOverlayArtifact`] on success. Fails closed on
     /// every other path — no partial / degraded fallback: the agent must
@@ -382,7 +439,7 @@ impl RuntimeOverlayResolver {
         }
         let roothash = read_roothash_file(&layout.roothash_file)?;
         if !validation_cached {
-            validate_overlay_payload(&layout.overlay_ext4)?;
+            validate_overlay_payload_for_version(&layout.overlay_ext4, &version)?;
             write_validation_stamp(&layout.artifact_dir);
         }
 
@@ -610,15 +667,33 @@ pub fn read_roothash_file(path: &Path) -> Result<String, OverlayError> {
 }
 
 /// Check the overlay ext4 payload carries every required guest binary at its
-/// canonical absolute path. Fails closed when the image can't be opened.
+/// canonical absolute path, holding it to this CLI's full list. Fails closed
+/// when the image can't be opened.
 pub fn validate_overlay_payload(overlay_ext4: &Path) -> Result<(), OverlayError> {
+    validate_overlay_payload_against(overlay_ext4, REQUIRED_OVERLAY_GUEST_PATHS)
+}
+
+/// The same check for an overlay labelled `version`: it is held to the paths
+/// its own version promises (see [`required_overlay_guest_paths_for`]), which
+/// is the full list for any overlay as new as this CLI.
+pub fn validate_overlay_payload_for_version(
+    overlay_ext4: &Path,
+    version: &str,
+) -> Result<(), OverlayError> {
+    validate_overlay_payload_against(overlay_ext4, &required_overlay_guest_paths_for(version))
+}
+
+fn validate_overlay_payload_against(
+    overlay_ext4: &Path,
+    required_paths: &[&str],
+) -> Result<(), OverlayError> {
     let fs = ext4_view::Ext4::load_from_path(overlay_ext4).map_err(|e| {
         OverlayError::PayloadUnreadable {
             overlay_ext4: overlay_ext4.to_path_buf(),
             reason: format!("load ext4 image: {e}"),
         }
     })?;
-    for required in REQUIRED_OVERLAY_GUEST_PATHS {
+    for required in required_paths {
         let present = fs
             .exists(*required)
             .map_err(|e| OverlayError::PayloadUnreadable {
@@ -1216,6 +1291,134 @@ mod tests {
         match err {
             OverlayError::PayloadIncomplete { missing_path, .. } => {
                 assert_eq!(missing_path, "/exit-report");
+            }
+            other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_since_entry_names_a_required_path_at_a_readable_version() {
+        for (path, since) in OVERLAY_GUEST_PATHS_SINCE {
+            assert!(
+                REQUIRED_OVERLAY_GUEST_PATHS.contains(path),
+                "{path} is not a required overlay path"
+            );
+            assert!(
+                release_triple(since).is_some(),
+                "{path} joined at a version the resolver cannot read: {since:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_triple_reads_the_leading_numeric_triple() {
+        assert_eq!(release_triple("0.18.0-rc.2+build_7"), Some((0, 18, 0)));
+        assert_eq!(release_triple("0.23.1-dirty"), Some((0, 23, 1)));
+        assert_eq!(release_triple("10.2.33"), Some((10, 2, 33)));
+        for unreadable in [
+            "", "0.22", "0.22.0.1", "v0.22.0", "a.b.c", "0.-1.0", "0.22.", ".22.0",
+        ] {
+            assert_eq!(release_triple(unreadable), None, "{unreadable:?}");
+        }
+    }
+
+    #[test]
+    fn required_paths_follow_the_overlay_version() {
+        for older in ["0.22.0", "0.14.0", "0.0.1-member"] {
+            let required = required_overlay_guest_paths_for(older);
+            assert!(!required.contains(&"/tool-shim"), "{older}");
+            assert!(!required.contains(&"/tool-helper"), "{older}");
+            assert!(required.contains(&"/agent"), "{older}");
+            assert!(required.contains(&"/egress-client"), "{older}");
+        }
+        for current in [
+            "0.23.1",
+            "0.24.0",
+            "1.0.0",
+            "0.23.1-dirty",
+            "0.24.0-rc.1+build_3",
+        ] {
+            assert_eq!(
+                required_overlay_guest_paths_for(current),
+                REQUIRED_OVERLAY_GUEST_PATHS,
+                "{current}"
+            );
+        }
+        // A label the resolver cannot read is held to everything.
+        for unreadable in ["", "0.22", "v0.22.0", "latest"] {
+            assert_eq!(
+                required_overlay_guest_paths_for(unreadable),
+                REQUIRED_OVERLAY_GUEST_PATHS,
+                "{unreadable:?}"
+            );
+        }
+    }
+
+    /// A bundle's boot assets pin the published image set's overlay, which
+    /// predates declared-command mediation; that overlay is complete for its
+    /// own version and resolves.
+    #[test]
+    fn resolve_accepts_an_older_overlay_without_the_paths_it_predates() {
+        let cache = make_cache(
+            "0.22.0",
+            "aarch64",
+            &[
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/tool-shim", "/tool-helper"]),
+                ),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.22.0\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.22.0".into());
+        let artifact = resolver
+            .resolve("aarch64")
+            .expect("an overlay complete for its own version resolves");
+        assert_eq!(artifact.version, "0.22.0");
+    }
+
+    #[test]
+    fn resolve_holds_an_older_overlay_to_the_paths_it_always_carried() {
+        let cache = make_cache(
+            "0.22.0",
+            "aarch64",
+            &[
+                (
+                    "overlay.ext4",
+                    &overlay_ext4_bytes_without(&["/tool-shim", "/egress-client"]),
+                ),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.22.0\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.22.0".into());
+        match resolver.resolve("aarch64").unwrap_err() {
+            OverlayError::PayloadIncomplete { missing_path, .. } => {
+                assert_eq!(missing_path, "/egress-client");
+            }
+            other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_a_current_overlay_missing_tool_shim() {
+        let cache = make_cache(
+            "0.23.1",
+            "aarch64",
+            &[
+                ("overlay.ext4", &overlay_ext4_bytes_without(&["/tool-shim"])),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.23.1\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.23.1".into());
+        match resolver.resolve("aarch64").unwrap_err() {
+            OverlayError::PayloadIncomplete { missing_path, .. } => {
+                assert_eq!(missing_path, "/tool-shim");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
         }
