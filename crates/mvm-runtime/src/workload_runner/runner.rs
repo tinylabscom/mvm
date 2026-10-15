@@ -2962,14 +2962,23 @@ mod tests {
 
     /// An initramfs under the shared cache: the universal-initramfs boot whose
     /// guest waits for `ActivateEnvironment`.
-    fn seeded_universal_initramfs() -> String {
-        let initrd = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir())
-            .join("initramfs")
-            .join("test-version")
-            .join("initramfs.cpio.gz");
-        std::fs::create_dir_all(initrd.parent().expect("initramfs cache parent")).unwrap();
-        std::fs::write(&initrd, b"initramfs").unwrap();
-        initrd.to_string_lossy().into_owned()
+    fn checked_source_launch_config(
+        vm: &str,
+        admission_durability: Option<mvm_core::admission_durability::AdmissionDurability>,
+    ) -> VmStartConfig {
+        // These tests prove activation/sync ordering, not runtime
+        // authentication, but the launch gate authenticates any runtime the
+        // config names — so the fixture supplies a checked one rather than
+        // naming an unverifiable initramfs.
+        let (fixture_cfg, _binding) = crate::runtime_evidence::checked_source_runtime_fixture(
+            vm,
+            std::path::Path::new("/img/rootfs.ext4"),
+        )
+        .expect("checked-source runtime fixture");
+        VmStartConfig {
+            admission_durability,
+            ..fixture_cfg
+        }
     }
 
     fn launch(runner_cfg: &VmStartConfig) -> WorkloadLaunchInputs<'_> {
@@ -3022,12 +3031,7 @@ mod tests {
             RecordingSpawner::new("/run/ep.sock"),
             RecordingBrokerRegistrar::new(),
         );
-        let cfg = VmStartConfig {
-            name: "runner-durable-activation".into(),
-            initrd_path: Some(seeded_universal_initramfs()),
-            admission_durability: Some(durability),
-            ..config("runner-durable-activation")
-        };
+        let cfg = checked_source_launch_config("runner-durable-activation", Some(durability));
 
         let guest = {
             let synced = Arc::clone(&synced);
@@ -3070,17 +3074,15 @@ mod tests {
             RecordingBrokerRegistrar::new(),
         );
         let vm = "runner-undurable-admission";
-        let cfg = VmStartConfig {
-            name: vm.into(),
-            initrd_path: Some(seeded_universal_initramfs()),
-            admission_durability: Some(
+        let cfg = checked_source_launch_config(
+            vm,
+            Some(
                 mvm_core::admission_durability::AdmissionDurability::spawn(|| {
                     anyhow::bail!("fdatasync audit/local.jsonl: input/output error")
                 })
                 .expect("spawn the sync"),
             ),
-            ..config(vm)
-        };
+        );
 
         let error = match runner.start_workload(&launch(&cfg)) {
             Ok(_) => panic!("a launch whose admission did not reach the log must fail"),
