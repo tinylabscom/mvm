@@ -269,10 +269,43 @@ mod tests {
             "hi\n"
         );
         assert!(artifact.join("src/bin/run").is_file());
+        assert_eq!(
+            fs::metadata(artifact.join("src/bin/run"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0o111,
+            "copy selection, snapshotting and compilation preserve executable bits"
+        );
         let workload: serde_json::Value =
             serde_json::from_slice(&fs::read(artifact.join("workload.json")).unwrap()).unwrap();
         assert_eq!(workload["apps"][0]["source"]["path"], APP_TREE);
         assert_eq!(launch_ir_hash(&artifact), locked.workload_sha256);
+    }
+
+    #[test]
+    fn a_copied_executable_mode_change_refuses_frozen_compile() {
+        let dir = source_tree();
+        let spec = copying(&[("bin/run", "/app/bin/run")]);
+        let input = PackInput {
+            spec: &spec,
+            spec_dir: dir.path(),
+            revision: &revision(),
+        };
+        let locked = lock_pack(&input).unwrap();
+        fs::set_permissions(
+            dir.path().join("bin/run"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        let out = TempDir::new().unwrap();
+        let artifact = out.path().join("artifact");
+        assert_eq!(
+            stale(compile_frozen(&input, &locked, &artifact)),
+            vec![LockField::Source]
+        );
+        assert!(!artifact.exists());
     }
 
     #[test]
