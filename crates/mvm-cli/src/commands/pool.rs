@@ -53,7 +53,7 @@ mod warm_source;
 
 pub use cold_start::{ColdStartReason, WarmClaimOutcome};
 use cold_start::{claim_gate, claim_required, outcome_for_refusal};
-use late_volumes::{enforce_late_volume_shares, late_volumes_attachable};
+use late_volumes::late_volumes_attachable;
 pub use refill::{StandbyRefill, schedule_standby_refill};
 use select::{recent_image_limit, warm_each, warm_sources};
 pub use warm::WarmResult;
@@ -1043,7 +1043,7 @@ pub fn try_warm_claim(
         }
         return Ok(WarmClaimOutcome::Cold(ColdStartReason::BackendUnsupported));
     }
-    enforce_late_volume_shares(cfg, &plan_json)?;
+    mvm_client::admission::enforce_shares_for_claim(&cfg.volumes, &plan_json)?;
     // The same builder the spawn side records with, so the key searched for is
     // the key recorded. The rootfs digest comes from the sidecar cache plan
     // admission just populated, so this costs a read, not a re-hash.
@@ -1585,56 +1585,6 @@ mod tests {
                 "{why}"
             );
         }
-    }
-
-    /// A volume the signed plan never admitted is refused before any parent is
-    /// touched, and so is a launch with volumes whose plan cannot be read.
-    #[test]
-    fn a_volume_the_plan_did_not_admit_is_refused_before_the_claim() {
-        let mut cfg = eligible_cfg();
-        cfg.volumes = vec![read_only_mount("/data")];
-        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        let plan_json = serde_json::to_string(&plan).unwrap();
-        let err = enforce_late_volume_shares(&cfg, &plan_json).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("not named in the signed"),
-            "{err:#}"
-        );
-        assert!(enforce_late_volume_shares(&cfg, "not a plan").is_err());
-        assert!(enforce_late_volume_shares(&eligible_cfg(), "not a plan").is_ok());
-    }
-
-    /// The content digest a plan pinned for a mount is re-checked right before
-    /// the claim, as a cold boot re-checks it: an image whose bytes changed
-    /// after admission is refused, the unchanged one is attached.
-    #[test]
-    fn a_mount_whose_bytes_changed_after_admission_is_refused_before_the_claim() {
-        let dir = tempfile::tempdir().unwrap();
-        let image = dir.path().join("mount.ext4");
-        std::fs::write(&image, b"admitted bytes").unwrap();
-        let mut cfg = eligible_cfg();
-        let mut volume = read_only_mount("/data");
-        volume.materialized_image = Some(image.display().to_string());
-        cfg.volumes = vec![volume.clone()];
-
-        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
-        plan.shares = vec![mvm_core::plan::HostShareGrant {
-            tag: "uvol0".into(),
-            host_path: volume.host.clone(),
-            guest_path: volume.guest.clone(),
-            kind: mvm_core::plan::ShareKind::DirShare,
-            read_only: true,
-            encrypted: false,
-            content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
-        }];
-        let plan_json = serde_json::to_string(&plan).unwrap();
-        enforce_late_volume_shares(&cfg, &plan_json).expect("unchanged bytes are attached");
-
-        std::fs::write(&image, b"changed after admission").unwrap();
-        assert!(
-            enforce_late_volume_shares(&cfg, &plan_json).is_err(),
-            "bytes the plan never vouched for must not reach a claimed child"
-        );
     }
 
     // ── Auditing a captured factory parent ───────────────────────────────
@@ -2390,24 +2340,6 @@ mod tests {
         assert_eq!(id.as_str(), "standby-warm-parent");
     }
 
-    #[test]
-    fn build_pool_status_reports_dead_standbys_separately() {
-        let live = idle_handle("live", "aa");
-        let mut dead = idle_handle("dead", "aa");
-        dead.pid = 999_999_999;
-        let saved = saved_idle_handle("saved", "aa", "img");
-
-        let report = status::build_pool_status(&[live, dead, saved]);
-
-        assert_eq!(report.idle, 2, "live process + saved-state are idle");
-        assert_eq!(report.claimed, 0);
-        assert_eq!(report.parked, 0);
-        assert_eq!(report.dead, 1);
-        assert_eq!(report.standbys[0].state, "idle");
-        assert_eq!(report.standbys[1].state, "dead");
-        assert_eq!(report.standbys[2].state, "idle");
-    }
-
     // The following tests need a backend that actually reaches the spawn loop
     // (`capabilities().standby_pool == true`) — every real `AnyBackend` variant
     // selectable via the CLI reports `false` until a live run proves its spawn
@@ -3039,7 +2971,7 @@ fn resolve_warm_launch(req: &WarmRequest) -> Result<crate::exec::ResolvedLaunch>
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
-        PoolAction::Status { json } => status::run_status(&SupervisorStandbyPool::open()?, json),
+        PoolAction::Status { json } => status::run_status(json),
         PoolAction::Refill {
             image,
             cpus,

@@ -35,7 +35,7 @@ pub fn ensure_placeholders(state_dir: &Path, slots: u8) -> Result<()> {
         if path.exists() {
             continue;
         }
-        let file = std::fs::File::create(&path)
+        let file = mvm_core::util::atomic_io::open_private_truncated(&path)
             .with_context(|| format!("creating late-volume placeholder {}", path.display()))?;
         file.set_len(PLACEHOLDER_BYTES)
             .with_context(|| format!("sizing late-volume placeholder {}", path.display()))?;
