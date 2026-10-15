@@ -219,6 +219,72 @@ pub fn verify_runtime_binding(binding: &RuntimeLaunchBinding) -> Result<()> {
     Ok(())
 }
 
+/// Checked-source runtime evidence for integration fixtures: a bound
+/// `VmStartConfig` and its `RuntimeLaunchBinding` in the retained-generation
+/// layout the launch-time lease produces, rooted under the current `MVM_HOME`.
+///
+/// The bytes come from the public source-cache fixture assembled by the
+/// ordinary overlay/initramfs builders, and every consumer still runs the real
+/// verifiers against them — this exists so a harness can supply the
+/// authenticated runtime the launch and claim paths require instead of
+/// launching without one. The fixture binaries are placeholder bytes and must
+/// never execute.
+#[cfg(any(test, feature = "test-support"))]
+pub fn checked_source_runtime_fixture(
+    vm_name: &str,
+    rootfs: &Path,
+) -> Result<(VmStartConfig, RuntimeLaunchBinding)> {
+    let cache = Path::new(&mvm_core::config::mvm_home()).join("cache");
+    let workspace = mvm_build::image_source::guest_runtime_source_checkout()
+        .context("a checked-source fixture requires the developer checkout")?;
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = GuestArch::host();
+    let runtime = mvm_build::guest_runtime::test_support::write_source_cache_fixture(
+        &cache, &workspace, version, arch,
+    )?;
+    let overlay = mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+        &cache, version, arch, &runtime,
+    )?;
+    let initramfs =
+        mvm_build::initramfs::build_initramfs_from_guest_runtime(&cache, version, arch, &runtime)?;
+
+    // The retained-generation layout `RuntimeLifecycleLease::bind` produces:
+    // private ancestry and read-only artifacts, both of which
+    // `verify_runtime_binding` demands.
+    let root = namespace::root(true)?;
+    private_directory(&root.join(vm_name))?;
+    let generation = root.join(vm_name).join("runtime-fixture");
+    private_directory(&generation)?;
+    for (source, name) in [
+        (&overlay.overlay_ext4, "overlay.ext4"),
+        (&overlay.sidecar, "overlay.verity"),
+        (&initramfs.image_path, "initramfs.cpio.gz"),
+    ] {
+        let dest = generation.join(name);
+        std::fs::copy(source, &dest).with_context(|| format!("stage fixture {name}"))?;
+        mvm_core::private_fs::set_mode(&dest, 0o400)?;
+    }
+
+    let binding = RuntimeLaunchBinding::CliAssembly(CliRuntimeLaunchBinding {
+        provenance: RuntimeBindingProvenance::Source {
+            version: version.to_owned(),
+            arch,
+            archive_sha256: runtime.digest,
+        },
+        overlay_path: generation.join("overlay.ext4"),
+        overlay_verity_path: generation.join("overlay.verity"),
+        initramfs_path: generation.join("initramfs.cpio.gz"),
+        overlay_roothash: overlay.roothash,
+    });
+    let mut config = VmStartConfig {
+        name: vm_name.to_owned(),
+        rootfs_path: rootfs.display().to_string(),
+        ..Default::default()
+    };
+    binding.apply_to_config(&mut config);
+    Ok((config, binding))
+}
+
 pub(crate) fn verify_retained_legacy_runtime(
     config: &VmStartConfig,
 ) -> Result<crate::legacy_bundle_runtime::VerifiedLegacyBundleRuntime> {
@@ -734,6 +800,34 @@ impl RuntimeLifecycleLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_source_fixture_binds_a_reverifiable_runtime() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let rootfs = home.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+
+        let (config, binding) = checked_source_runtime_fixture("fixture-vm", &rootfs).unwrap();
+        let checked = verify_runtime_for_launch(&config, MIN_GUEST_RPC_PROTOCOL_VERSION)
+            .unwrap()
+            .expect("the fixture config carries external runtime evidence");
+        assert!(!checked.is_release(), "fixture bytes are source provenance");
+        verify_runtime_binding(&binding).unwrap();
+
+        // A swapped retained artifact fails the same re-verification.
+        let RuntimeLaunchBinding::CliAssembly(assembly) = &binding else {
+            panic!("source fixture binding");
+        };
+        let overlay = assembly.overlay_path.clone();
+        mvm_core::private_fs::set_mode(&overlay, 0o600).unwrap();
+        std::fs::write(&overlay, b"swapped").unwrap();
+        assert!(verify_runtime_binding(&binding).is_err());
+    }
 
     #[test]
     fn generic_preflight_refuses_mixed_provenance_before_proof_or_snapshot_effects() {

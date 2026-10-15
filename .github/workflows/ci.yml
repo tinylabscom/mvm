@@ -1791,6 +1791,9 @@ jobs:
         # not an image-set member a launch reads. Every `mvmctl` assembles it
         # on the host from its guest runtime, so this lane assembles it from
         # this tree, in a home of the step's own so no cache stands in for it.
+        # The bench step reuses the same home: the launch-time evidence gate
+        # verifies the overlay against the checked source cache this build
+        # left there, and the version names that cache entry.
         env:
           MVM_HOME: ${{ github.workspace }}/.boot-latency-overlay-home
           MVM_RUNTIME_OVERLAY_ACQUIRE_MODE: build
@@ -1804,6 +1807,11 @@ jobs:
           for f in overlay.ext4 overlay.verity overlay.roothash; do
             cp -L "${dirs[0]}/$f" "/tmp/boot-image/overlay/$f"
           done
+          # The bench step boots with the launch-time evidence gate verifying
+          # the overlay against this home's checked source cache, named by the
+          # version the cache layout records.
+          echo "MVM_RUNTIME_BOOT_RUNTIME_VERSION=$(basename "$(dirname "${dirs[0]}")")" \
+            >> "$GITHUB_ENV"
           ls -la /tmp/boot-image/overlay
 
       - name: Boot within the ceiling
@@ -1825,6 +1833,10 @@ jobs:
           MVM_RUNTIME_BOOT_RUNS: "5"
           MVM_RUNTIME_BOOT_CONCURRENT: "3"
           MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
+          # The evidence gate verifies the overlay against the checked source
+          # cache in the home that assembled it; the version arrives via
+          # GITHUB_ENV from the assembly step.
+          MVM_HOME: ${{ github.workspace }}/.boot-latency-overlay-home
         run: |
           MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH="$(tr -d '[:space:]' \
             < /tmp/boot-image/overlay/overlay.roothash)" \
@@ -1960,6 +1972,11 @@ jobs:
           cp -L "${dirs[0]}/overlay.verity"   overlay-staging/overlay.verity
           cp -L "${dirs[0]}/overlay.roothash" overlay-staging/overlay.roothash
           echo "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH=$(tr -d '[:space:]' < overlay-staging/overlay.roothash)" \
+            >> "$GITHUB_ENV"
+          # The bench step boots with the launch-time evidence gate verifying
+          # the overlay against this home's checked source cache, named by the
+          # version the cache layout records.
+          echo "MVM_RUNTIME_BOOT_RUNTIME_VERSION=$(basename "$(dirname "${dirs[0]}")")" \
             >> "$GITHUB_ENV"
 
       - name: Reassemble the overlay and require identical bytes

@@ -41,6 +41,12 @@
 //!
 //! - `MVM_RUNTIME_BOOT_INITRD`, `MVM_RUNTIME_BOOT_ROOTFS_VERITY`, and
 //!   `MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH` to exercise a sealed rootfs boot.
+//! - `MVM_RUNTIME_BOOT_OVERLAY`, `MVM_RUNTIME_BOOT_OVERLAY_VERITY`,
+//!   `MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH` and `MVM_RUNTIME_BOOT_RUNTIME_VERSION`
+//!   (or the `overlay`/`overlay-verity`/`overlay-roothash`/`runtime-version`
+//!   TOML fields) attach the runtime overlay. The launch-time evidence gate
+//!   verifies that runtime against the checked source cache of the home this
+//!   runs under, so run it with an `MVM_HOME` whose cache built the overlay.
 //! - `MVM_RUNTIME_BOOT_GRANT=1` (or `grant = true` in the TOML config) to
 //!   provision each boot with the signed verb-grant sidecar an admitted run
 //!   carries. Every backend boots guests under `mvm.require_grant=1`, so a
@@ -81,11 +87,15 @@ const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
 /// `/mvm/runtime`, which is the runtime overlay attached as a second
 /// virtio-blk drive. Booting one without the overlay panics the guest at
 /// `Attempted to kill init!` before the agent can bind vsock, so a harness that
-/// cannot attach an overlay cannot boot a prod image at all. All three are
-/// required together, matching what the backend demands.
+/// cannot attach an overlay cannot boot a prod image at all. The path, verity
+/// sidecar, roothash and runtime version are required together, matching what
+/// the backend and the launch-time evidence gate demand.
 const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
 const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
 const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
+/// The runtime's own version, binding the overlay quadruple to the checked
+/// source cache the launch-time evidence gate verifies against.
+const RUNTIME_VERSION_VAR: &str = "MVM_RUNTIME_BOOT_RUNTIME_VERSION";
 const GRANT_VAR: &str = "MVM_RUNTIME_BOOT_GRANT";
 
 const DEFAULT_BACKEND: &str = "firecracker";
@@ -370,14 +380,17 @@ struct RootfsIntegritySpec {
     roothash: String,
 }
 
-/// All three or none. The backend attaches the overlay only when the path, the
+/// All four or none. The backend attaches the overlay only when the path, the
 /// verity sidecar and the roothash are all present, so accepting a partial set
 /// here would boot without an overlay and fail as though none was configured.
+/// The version is what binds that set to a checked runtime: the launch-time
+/// evidence gate refuses an overlay it cannot name a version for.
 #[derive(Debug, Clone)]
 struct OverlaySpec {
     path: PathBuf,
     verity: PathBuf,
     roothash: String,
+    version: String,
 }
 
 impl BenchSpec {
@@ -445,6 +458,8 @@ struct RawBenchConfig {
     overlay_verity: Option<PathBuf>,
     #[serde(alias = "overlay_roothash")]
     overlay_roothash: Option<String>,
+    #[serde(alias = "runtime_version")]
+    runtime_version: Option<String>,
     grant: Option<bool>,
     #[serde(default)]
     evidence: evidence::Options,
@@ -818,6 +833,7 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
+        runtime_overlay_version: spec.overlay.as_ref().map(|o| o.version.clone()),
         ..Default::default()
     }
 }
@@ -989,27 +1005,35 @@ fn assert_within_budget(label: &str, actual: Duration, budget: Duration) {
     );
 }
 
-/// Resolve the overlay triple, refusing a partial one. A silently-dropped
+/// Resolve the overlay quadruple, refusing a partial one. A silently-dropped
 /// overlay is indistinguishable at the console from an image with no agent, so
 /// name the missing piece here rather than let the guest panic explain it.
+/// Without the version the launch-time evidence gate cannot name the runtime
+/// the overlay claims to be, and refuses the boot.
 fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
     let path = env_path_opt(OVERLAY_VAR, config.overlay.clone());
     let verity = env_path_opt(OVERLAY_VERITY_VAR, config.overlay_verity.clone());
     let roothash = env_string_opt(OVERLAY_ROOTHASH_VAR, config.overlay_roothash.clone());
-    match (path, verity, roothash) {
-        (None, None, None) => Ok(None),
-        (Some(path), Some(verity), Some(roothash)) => {
+    let version = env_string_opt(RUNTIME_VERSION_VAR, config.runtime_version.clone());
+    match (path, verity, roothash, version) {
+        (None, None, None, None) => Ok(None),
+        (Some(path), Some(verity), Some(roothash), Some(version)) => {
             let roothash = roothash.trim().to_string();
             if roothash.is_empty() {
                 anyhow::bail!("{OVERLAY_ROOTHASH_VAR} is set but empty");
+            }
+            let version = version.trim().to_string();
+            if version.is_empty() {
+                anyhow::bail!("{RUNTIME_VERSION_VAR} is set but empty");
             }
             Ok(Some(OverlaySpec {
                 path,
                 verity,
                 roothash,
+                version,
             }))
         }
-        (path, verity, roothash) => {
+        (path, verity, roothash, version) => {
             let mut missing = Vec::new();
             if path.is_none() {
                 missing.push(OVERLAY_VAR);
@@ -1020,9 +1044,12 @@ fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
             if roothash.is_none() {
                 missing.push(OVERLAY_ROOTHASH_VAR);
             }
+            if version.is_none() {
+                missing.push(RUNTIME_VERSION_VAR);
+            }
             anyhow::bail!(
                 "runtime overlay is half-configured; the backend attaches it only \
-                 when all three are set. Missing: {}",
+                 when all four are set. Missing: {}",
                 missing.join(", ")
             )
         }
@@ -1380,20 +1407,22 @@ fn overlay_spec_is_absent_when_nothing_is_configured() {
 }
 
 #[test]
-fn overlay_spec_accepts_the_complete_triple() {
+fn overlay_spec_accepts_the_complete_quadruple() {
     let config = RawBenchConfig {
         overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
         overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
         overlay_roothash: Some("  deadbeef\n".to_string()),
+        runtime_version: Some(" 0.24.0 \n".to_string()),
         ..RawBenchConfig::default()
     };
     let spec = overlay_spec(&config)
-        .expect("complete triple is valid")
-        .expect("complete triple yields an overlay");
+        .expect("complete quadruple is valid")
+        .expect("complete quadruple yields an overlay");
     assert_eq!(spec.path, PathBuf::from("/tmp/overlay.ext4"));
     assert_eq!(spec.verity, PathBuf::from("/tmp/overlay.verity"));
     // Trimmed: the roothash is read from a file that ends in a newline.
     assert_eq!(spec.roothash, "deadbeef");
+    assert_eq!(spec.version, "0.24.0");
 }
 
 #[test]
@@ -1414,7 +1443,7 @@ fn overlay_spec_refuses_a_half_configured_overlay_and_names_what_is_missing() {
         .unwrap_or_else(|| panic!("error should name what is missing: {err}"));
     assert_eq!(
         listed,
-        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}")
+        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}, {RUNTIME_VERSION_VAR}")
     );
 }
 
@@ -1424,6 +1453,7 @@ fn overlay_spec_refuses_a_blank_roothash() {
         overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
         overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
         overlay_roothash: Some("   \n".to_string()),
+        runtime_version: Some("0.24.0".to_string()),
         ..RawBenchConfig::default()
     };
     let err = overlay_spec(&config)
@@ -1517,6 +1547,7 @@ fn overlay_fixture() -> OverlaySpec {
         path: PathBuf::from("/img/overlay.ext4"),
         verity: PathBuf::from("/img/overlay.verity"),
         roothash: "b".repeat(64),
+        version: "0.24.0".into(),
     }
 }
 

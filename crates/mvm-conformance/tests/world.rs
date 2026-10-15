@@ -398,6 +398,10 @@ pub struct CliWorld {
     pub warm_claim_registry_path: Option<PathBuf>,
     /// The outcome of the most recent `claim_standby` call.
     pub warm_claim_outcome: Option<WarmClaimOutcome>,
+    /// Per-scenario isolated `MVM_HOME` backing the warm-claim fixture. Kept
+    /// alive for the scenario's duration; `world.mvm_home_guard` holds the
+    /// process override pointing at it.
+    pub warm_claim_home: Option<tempfile::TempDir>,
 
     /// RAII guard that keeps a scenario-local `MVM_HOME` and snapshot key
     /// active across the warm-restore steps. Dropping it restores the
