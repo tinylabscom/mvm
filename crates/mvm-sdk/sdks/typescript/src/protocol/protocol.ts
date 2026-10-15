@@ -132,6 +132,10 @@ seccomp_tier?: (SeccompTier | null)
  * @maxItems 16
  */
 token?: [number, number, number, number, number, number, number, number, number, number, number, number, number, number, number, number]
+/**
+ * Read-only volumes the claim attached to the late-volume slots this child's parent booted, for the guest to mount before it acknowledges. Omitted when empty, so a claim naming none reaches an agent built before the field; an agent that predates it refuses a request carrying volumes, which fails the claim.
+ */
+volumes?: VolumeConfig[]
 }
 } | "FsDiff" | "SyncFilesystems" | {
 StartUnixSocketForward: {
@@ -551,6 +555,10 @@ reseeded?: boolean
  */
 seccomp_tier?: (SeccompTier | null)
 success: boolean
+/**
+ * How many late volumes the guest mounted after this restore. Reported only when the request named volumes; `None` when it named none or the mount failed.
+ */
+volumes_mounted?: (number | null)
 }
 } | {
 FsDiffResult: {

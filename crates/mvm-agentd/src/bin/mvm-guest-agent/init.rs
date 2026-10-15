@@ -191,6 +191,10 @@ pub(crate) fn apply_activation(
     // first. Without it the guest still boots, and its restores are refused.
     #[cfg(target_os = "linux")]
     mvm_agentd::crng_reseed::start_helper();
+    // A warm parent's guest gets the one helper that can mount the read-only
+    // volumes a claim attaches after restore; any other guest starts none.
+    #[cfg(target_os = "linux")]
+    mvm_agentd::late_volumes::start_helper_if_slotted();
     // The telemetry signing key is the egress client's, mode 0400; read it now
     // or the listener can never answer a session.
     crate::telemetry::capture_session_keys_before_privilege_drop();

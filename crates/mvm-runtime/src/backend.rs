@@ -700,6 +700,22 @@ impl AnyBackend {
         }
     }
 
+    /// How many read-only volumes a warm claim on this backend can attach to a
+    /// restored child. Zero keeps every volume launch on the cold path.
+    pub fn late_volume_slots(&self) -> u8 {
+        match self {
+            AnyBackend::Firecracker(runner) => runner.late_volume_slots(),
+            AnyBackend::Libkrun(runner) => runner.late_volume_slots(),
+            AnyBackend::Hvf(runner) => runner.late_volume_slots(),
+            #[cfg(feature = "test-support")]
+            AnyBackend::Mock(_) => 0,
+            AnyBackend::Qemu(_)
+            | AnyBackend::Wasm(_)
+            | AnyBackend::AppleContainer(_)
+            | AnyBackend::WebLinux(_) => 0,
+        }
+    }
+
     /// Prepare one paused child for a saved-state standby after its checkpoint
     /// has been audited. Unsupported backends leave the existing saved-state
     /// pool path intact.

@@ -1,24 +1,37 @@
-//! Machine-readable pool status output types.
+//! Rendering of the pool status report `mvm_client::standby` builds.
 
-#[derive(serde::Serialize)]
-pub(super) struct PoolStatus {
-    pub(super) idle: usize,
-    pub(super) claimed: usize,
-    pub(super) parked: usize,
-    pub(super) dead: usize,
-    pub(super) standbys: Vec<PoolStatusEntry>,
-}
+use anyhow::Result;
 
-#[derive(serde::Serialize)]
-pub(super) struct PoolStatusEntry {
-    pub(super) id: String,
-    pub(super) state: &'static str,
-    pub(super) pid: u32,
-    pub(super) kernel_sha256: String,
-    pub(super) vcpus: u8,
-    pub(super) mem_mib: u32,
-    /// The image half of the compat key: sha256 of the rootfs the parent
-    /// booted. Every standby carries one, since a parent is only ever spawned
-    /// for a resolved launch shape; absent marks a record predating that.
-    pub(super) image_sha256: Option<String>,
+pub(super) fn run_status(json: bool) -> Result<()> {
+    let report = mvm_client::standby::pool_status()?;
+    if json {
+        crate::json_out::emit_json(&report)?;
+        return Ok(());
+    }
+    println!(
+        "Supervisor standby pool: {} idle, {} claimed, {} parked, {} dead",
+        report.idle, report.claimed, report.parked, report.dead
+    );
+    for e in &report.standbys {
+        let image_tag = e
+            .image_sha256
+            .as_deref()
+            .map(|s| format!(" · image {}", &s[..s.len().min(12)]))
+            .unwrap_or_default();
+        println!(
+            "  {} · {} · {} · {} vcpu / {} MiB · kernel {}{}",
+            e.id,
+            e.state,
+            if e.pid == 0 {
+                "saved-state".to_string()
+            } else {
+                format!("pid {}", e.pid)
+            },
+            e.vcpus,
+            e.mem_mib,
+            &e.kernel_sha256[..e.kernel_sha256.len().min(12)],
+            image_tag,
+        );
+    }
+    Ok(())
 }
