@@ -22,10 +22,10 @@ use zeroize::Zeroizing;
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
-mod endpoint_identity;
 mod owned;
 use owned::endpoint_command;
 pub use owned::{OwnedEndpoint, OwnedEndpointSpawnError, spawn_network_endpoint_owned};
+mod endpoint_identity;
 mod stderr_log;
 pub use endpoint_identity::EndpointPid;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};

@@ -30,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::ir::Workload;
+use mvm_contract::ir::Workload;
 use tree_sitter::{Node, Parser};
 
 use super::value::{HELPER_ALLOWLIST, Value, lower_to_workload, non_literal_at};
@@ -520,7 +520,7 @@ fn first_error_location(root: Node, source: &[u8]) -> (usize, usize, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{Entrypoint, EnvValue, HookCmd, Image, NetworkMode, SecretMount};
+    use mvm_contract::ir::{Entrypoint, EnvValue, HookCmd, Image, NetworkMode, SecretMount};
     use std::path::PathBuf;
 
     fn parse_str(src: &str) -> Result<(Workload, DecoratorManifest), ParseError> {
@@ -699,7 +699,7 @@ export const greet = mvm.app({
         match env.get("API_KEY") {
             Some(EnvValue::SecretRef { reference }) => {
                 assert_eq!(reference.name, "api-key");
-                assert_eq!(reference.auth_type, crate::ir::AuthType::Bearer);
+                assert_eq!(reference.auth_type, mvm_contract::ir::AuthType::Bearer);
                 assert_eq!(reference.allowed_hosts, ["api.openai.com"]);
                 match &reference.mount {
                     SecretMount::Env { var } => assert_eq!(var, "api-key"),

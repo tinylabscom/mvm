@@ -1171,6 +1171,9 @@ impl AuditEmitter {
     /// result is discarded, so a caller that boots on `Ok` cannot boot on
     /// records that never reached the disk. The scope must therefore close
     /// before the action the entries authorize — not at process exit.
+    ///
+    /// Batches do not nest: `f` runs nothing that opens another batch on this
+    /// emitter, which refuses with an error before `f`'s records are written.
     pub fn batched<T>(&self, f: impl FnOnce() -> Result<T>) -> Result<T> {
         let atomic_batch = AtomicSyncBatch::begin(Arc::clone(&self.atomic_sync_state))?;
         for signer in &self.signers {
