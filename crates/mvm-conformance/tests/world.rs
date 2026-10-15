@@ -603,7 +603,7 @@ impl CliWorld {
     /// a VM's state) at. A process still naming one of these when the
     /// scenario ends was started by it.
     fn scenario_homes(&self) -> Vec<&std::path::Path> {
-        [
+        let mut homes: Vec<&std::path::Path> = [
             &self.isolated_home,
             &self.scratch_dir,
             &self.warm_restore_home,
@@ -618,7 +618,17 @@ impl CliWorld {
         .into_iter()
         .flatten()
         .map(tempfile::TempDir::path)
-        .collect()
+        .collect();
+        // Non-TempDir homes that live steps launched VMs against. Without
+        // these, a scenario that fails before its own `machine stop` leaks
+        // the detached Firecracker VMM past the job.
+        if let Some(home) = &self.e2e_home {
+            homes.push(home.as_path());
+        }
+        if let Some(home) = &self.last_live_home {
+            homes.push(home.as_path());
+        }
+        homes
     }
 
     /// Stop everything this scenario left running against its own homes.

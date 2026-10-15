@@ -38,6 +38,41 @@ identifiers. A metadata schema that exposes them must explicitly account for
 their sensitivity. "May remain unencrypted" does not mean world-readable or
 safe to publish.
 
+## Surface inventory
+
+Every file or store mvm itself writes that holds diagnostic payload, sensitive
+configuration or audit metadata, with its class, how it is protected, how long
+its plaintext lives and what removes it. "Instance-scoped" means the file lives
+in the VM's state directory (`vm_state_dir`, created 0700), is replaced with a
+fresh 0600 inode on each boot, and is removed with that directory: when a
+transient run ends, or by `mvmctl machine rm`, which keeps the directory only
+while a live process still owns it. It is never copied out by managed
+retention, so it is transient plaintext with that directory as its owner, not a
+retained copy.
+
+| Surface | Class | Protection | Plaintext lifetime and cleanup | Byte bound |
+|---|---|---|---|---|
+| HVF guest console | Sensitive payload | Protected capture, required; the supervisor config cannot select plaintext | No plaintext file. Payload retired 604800 s after terminal seal; generations at most 3600 s | Workload-output family budget (8 MiB, 65536 chunks) |
+| HVF supervisor stderr | Sensitive payload | Discarded (`/dev/null`); payload-free status evidence instead | None written | Not applicable |
+| Workload output through the stream plane | Sensitive payload | Encrypted transcript (protected families under the audit root; legacy per-VM `stream/`) | No plaintext file. Protected families follow the retention above; legacy captures are retention-ineligible and go with the VM state | Family budget, or the legacy capture's own bounds |
+| Firecracker, libkrun and QEMU `console.log` | Sensitive payload | Private file (0600, fresh inode, link at the path replaced) | Instance-scoped | None: bounded only by what the guest writes to its serial console. Workload stdout and stderr do not go there |
+| `firecracker.log`, `qemu.log`, `supervisor.stderr.log`, `network-endpoint.stderr.log`, `gpu-endpoint.log` | Sensitive payload | Private file, as above | Instance-scoped | None |
+| `supervisor.lifecycle.log` (libkrun) | Sensitive payload (free-form detail) | Private append: created 0600, refuses a link, a second hard link or another user's file | Instance-scoped | None; one line per lifecycle stage |
+| `supervisor-config.json`, `substitution-env.json`, the QEMU bridge spec | Sensitive configuration | Private file, written whole | Instance-scoped | Fixed by schema |
+| HVF RAM image written at capture | Sensitive payload (guest memory) | Private file, fresh inode | Staging and checkpoint rules of the snapshot and checkpoint policies, not this one | Guest memory size |
+| Builder VM console, supervisor stdout/stderr and command logs | Sensitive payload | The libkrun builder's command, supervisor and config files are private files; builder console files are created by the VMM inside the 0700 builder state directory and are not individually narrowed | Builder state directory; replaced each boot | None |
+| `MVM_HVF_AGENT_DEBUG` trace | Sensitive payload | Private append at the operator-named path; nothing written when unset | Operator-selected: outside managed retention, never cleaned up by mvm | None |
+| Guest telemetry records | Sensitive payload | Retained only sealed under the transcript key-custody facility; a plaintext telemetry store is not permitted | Per the collector's sealed store | Collector bounds |
+| Audit chain segments, seals and retirement records | Audit metadata | Chain-signed, private managed state | Independent of payload; pinned while enrolled capture metadata remains | Segment rotation; no deletion except deliberate prune |
+| Operator exports (`machine logs` export, transcript export) | Intentional plaintext disclosure | Verified decryption, explicit destination | Operator-owned; outside managed retention | Not applicable |
+| PID files, exit codes, timing and quota records | Operational metadata | Private state directory | Instance-scoped | Fixed by schema |
+
+`xtask check-private-diagnostic-files` keeps the VMM, backend, supervisor and
+builder-log writers on the private-creation helpers. An unbounded
+instance-scoped file is a stated limit, not a retention policy: a detached
+instance that runs for months keeps its whole serial console until it is
+removed.
+
 ## Protected capture
 
 Reuse the existing transcript envelope rather than introduce another encryption

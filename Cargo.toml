@@ -12,6 +12,7 @@ members = [
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
+    "crates/mvm-fc-lifecycle",
     "crates/mvm-backends",
     "crates/mvm-build",
     # Seals built artifacts into a signed `.mvmpkg` under any Ed25519 signer.

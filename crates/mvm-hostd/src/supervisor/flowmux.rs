@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
-use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
+use mvm_contract::protocol::network_flow::hello::{self, Handshake, agree};
 use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, HEADER_LEN, IngressFlowKind, LENGTH_PREFIX_LEN, Opcode,
@@ -472,13 +472,26 @@ impl FlowMuxSession {
 
         // Refuse a guest built against a different revision before serving it
         // anything. A GoAway first, so the guest reports the same mismatch
-        // rather than a bare disconnect it cannot explain.
+        // rather than a bare disconnect it cannot explain. Both a malformed
+        // Hello (a guest that predates the handshake format) and a revision
+        // mismatch send GoAway — without it the guest sees a bare stream
+        // close with no diagnostic.
         let local = Handshake::local(HOST_BUILD);
         let payload_start = LENGTH_PREFIX_LEN + HEADER_LEN;
-        let guest = Handshake::decode(
+        let guest = match Handshake::decode(
             &self.read_buf[payload_start..payload_start + guest_payload_len as usize],
-        )
-        .map_err(|e| FlowMuxError::FrameRefused(e.to_string()))?;
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                let reason = format!(
+                    "{e} — this host is {HOST_BUILD} (behavior revision {}); \
+                     rebuild and restage the guest",
+                    hello::BEHAVIOR_REVISION,
+                );
+                let _ = self.send_goaway(&reason);
+                return Err(FlowMuxError::FrameRefused(reason));
+            }
+        };
         if let Err(e) = agree(&local, &guest) {
             self.send_goaway(&e.to_string())?;
             return Err(FlowMuxError::FrameRefused(e.to_string()));
@@ -1611,9 +1624,11 @@ mod tests {
     }
 
     /// A peer that predates the handshake sends an empty Hello payload. That
-    /// is the stale-binary case, so it must be refused rather than defaulted.
+    /// is the stale-binary case, so the host must send GoAway (naming itself)
+    /// rather than closing the stream silently — a bare close gives the guest
+    /// no diagnostic to report.
     #[test]
-    fn a_guest_with_no_handshake_at_all_is_refused() {
+    fn a_guest_with_no_handshake_at_all_is_refused_with_goaway() {
         let (host_key, host_verify) = fresh_keys();
         let (guest_key, guest_verify) = fresh_keys();
         let (host_stream, mut guest_stream) = UnixStream::pair().unwrap();
@@ -1634,6 +1649,18 @@ mod tests {
         let (mut guest_session, _id) =
             Session::guest(&mut guest_stream, guest_key, &host_verify).unwrap();
         write_frame(&mut guest_stream, &mut guest_session, Opcode::Hello, 0, b"");
+
+        // The host must send GoAway before closing, so the guest can report
+        // what went wrong instead of seeing a bare disconnect.
+        let (opcode, _sid, payload) = read_flowmux_frame(&mut guest_stream, &mut guest_session);
+        assert_eq!(
+            opcode,
+            Opcode::GoAway,
+            "an empty Hello must be refused with GoAway, not a bare close"
+        );
+        let reason = String::from_utf8(payload).expect("GoAway reason is text");
+        assert!(reason.contains(HOST_BUILD), "{reason}");
+        assert!(reason.contains("handshake"), "{reason}");
 
         let err = host_handle
             .join()

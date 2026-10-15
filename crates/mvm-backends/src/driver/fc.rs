@@ -118,19 +118,30 @@ pub const GUEST_CONSOLE_VERBOSE_ENV: &str = "MVM_GUEST_CONSOLE_VERBOSE";
 /// nobody is reading. The other backends do not share the cost: libkrun and the
 /// mock boot `console=hvc0`, a virtio-console whose output rides a ring.
 ///
-/// `quiet` raises the console loglevel so `KERN_INFO` chatter stops crossing
-/// the port, and `loglevel=3` (parsed after it, so it wins) holds back
-/// `KERN_ERR` too for the rest of kernel boot. On a healthy boot those errors
-/// are the same fifteen lines every time, about 25 ms of VM exits: Firecracker
-/// describes its virtio-mmio devices in ACPI and also passes them as
-/// `virtio_mmio.device=`, so each one registers twice and the second
-/// registration fails with `-EBUSY`, and there is no PCI config space to find.
-/// The guest agent, as PID 1, raises the level back to the `quiet` value as
-/// soon as it has `/proc` (`mvm_agentd::console_loglevel`), so an error raised
-/// once the guest is running — the OOM killer's report, which diagnostics scan
-/// `console.log` for — still reaches the console. Early-boot errors stay in
-/// the kernel ring buffer (`dmesg`). The agent's own messages are userspace
-/// writes rather than printk and are unaffected either way.
+/// `quiet` raises the console loglevel to 4 (`KERN_WARNING`), so only
+/// `KERN_ERR` and above cross the serial port. The boot args also carry
+/// `pci=off`, which tells the kernel not to probe for a PCI bus Firecracker
+/// does not provide — without it the kernel spent cycles probing for PCI
+/// config space and printed `KERN_ERR` lines when it found none.
+///
+/// `loglevel=3` (parsed after `quiet`, so it wins) further holds back
+/// `KERN_ERR` during early boot. On x86 Firecracker describes its
+/// virtio-mmio devices in ACPI *and* appends `virtio_mmio.device=`
+/// parameters to the kernel command line. When the workload kernel has
+/// both `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` and ACPI enabled, every
+/// device is registered twice and the second registration fails with
+/// `-EBUSY` at `KERN_ERR` — about 25 ms of serial-port VM exits on a
+/// healthy boot. The `loglevel=3` suppresses those until Firecracker
+/// stops passing cmdline devices where ACPI tables describe the same
+/// hardware.
+///
+/// The guest agent, as PID 1, raises the level back to the `quiet` value
+/// as soon as it has `/proc` (`mvm_agentd::console_loglevel`), so an
+/// error raised once the guest is running — the OOM killer's report,
+/// which diagnostics scan `console.log` for — still reaches the
+/// console. Early-boot errors stay in the kernel ring buffer (`dmesg`).
+/// The agent's own messages are userspace writes rather than printk and
+/// are unaffected either way.
 ///
 /// The escape hatch matters: kernel boot output is how a hung guest gets
 /// diagnosed. [`GUEST_CONSOLE_VERBOSE_ENV`] restores it in full.
@@ -148,10 +159,13 @@ fn verbosity_token_for(requested: Option<&str>) -> &'static str {
 }
 
 fn fc_base_bootargs(has_disk: bool) -> String {
-    // Serial console + reboot/panic behavior + stable interface naming. The NIC
-    // fields the raw Firecracker TAP path appends here are deliberately absent.
+    // Serial console + reboot/panic behavior + stable interface naming + no PCI
+    // probe. The NIC fields the raw Firecracker TAP path appends here are
+    // deliberately absent. `pci=off` tells the kernel not to look for a PCI bus
+    // Firecracker does not provide; without it the probe emits KERN_ERR lines
+    // about missing PCI config space that cost serial-port VM exits.
     let console = format!(
-        "console=ttyS0{} reboot=k panic=1 net.ifnames=0",
+        "console=ttyS0{} reboot=k panic=1 pci=off net.ifnames=0",
         fc_console_verbosity()
     );
     let console = console.as_str();
@@ -1677,7 +1691,7 @@ mod tests {
         let verity = d.workload_base_bootargs(false);
         assert_eq!(
             verity,
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"
         );
         assert!(!verity.contains("root="), "got: {verity}");
 
@@ -1913,7 +1927,7 @@ mod tests {
         );
         assert!(
             boot.contains(
-                r#""boot_args": "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0""#
+                r#""boot_args": "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0""#
             ),
             "{boot}"
         );
@@ -2763,14 +2777,14 @@ mod console_verbosity_tests {
     fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
         assert_eq!(
             fc_base_bootargs(true),
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0 rootwait init=/init"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
         // PID 1 owns root/init selection. The virtiofs-root shape that used to
         // be here is gone.
         assert_eq!(
             fc_base_bootargs(false),
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"
         );
     }
 
@@ -2786,6 +2800,19 @@ mod console_verbosity_tests {
         // The guest agent restores exactly the level `quiet` selects, so the
         // two halves of this have to agree on it.
         assert_eq!(mvm_agentd::console_loglevel::QUIET_CONSOLE_LOGLEVEL, 4);
+    }
+
+    /// Firecracker has no PCI bus; probing for one emits KERN_ERR lines about
+    /// missing config space and wastes serial-port VM exits.
+    #[test]
+    fn pci_probe_is_disabled() {
+        for has_disk in [false, true] {
+            let args = fc_base_bootargs(has_disk);
+            assert!(
+                args.contains("pci=off"),
+                "boot shape (has_disk={has_disk}) lost pci=off: {args}"
+            );
+        }
     }
 
     /// A hung guest is diagnosed from kernel boot output, so the suppression

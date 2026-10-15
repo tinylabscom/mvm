@@ -533,8 +533,13 @@ pub fn encode_hvf_snapshot_frame(
 /// come from the mapping, never from a file a restore mapped it from: pages the
 /// guest wrote since its own restore are private copies, and those are the
 /// bytes the new snapshot has to carry.
+///
+/// The image is guest memory in the clear, so it lands on a fresh 0600 inode
+/// rather than truncating whatever is at `path`: a link there is replaced, not
+/// written through, and a file a restore still has mapped is never shortened
+/// under it.
 pub fn write_ram_image(ram: &GuestRam, path: &std::path::Path) -> std::io::Result<RamLayout> {
-    let mut file = std::fs::File::create(path)?;
+    let mut file = mvm_core::util::atomic_io::open_private_truncated(path)?;
     ram.write_to(&mut file)?;
     file.sync_all()?;
     Ok(RamLayout::whole_file(ram.len()))
@@ -1212,6 +1217,27 @@ mod tests {
     /// macOS a private mapping has not been observed to pick up later writes
     /// to its file, so such an assertion would pass with or without the clone
     /// and prove nothing; the file identity checked here is what protects.
+    #[test]
+    fn a_ram_image_is_a_fresh_owner_only_file_and_never_written_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let ram_path = dir.path().join("memory.bin");
+        std::os::unix::fs::symlink(&victim, &ram_path).unwrap();
+        let mut ram = GuestRam::new(TEST_RAM_LEN).unwrap();
+        ram.copy_at(0, b"SYNTHETIC_MARKER").unwrap();
+
+        write_ram_image(&ram, &ram_path).unwrap();
+
+        let meta = std::fs::symlink_metadata(&ram_path).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert!(write_ram_image(&ram, &dir.path().join("absent/memory.bin")).is_err());
+    }
+
     #[test]
     fn a_captured_image_round_trips_through_verification_into_a_private_mapping() {
         use mvm_vmm::host::restore_image::VerifiedRestoreFile;

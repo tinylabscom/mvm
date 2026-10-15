@@ -219,7 +219,7 @@ which builds the registry layout by:
    SHA-256 digest and size;
 2. signing each manifest keyless with `cosign sign-blob`, under the workflow's
    GitHub OIDC identity, and writing the Sigstore bundle beside it;
-3. regenerating the registry index, `packs/index.json`;
+3. regenerating the root registry index, `index.json`;
 4. checking the result with `scripts/validate-packs.py`;
 5. committing the published layout under `packs/`.
 
@@ -233,7 +233,7 @@ Existing signed versions retain their old identity unless re-signed. Official
 verified pack.
 
 ```text
-packs/index.json
+index.json
 packs/runtime/node/1.0.0/manifest.json
 packs/runtime/node/1.0.0/manifest.sigstore.json
 packs/runtime/node/1.0.0/files/pack/group.toml
@@ -459,7 +459,7 @@ that names a pack loads, until it is fixed.
 ## Serve packs from your own registry
 
 `MVM_PACK_REGISTRY` replaces the registry base URL. `mvmctl` reads
-`packs/index.json` and the per-version files beneath that base, over HTTPS or
+root `index.json` and the per-version files under `packs/` beneath that base, over HTTPS or
 from a `file://` path:
 
 ```sh
@@ -467,7 +467,7 @@ MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl search
 MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl pull runtime/node
 ```
 
-A mirror of the previously published `packs/` tree verifies under the default
+A mirror containing the root catalog and the published `packs/` tree verifies under the default
 trust policy for `agent/` and `runtime/`, because the signatures are unchanged.
 Packs you sign yourself need your signing identity in `publishers.toml`, and
 they need the Sigstore bundle format cosign v3 writes.
@@ -499,17 +499,26 @@ changes for existing installations:
   cutoff; operators who intentionally keep the former identity must own that
   trust and its revocation plan.
 
-The index is a small JSON document, and unknown fields in it are refused:
+The root index uses schema version 2 only. Unknown fields, duplicate coordinates
+or versions, invalid coordinates or semantic versions, and missing or malformed
+manifest digests are refused. Each digest is 64 lowercase hexadecimal characters
+and covers the exact published `manifest.json` bytes. The catalog is untrusted
+discovery metadata: a matching hash never replaces mandatory publisher signature
+verification or an authenticated installed pin. A mismatch stops installation.
+There is no fallback to `packs/index.json` or schema version 1.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "packs": [
     {
       "namespace": "runtime",
-      "name": "node",
-      "description": "Node.js runtime policy: the npm registry, Node downloads, and GitHub release assets for native-module prebuilds.",
-      "versions": ["1.0.0"]
+      "name": "go",
+      "description": "Go runtime policy",
+      "versions": [{
+        "version": "1.0.0",
+        "manifest_sha256": "ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50"
+      }]
     }
   ]
 }

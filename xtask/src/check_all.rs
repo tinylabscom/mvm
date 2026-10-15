@@ -249,6 +249,10 @@ pub const GATES: &[Gate] = &[
         crate::check_backend_resource_controls::run,
     ),
     ("check-vcpu-ceilings", crate::check_vcpu_ceilings::run),
+    (
+        "check-private-diagnostic-files",
+        crate::check_private_diagnostic_files::run,
+    ),
     ("check-private-mvm-dirs", crate::check_private_mvm_dirs::run),
     (
         "check-single-fixture-corpus",
