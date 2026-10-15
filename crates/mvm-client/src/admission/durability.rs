@@ -2,7 +2,17 @@
 
 use anyhow::Result;
 
-use super::{AdmissionContext, AdmissionSync, AdmitPlanForBootParams, admit};
+use super::{AdmissionContext, AdmitPlanForBootParams, admit};
+
+/// Where admission blocks on its audit sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AdmissionSync {
+    /// Before admission returns: the context it hands back is durable.
+    Inline,
+    /// Not at all: the sync runs on its own thread and the caller waits for it
+    /// before the workload runs.
+    BesideBoot,
+}
 
 /// [`admit_plan_for_boot`](super::admit_plan_for_boot), with the admission's
 /// audit sync left running instead of waited for.

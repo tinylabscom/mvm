@@ -73,6 +73,19 @@ pub struct ChildForkRequest<'a> {
     /// parent booted with no plan and would otherwise enforce none of them.
     /// A driver with no such process has nowhere to deliver it.
     pub admitted_plan: Option<&'a str>,
+    /// Read-only images to put behind the late-volume slots the parent booted,
+    /// before the child resumes. Empty for a claim that attaches none.
+    pub late_volumes: &'a [LateVolumeAttach],
+}
+
+/// One read-only image a claim attaches to a late-volume slot of a restored
+/// child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LateVolumeAttach {
+    /// The block slot the parent booted a placeholder in.
+    pub slot: u8,
+    /// The host image the slot serves from now on.
+    pub source: std::path::PathBuf,
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
@@ -140,6 +153,12 @@ pub trait VmmDriver: Send + Sync {
     /// the claim wires its authority-bearing channels.
     fn supports_preloaded_standby(&self) -> bool {
         false
+    }
+    /// How many read-only late-volume slots this VMM boots a warm parent with,
+    /// and can point at a claim's own images before the child resumes. Zero
+    /// means a claim can attach no volume and such a launch keeps its cold path.
+    fn late_volume_slots(&self) -> u8 {
+        0
     }
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;

@@ -250,6 +250,12 @@ const RAW_SITES: &[RawSite] = &[
         "the CRNG reseed helper, started by the guest agent",
     ),
     guest(
+        "crates/mvm-agentd/src/late_volumes.rs",
+        "spawn",
+        "Command::new(\"/proc/self/exe\")",
+        "the one-shot late-volume helper, started by the guest agent",
+    ),
+    guest(
         "crates/mvm-agentd/src/entrypoint.rs",
         "execute_streaming",
         "Command::new(&program)",
@@ -570,6 +576,10 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
     (
         "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
         "fn spawn_network_endpoint(",
+    ),
+    (
+        "crates/mvm-vmm/src/host/network_endpoint_spawn/owned.rs",
+        "fn spawn_prepared(",
     ),
     (
         "crates/mvm-vmm/src/host/gpu_endpoint_spawn.rs",

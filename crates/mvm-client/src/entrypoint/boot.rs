@@ -37,6 +37,8 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// Trusted admission's optional caller registration, never a producer ACK.
+    pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// The tenant policy bundle the plan resolved, serialized, when it has one.
     pub bundle_json: Option<String>,
     /// Config-drive files the plan's guest boot config needs.
@@ -58,6 +60,7 @@ impl SessionAuditSubstrate {
     pub fn apply_to(self, start_config: &mut mvm_core::vm_backend::VmStartConfig) -> Vec<String> {
         start_config.tenant_id = Some(self.tenant_id);
         start_config.plan_json = Some(self.plan_json);
+        start_config.caller_registration = self.caller_registration;
         start_config.bundle_json = self.bundle_json;
         start_config.config_files.extend(self.config_files);
         start_config.admission_durability = self.durability;

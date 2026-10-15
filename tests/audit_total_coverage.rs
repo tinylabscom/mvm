@@ -383,6 +383,8 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
+    // Reads the collector's status and sealed records beside the VM.
+    ("telemetry", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
     ("forward", AuditPosture::ReadOnly),

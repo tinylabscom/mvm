@@ -861,7 +861,50 @@ fn child_io(
     })
 }
 
+/// Point every late-volume slot a claim uses at its image on a paused child,
+/// tearing the child down if any of them cannot be.
+pub(crate) fn attach_late_volumes(
+    io: &super::io::FirecrackerIO,
+    late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+) -> anyhow::Result<()> {
+    for volume in late_volumes {
+        if let Err(error) = io.repoint_drive(&format!("blk{}", volume.slot), &volume.source) {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(io);
+            return Err(error.context("attaching a late volume to the restored child"));
+        }
+    }
+    Ok(())
+}
+
 impl FcForkRestorer {
+    /// Stage the child's snapshot, point its late-volume slots at the claim's
+    /// images while it is still paused, and only then resume it.
+    pub fn restore_fork_attaching(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+        cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+        late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        if late_volumes.is_empty() {
+            return self.restore_fork(child_vm_name, child_dir, cpu_grant);
+        }
+        let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        attach_late_volumes(&io, late_volumes)?;
+        if let Err(error) = <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
+        {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            return Err(error.context("resume after attaching late volumes"));
+        }
+        Ok(())
+    }
+
     /// Stage the child's snapshot and resume it. The fork-restore callback
     /// `fork_vm_full_fc` takes.
     pub fn restore_fork(

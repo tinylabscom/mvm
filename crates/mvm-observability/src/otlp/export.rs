@@ -13,7 +13,7 @@ use mvm_http::blocking::Client;
 use mvm_http::{HeaderValue, Url, header};
 
 use super::config::OtlpConfig;
-use super::encode::{ResourceInfo, encode_batch};
+use super::encode::{ResourceInfo, encode_batch, encode_log_batch};
 use super::record::{EventRecord, SpanRecord};
 
 /// Spans held while the export thread is busy. Beyond this they are dropped.
@@ -22,17 +22,19 @@ const QUEUE_CAPACITY: usize = 2048;
 const MAX_BATCH: usize = 512;
 /// How long a partial batch waits for company before it is sent anyway.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+/// The largest request body sent. A batch that encodes larger is split; a
+/// single record that still does is dropped and counted, so one oversized
+/// span cannot make every request fail.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 /// Collector responses carry nothing the exporter reads.
 const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
 
 /// What crosses the queue.
 pub(crate) enum Message {
     Span(Box<SpanRecord>),
-    /// An event with no enclosing span, captured as its own record rather
-    /// than silently dropped. The payload is carried for the proper-signal
-    /// exporter this trace-signal one is not; until that lands, only the
-    /// capture side reads it.
-    Event(#[allow(dead_code)] Box<EventRecord>),
+    /// An event with no enclosing span, captured as its own record and
+    /// exported as an OTLP log record — never wrapped in a span.
+    Event(Box<EventRecord>),
     /// Wakes a thread idle in `recv_timeout` so shutdown need not wait out the
     /// flush interval.
     Shutdown,
@@ -45,6 +47,7 @@ pub(crate) struct SpanQueue {
     dropped: Arc<AtomicU64>,
     dropped_events: Arc<AtomicU64>,
     unexported_events: Arc<AtomicU64>,
+    oversize: Arc<AtomicU64>,
 }
 
 impl SpanQueue {
@@ -76,16 +79,24 @@ impl SpanQueue {
         self.dropped_events.load(Ordering::Relaxed)
     }
 
-    /// Standalone events the export thread received but held back: this
-    /// exporter speaks the trace signal only, and exporting them through
-    /// their proper signal is separate work. Counted so the deferral is
-    /// evidence rather than a silent drop.
+    /// Standalone events the export thread received but could not export:
+    /// the configuration names no logs endpoint, and an event is never
+    /// turned into a span. Counted so the gap is evidence, not silence.
     pub(crate) fn note_unexported_event(&self) {
         self.unexported_events.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn unexported_events(&self) -> u64 {
         self.unexported_events.load(Ordering::Relaxed)
+    }
+
+    /// A record that alone encoded past [`MAX_BODY_BYTES`] and was dropped.
+    pub(crate) fn note_oversize(&self) {
+        self.oversize.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn oversize(&self) -> u64 {
+        self.oversize.load(Ordering::Relaxed)
     }
 }
 
@@ -98,6 +109,7 @@ pub(crate) fn span_queue(capacity: usize) -> (SpanQueue, Receiver<Message>) {
             dropped: Arc::new(AtomicU64::new(0)),
             dropped_events: Arc::new(AtomicU64::new(0)),
             unexported_events: Arc::new(AtomicU64::new(0)),
+            oversize: Arc::new(AtomicU64::new(0)),
         },
         rx,
     )
@@ -150,6 +162,7 @@ impl ExportGuard {
             self.queue.dropped(),
             self.queue.dropped_events(),
             self.queue.unexported_events(),
+            self.queue.oversize(),
         ) {
             eprintln!("{line}");
         }
@@ -163,7 +176,12 @@ impl Drop for ExportGuard {
     }
 }
 
-fn loss_report(dropped: u64, dropped_events: u64, unexported_events: u64) -> Vec<String> {
+fn loss_report(
+    dropped: u64,
+    dropped_events: u64,
+    unexported_events: u64,
+    oversize: u64,
+) -> Vec<String> {
     let mut lines = Vec::new();
     if dropped > 0 {
         lines.push(format!(
@@ -177,8 +195,13 @@ fn loss_report(dropped: u64, dropped_events: u64, unexported_events: u64) -> Vec
     }
     if unexported_events > 0 {
         lines.push(format!(
-            "otlp: {unexported_events} standalone event(s) captured but not exported — this \
-             exporter sends the trace signal only"
+            "otlp: {unexported_events} standalone event(s) captured but not exported — no \
+             logs endpoint is configured"
+        ));
+    }
+    if oversize > 0 {
+        lines.push(format!(
+            "otlp: {oversize} record(s) dropped because each alone exceeded the request size bound"
         ));
     }
     lines
@@ -233,15 +256,23 @@ impl ExportSlot {
     }
 }
 
+/// Which OTLP signal a request body belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Signal {
+    Traces,
+    Logs,
+}
+
 /// Where a finished batch goes.
 pub(crate) trait BatchSink: Send + 'static {
-    fn send(&mut self, body: Vec<u8>) -> Result<(), String>;
+    fn send(&mut self, signal: Signal, body: Vec<u8>) -> Result<(), String>;
 }
 
 /// POSTs batches to the collector.
 struct HttpSink {
     client: Client,
     endpoint: Url,
+    logs_endpoint: Option<Url>,
 }
 
 impl HttpSink {
@@ -261,15 +292,23 @@ impl HttpSink {
         Ok(Self {
             client,
             endpoint: config.endpoint().clone(),
+            logs_endpoint: config.logs_endpoint().cloned(),
         })
     }
 }
 
 impl BatchSink for HttpSink {
-    fn send(&mut self, body: Vec<u8>) -> Result<(), String> {
+    fn send(&mut self, signal: Signal, body: Vec<u8>) -> Result<(), String> {
+        let endpoint = match signal {
+            Signal::Traces => &self.endpoint,
+            Signal::Logs => self
+                .logs_endpoint
+                .as_ref()
+                .ok_or_else(|| "no logs endpoint".to_string())?,
+        };
         let response = self
             .client
-            .post(self.endpoint.as_str())
+            .post(endpoint.as_str())
             .body(body)
             .send()
             .map_err(|e| e.to_string())?;
@@ -291,6 +330,7 @@ pub(crate) fn start(config: &OtlpConfig) -> std::io::Result<(SpanQueue, ExportGu
         sink,
         resource: ResourceInfo::current(config.service_name()),
         endpoint: endpoint_for_report(config.endpoint()),
+        exports_logs: config.logs_endpoint().is_some(),
     };
     start_injected_sink(worker, QUEUE_CAPACITY, config.timeout())
 }
@@ -311,6 +351,8 @@ pub(crate) struct Worker<K> {
     pub(crate) resource: ResourceInfo,
     /// For the failure report only; never carries header values.
     pub(crate) endpoint: String,
+    /// Whether standalone events have a logs endpoint to go to.
+    pub(crate) exports_logs: bool,
 }
 
 pub(crate) fn start_injected_sink<K: BatchSink>(
@@ -339,10 +381,23 @@ pub(crate) fn start_injected_sink<K: BatchSink>(
     Ok((queue, guard))
 }
 
+/// The spans and standalone events waiting for their next request.
+#[derive(Default)]
+struct Batches {
+    spans: Vec<SpanRecord>,
+    events: Vec<EventRecord>,
+}
+
+impl Batches {
+    fn is_full(&self) -> bool {
+        self.spans.len() >= MAX_BATCH || self.events.len() >= MAX_BATCH
+    }
+}
+
 impl<K: BatchSink> Worker<K> {
     fn run(mut self, rx: &Receiver<Message>, shutdown: &AtomicBool, queue: &SpanQueue) {
         let mut reporter = FailureReporter::default();
-        let mut batch = Vec::with_capacity(MAX_BATCH);
+        let mut batches = Batches::default();
         let mut deadline: Option<Instant> = None;
         loop {
             let wait = deadline.map_or(FLUSH_INTERVAL, |d| {
@@ -351,27 +406,31 @@ impl<K: BatchSink> Worker<K> {
             match rx.recv_timeout(wait) {
                 Ok(Message::Span(span)) => {
                     deadline.get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
-                    batch.push(*span);
-                    if batch.len() >= MAX_BATCH {
-                        self.flush(&mut batch, &mut reporter);
-                        deadline = None;
+                    batches.spans.push(*span);
+                }
+                Ok(Message::Event(event)) => {
+                    if self.exports_logs {
+                        deadline.get_or_insert_with(|| Instant::now() + FLUSH_INTERVAL);
+                        batches.events.push(*event);
+                    } else {
+                        queue.note_unexported_event();
                     }
                 }
-                // This exporter speaks the trace signal only. The event was
-                // captured and crossed the bounded queue; holding it back
-                // here is a counted, reported deferral, not a silent drop.
-                Ok(Message::Event(_)) => queue.note_unexported_event(),
                 Ok(Message::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
-                    self.flush(&mut batch, &mut reporter);
+                    self.flush(&mut batches, &mut reporter, queue);
                     deadline = None;
                 }
+            }
+            if batches.is_full() {
+                self.flush(&mut batches, &mut reporter, queue);
+                deadline = None;
             }
             if shutdown.load(Ordering::SeqCst) {
                 break;
             }
         }
-        self.drain(rx, &mut batch, &mut reporter, queue);
+        self.drain(rx, &mut batches, &mut reporter, queue);
     }
 
     /// Send what is already queued, without waiting for more. Bounded by the
@@ -379,36 +438,71 @@ impl<K: BatchSink> Worker<K> {
     fn drain(
         &mut self,
         rx: &Receiver<Message>,
-        batch: &mut Vec<SpanRecord>,
+        batches: &mut Batches,
         reporter: &mut FailureReporter,
         queue: &SpanQueue,
     ) {
-        let spans = rx.try_iter().take(QUEUE_CAPACITY).filter_map(|m| match m {
-            Message::Span(span) => Some(*span),
-            Message::Event(_) => {
-                queue.note_unexported_event();
-                None
+        for message in rx.try_iter().take(QUEUE_CAPACITY) {
+            match message {
+                Message::Span(span) => batches.spans.push(*span),
+                Message::Event(event) if self.exports_logs => batches.events.push(*event),
+                Message::Event(_) => queue.note_unexported_event(),
+                Message::Shutdown => {}
             }
-            Message::Shutdown => None,
-        });
-        for span in spans {
-            batch.push(span);
-            if batch.len() >= MAX_BATCH {
-                self.flush(batch, reporter);
+            if batches.is_full() {
+                self.flush(batches, reporter, queue);
             }
         }
-        self.flush(batch, reporter);
+        self.flush(batches, reporter, queue);
     }
 
-    fn flush(&mut self, batch: &mut Vec<SpanRecord>, reporter: &mut FailureReporter) {
-        if batch.is_empty() {
+    fn flush(&mut self, batches: &mut Batches, reporter: &mut FailureReporter, queue: &SpanQueue) {
+        let spans = std::mem::take(&mut batches.spans);
+        let resource = self.resource.clone();
+        self.send_bounded(
+            Signal::Traces,
+            &spans,
+            &|items| encode_batch(&resource, items),
+            reporter,
+            queue,
+        );
+        let events = std::mem::take(&mut batches.events);
+        self.send_bounded(
+            Signal::Logs,
+            &events,
+            &|items| encode_log_batch(&resource, items),
+            reporter,
+            queue,
+        );
+    }
+
+    /// Send `items` in as few requests as fit under [`MAX_BODY_BYTES`]:
+    /// a body over the bound is split in half and each half retried; a
+    /// single record over it is dropped and counted.
+    fn send_bounded<T>(
+        &mut self,
+        signal: Signal,
+        items: &[T],
+        encode: &dyn Fn(&[T]) -> Vec<u8>,
+        reporter: &mut FailureReporter,
+        queue: &SpanQueue,
+    ) {
+        if items.is_empty() {
             return;
         }
-        let body = encode_batch(&self.resource, batch);
-        let count = batch.len();
-        batch.clear();
-        if let Err(error) = self.sink.send(body) {
-            reporter.report(&self.endpoint, count, &error);
+        let body = encode(items);
+        if body.len() > MAX_BODY_BYTES {
+            if items.len() == 1 {
+                queue.note_oversize();
+                return;
+            }
+            let (left, right) = items.split_at(items.len() / 2);
+            self.send_bounded(signal, left, encode, reporter, queue);
+            self.send_bounded(signal, right, encode, reporter, queue);
+            return;
+        }
+        if let Err(error) = self.sink.send(signal, body) {
+            reporter.report(&self.endpoint, items.len(), &error);
         }
     }
 }
@@ -460,11 +554,19 @@ mod tests {
 
     /// Records the span count of each body it receives.
     #[derive(Clone, Default)]
-    struct Capture(Arc<Mutex<Vec<usize>>>);
+    struct Capture(Arc<Mutex<Vec<usize>>>, Arc<Mutex<Vec<usize>>>);
 
     impl BatchSink for Capture {
-        fn send(&mut self, body: Vec<u8>) -> Result<(), String> {
+        fn send(&mut self, signal: Signal, body: Vec<u8>) -> Result<(), String> {
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            if signal == Signal::Logs {
+                let records = value["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+                    .as_array()
+                    .unwrap()
+                    .len();
+                self.1.lock().unwrap().push(records);
+                return Ok(());
+            }
             let spans = value["resourceSpans"][0]["scopeSpans"][0]["spans"]
                 .as_array()
                 .unwrap()
@@ -479,6 +581,7 @@ mod tests {
             sink,
             resource: ResourceInfo::current("test"),
             endpoint: "https://collector.example.com/v1/traces".into(),
+            exports_logs: true,
         }
     }
 
@@ -513,7 +616,7 @@ mod tests {
     struct Slow(Duration);
 
     impl BatchSink for Slow {
-        fn send(&mut self, _body: Vec<u8>) -> Result<(), String> {
+        fn send(&mut self, _signal: Signal, _body: Vec<u8>) -> Result<(), String> {
             thread::sleep(self.0);
             Ok(())
         }
@@ -560,6 +663,7 @@ mod tests {
             sink: Slow(Duration::from_secs(10)),
             resource: ResourceInfo::current("test"),
             endpoint: "https://collector.example.com/v1/traces".into(),
+            exports_logs: false,
         };
         let (queue, guard) = start_injected_sink(worker, 16, Duration::from_secs(30)).unwrap();
         queue.offer(span(1));
@@ -589,12 +693,93 @@ mod tests {
 
     #[test]
     fn the_loss_report_names_each_nonzero_count_and_is_silent_at_zero() {
-        assert!(loss_report(0, 0, 0).is_empty());
-        let lines = loss_report(4, 2, 3);
-        assert_eq!(lines.len(), 3);
+        assert!(loss_report(0, 0, 0, 0).is_empty());
+        let lines = loss_report(4, 2, 3, 1);
+        assert_eq!(lines.len(), 4);
+        assert!(lines[3].contains("1 record(s) dropped because each alone exceeded"));
         assert!(lines[0].contains("4 span(s) dropped"));
         assert!(lines[1].contains("2 standalone event(s) dropped"));
         assert!(lines[2].contains("3 standalone event(s) captured but not exported"));
+    }
+
+    fn event(n: u64) -> EventRecord {
+        EventRecord {
+            time: SystemTime::UNIX_EPOCH,
+            name: format!("event-{n}"),
+            attributes: vec![(
+                "level".into(),
+                super::super::record::AttrValue::Str("INFO".into()),
+            )],
+        }
+    }
+
+    #[test]
+    fn standalone_events_go_out_through_the_logs_signal_in_bounded_batches() {
+        let sink = Capture::default();
+        let (queue, guard) =
+            start_injected_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+        for n in 1..=(MAX_BATCH as u64 + 3) {
+            queue.offer_event(event(n));
+        }
+        drop(guard);
+        let logs = sink.1.lock().unwrap().clone();
+        assert_eq!(logs.iter().sum::<usize>(), MAX_BATCH + 3);
+        assert!(logs.iter().all(|&n| n <= MAX_BATCH), "{logs:?}");
+        assert!(sink.0.lock().unwrap().is_empty(), "no span was fabricated");
+        assert_eq!(queue.unexported_events(), 0);
+    }
+
+    #[test]
+    fn without_a_logs_endpoint_events_are_counted_unexported_not_spanned() {
+        let sink = Capture::default();
+        let mut w = worker(sink.clone());
+        w.exports_logs = false;
+        let (queue, guard) = start_injected_sink(w, 64, Duration::from_secs(5)).unwrap();
+        queue.offer_event(event(1));
+        queue.offer_event(event(2));
+        drop(guard);
+        assert_eq!(queue.unexported_events(), 2);
+        assert!(sink.0.lock().unwrap().is_empty() && sink.1.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_oversized_batch_is_split_and_a_single_oversized_record_is_dropped() {
+        let sink = Capture::default();
+        let (queue, guard) =
+            start_injected_sink(worker(sink.clone()), 64, Duration::from_secs(5)).unwrap();
+        // Each span carries ~1.5 MiB of attributes: two fit in one request,
+        // three do not, so four split into two requests.
+        let fat = |id| {
+            let mut s = span(id);
+            s.attributes = (0..384)
+                .map(|i| {
+                    (
+                        format!("k{i}"),
+                        super::super::record::AttrValue::Str("v".repeat(4096)),
+                    )
+                })
+                .collect();
+            s
+        };
+        for id in 1..=4 {
+            queue.offer(fat(id));
+        }
+        // One span far past the bound on its own.
+        let mut huge = span(9);
+        huge.attributes = (0..1200)
+            .map(|i| {
+                (
+                    format!("k{i}"),
+                    super::super::record::AttrValue::Str("v".repeat(4096)),
+                )
+            })
+            .collect();
+        queue.offer(huge);
+        drop(guard);
+        let batches = sink.0.lock().unwrap().clone();
+        assert_eq!(batches.iter().sum::<usize>(), 4, "{batches:?}");
+        assert!(batches.len() >= 2, "the fat batch was split: {batches:?}");
+        assert_eq!(queue.oversize(), 1);
     }
 
     #[test]

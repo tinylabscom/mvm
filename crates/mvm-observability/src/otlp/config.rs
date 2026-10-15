@@ -18,6 +18,10 @@ pub const DEFAULT_FILTER: &str = "info";
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_millis(10_000);
 
 const TRACES_PATH: &str = "v1/traces";
+const LOGS_PATH: &str = "v1/logs";
+
+/// The logs-signal endpoint, used verbatim when set.
+pub const ENV_LOGS_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT";
 
 /// Why the environment could not produce an exporter.
 ///
@@ -74,6 +78,7 @@ impl std::error::Error for ConfigError {}
 #[derive(Clone)]
 pub struct OtlpConfig {
     endpoint: Url,
+    logs_endpoint: Option<Url>,
     headers: HeaderMap,
     timeout: Duration,
     service_name: String,
@@ -86,6 +91,10 @@ impl fmt::Debug for OtlpConfig {
         let header_names: Vec<&str> = self.headers.keys().map(HeaderName::as_str).collect();
         f.debug_struct("OtlpConfig")
             .field("endpoint", &self.endpoint.as_str())
+            .field(
+                "logs_endpoint",
+                &self.logs_endpoint.as_ref().map(Url::as_str),
+            )
             .field("headers", &header_names)
             .field("header_values", &"<redacted>")
             .field("timeout", &self.timeout)
@@ -111,12 +120,16 @@ impl OtlpConfig {
             return Ok(None);
         };
         let endpoint = parse_endpoint(&endpoint)?;
+        let logs_endpoint = resolve_logs_endpoint(&lookup, &endpoint)
+            .map(|raw| parse_endpoint(&raw))
+            .transpose()?;
         let headers = match non_empty(&lookup, ENV_HEADERS) {
             Some(raw) => parse_headers(&raw)?,
             None => HeaderMap::new(),
         };
         Ok(Some(Self {
             endpoint,
+            logs_endpoint,
             headers,
             timeout: parse_timeout(non_empty(&lookup, ENV_TIMEOUT).as_deref()),
             service_name: non_empty(&lookup, ENV_SERVICE_NAME)
@@ -128,6 +141,13 @@ impl OtlpConfig {
     /// The full traces URL requests are POSTed to.
     pub fn endpoint(&self) -> &Url {
         &self.endpoint
+    }
+
+    /// Where standalone events go as OTLP log records, when there is a
+    /// logs endpoint to send them to. Without one they are counted as
+    /// unexported, never turned into spans.
+    pub fn logs_endpoint(&self) -> Option<&Url> {
+        self.logs_endpoint.as_ref()
     }
 
     /// Headers added to every export request.
@@ -162,6 +182,23 @@ fn non_empty(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Option<Str
 fn resolve_endpoint(lookup: &impl Fn(&str) -> Option<String>) -> Option<String> {
     non_empty(lookup, ENV_TRACES_ENDPOINT)
         .or_else(|| non_empty(lookup, ENV_ENDPOINT).map(|base| join_traces_path(&base)))
+}
+
+/// The logs endpoint, by the same convention: the signal variable verbatim,
+/// else the base variable with the logs path appended, else — when only a
+/// traces endpoint was given and it ends in the standard traces path — the
+/// same collector's logs path. A bespoke traces URL gives no logs endpoint.
+fn resolve_logs_endpoint(lookup: &impl Fn(&str) -> Option<String>, traces: &Url) -> Option<String> {
+    if let Some(logs) = non_empty(lookup, ENV_LOGS_ENDPOINT) {
+        return Some(logs);
+    }
+    if let Some(base) = non_empty(lookup, ENV_ENDPOINT) {
+        return Some(format!("{}/{LOGS_PATH}", base.trim_end_matches('/')));
+    }
+    let path = traces.path().strip_suffix(&format!("/{TRACES_PATH}"))?;
+    let mut logs = traces.clone();
+    logs.set_path(&format!("{path}/{LOGS_PATH}"));
+    Some(logs.to_string())
 }
 
 fn join_traces_path(base: &str) -> String {
@@ -254,6 +291,63 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn logs_endpoint_of(vars: &[(&str, &str)]) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        OtlpConfig::from_lookup(
+            |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+            "svc",
+        )
+        .unwrap()
+        .unwrap()
+        .logs_endpoint()
+        .map(|url| url.to_string())
+    }
+
+    #[test]
+    fn the_logs_endpoint_follows_the_signal_convention() {
+        assert_eq!(
+            logs_endpoint_of(&[(ENV_ENDPOINT, "https://c.example.com/otlp/")]).as_deref(),
+            Some("https://c.example.com/otlp/v1/logs")
+        );
+        assert_eq!(
+            logs_endpoint_of(&[(ENV_TRACES_ENDPOINT, "https://c.example.com/v1/traces")])
+                .as_deref(),
+            Some("https://c.example.com/v1/logs")
+        );
+        assert_eq!(
+            logs_endpoint_of(&[
+                (ENV_TRACES_ENDPOINT, "https://c.example.com/v1/traces"),
+                (ENV_LOGS_ENDPOINT, "https://logs.example.com/ingest"),
+            ])
+            .as_deref(),
+            Some("https://logs.example.com/ingest")
+        );
+        assert_eq!(
+            logs_endpoint_of(&[(ENV_TRACES_ENDPOINT, "https://c.example.com/custom")]),
+            None,
+            "a bespoke traces URL implies no logs endpoint"
+        );
+    }
+
+    #[test]
+    fn a_cleartext_remote_logs_endpoint_is_refused_like_a_traces_one() {
+        let refused = OtlpConfig::from_lookup(
+            |name| match name {
+                ENV_TRACES_ENDPOINT => Some("https://c.example.com/v1/traces".into()),
+                ENV_LOGS_ENDPOINT => Some("http://logs.example.com/v1/logs".into()),
+                _ => None,
+            },
+            "svc",
+        );
+        assert!(matches!(
+            refused,
+            Err(ConfigError::CleartextToRemoteHost { .. })
+        ));
     }
 
     #[test]

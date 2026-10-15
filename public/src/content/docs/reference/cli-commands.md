@@ -26,7 +26,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Group / top-level          | Commands                                                                                                                                                                |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Daily drivers (top-level)  | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`ls`/`stop`/`forward`/…), `build`, `doctor`, `init`, `bootstrap`                                              |
-| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `telemetry`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>`              | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
@@ -103,6 +103,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>`                                                        | Tune the deadline and poll cadence. Defaults: 60s / 250ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine boot-report <name>`                                                                                     | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine boot-report <name> --json`                                                                              | Same payload as JSON.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `mvmctl machine telemetry <name>`                                                                                       | What the host collected from the guest: collector status, host and guest losses by reason, recent records (spans, events, logs, stdio, coverage) and incomplete spans. Read from the host's files; no guest RPC, so a detached machine reads the same way. |
+| `mvmctl machine telemetry <name> --follow`                                                                              | Keep printing new records as they arrive. |
+| `mvmctl machine telemetry <name> --json`                                                                                | Status, summary and records as one JSON object. |
 | `mvmctl machine fork <parent> --as <child>`                                                                             | Snapshot a running machine as a `vm_full` checkpoint and branch it into a fresh child VM with a new identity. The child is admitted through the same path as `machine warm-restore`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl machine fork <parent> --branch <slug>`                                                                          | Auto-name the child `<parent>-<slug>-<timestamp>` instead of using `--as`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine restore <checkpoint> --as <child>`                                                                      | Branch an existing `vm_full` checkpoint into a fresh child VM with a new identity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -883,9 +886,20 @@ start launches if it is not already running, watches the session and runs
 `machine session reap` once it expires. That sweep stops a Firecracker machine
 through the same `sudo` signal `machine stop` uses, and the host agent has no
 terminal, so it needs `sudo` that does not prompt; where `sudo` prompts, the
-session is stopped by the next `machine session` command instead. A session
-that stops this way leaves the same host state a `machine stop` does: its
-helper processes are stopped and no pid file is left behind.
+session is stopped by the next `machine session` command instead.
+
+HVF stop uses authenticated instance control and confirms the supervisor's actual
+process exit and successful finalization before cleanup. A missing endpoint, key,
+or lifetime proof is an error, not evidence that the machine stopped. Older HVF
+instances without this control protocol require separate operator recovery; there
+is no PID-based stop fallback. Runtime and session evidence is retained on refusal.
+An owned launch can prove its normal exit after its endpoint closes; a later
+detached client cannot reconstruct that proof from a missing PID file.
+
+HVF wall-clock and session expiry preserve the hard timeout exit code 124, without
+adding a guest-execution grace period. A hard expiry does not claim graceful
+capture or helper finalization, so it retains runtime evidence and automatic
+cleanup can still refuse. Other backends retain their existing expiry cleanup.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
@@ -1927,7 +1941,7 @@ limits and the split registry/release inventory.
 
 On Linux and other non-HVF hosts, the default residency remains `parked`
 (`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
-policy. For a prepared, unnamed launch without extra volumes, enable claims
+policy. For a prepared, unnamed launch of a warm-eligible shape, enable claims
 explicitly:
 
 ```bash
@@ -1956,8 +1970,19 @@ Remove any explicit `warm_pool_size=0` configuration override: an explicit
 size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
 when standbys are enabled. If no compatible standby is ready, the launch
 declares a cold boot rather than reporting it as a warm claim. Named launches,
-shapes with extra volumes (including directory mounts), and launches with
-standbys disabled retain their cold path.
+launches with standbys disabled, and volume shapes no late-volume slot can
+serve retain their cold path.
+
+On Firecracker, a launch with up to four read-only directory mounts
+(`--mount DIR:PATH:ro`) claims the same standby a launch without them would.
+Every standby boots four read-only placeholder slots; the claim re-checks each
+mount against the shares its signed plan admitted, including the content digest
+the plan pinned, points a slot at the launch's own materialized image before the
+child resumes, and has the guest mount it read-only by its label before the
+claim commits. The guest's mount helper exists only in a standby's guest and
+exits on that first restore, before any workload process starts. A writable
+mount, a disk volume, or more than four mounts keeps the cold path, as does
+every volume launch on other backends.
 
 A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
 with `pool warm --egress`, or the one an earlier egress-allowing run left

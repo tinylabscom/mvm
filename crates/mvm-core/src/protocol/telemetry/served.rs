@@ -12,10 +12,26 @@
 //! The persisted line is the record plus the host wall-clock time it was
 //! received. The guest's `monotonic_ns` orders records within one producer
 //! and epoch; only the host receive time places them on a wall clock.
+//!
+//! On disk each line is sealed: base64 of an AES-256-GCM frame of the JSON
+//! line under the boot's records data key, which is itself stored wrapped
+//! under the host transcript key-encryption key. [`ReceivedRecord::seal_line`]
+//! and [`ReceivedRecord::open_line`] are the two ends.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
 use super::{MAX_RECORD_BYTES, TelemetryRecord};
+use crate::crypto::aead;
+
+/// Associated data every sealed records line is bound to.
+pub const RECORDS_LINE_AAD: &[u8] = b"mvm.telemetry.records.v1";
+
+/// The longest sealed line a reader opens: the base64 of a nonce, the
+/// longest persisted line and a tag, without its newline.
+pub const MAX_SEALED_LINE_BYTES: usize =
+    (aead::NONCE_SIZE + MAX_PERSISTED_LINE_BYTES + aead::TAG_SIZE).div_ceil(3) * 4;
 
 /// The longest persisted line a reader decodes. A record is bounded by
 /// [`MAX_RECORD_BYTES`]; the envelope adds its receive time and field names.
@@ -63,6 +79,48 @@ impl ReceivedRecord {
         Ok(line)
     }
 
+    /// Seal the line the collector appends to its records file: the
+    /// envelope [`ReceivedRecord::encode_line`] produces, encrypted under the
+    /// boot's records data key and base64-encoded, newline-terminated.
+    pub fn seal_line(
+        key: &aead::Key,
+        received_at_ms: u64,
+        record: &TelemetryRecord,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let mut plain = zeroize::Zeroizing::new(Self::encode_line(received_at_ms, record)?);
+        plain.pop();
+        let mut line = B64
+            .encode(aead::seal(key, &plain, RECORDS_LINE_AAD))
+            .into_bytes();
+        line.push(b'\n');
+        Ok(line)
+    }
+
+    /// The length, newline included, of the sealed line
+    /// [`ReceivedRecord::seal_line`] writes for this record: what a cursor
+    /// advances by. Sealing is length-preserving up to its fixed overhead,
+    /// so this is exact without sealing anything.
+    pub fn sealed_line_len(
+        received_at_ms: u64,
+        record: &TelemetryRecord,
+    ) -> Result<u64, serde_json::Error> {
+        let plain = Self::encode_line(received_at_ms, record)?.len() - 1;
+        Ok(((aead::NONCE_SIZE + plain + aead::TAG_SIZE).div_ceil(3) * 4 + 1) as u64)
+    }
+
+    /// Open one line written by [`ReceivedRecord::seal_line`], with or
+    /// without its newline. `None` for a line that is too long, not base64,
+    /// sealed under another key, tampered with, or not a record once opened.
+    pub fn open_line(key: &aead::Key, line: &[u8]) -> Option<Self> {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.len() > MAX_SEALED_LINE_BYTES {
+            return None;
+        }
+        let framed = B64.decode(line).ok()?;
+        let plain = zeroize::Zeroizing::new(aead::open(key, &framed, RECORDS_LINE_AAD).ok()?);
+        Self::decode_line(&plain)
+    }
+
     /// Decode one persisted line, with or without its trailing newline. A
     /// line is the envelope, or — for a file written before receive time was
     /// stamped — a bare record, which decodes with no `received_at_ms`.
@@ -82,6 +140,46 @@ impl ReceivedRecord {
                 received_at_ms: None,
                 record,
             })
+    }
+}
+
+/// Records the host shed after it received them, by why. The guest's own
+/// losses travel inside the stream as `Loss` records; these are the ones the
+/// guest cannot know about, because they happen on the host side of the
+/// session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostLosses {
+    /// The collector's write queue was full: the records file's writer fell
+    /// behind the session, and the receive loop shed rather than waited.
+    #[serde(default)]
+    pub queue_full: u64,
+    /// The records file reached its byte cap.
+    #[serde(default)]
+    pub cap_reached: u64,
+    /// A write to the records file failed (a full disk, an I/O error). The
+    /// file is rolled back to its last whole line, so a failed write never
+    /// leaves a torn record behind.
+    #[serde(default)]
+    pub write_failed: u64,
+    /// The record carried a secret the host holds for this VM, so it was
+    /// withheld from the records file entirely.
+    #[serde(default)]
+    pub secret_withheld: u64,
+}
+
+impl HostLosses {
+    /// Every record shed, whatever the reason.
+    pub fn total(&self) -> u64 {
+        self.queue_full
+            .saturating_add(self.cap_reached)
+            .saturating_add(self.write_failed)
+            .saturating_add(self.secret_withheld)
+    }
+
+    /// Whether nothing has been shed.
+    pub fn is_zero(&self) -> bool {
+        self.total() == 0
     }
 }
 
@@ -142,6 +240,9 @@ pub enum TelemetryStatus {
         state: CollectorState,
         /// Records the host shed after receipt (a full or failed sink).
         shed: u64,
+        /// The same sheds by reason; absent when nothing was shed.
+        #[serde(default, skip_serializing_if = "HostLosses::is_zero")]
+        losses: HostLosses,
         /// How long ago the snapshot was refreshed, when the host can tell.
         /// The collector rewrites it about once a second while it lives, so
         /// a large age means the process that owned the VM is gone.
@@ -270,6 +371,56 @@ mod tests {
     }
 
     #[test]
+    fn a_sealed_line_opens_only_under_its_key_and_hides_the_record() {
+        let key = aead::Key::from_bytes([3; 32]);
+        let line = ReceivedRecord::seal_line(&key, 42, &record(1)).unwrap();
+        assert!(line.ends_with(b"\n"));
+        assert_eq!(line.iter().filter(|&&b| b == b'\n').count(), 1);
+        assert!(
+            !line.windows(b"served".len()).any(|w| w == b"served"),
+            "no plaintext on disk"
+        );
+        let opened = ReceivedRecord::open_line(&key, &line).expect("opens");
+        assert_eq!(opened.received_at_ms, Some(42));
+        assert_eq!(opened.record, record(1));
+
+        let other = aead::Key::from_bytes([4; 32]);
+        assert_eq!(ReceivedRecord::open_line(&other, &line), None);
+
+        let mut tampered = line.clone();
+        tampered[10] = if tampered[10] == b'A' { b'B' } else { b'A' };
+        assert_eq!(ReceivedRecord::open_line(&key, &tampered), None);
+
+        // A plaintext line is not accepted in place of a sealed one.
+        let plain = ReceivedRecord::encode_line(42, &record(1)).unwrap();
+        assert_eq!(ReceivedRecord::open_line(&key, &plain), None);
+    }
+
+    #[test]
+    fn the_longest_record_seals_within_the_sealed_line_bound() {
+        let key = aead::Key::from_bytes([3; 32]);
+        let big = TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([7; 16]).unwrap())
+            .producer(1)
+            .sequence(u64::MAX)
+            .monotonic_ns(u64::MAX)
+            .source(SourceKind::Stdio)
+            .body(RecordBody::Stdio {
+                stream: crate::protocol::telemetry::StdioStream::Stdout,
+                bytes: crate::protocol::telemetry::BoundedList::new(vec![255; 4096]).unwrap(),
+            })
+            .build()
+            .unwrap();
+        let line = ReceivedRecord::seal_line(&key, u64::MAX, &big).unwrap();
+        assert!(line.len() - 1 <= MAX_SEALED_LINE_BYTES);
+        assert_eq!(
+            ReceivedRecord::sealed_line_len(u64::MAX, &big).unwrap(),
+            line.len() as u64
+        );
+        assert!(ReceivedRecord::open_line(&key, &line).is_some());
+    }
+
+    #[test]
     fn a_persisted_line_round_trips_with_its_receive_time() {
         let line = ReceivedRecord::encode_line(1_700_000_000_123, &record(1)).unwrap();
         assert!(line.ends_with(b"\n"), "newline-terminated");
@@ -338,6 +489,7 @@ mod tests {
                 code: "signer-unreachable".into(),
             },
             shed: 4,
+            losses: Default::default(),
             snapshot_age_ms: Some(900),
             records_bytes: 2_048,
         };

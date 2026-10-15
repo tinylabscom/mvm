@@ -2595,6 +2595,17 @@ fn image_revocations_fail_closed_without_an_applied_signed_list() {
     );
 }
 
+/// `machine telemetry` reads what the host collected, so its help names the
+/// follow and JSON modes and the record cap.
+#[test]
+fn machine_telemetry_help_names_follow_json_and_tail() {
+    let help = help_text(&["machine", "telemetry", "--help"]);
+    for flag in ["--follow", "--json", "--tail"] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    assert!(help.contains("Name of the machine"), "{help}");
+}
+
 /// The optional pre-warm path: `image pull --warm` and `image dev ensure
 /// --warm` are advertised, and `pool warm --help` says which images a bare
 /// `pool warm` picks and that a run already leaves a standby behind.

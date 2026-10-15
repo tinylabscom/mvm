@@ -924,6 +924,10 @@ impl VmmDriver for FcDriver {
         true
     }
 
+    fn late_volume_slots(&self) -> u8 {
+        mvm_agentd::late_volumes::MAX_SLOTS
+    }
+
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -941,6 +945,8 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             )));
         }
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|error| preload_spawn_error("create late-volume placeholders", error))?;
         crate::fc::FcForkRestorer
             .restore_fork_paused(req.child_vm_name, req.child_dir)
             .map_err(|error| preload_spawn_error("load paused child", error))?;
@@ -978,6 +984,8 @@ impl VmmDriver for FcDriver {
             ))
         })?;
         let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
+        crate::fc::host::attach_late_volumes(&io, req.late_volumes)
+            .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e:#}")))?;
         <crate::fc::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
             .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e}")))
     }
@@ -1031,8 +1039,20 @@ impl VmmDriver for FcDriver {
         // device-model guard between load and resume refuses any snapshot
         // carrying a network interface, so a restored child cannot reintroduce a
         // path off the box that bypasses vsock.
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': creating late-volume placeholders: {e:#}",
+                req.child_vm_name
+            ))
+        })?;
         crate::fc::FcForkRestorer
-            .restore_fork(req.child_vm_name, req.child_dir, req.cpu_grant)
+            .restore_fork_attaching(
+                req.child_vm_name,
+                req.child_dir,
+                req.cpu_grant,
+                req.late_volumes,
+            )
             .map_err(fork_restore_error)?;
         Ok(())
     }
@@ -2591,6 +2611,7 @@ mod tests {
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2617,6 +2638,7 @@ mod tests {
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2653,6 +2675,7 @@ mod tests {
             channels: &channels,
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         // The restore has no Firecracker to talk to and no device anchors to
