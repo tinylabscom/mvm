@@ -194,6 +194,52 @@ pub fn call(socket: &Path, method: &str, path: &str, body: Option<&str>) -> Resu
     Ok(resp.body)
 }
 
+/// A keep-alive session over one Firecracker API socket connection.
+///
+/// The boot path sends ~11 PUTs to configure a fresh VMM. Before this, each
+/// was a separate `connect → write → read → close` round trip. Firecracker
+/// answers `Connection: keep-alive` and holds the socket open, so the
+/// connection the first call established was immediately discarded and
+/// re-established for the next. An `FcSession` opens one connection and
+/// pipelines every call through it, saving 10 connect round trips.
+#[derive(Debug)]
+pub struct FcSession {
+    reader: BufReader<UnixStream>,
+}
+
+impl FcSession {
+    /// Open a session to the Firecracker API socket at `socket`.
+    pub fn connect(socket: &Path) -> Result<Self> {
+        let stream = UnixStream::connect(socket).with_context(|| {
+            format!("connecting to Firecracker API socket {}", socket.display())
+        })?;
+        stream
+            .set_read_timeout(Some(IO_TIMEOUT))
+            .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
+            .with_context(|| "setting Firecracker API socket timeouts")?;
+        Ok(Self {
+            reader: BufReader::new(stream),
+        })
+    }
+
+    /// Send one request and read its response, reusing the connection.
+    pub fn call(&mut self, method: &str, path: &str, body: Option<&str>) -> Result<String> {
+        let stream = self.reader.get_mut();
+        stream
+            .write_all(&build_request(method, path, body))
+            .with_context(|| format!("sending {method} {path} to Firecracker"))?;
+        stream
+            .flush()
+            .with_context(|| format!("flushing {method} {path} to Firecracker"))?;
+        let resp = read_response(&mut self.reader)
+            .with_context(|| format!("reading Firecracker response to {method} {path}"))?;
+        if !resp.is_success() {
+            bail!("{method} {path} failed: HTTP {} {}", resp.status, resp.body);
+        }
+        Ok(resp.body)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +433,69 @@ mod tests {
     fn call_errors_when_the_socket_is_absent() {
         let dir = tempfile::tempdir().unwrap();
         let err = call(&dir.path().join("nope.socket"), "GET", "/vm/config", None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("connecting to Firecracker API socket"),
+            "got: {err}"
+        );
+    }
+
+    /// Serve N canned responses on a single connection, mirroring
+    /// Firecracker's keep-alive behaviour.
+    fn serve_keep_alive_multi(
+        dir: &Path,
+        responses: Vec<&'static str>,
+    ) -> (
+        std::path::PathBuf,
+        mpsc::Sender<()>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let sock = dir.join("fc.socket");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            for response in &responses {
+                // Read enough of the request to unblock the client.
+                let mut req = [0u8; 2048];
+                conn.set_read_timeout(Some(Duration::from_millis(200))).ok();
+                let _ = conn.read(&mut req);
+                conn.write_all(response.as_bytes()).unwrap();
+                conn.flush().unwrap();
+            }
+            // Hold the connection open.
+            let _ = release_rx.recv();
+        });
+        (sock, release_tx, handle)
+    }
+
+    /// An FcSession pipelines multiple calls through one connection.
+    #[test]
+    fn session_pipelines_calls_on_one_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let resp1 = "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
+        let resp2 = "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
+        let resp3 = "HTTP/1.1 200 OK\r\nConnection: keep-alive\r\nContent-Length: 16\r\n\r\n{\"vcpu_count\":2}";
+        let (sock, release, server) = serve_keep_alive_multi(dir.path(), vec![resp1, resp2, resp3]);
+
+        let mut session = FcSession::connect(&sock).expect("connect");
+        session
+            .call("PUT", "/logger", Some("{}"))
+            .expect("first PUT");
+        session
+            .call("PUT", "/machine-config", Some("{}"))
+            .expect("second PUT");
+        let body = session.call("GET", "/vm/config", None).expect("GET");
+        assert_eq!(body, r#"{"vcpu_count":2}"#);
+
+        let _ = release.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn session_errors_when_the_socket_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = FcSession::connect(&dir.path().join("nope.socket")).unwrap_err();
         assert!(
             err.to_string()
                 .contains("connecting to Firecracker API socket"),

@@ -751,7 +751,7 @@ fn ci_full() -> String {
 #[test]
 fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
     let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
-    for job in ["test-workspace-build", "test-workspace-aarch64-build"] {
+    for job in ["test-workspace-build", "test-workspace-aarch64"] {
         let body = job_block(&ci, job);
         let install = body
             .find("- uses: ./.github/actions/install-zigbuild")
