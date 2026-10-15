@@ -342,10 +342,10 @@ fn load_cached_source(
     workspace_root: &Path,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     let runtime = load_cached(base, digest, version, arch)?;
-    VALIDATED_SOURCE_SDK.get_or_try_insert(
-        (digest.to_string(), workspace_root.to_path_buf()),
-        || validate_source_sdk_members(&runtime.manifest, workspace_root),
-    )?;
+    VALIDATED_SOURCE_SDK
+        .get_or_try_insert((digest.to_string(), workspace_root.to_path_buf()), || {
+            validate_source_sdk_members(&runtime.manifest, workspace_root)
+        })?;
     Ok(runtime)
 }
 

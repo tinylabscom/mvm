@@ -136,7 +136,15 @@ fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Dur
                 return;
             }
             release_idle(pool, idle_timeout);
-            seen = live_standbys(pool);
+            let now = live_standbys(pool);
+            // The home can also vanish mid-sweep, after the check above; an
+            // empty listing then means the standbys seen last tick are
+            // orphaned, not released.
+            if now.is_empty() && !pool_root_exists(pool.root()) {
+                stop_orphaned(&seen);
+                return;
+            }
+            seen = now;
         }
         drop(guard);
         // A refill that recorded its standby while this watcher held the lock
@@ -244,16 +252,41 @@ mod tests {
             vsock_egress: false,
         };
         pool.record(&handle).unwrap();
-        let remover = {
-            let root = root.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(100));
-                std::fs::remove_dir_all(&root).unwrap();
-            })
-        };
-        watch_idle_in(&pool, Duration::from_secs(3600), Duration::from_millis(200));
-        remover.join().unwrap();
+        let tick = Duration::from_millis(100);
+        let watcher =
+            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
+        // Remove the home only once the watcher has seen the standby: it holds
+        // the watch lock from before its first sweep until it returns, so the
+        // lock still being taken after the file appeared means the first
+        // sweep listed s1 and the watcher is parked in its loop. Removing
+        // earlier would race that sweep, and the watcher stops only standbys
+        // it last saw. The extra half tick lands the removal inside the
+        // watcher's sleep rather than on its wake-up check. (An explicit
+        // "armed" signal from the watcher would replace probing its lock.)
+        let lock_path = root.join(WATCH_LOCK);
+        wait_until("the watcher to take the watch lock", || {
+            lock_path.with_extension("lock").exists()
+        });
+        std::thread::sleep(tick + tick / 2);
+        wait_until("the watcher to still hold the watch lock", || {
+            mvm_core::atomic_io::FileLock::try_acquire(&lock_path)
+                .unwrap()
+                .is_none()
+        });
+        std::fs::remove_dir_all(&root).unwrap();
+        watcher.join().unwrap();
         let status = child.wait().expect("waiting for the stand-in");
         assert!(!status.success(), "the orphaned standby was stopped");
+    }
+
+    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            if done() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("timed out waiting for {what}");
     }
 }

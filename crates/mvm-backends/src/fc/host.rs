@@ -573,10 +573,10 @@ fn rootfs_from_vm_config(vm_name: &str) -> Result<PathBuf> {
     let drives: Drives = serde_json::from_str(&body)
         .with_context(|| format!("parsing GET /vm/config for VM '{vm_name}'"))?;
     for drive in &drives.drives {
-        if drive.drive_id == "rootfs" {
-            if let Some(path) = &drive.path_on_host {
-                return Ok(PathBuf::from(path));
-            }
+        if drive.drive_id == "rootfs"
+            && let Some(path) = &drive.path_on_host
+        {
+            return Ok(PathBuf::from(path));
         }
     }
     anyhow::bail!("GET /vm/config for VM '{}' has no rootfs drive", vm_name)
@@ -679,11 +679,13 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
             recorded = %rootfs_str,
             "recorded rootfs path missing; querying Firecracker for the live rootfs"
         );
-        rootfs_from_vm_config(&self.vm_name).with_context(|| format!(
-            "recorded rootfs {} is gone and Firecracker's live config did not \
+        rootfs_from_vm_config(&self.vm_name).with_context(|| {
+            format!(
+                "recorded rootfs {} is gone and Firecracker's live config did not \
              name an alternative for VM '{}'",
-            rootfs_str, self.vm_name
-        ))
+                rootfs_str, self.vm_name
+            )
+        })
     }
 
     /// The paths this VM's Firecracker names. A restored VM's Firecracker still
