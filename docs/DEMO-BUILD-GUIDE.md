@@ -2,6 +2,8 @@
 
 This guide explains how to build and deploy the mvm demo site with WebLinux support.
 
+Run the commands in this guide from the repository root unless a step changes directories.
+
 ## Prerequisites
 
 ### lima (required for Linux builder VM on macOS)
