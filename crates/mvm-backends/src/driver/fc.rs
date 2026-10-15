@@ -29,8 +29,8 @@ use mvm_core::vm_backend::{
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
-    FcCapabilities, FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
-    read_firecracker_pid, start_vm_firecracker_bounded,
+    FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,
+    firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
@@ -1125,7 +1125,9 @@ impl VmmDriver for FcDriver {
             .context("adopting the Firecracker API socket for the invoking user")?;
 
         // Drive the NIC-less API config sequence, asking only for what the
-        // Firecracker behind this socket supports.
+        // Firecracker behind this socket supports. All PUTs share one
+        // connection: Firecracker answers keep-alive, so reusing it saves
+        // ~10 connect round trips.
         let caps = running_fc_capabilities(&socket);
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
         let puts = fc_config_api_puts(
@@ -1135,8 +1137,10 @@ impl VmmDriver for FcDriver {
             &abs_dir,
             caps,
         );
+        let mut session =
+            api_session(&socket).context("opening Firecracker API session for boot config")?;
         for put in &puts {
-            api_put_socket(&socket, &put.path, &put.body)
+            api_put_session(&mut session, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
@@ -1156,9 +1160,14 @@ impl VmmDriver for FcDriver {
             "fc boot: API config sequence"
         );
 
-        // Boot the configured instance.
-        api_put_socket(&socket, "/actions", r#"{"action_type": "InstanceStart"}"#)
-            .context("Firecracker API PUT /actions InstanceStart")?;
+        // Boot the configured instance (same session).
+        api_put_session(
+            &mut session,
+            "/actions",
+            r#"{"action_type": "InstanceStart"}"#,
+        )
+        .context("Firecracker API PUT /actions InstanceStart")?;
+        drop(session);
         let started_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,

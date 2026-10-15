@@ -1012,11 +1012,25 @@ fn admit(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    // One batch, one fsync. These entries all have to be durable before the
-    // same thing — this plan's workload running — and nothing between them
-    // acts on the one before it, so syncing each separately bought no
-    // ordering. It cost one `F_FULLFSYNC` each, which is 7.4ms on an
-    // Apple-silicon host and ~42ms on the KVM box's array. A failed write
+    // The validated tenant bundle is loaded once and delivered to the bridge
+    // for the live L4 enforcement path. Local-default plans retain the bridge's
+    // mandatory-deny posture by carrying no bundle.
+    let policy_bundle = resolved.bundle;
+
+    // The admitted L7 egress boundary recorded in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+
+    // One batch, one fsync. Every admission-path entry has to be durable
+    // before the same thing — this plan's workload running — and nothing
+    // between them acts on the one before it, so syncing each separately
+    // bought no ordering. The batch covers the admission record, its decision
+    // record, the grant, the shares, the asset identities, the policy
+    // resolution and the egress destinations: all entries that used to
+    // trigger their own fsync now share the single flush. A failed write
     // inside the batch is an error here; a failed sync is an error wherever
     // the caller waits for it, which is here unless it asked to sync beside
     // the boot.
@@ -1045,6 +1059,14 @@ fn admit(
         emitter
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
+        // Policy resolution and egress destinations are non-fatal records
+        // that used to live outside the batch, each triggering its own
+        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
+        emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
+        if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+            tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+        }
         Ok(())
     };
     let durability = match sync {
@@ -1059,23 +1081,6 @@ fn admit(
         ?sync,
         "admit: record_admission (batched fsync)"
     );
-
-    emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
-
-    // The validated tenant bundle is loaded once and delivered to the bridge
-    // for the live L4 enforcement path. Local-default plans retain the bridge's
-    // mandatory-deny posture by carrying no bundle.
-    let policy_bundle = resolved.bundle;
-
-    // Record the admitted L7 egress boundary in the chain-signed log so a
-    // receipt can name the destinations without re-resolving policy refs.
-    let egress_destinations = policy_bundle
-        .as_ref()
-        .map(|b| b.egress.allow_list.clone())
-        .unwrap_or_default();
-    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
-        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
-    }
 
     let context = AdmissionContext {
         admitted,
