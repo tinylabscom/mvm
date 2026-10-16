@@ -50,14 +50,16 @@ impl KernelBoundLaunch {
                 "cannot mix producer byte continuity and canonical bundle custody"
             );
             ensure!(
-                cfg!(unix) && backend == BackendKind::Hvf,
+                (cfg!(unix) && backend == BackendKind::Hvf)
+                    || (cfg!(target_os = "linux") && backend == BackendKind::Firecracker),
                 "this backend does not support producer kernel descriptor custody"
             );
             #[cfg(unix)]
             {
                 // This is a data-continuity constraint, NOT an admission
-                // capability. The same actual caller registration is still
-                // consumed by the native supervisor for descriptor startup.
+                // capability. HVF still consumes the actual caller launch
+                // registration; Firecracker retains its existing admission
+                // and synchronous API startup path on the same Linux host.
                 let source = Path::new(
                     config
                         .kernel_path
@@ -339,6 +341,15 @@ mod tests {
         };
         let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
         assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Qemu, &lease).is_err());
+        let firecracker = KernelBoundLaunch::bind(config.clone(), BackendKind::Firecracker, &lease);
+        if cfg!(target_os = "linux") {
+            let firecracker = firecracker.unwrap();
+            assert!(firecracker.kernel.is_some());
+            assert!(firecracker.config().canonical_kernel.is_none());
+            assert!(!has_retained_kernel(&lease).unwrap());
+        } else {
+            assert!(firecracker.is_err());
+        }
         let mut wrong = config.clone();
         wrong.kernel_read_sha256 = Some("0".repeat(64));
         assert!(KernelBoundLaunch::bind(wrong, BackendKind::Hvf, &lease).is_err());

@@ -96,10 +96,7 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     })?;
     let compiled = tree_digest(&artifact)?;
     let health_backend = mvm_client::entrypoint::backend_name_for(args.hypervisor.as_deref())?;
-    anyhow::ensure!(
-        health_backend == "hvf",
-        "portable pack health currently requires HVF verified kernel descriptors; Linux producer descriptor support is not implemented"
-    );
+    require_descriptor_health_backend(&health_backend)?;
     // Validate the frozen lock before any acquisition. Capture once before
     // builder/health effects; never build a runtime or substitute host caches.
     let portable = std::sync::Arc::new(
@@ -213,6 +210,14 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         pack_ref(&lock),
         exported.path.display(),
         exported.key_id.0
+    );
+    Ok(())
+}
+
+fn require_descriptor_health_backend(backend: &str) -> Result<()> {
+    anyhow::ensure!(
+        backend == "hvf" || (cfg!(target_os = "linux") && backend == "firecracker"),
+        "portable pack health requires HVF or same-host Linux Firecracker kernel descriptors"
     );
     Ok(())
 }
@@ -484,6 +489,18 @@ fn file_sha256(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_backend_requires_an_actual_same_host_descriptor_route() {
+        assert!(require_descriptor_health_backend("hvf").is_ok());
+        assert_eq!(
+            require_descriptor_health_backend("firecracker").is_ok(),
+            cfg!(target_os = "linux")
+        );
+        for backend in ["qemu", "libkrun", "mock", "docker", "unknown"] {
+            assert!(require_descriptor_health_backend(backend).is_err());
+        }
+    }
 
     #[test]
     fn health_input_retention_survives_error_and_unwind_without_claiming_exit() {

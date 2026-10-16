@@ -2120,11 +2120,14 @@ verification does not build, download, or seed a missing runtime. The canonical
 consumer launch refusal described above remains in force until that launch lane
 is enabled through its separate integration gates. Re-exporting an installed
 bundle with protected boot members is refused rather than silently dropping them.
-Producer health currently supports only HVF's verified kernel descriptor route.
-Other health backends are refused before runtime acquisition or builder effects;
-Linux producer descriptor support remains required for the release's Linux
-positive gates. A caller-provided kernel continuity digest is not admission or
-publisher authority.
+Producer health supports HVF's verified kernel descriptor route and same-host
+Linux Firecracker. Firecracker receives a procfs reference to the held unlinked
+descriptor and opens it synchronously during boot configuration, before the
+producer releases that borrow. This route requires an already-loadable ELF or
+arm64 Image; it never extracts a compressed kernel or consults sibling caches.
+Other health backends are refused before runtime acquisition or builder effects.
+A caller-provided kernel continuity digest is not admission or publisher
+authority, and the procfs reference is not an enduring runtime measurement.
 After a producer health attempt, its private build/boot input directories are
 retained on success, failure, and unwind: the health API's workload status and
 stop acknowledgment are not independent evidence that no native reader remains.
