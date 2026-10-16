@@ -252,6 +252,9 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
             | BundleMember::EmbeddedBootAssets { manifest_artifact } => {
                 manifest.find_by_name(manifest_artifact)
             }
+            BundleMember::EmbeddedCliBootAssets(runtime) => {
+                manifest.find_by_name(&runtime.manifest_artifact)
+            }
             _ => None,
         })
         .map(|artifact| artifact.path.clone())

@@ -148,6 +148,10 @@ pub(crate) fn verify_retained(
         .as_ref()
         .context("portable signed boot assets missing")?;
     ensure!(
+        boot.cli_runtime.is_none(),
+        "portable legacy runtime refuses CLI runtime boot assets"
+    );
+    ensure!(
         boot.arch == proof.arch && boot.image_set.manifest_sha256.as_str() == proof.manifest_sha256,
         "portable image-set identity mismatch"
     );
