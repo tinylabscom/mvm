@@ -45,6 +45,9 @@ pub struct SessionAuditSubstrate {
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
     /// Frozen host-directory images admission hardened to read-only.
     pub read_only_materialized_images: Vec<String>,
+    /// One-use image expectations from the actual admitted plan. This is not
+    /// decoded from `plan_json` and cannot authorize another launch.
+    pub built_pack_check: Option<mvm_hostd::plan_admission::BuiltPackBootCheck>,
     /// The admission's audit sync, when the admission left it running beside
     /// the boot. Carried onto [`VmStartConfig::admission_durability`]; `None`
     /// when the admission was already durable.
@@ -307,7 +310,16 @@ pub fn boot_session_vm(
         runtime_config: Some(&start_config),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
+    let mut substrate = substrate;
+    let built_pack_check = substrate.built_pack_check.take();
     substrate.apply_to(&mut start_config);
+    let _built_runtime = built_pack_check
+        .map(|check| check.prepare(&mut start_config, backend.kind()))
+        .transpose()?
+        .flatten();
+    if let Some(runtime) = &_built_runtime {
+        runtime.verify_config(&start_config)?;
+    }
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;
@@ -366,6 +378,39 @@ pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn applying_admission_preserves_durability_and_materialized_images() {
+        for outcome in [Ok(()), Err(anyhow::anyhow!("audit sync refused"))] {
+            let should_succeed = outcome.is_ok();
+            let mut substrate = SessionAuditSubstrate {
+                tenant_id: "tenant".into(),
+                plan_json: "signed-plan".into(),
+                caller_registration: None,
+                bundle_json: Some("policy-bundle".into()),
+                config_files: Vec::new(),
+                read_only_materialized_images: vec!["image.ext4".into()],
+                built_pack_check: None,
+                durability: Some(
+                    mvm_core::admission_durability::AdmissionDurability::settled(outcome),
+                ),
+            };
+            // Taking the image handoff must not bypass the rest of admission.
+            let built_pack_check = substrate.built_pack_check.take();
+            let mut config = VmStartConfig::default();
+            let images = substrate.apply_to(&mut config);
+            assert!(built_pack_check.is_none());
+            assert_eq!(images, vec!["image.ext4"]);
+            assert_eq!(config.tenant_id.as_deref(), Some("tenant"));
+            assert_eq!(config.plan_json.as_deref(), Some("signed-plan"));
+            assert_eq!(config.bundle_json.as_deref(), Some("policy-bundle"));
+            assert_eq!(
+                config.admission_durability.as_ref().unwrap().wait().is_ok(),
+                should_succeed,
+                "a failed audit sync must still refuse activation"
+            );
+        }
+    }
 
     #[test]
     fn an_exact_session_vm_name_is_not_rewritten() {

@@ -109,6 +109,18 @@ and asks whether any witness notices. Its nightly lane ran
 that baseline is recorded here, because most of what it found was not
 surviving mutants.
 
+Each local `--run` prints and retains a unique
+`$TMPDIR/mvm-mutation-witnesses-*` evidence directory (using the system temp
+directory when `TMPDIR` is unset). Pass that exact directory to
+`--verify-outcomes <dir>` to inspect a completed or interrupted run; concurrent
+invocations never clear each other's reports or share their isolated state root.
+The checker removes inherited `CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET_DIR`, and
+`CARGO_BUILD_BUILD_DIR` from the mutation subprocess. Even an intentional
+per-run fixed target would share compiled artifacts between cargo-mutants'
+baseline and worker source copies. Let cargo-mutants manage those copies and
+their build caches; `CARGO_HOME` and `RUSTUP_HOME` still locate the caller's
+toolchain. The caller's environment and ordinary development builds are unchanged.
+
 The whole surface now measures — **1221 mutants** — which it had never
 done before, and **the lane is armed**: `continue-on-error` is gone, so a
 witness that stops detecting its own property fails the nightly.

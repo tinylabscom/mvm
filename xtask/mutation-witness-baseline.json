@@ -472,18 +472,8 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace + with - in wait_for_guest_agent",
-      "reason": "HVF guest-agent wait deadline arithmetic; mutating the operator changes timeout timing, not a security decision."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace < with <= in <impl VmFullControl for HvfVmFullControl>::save_memory",
       "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace < with <= in wait_for_guest_agent",
-      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -492,18 +482,8 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace < with == in wait_for_guest_agent",
-      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace < with > in <impl VmFullControl for HvfVmFullControl>::save_memory",
       "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace < with > in wait_for_guest_agent",
-      "reason": "HVF guest-agent wait deadline comparison; mutating the comparison changes when the timeout fires, not a security decision."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",

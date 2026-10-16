@@ -241,6 +241,7 @@ const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
 
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("install-local", AuditPosture::Emits("RegistryPackPin")),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("update", AuditPosture::Emits("RegistryPackPin")),
     (

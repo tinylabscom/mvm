@@ -414,14 +414,123 @@ pub fn load_pack_lockfile(path: &Path) -> Result<PackLockfile, RegistryPackStore
 
 /// Atomically replace the lockfile (temp file + rename on one filesystem).
 pub fn save_pack_lockfile(path: &Path, lock: &PackLockfile) -> Result<(), RegistryPackStoreError> {
+    let _guard = lock_registry_pack_store(path)?;
+    save_pack_lockfile_locked(path, lock)
+}
+
+fn save_pack_lockfile_locked(
+    path: &Path,
+    lock: &PackLockfile,
+) -> Result<(), RegistryPackStoreError> {
     let text = toml::to_string_pretty(lock)
         .map_err(|error| parse_at(path, format!("serialize lockfile: {error}")))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(io_at(parent))?;
     }
-    let temp = path.with_extension("lock.tmp");
-    std::fs::write(&temp, text).map_err(io_at(&temp))?;
-    std::fs::rename(&temp, path).map_err(io_at(path))?;
+    crate::util::atomic_io::atomic_write(path, text.as_bytes())
+        .map_err(|error| parse_at(path, error))?;
+    Ok(())
+}
+
+/// Exclusive registry transaction lease. Closing the descriptor releases the
+/// advisory lock; all Core pin writers share this stable sibling lock inode.
+pub struct RegistryPackStoreLease {
+    _file: std::fs::File,
+    lock_path: std::path::PathBuf,
+}
+
+pub fn lock_registry_pack_store(
+    path: &Path,
+) -> Result<RegistryPackStoreLease, RegistryPackStoreError> {
+    let lease_path = path.with_extension("transaction.lock");
+    if let Some(parent) = lease_path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_at(parent))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(&lease_path).map_err(io_at(&lease_path))?;
+    let metadata = file.metadata().map_err(io_at(&lease_path))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(parse_at(
+                &lease_path,
+                "transaction lock is not a single-link regular file",
+            ));
+        }
+        file.lock().map_err(io_at(&lease_path))?;
+        Ok(RegistryPackStoreLease {
+            _file: file,
+            lock_path: path.to_path_buf(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(parse_at(
+            &lease_path,
+            "registry transaction locking requires Unix",
+        ))
+    }
+}
+
+impl RegistryPackStoreLease {
+    /// Under this lease, refuse any different pin for the same coordinate,
+    /// publish without repair, then atomically record the authenticated pin.
+    pub fn install_local_and_pin(
+        &self,
+        cache_root: &Path,
+        staged_root: &Path,
+        expected: &PackPin,
+        verified: &VerifiedRegistryPack,
+    ) -> Result<InstalledRegistryPack, RegistryPackStoreError> {
+        let lock_path = &self.lock_path;
+        let lock = load_pack_lockfile(lock_path)?;
+        check_local_expected_pin(&lock, expected, verified)?;
+        check_registry_pack_revocations_if_configured(verified)?;
+        let installed = crate::registry_pack::install_local_registry_pack_at(
+            cache_root,
+            staged_root,
+            verified,
+            crate::registry_pack::RegistryPackInstallPolicy::RefuseExisting,
+        )?;
+        save_pack_lockfile_locked(lock_path, &upsert_pack_pin(lock, expected.clone())?)?;
+        crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackPin)
+            .detail(format!(
+                "pack={} manifest_sha256={}",
+                expected.reference(),
+                expected.manifest_sha256().as_str()
+            ))
+            .emit();
+        Ok(installed)
+    }
+}
+
+pub fn check_local_expected_pin(
+    lock: &PackLockfile,
+    expected: &PackPin,
+    verified: &VerifiedRegistryPack,
+) -> Result<(), RegistryPackStoreError> {
+    if expected.reference() != &verified.manifest().reference
+        || expected.manifest_sha256() != verified.manifest_sha256()
+        || lock.pins().iter().any(|pin| {
+            pin.reference().coordinate_string() == expected.reference().coordinate_string()
+                && pin != expected
+        })
+    {
+        return Err(parse_at(
+            Path::new("packs.lock.toml"),
+            "local candidate expected pin conflicts with manifest or existing pin",
+        ));
+    }
     Ok(())
 }
 
@@ -579,6 +688,7 @@ pub(crate) fn adopt_install_and_pin_with(
     lock_path: &Path,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<InstalledRegistryPack, RegistryPackStoreError> {
+    let _lease = lock_registry_pack_store(lock_path)?;
     let lock = load_pack_lockfile(lock_path)?;
     let verified = adopt_registry_pack_with(adoption, check_signature)?;
     check_registry_pack_revocations_if_configured(&verified)?;
@@ -588,7 +698,7 @@ pub(crate) fn adopt_install_and_pin_with(
         verified.manifest_sha256().clone(),
     )?;
     let lock = upsert_pack_pin(lock, pin)?;
-    save_pack_lockfile(lock_path, &lock)?;
+    save_pack_lockfile_locked(lock_path, &lock)?;
     crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackPin)
         .detail(format!(
             "pack={} manifest_sha256={}",
@@ -601,6 +711,20 @@ pub(crate) fn adopt_install_and_pin_with(
 
 /// Re-open an installed pack: lock-first verification of the recorded
 /// sidecars and exact payload, refusing every drift or tamper.
+pub fn refresh_pinned_registry_pack(
+    cache_root: &Path,
+    lock_path: &Path,
+    staged_root: &Path,
+    verified: &VerifiedRegistryPack,
+) -> Result<InstalledRegistryPack, RegistryPackStoreError> {
+    let _lease = lock_registry_pack_store(lock_path)?;
+    let lock = load_pack_lockfile(lock_path)?;
+    lock.verify_manifest(&verified.manifest().reference, verified.manifest_bytes())?;
+    check_registry_pack_revocations_if_configured(verified)?;
+    Ok(install_registry_pack_at(cache_root, staged_root, verified)?)
+}
+
+/// Re-open under the persisted pin, signature, payload and revocation gates.
 pub fn open_installed_registry_pack(
     cache_root: &Path,
     lock: &PackLockfile,
@@ -654,9 +778,11 @@ pub(crate) fn open_installed_registry_pack_with(
     let root = cache_root.join(pin.manifest_sha256().as_str());
     let installed = InstalledRegistryPack::from_root(root);
     let manifest_path = installed.manifest_path();
-    let manifest_bytes = std::fs::read(&manifest_path).map_err(io_at(&manifest_path))?;
+    let manifest_bytes = crate::registry_pack::local_input::read_metadata(&manifest_path)
+        .map_err(io_at(&manifest_path))?;
     let signature_path = installed.signature_path();
-    let signature_bytes = std::fs::read(&signature_path).map_err(io_at(&signature_path))?;
+    let signature_bytes = crate::registry_pack::local_input::read_metadata(&signature_path)
+        .map_err(io_at(&signature_path))?;
     let verification = RegistryPackVerification::new(
         pin.reference(),
         &manifest_bytes,
@@ -699,6 +825,7 @@ pub fn remove_installed_registry_pack(
     lock_path: &Path,
     requested: &PackReference,
 ) -> Result<bool, RegistryPackStoreError> {
+    let _lease = lock_registry_pack_store(lock_path)?;
     let lock = load_pack_lockfile(lock_path)?;
     let pin = lock.pins().iter().find(|pin| {
         pin.reference().namespace() == requested.namespace()
@@ -721,7 +848,7 @@ pub fn remove_installed_registry_pack(
     }
     let (lock, removed) = remove_pack_pin(lock, requested);
     if removed {
-        save_pack_lockfile(lock_path, &lock)?;
+        save_pack_lockfile_locked(lock_path, &lock)?;
         crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRemove)
             .detail(format!("pack={pin_reference} manifest_sha256={pin_digest}"))
             .emit();
@@ -1371,6 +1498,29 @@ mod tests {
         let path = home.path().join("packs.lock.toml");
         let lock = load_pack_lockfile(&path).expect("missing lock is empty");
         assert!(lock.pins().is_empty());
+    }
+
+    #[test]
+    fn registry_transactions_hold_a_stable_exclusive_lock_through_pin_save() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("packs.lock.toml");
+        let lease = lock_registry_pack_store(&path).unwrap();
+        let observer = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.with_extension("transaction.lock"))
+            .unwrap();
+        assert!(matches!(
+            observer.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        save_pack_lockfile_locked(&path, &PackLockfile::new(vec![]).unwrap()).unwrap();
+        assert!(matches!(
+            observer.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(lease);
+        observer.try_lock().unwrap();
     }
 
     #[test]

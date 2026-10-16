@@ -10,6 +10,7 @@
 
 pub mod boot_order;
 pub mod budget_charge;
+pub mod built_pack;
 pub mod bundle_runtime;
 pub mod detached;
 pub mod grants_report;
@@ -19,6 +20,7 @@ pub mod offline_attachment;
 pub mod offline_revocation;
 pub mod persistent;
 mod request;
+pub(crate) use request::persisted_spec_from_request;
 pub mod runtime_overlay;
 pub mod runtime_source;
 pub mod start_params;
@@ -43,7 +45,6 @@ use mvm_core::config::{machine_spec_path, machine_state_dir, machine_state_root,
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
-use mvm_core::rootfs_source::RootfsSource;
 use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
 pub(crate) use mvm_hostd::audit::unsealed::{UnsealedEnd, UnsealedReason, record_unsealed_end};
 use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, StartedMachine, SystemClock};
@@ -436,7 +437,8 @@ impl std::ops::Deref for BackendHandle<'_> {
 /// lifecycle modes (and the trait's `run_machine`) reach.
 pub(crate) struct BootParams {
     pub(crate) name: String,
-    pub(crate) image: RootfsSource,
+    pub(crate) source: LaunchSource,
+    pub(crate) profile: String,
     pub(crate) cpus: u32,
     pub(crate) memory_mib: u32,
     pub(crate) backend_override: Option<String>,
@@ -484,15 +486,43 @@ impl LocalBackend {
         if !self.machine_running(&params.name) {
             remove_vm_runtime_dirs(&params.name)?;
         }
-        let rootfs = crate::local::resolve_local_rootfs(&params.image, &params.name).await?;
-        let (verity_path, roothash) = crate::local::host_verity_sidecars(&rootfs);
-        let kernel_path = Self::resolve_workload_kernel(&backend)?;
+        let (rootfs, kernel_path, verity_path, roothash, registry_pack_image) = match &params.source
+        {
+            LaunchSource::Image(image) => {
+                let rootfs = crate::local::resolve_local_rootfs(image, &params.name).await?;
+                let (verity, hash) = crate::local::host_verity_sidecars(&rootfs);
+                (
+                    rootfs,
+                    Self::resolve_workload_kernel(&backend)?,
+                    verity.map(PathBuf::from),
+                    hash,
+                    None,
+                )
+            }
+            LaunchSource::RegistryPack { pin } => {
+                let image =
+                    built_pack::resolve_built_pack_image(pin, backend.name(), &params.profile)
+                        .map_err(|error| crate::local::backend_err(format!("{error:#}")))?;
+                (
+                    PathBuf::from(image.rootfs_path),
+                    image.kernel_path.map(PathBuf::from),
+                    image.verity_path.map(PathBuf::from),
+                    image.roothash,
+                    Some(pin.clone()),
+                )
+            }
+            LaunchSource::Built { .. } => {
+                return Err(MvmError::InvalidSpec {
+                    reason: "a manifest-built workload boots as a persistent machine".into(),
+                });
+            }
+        };
 
         let req = LocalRunRequest {
             name: params.name.clone(),
             rootfs_path: rootfs,
             kernel_path,
-            verity_path: verity_path.map(PathBuf::from),
+            verity_path,
             roothash,
             cpus: params.cpus,
             mem_mib: params.memory_mib,
@@ -503,6 +533,7 @@ impl LocalBackend {
             secret_release: params.secrets.secret_release,
             secrets: params.secrets.secrets,
             signed_plan: params.signed_plan.clone(),
+            registry_pack_image,
         };
 
         // A fresh per-launch ledger: local launches are one-shot from this
@@ -689,55 +720,6 @@ pub(crate) fn launch_volume_service() -> LocalVolumeService {
     }
 }
 
-/// Build the persisted declarative spec a persistent launch writes.
-fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::MachineSpec {
-    mp::MachineSpec {
-        schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
-        name: name.to_string(),
-        // The persisted record carries the written form — the same token the
-        // caller declared, so a spec read back reconstructs the same value.
-        image: match &request.source {
-            LaunchSource::Image(image) => Some(image.to_string()),
-            LaunchSource::Built { .. } => None,
-        },
-        manifest: match &request.source {
-            LaunchSource::Image(_) => None,
-            LaunchSource::Built { slot_hash } => Some(slot_hash.clone()),
-        },
-        deployment: None,
-        resolved_digest: None,
-        runtime_pack: false,
-        registry_pack_image: None,
-        tools: Default::default(),
-        net: false,
-        allow_host: vec![],
-        peer: Vec::new(),
-        routes: Vec::new(),
-        ai: None,
-        ports: request.ports.clone(),
-        cpus: request.cpus,
-        memory: format!("{}M", request.memory_mib),
-        mem_initial: None,
-        profile: request.profile.clone(),
-        volumes: vec![],
-        init: vec![],
-        agent_verb: vec![],
-        // The daemon launch surface does not carry the GPU flag yet; the
-        // CLI persistent path (`machine create/start --gpu`) is the
-        // supported route for GPU machines.
-        gpu: false,
-        gpu_device: None,
-        caller_commitment: None,
-        workload_dir: None,
-        created_at: Some(mvm_core::util::time::utc_now()),
-        last_started_at: None,
-        health_check: None,
-        // The permission set the launch was admitted under, so a later
-        // `start` by name re-admits under the same bounds.
-        grants: request.grants.clone(),
-    }
-}
-
 impl LocalBackend {
     /// Refuse a transient launch whose name is already claimed — by a
     /// persisted definition (that name is managed via the persistent verbs)
@@ -838,6 +820,11 @@ impl LocalBackend {
     /// requests persist their definition first, then boot from it — both
     /// through the one canonical signed-admission seam.
     pub async fn launch(&self, request: LaunchRequest) -> Result<LaunchOutcome> {
+        if let LaunchSource::RegistryPack { pin } = &request.source {
+            let backend = self.launch_backend(request.backend.as_deref())?;
+            built_pack::resolve_built_pack_image(pin, backend.name(), &request.profile)
+                .map_err(|error| crate::local::backend_err(format!("{error:#}")))?;
+        }
         match request.mode {
             LifecycleMode::Transient => self.launch_transient(request).await,
             LifecycleMode::Persistent => {
@@ -1123,17 +1110,8 @@ impl LocalBackend {
         let started = self
             .boot_admitted(BootParams {
                 name: name.to_string(),
-                image: match &request.source {
-                    LaunchSource::Image(image) => image.clone(),
-                    // `build` refuses a built workload on the transient path.
-                    LaunchSource::Built { .. } => {
-                        return Err(MvmError::InvalidSpec {
-                            reason: "a workload built from a manifest boots as a persistent \
-                                     machine"
-                                .into(),
-                        });
-                    }
-                },
+                source: request.source.clone(),
+                profile: request.profile.clone(),
                 cpus: request.cpus,
                 memory_mib: request.memory_mib,
                 backend_override: request.backend.clone(),
@@ -1231,7 +1209,18 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
     if !spec.init.is_empty() {
         return Err(unsupported("init commands"));
     }
-    if spec.image.is_none() && spec.manifest.is_none() && spec.deployment.is_none() {
+    if spec.registry_pack_image.is_some() {
+        machine_start::validate_registry_pack_source(spec).map_err(|error| {
+            MvmError::InvalidSpec {
+                reason: format!("invalid registry pack source: {error:#}"),
+            }
+        })?;
+    }
+    if spec.image.is_none()
+        && spec.manifest.is_none()
+        && spec.deployment.is_none()
+        && spec.registry_pack_image.is_none()
+    {
         return Err(MvmError::InvalidSpec {
             reason: format!(
                 "machine {:?} has no image, manifest or deployment source",

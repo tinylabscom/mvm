@@ -49,7 +49,7 @@ fn read_image_attestation(
             ));
         }
         let mut bytes = Vec::new();
-        std::fs::File::open(path)?
+        local_input::open_payload(root, asset.name.as_str(), asset.size)?
             .take(asset.size + 1)
             .read_to_end(&mut bytes)?;
         if u64::try_from(bytes.len()).ok() != Some(asset.size)

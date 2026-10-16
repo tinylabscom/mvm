@@ -723,8 +723,14 @@ jobs:
         if: always()
         timeout-minutes: 10
         run: |
+          set -euo pipefail
+          roots=("$RUNNER_TEMP"/mutants-out/mvm-mutation-witnesses-*/)
+          if [ "${#roots[@]}" -ne 1 ] || [ ! -d "${roots[0]}" ]; then
+            echo "::error::expected exactly one mutation evidence root; refusing missing or ambiguous evidence" >&2
+            exit 1
+          fi
           cargo run -p xtask -- check-mutation-witnesses \
-            --verify-outcomes "$RUNNER_TEMP/mutants-out/mvm-mutation-witnesses" \
+            --verify-outcomes "${roots[0]}" \
             --package '${{ matrix.package }}'
 
       - name: Keep the mutation output of a shard that did not finish
@@ -742,8 +748,8 @@ jobs:
         with:
           name: mutants-${{ strategy.job-index }}
           path: |
-            ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/
-            !${{ runner.temp }}/mutants-out/mvm-mutation-witnesses/state-root/
+            ${{ runner.temp }}/mutants-out/mvm-mutation-witnesses-*/
+            !${{ runner.temp }}/mutants-out/mvm-mutation-witnesses-*/state-root/
           if-no-files-found: ignore
           retention-days: 7
 
