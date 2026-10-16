@@ -945,6 +945,65 @@ fn live_segment_seal(emitter: &AuditEmitter, p: &ExecutionPlan) -> Option<Sessio
 }
 
 #[test]
+fn a_malformed_seal_reports_its_absolute_chain_position() {
+    let lines = [
+        "unrelated".to_string(),
+        r#"{"event":"session.sealed""#.to_string(),
+    ];
+    let tail = ChainTail {
+        lines: lines.iter().map(String::as_str).collect(),
+        first_seq: 17,
+    };
+    let error = last_seal_hash(&tail).unwrap_err();
+    assert_eq!(error.to_string(), "decoding audit line 18");
+}
+
+#[test]
+fn a_previous_seal_in_a_sealed_segment_cannot_be_replaced_by_genesis() {
+    let dir = tempfile::tempdir().unwrap();
+    let previous = plan("sha256:previous");
+    let emitter = rotating_emitter(dir.path(), 1);
+    run_noted_session(&emitter, &previous);
+    emitter.seal_session(&previous, SealReason::Exited).unwrap();
+    // Rotate the previous session's seal out before the next session exists.
+    emitter.emit_launched(&previous, "mock").unwrap();
+    drop(emitter);
+
+    let emitter = AuditEmitter::with_dir(key(7), dir.path()).unwrap();
+    let next = plan("sha256:next");
+    run_noted_session(&emitter, &next);
+    let chain =
+        crate::audit::merkle::CachedChain::load(dir.path(), TENANT, &key(7).verifying_key())
+            .expect("the published prefix and active suffix are valid");
+    assert!(chain.has_sealed_segments());
+    assert!(floor::confined_to(
+        dir.path(),
+        TENANT,
+        &next.plan_id.0,
+        chain.active_seq
+    ));
+    assert_eq!(
+        last_seal_hash(&ChainTail {
+            lines: chain.active_lines(),
+            first_seq: chain.tree_size() - chain.active_lines().len() as u64,
+        })
+        .unwrap(),
+        None
+    );
+    assert_eq!(live_segment_seal(&emitter, &next), None);
+    let expected = whole_chain_seal(&emitter, &next);
+    assert_ne!(expected.prev_seal, GENESIS_SEAL);
+    assert_eq!(
+        emitter.seal_session(&next, SealReason::Exited).unwrap(),
+        expected
+    );
+    assert_eq!(
+        verify_session(dir.path(), TENANT, &next.plan_id.0, &key(7).verifying_key()).verdict,
+        Verdict::Verified
+    );
+}
+
+#[test]
 fn the_live_segment_seal_is_the_whole_chain_seal_across_rotations() {
     let dir = tempfile::tempdir().unwrap();
     let emitter = rotating_emitter(dir.path(), 24 * 1024);
