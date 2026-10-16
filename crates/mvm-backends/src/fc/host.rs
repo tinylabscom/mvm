@@ -799,28 +799,7 @@ impl FcForkRestorer {
             })?;
         }
 
-        let anchors_path = child_dir.join("device-anchors.json");
-        let anchors: mvm_core::checkpoint::DeviceAnchors =
-            serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
-                format!(
-                    "reading required FC fork device anchors {}",
-                    anchors_path.display()
-                )
-            })?)
-            .with_context(|| {
-                format!(
-                    "parsing required FC fork device anchors {}",
-                    anchors_path.display()
-                )
-            })?;
-        let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
-            .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
-        super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
-        let devices = super::ForkDevices::from_anchors(
-            &anchors,
-            child_dir,
-            std::path::Path::new(&child_vm_dir),
-        )?;
+        let devices = fork_devices_for(child_vm_name, child_dir)?;
         std::fs::create_dir_all(child_dir.join("runtime")).ok();
 
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
@@ -853,14 +832,38 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        if let Err(error) =
-            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
-        {
+        if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
             let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
             return Err(error);
         }
         Ok(())
     }
+}
+
+/// The child's own devices, from the parent anchors its checkpoint carries.
+pub(crate) fn fork_devices_for(
+    child_vm_name: &str,
+    child_dir: &std::path::Path,
+) -> anyhow::Result<super::ForkDevices> {
+    use anyhow::Context as _;
+    let anchors_path = child_dir.join("device-anchors.json");
+    let anchors: mvm_core::checkpoint::DeviceAnchors =
+        serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
+            format!(
+                "reading required FC fork device anchors {}",
+                anchors_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "parsing required FC fork device anchors {}",
+                anchors_path.display()
+            )
+        })?;
+    let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
+        .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
+    super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
+    super::ForkDevices::from_anchors(&anchors, child_dir, std::path::Path::new(&child_vm_dir))
 }
 
 /// The API handle a forked child's snapshot load runs through, carrying the
@@ -926,7 +929,7 @@ pub(crate) fn resume_preloaded_fork_child(
                 reseeded_identity_sha256: None,
             },
         )?;
-        super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        super::runtime_artifacts::verify_restored_layout(io, expected)
     })();
     if let Err(error) = verified {
         let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
@@ -960,9 +963,7 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        if let Err(error) =
-            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
-        {
+        if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
             let _ =
                 <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
             return Err(error);
@@ -992,7 +993,7 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        let resumed = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        let resumed = super::runtime_artifacts::verify_restored_layout(&io, expected)
             .and_then(|()| mvm_vmm::snapshot::SnapshotIO::resume(&io));
         if resumed.is_err() {
             let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);

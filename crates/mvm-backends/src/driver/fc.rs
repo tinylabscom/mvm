@@ -999,7 +999,10 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             ))
         })?;
-        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
+        let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)
+            .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
+        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"))
+            .forking_onto(devices);
         crate::fc::host::resume_preloaded_fork_child(
             &io,
             req.child_dir,

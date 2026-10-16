@@ -266,9 +266,17 @@ pub(crate) fn authenticated_fork_capture(
     Ok(expected)
 }
 
-pub(crate) fn verify_restored_layout(socket: &Path, expected: &RuntimeArtifacts) -> Result<()> {
-    let actual = query(socket)?;
-    compare_restored_layout(&actual, expected)
+/// Compare the paused child's actual layout with the authenticated capture of
+/// its parent, after the child's own drive files have replaced the parent's.
+pub(crate) fn verify_restored_layout(
+    io: &super::io::FirecrackerIO,
+    expected: RuntimeArtifacts,
+) -> Result<()> {
+    let devices = io
+        .fork_devices()
+        .context("a restored fork's layout is checked against the child's own devices")?;
+    let actual = query(&io.socket_path)?;
+    compare_restored_layout(&actual, &devices.as_child_capture(expected))
 }
 
 fn compare_restored_layout(actual: &RuntimeArtifacts, expected: &RuntimeArtifacts) -> Result<()> {
