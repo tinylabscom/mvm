@@ -225,11 +225,6 @@ fn resolve_run_image_with(
                 }
             }
         }
-        _ if acquisition == RunImageAcquisition::PreparedOnly => {
-            bail!(
-                "OCI image {reference} is not prepared; run `mvmctl image pull {reference}` first"
-            );
-        }
         _ => {
             sweep_before_builder_vm();
             let (cached, trust, auth_source) =
@@ -1765,6 +1760,127 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
                 "{reference}: a launch must not ingest the source, got {launch}"
             );
         }
+    }
+
+    #[test]
+    fn prepared_only_refuses_an_uncached_image_without_acquisition() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reference = "127.0.0.1:1/library/not-cached:latest";
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            refusing_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch cannot acquire a missing image");
+        assert!(error.to_string().contains("is not prepared"), "{error:#}");
+        assert_eq!(verifier.0.get(), 0);
+        assert!(
+            !tmp.path()
+                .join(super::super::oci_types::INDEX_FILE)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn prepared_only_refuses_missing_trust_evidence_before_materialization() {
+        let fixture = prod_fixture();
+        let index_path = fixture.cache.join(super::super::oci_types::INDEX_FILE);
+        let index_before = fs::read(&index_path).expect("read original index");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+        let error = resolve_run_image_with(
+            &fixture.cache,
+            PINNED,
+            true,
+            refusing_runtime_materialize,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a production launch needs its pull's verification evidence");
+        assert!(
+            error
+                .to_string()
+                .contains("production verification evidence is unusable"),
+            "{error:#}"
+        );
+        assert_eq!(verifier.0.get(), 0, "a launch must not reverify online");
+        assert_eq!(
+            fs::read(index_path).expect("read unchanged index"),
+            index_before
+        );
+    }
+
+    #[test]
+    fn prepared_only_refuses_a_repairable_cache_before_calling_the_materializer() {
+        fn observe_materialization(
+            call: super::super::materialize::MaterializeCall<'_>,
+        ) -> Result<()> {
+            fs::write(call.cache_root.join("materializer-called"), b"called")?;
+            bail!("test materializer reached")
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        seed_guest_runtime_cache(tmp.path());
+        let reference = "docker.io/library/alpine:3.20";
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![sample_image(reference, digest, "blobs/a")],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+        // Both sidecars make the cached layers repairable, so allowing
+        // acquisition must reach the observing materializer.
+        super::super::cache::write_deferred_nodes(tmp.path(), digest, &[])
+            .expect("record empty deferred nodes");
+        assert!(
+            super::super::cache::read_cached_unpack(tmp.path(), digest)
+                .expect("read complete cached unpack")
+                .is_some()
+        );
+        let index_path = tmp.path().join(super::super::oci_types::INDEX_FILE);
+        let index_before = fs::read(&index_path).expect("read original index");
+        let verifier = AcceptingVerifier(std::cell::Cell::new(0));
+
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            observe_materialization,
+            &verifier,
+            RunImageAcquisition::PreparedOnly,
+        )
+        .expect_err("a launch refuses even when cached layers could repair the image");
+        assert!(error.to_string().contains("not launch-ready"), "{error:#}");
+        assert!(!tmp.path().join("materializer-called").exists());
+        assert_eq!(
+            fs::read(&index_path).expect("read unchanged index"),
+            index_before
+        );
+
+        let error = resolve_run_image_with(
+            tmp.path(),
+            reference,
+            false,
+            observe_materialization,
+            &verifier,
+            RunImageAcquisition::Allow,
+        )
+        .expect_err("the observing materializer deliberately returns an error");
+        assert!(
+            format!("{error:#}").contains("test materializer reached"),
+            "{error:#}"
+        );
+        assert_eq!(
+            fs::read(tmp.path().join("materializer-called")).expect("explicit acquisition repairs"),
+            b"called"
+        );
     }
 
     /// A cached image whose rootfs is not current for this runtime is repaired

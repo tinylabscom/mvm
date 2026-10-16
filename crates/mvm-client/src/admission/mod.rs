@@ -1726,6 +1726,37 @@ pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn tool_decision_service_is_appended_once_without_reordering_callers() {
+        use mvm_contract::policy::tool_rules::ToolRules;
+        use mvm_contract::protocol::broker::ServiceId;
+
+        let caller = ServiceId::parse(mvm_contract::stream::input::INPUT_GRANT_SERVICE)
+            .expect("valid caller service");
+        let decision = ServiceId::parse(mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE)
+            .expect("valid tool service");
+        let tools = ToolRules {
+            allow: vec!["shell".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            services_with_tool_decision(vec![caller.clone()], &tools),
+            vec![caller.clone(), decision.clone()],
+            "declared tools need their decision endpoint"
+        );
+        assert_eq!(
+            services_with_tool_decision(vec![decision.clone(), caller.clone()], &tools),
+            vec![decision, caller.clone()],
+            "an existing endpoint keeps its position and is not duplicated"
+        );
+        assert_eq!(
+            services_with_tool_decision(vec![caller.clone()], &ToolRules::default()),
+            vec![caller],
+            "an unused tool dimension adds no endpoint"
+        );
+    }
+
     pub(super) fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");
         let mut f = std::fs::File::create(&path).expect("create rootfs");
