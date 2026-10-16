@@ -871,6 +871,23 @@ pub fn key_for_manifest_identity(identity: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Resolve the flake identity shared by compilation and pinned Source-pack
+/// validation. Opaque remote references retain their existing spelling.
+pub fn resolve_flake_ref(flake_ref: &str) -> Result<String> {
+    if flake_ref.contains(':') {
+        return Ok(flake_ref.to_string());
+    }
+    let canonical = Path::new(flake_ref)
+        .canonicalize()
+        .with_context(|| format!("Flake path '{}' does not exist", flake_ref))?;
+    Ok(canonical.to_string_lossy().to_string())
+}
+
+/// Synthetic identity of a flake-built slot; it is not a filesystem path.
+pub fn flake_manifest_identity(resolved_flake_ref: &str) -> String {
+    format!("<flake-slot>/{resolved_flake_ref}")
+}
+
 /// Canonical registry key for a manifest at `path`:
 /// `sha256(canonical_absolute_path)` as 64-char hex. Resolves
 /// symlinks so two access paths to the same file hash to the same
@@ -1048,6 +1065,32 @@ fn default_persisted_schema_version() -> u32 {
 }
 
 impl PersistedManifest {
+    /// The shared record used for flake compilation and Source-pack slot
+    /// validation. Profile remains part of the record, not of the slot key.
+    pub fn from_flake_identity(
+        resolved_flake_ref: &str,
+        profile: Option<&str>,
+        backend: &str,
+    ) -> Self {
+        let manifest_path = flake_manifest_identity(resolved_flake_ref);
+        Self {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            manifest_hash: key_for_manifest_identity(&manifest_path),
+            manifest_path,
+            flake_ref: resolved_flake_ref.to_owned(),
+            profile: profile.unwrap_or("default").to_owned(),
+            vcpus: 2,
+            mem_mib: 512,
+            mem_initial_mib: None,
+            data_disk_mib: 0,
+            name: None,
+            backend: backend.to_owned(),
+            provenance: Provenance::current(),
+            created_at: crate::time::utc_now(),
+            updated_at: crate::time::utc_now(),
+        }
+    }
+
     /// Build a `PersistedManifest` from a parsed `Manifest`, the
     /// (canonical) source path, the chosen backend name, and a
     /// `Provenance` block. Numeric sizing fields are parsed out of

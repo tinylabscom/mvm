@@ -241,6 +241,7 @@ const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
 
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
+    ("install-local", AuditPosture::Emits("RegistryPackPin")),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("update", AuditPosture::Emits("RegistryPackPin")),
     (
@@ -268,6 +269,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     // directory) and touch no host state, like `build compile`.
     ("lock", AuditPosture::ReadOnly),
     ("compile", AuditPosture::ReadOnly),
+    ("build", AuditPosture::Emits("PackBuild")),
     ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
@@ -919,6 +921,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
+        "PackBuild",
         "PackCacheChange",
         "PoolWarm",
         "RegistryReconcile",

@@ -15,10 +15,11 @@ pub(super) fn resolve_persistent_spec(
         || args.run.manifest.is_some()
         || args.run.deployment.is_some()
         || resolved_manifest_slot.is_some()
+        || args.run.registry_pack_image.is_some()
         || direct_boot;
     if !has_source && existing.is_none() {
         anyhow::bail!(
-            "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
+            "machine {name:?} does not exist; pass --image, --manifest, --deployment, --flake, or a signed image-bearing --policy pack to create it"
         );
     }
     let desired = if has_source {
@@ -31,6 +32,35 @@ pub(super) fn resolve_persistent_spec(
         None
     };
     mvm_client::launch::detached::resolve_spec(name, desired, existing, args.force)
+}
+
+pub(super) fn effective_hypervisor(explicit: Option<&str>) -> String {
+    explicit
+        .map(String::from)
+        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"))
+}
+
+pub(super) fn preflight_registry_pack_image(
+    spec: &MachineSpec,
+    hypervisor: Option<&str>,
+) -> Result<()> {
+    // Match start_machine_spec's distinction: a pin plus Source manifest slot
+    // is Source; a pin without a slot is the Built source marker.
+    let Some(pin) = spec
+        .registry_pack_image
+        .as_ref()
+        .filter(|_| spec.manifest.is_none())
+    else {
+        return Ok(());
+    };
+    let backend_name = effective_hypervisor(hypervisor);
+    mvm_client::launch::built_pack::resolve_built_pack_image(pin, &backend_name, &spec.profile)
+        .context("preflighting the signed Built pack before persistent reconciliation")?;
+    Ok(())
+}
+
+pub(super) fn needs_built_pack_preflight(action: &SpecReconcile, machine_running: bool) -> bool {
+    !(matches!(action, SpecReconcile::Reuse) && machine_running)
 }
 
 fn run_persistent(
@@ -64,6 +94,12 @@ fn run_persistent(
             print_machine_start_preflight_human(&summary);
         }
         return Ok(());
+    }
+
+    // Validate the selected immutable pack before a forced reconciliation can
+    // stop an existing machine or persist a replacement definition.
+    if needs_built_pack_preflight(&action, lifecycle::machine_is_running(&name)) {
+        preflight_registry_pack_image(&spec, args.run.hypervisor.as_deref())?;
     }
 
     // Watch for egress refusals from before the boot, so one the workload

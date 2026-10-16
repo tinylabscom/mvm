@@ -2064,6 +2064,7 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. The spec is read as data; no author code runs |
 | `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written |
+| `mvmctl pack build SPEC.json --out FILE.mvmpkg [--lock FILE] [--health-timeout SECS] [--hypervisor H]` | Compile a locked pack spec, build it in the builder VM, boot its entrypoint as a health check, and seal it into a `.mvmpkg` signed by the host key. The archive carries a sealed-prod posture and a signed environment naming the entrypoint, target and sizing. A stale lock, a non-zero health exit, or any artifact that changes between the health boot and signing is refused, and nothing is signed. Python (`mvm.packs`) and TypeScript (`packs`) write the spec as data |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
@@ -2088,14 +2089,54 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+Locked `pack build` inputs never receive the contributor build's automatic
+local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
+commit even when `mvmctl` was compiled from a local checkout. Each invocation owns
+its compile directory, checked builder-input snapshot and private template slot
+until health checking and export finish. The snapshot is verified before builder
+preparation and immediately before submission to the canonical one-shot builder;
+it is verified again after builder consumption.
+The disk-input staging filter must preserve every locked file and mode or the
+build is refused. Locked builds do not reuse a resident builder's unrelated
+`/work` or the contributor-source cache. Ordinary contributor builds retain their
+automatic source overrides.
+
+The private slot retains the builder's returned revision and refuses a changed
+`current` selection at health/export boundaries. This is invocation ownership,
+not support for launching arbitrary historical revisions through public manifest
+aliases. Temporary source and slot records are removed when the invocation ends;
+the archive records the exact pack lock as provenance, not a temporary source
+path. The sealed posture, health exit requirement and before/after artifact
+digests remain mandatory.
+
+Concurrent invocations must use distinct `--out` destinations. Private build slots
+do not make archive promotion or rollback safe for a shared output path; that
+separate ownership repair is tracked in
+[#4432](https://github.com/tinylabscom/mvm/issues/4432).
+
 For a built-image pack, `pull` authenticates its descriptor before fetching the
 exact public GitHub release assets, verifies their sizes, hashes, rootfs
 signature and provenance, then publishes the complete payload atomically.
 Installed-pack verification and admission repeat these checks. Registry mirrors
 do not redirect image release origins, and private image releases are unsupported.
 Currently, `pull` refuses built-image packs before downloading payload assets
-because no compatible released image verifier is trusted. Built-image boot
-remains explicitly unsupported. See
+because no compatible released image verifier is trusted. The built-image launch
+path also refuses until that prerequisite and an authenticated CLI runtime release
+are prepared; a source runtime or legacy bundle is not a substitute.
+
+A selected built image carries its exact pack pin, not a saved host payload path.
+Each transient or persistent start reopens the installed descriptor, publisher
+policy, applied image-set revocations and retained base proof. Final image and
+runtime bytes are checked against the admitted plan immediately before backend
+handoff, and the normal runtime lifecycle retains authenticated material for the
+VM and persistent reopen. Built images require a `standard` or `restrictive`
+profile and cold residency; warm-pool and snapshot claims are not enabled for this
+source. SDK sidecar attachments are refused until their selected bytes have a
+release-backed assembly contract. Source packs keep their separate manifest path;
+the persisted slot must match their signed source descriptor.
+
+These gates do not establish a published built-pack or released-client boot
+witness. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
@@ -2171,6 +2212,32 @@ under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
 `builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
 selects a workload pack. Other targets are rejected. This command migration
 does not change pack trust or establish any pack as official.
+
+#### Install a signed local candidate
+
+`mvmctl pack registry install-local ns/name@version --manifest-sha256 SHA256
+--manifest PATH --bundle PATH --files DIRECTORY` acquires an already-produced
+candidate without registry lookup, dependency downloads, or runtime launch.
+The exact version and SHA-256 of the signed manifest bytes are required.
+`--manifest` and `--bundle` must each be single-link regular files no larger
+than 1 MiB; paths are limited to 4096 bytes and 64 components. Symlinks,
+hardlinks, special files, and parent traversal are refused.
+
+`--files` is the ready root containing exactly the signed inventory: ordinary
+manifest files plus every built-image descriptor asset at its original name,
+without an additional release-directory prefix. The shared Core limits remain
+4096 payload files and 32 GiB total (with tighter built-asset limits). Metadata,
+publisher trust, revocations, and the compiled built-image verifier pin are
+checked before large payload copying. The private snapshot is checked before
+installation. Dependencies must already be trusted, installed, and locked
+locally; cycles and graphs exceeding 128 packs are refused.
+
+Local acquisition never replaces a conflicting pin or repairs an invalid
+existing cache entry. Registry pin writers serialize installation and pin
+updates, and cache publication is atomic and no-clobber. There is no unsigned
+flag, alternate trust policy, or network fallback. A built candidate still
+requires the independently signed fresh revocation feed and the released
+verifier pin accepted by Core; local transport does not supply those proofs.
 
 ### Bundles in image registries
 

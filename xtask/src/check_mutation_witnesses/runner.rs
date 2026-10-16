@@ -13,25 +13,19 @@ use std::path::{Path, PathBuf};
 /// the stricter question — the owning crate's own tests must catch the
 /// tampering.
 ///
-/// Each file's previous output is removed before anything runs, so the
-/// directory only ever holds this run's evidence. Left in place, output
-/// from an earlier run would stand in for a file this one never reached.
+/// Every invocation owns a fresh output and state root. Concurrent runs
+/// must neither read nor remove one another's evidence.
 pub(crate) fn run_mutants_over(
     workspace: &Path,
     surface: &[SurfaceFile],
     pinned: &str,
 ) -> Result<PathBuf> {
     ensure_cargo_mutants(pinned)?;
-    let out_root = std::env::temp_dir().join("mvm-mutation-witnesses");
-    std::fs::create_dir_all(&out_root)
-        .with_context(|| format!("creating {}", out_root.display()))?;
-    for file in surface {
-        let stale = file_output_dir(&out_root, &file.path);
-        if stale.exists() {
-            std::fs::remove_dir_all(&stale)
-                .with_context(|| format!("clearing earlier output at {}", stale.display()))?;
-        }
-    }
+    let out_root = new_run_root(&std::env::temp_dir())?;
+    eprintln!(
+        "check-mutation-witnesses: mutation evidence retained at {}",
+        out_root.display()
+    );
     let isolation = MutationIsolation::establish(&out_root)?;
 
     for (i, file) in surface.iter().enumerate() {
@@ -47,6 +41,15 @@ pub(crate) fn run_mutants_over(
         run_mutants_for_file(workspace, file, &out_dir, &isolation, pinned)?;
     }
     Ok(out_root)
+}
+
+/// Keep evidence after success, failure, or interruption for `--verify-outcomes`.
+fn new_run_root(under: &Path) -> Result<PathBuf> {
+    Ok(tempfile::Builder::new()
+        .prefix("mvm-mutation-witnesses-")
+        .tempdir_in(under)
+        .with_context(|| format!("creating a mutation run root under {}", under.display()))?
+        .keep())
 }
 
 /// Where one surface file's cargo-mutants output lives under a run's root.
@@ -227,6 +230,14 @@ impl MutationIsolation {
             .env("HOME", &self.home)
             .env("CARGO_HOME", &self.cargo_home)
             .env("RUSTUP_HOME", &self.rustup_home);
+
+        // cargo-mutants owns the baseline and worker source copies and their
+        // build caches. Even a target unique to this checker invocation would
+        // still share artifacts between those copies. Let Cargo use each
+        // copy's target instead of inheriting the caller's fixed build paths.
+        cmd.env_remove("CARGO_TARGET_DIR")
+            .env_remove("CARGO_BUILD_TARGET_DIR")
+            .env_remove("CARGO_BUILD_BUILD_DIR");
     }
 }
 
@@ -434,6 +445,106 @@ pub(crate) fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
             "could not read a version from `cargo mutants --version` ({:?}) — {install}",
             stdout.trim()
         ),
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn mutation_children_cannot_inherit_fixed_build_paths() {
+        let file = SurfaceFile {
+            path: "crates/example/src/lib.rs".to_string(),
+            package: "example".to_string(),
+            claims: vec![1],
+            scope: None,
+            features: vec!["witness".to_string()],
+        };
+        let isolation = MutationIsolation {
+            home: PathBuf::from("/isolated/state"),
+            cargo_home: PathBuf::from("/toolchain/cargo"),
+            rustup_home: PathBuf::from("/toolchain/rustup"),
+        };
+        let mut cmd = mutants_command_for(Path::new("/workspace"), &file);
+        // Command-local values simulate inherited settings without changing
+        // process-global environment during parallel tests. A deliberately
+        // per-run target is unsafe too: cargo-mutants has multiple copies.
+        for key in [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+        ] {
+            cmd.env(key, "/caller/per-run-target");
+        }
+        cmd.env("CARGO_BUILD_JOBS", "2");
+        isolation.apply(&mut cmd);
+        let env: std::collections::BTreeMap<_, _> = cmd.get_envs().collect();
+        for key in [
+            "CARGO_TARGET_DIR",
+            "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR",
+        ] {
+            assert_eq!(env.get(OsStr::new(key)), Some(&None), "{key}");
+        }
+        for (key, value) in [
+            ("HOME", "/isolated/state"),
+            ("MVM_HOME", "/isolated/state"),
+            ("CARGO_HOME", "/toolchain/cargo"),
+            ("RUSTUP_HOME", "/toolchain/rustup"),
+            ("CARGO_BUILD_JOBS", "2"),
+        ] {
+            assert_eq!(
+                env.get(OsStr::new(key)),
+                Some(&Some(OsStr::new(value))),
+                "{key}"
+            );
+        }
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/workspace")));
+        assert_eq!(
+            cmd.get_args().collect::<Vec<_>>(),
+            [
+                "mutants",
+                "-p",
+                "example",
+                "--file",
+                "crates/example/src/lib.rs",
+                "--features",
+                "witness",
+            ]
+            .map(OsStr::new)
+        );
+    }
+
+    #[test]
+    fn concurrent_run_roots_preserve_separate_evidence_and_state() {
+        let scratch = tempfile::tempdir().unwrap();
+        let first = new_run_root(scratch.path()).unwrap();
+        let path = "crates/example/src/lib.rs";
+        let first_report = file_output_dir(&first, path);
+        std::fs::create_dir_all(&first_report).unwrap();
+        std::fs::write(first_report.join("baseline"), "first baseline").unwrap();
+        std::fs::create_dir(first.join("state-root")).unwrap();
+        std::fs::write(first.join("state-root/key"), "first state").unwrap();
+
+        let second = new_run_root(scratch.path()).unwrap();
+        assert_ne!(first, second);
+        assert!(
+            first.is_dir(),
+            "returning the root must not delete evidence"
+        );
+        assert!(second.is_dir());
+        assert!(!file_output_dir(&second, path).exists());
+        assert!(!second.join("state-root").exists());
+        assert_eq!(
+            std::fs::read_to_string(first_report.join("baseline")).unwrap(),
+            "first baseline"
+        );
+        assert_eq!(
+            std::fs::read_to_string(first.join("state-root/key")).unwrap(),
+            "first state"
+        );
     }
 }
 

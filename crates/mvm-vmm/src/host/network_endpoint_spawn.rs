@@ -2360,7 +2360,6 @@ mod tests {
     #[test]
     fn a_socket_nothing_serves_is_cleared_and_a_served_one_is_kept() {
         use std::os::unix::fs::FileTypeExt;
-        use wait_timeout::ChildExt;
 
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("stale.sock");
@@ -2377,7 +2376,10 @@ mod tests {
             .env("MVM_TEST_STALE_SOCKET_PATH", &stale)
             .spawn()
             .unwrap();
-        let waited = child.wait_timeout(Duration::from_secs(10));
+        let waited = crate::host::process_exit::wait_for_test_child(
+            &mut child,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
         if !matches!(waited, Ok(Some(_))) {
             let _ = child.kill();
             child

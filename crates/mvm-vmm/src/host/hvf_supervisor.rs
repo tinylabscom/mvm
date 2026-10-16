@@ -13,6 +13,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+mod startup_diagnostics;
+#[cfg(unix)]
+pub use startup_diagnostics::{StartupDiagnostics, StartupReporter, StartupStage, StartupSummary};
+
 /// One virtio-blk device attached to the guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

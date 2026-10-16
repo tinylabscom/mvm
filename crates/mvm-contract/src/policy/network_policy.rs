@@ -1553,6 +1553,45 @@ mod tests {
         assert!(policy.ai().is_none());
     }
     #[test]
+    fn certificate_hosts_require_both_interception_and_inspection() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let mut routes = Vec::new();
+        for intercept in [false, true] {
+            for inspect in [false, true] {
+                routes.push(EgressRoute {
+                    id: format!("route-{}-{}", u8::from(intercept), u8::from(inspect)),
+                    host: format!(
+                        "host-{}-{}.example.test",
+                        u8::from(intercept),
+                        u8::from(inspect)
+                    ),
+                    port: 443,
+                    intercept,
+                    rules: if inspect {
+                        vec![EndpointRule {
+                            id: None,
+                            method: Some("GET".into()),
+                            path: "/**".into(),
+                            outcome: RouteOutcome::Allow,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    otherwise: RouteOutcome::Allow,
+                });
+            }
+        }
+        for policy in [NetworkPolicy::unrestricted(), NetworkPolicy::deny_all()] {
+            assert!(policy.intercepted_route_hosts().is_empty());
+            assert_eq!(
+                policy.with_routes(routes.clone()).intercepted_route_hosts(),
+                ["host-1-1.example.test"]
+            );
+        }
+    }
+
+    #[test]
     fn endpoint_routes_are_returned_for_both_policy_forms() {
         let route: crate::policy::routes::EgressRoute =
             serde_json::from_str(r#"{"id":"api","host":"api.example.test"}"#).unwrap();
@@ -1566,5 +1605,51 @@ mod tests {
         }
         assert!(is_mandatory_deny("0.1.2.3".parse().unwrap()));
         assert!(is_mandatory_deny("64:ff9b::a9fe:a9fe".parse().unwrap()));
+    }
+
+    /// `intercepted_route_hosts` names the destinations the host endpoint
+    /// terminates TLS for, and only those: a route must both grant
+    /// interception and carry something to enforce. A route that inspects but
+    /// was not granted interception is not terminated, since nothing is
+    /// intercepted silently, and a granted route with nothing to decide gives
+    /// the endpoint no reason to open the connection.
+    ///
+    /// The `&&` swapped for `||` survived here: the one test of this function
+    /// lived in the runtime crate, outside the package this file is mutated
+    /// under. Under that mutant every route with either property is
+    /// terminated, which is the silent interception the grant exists to rule
+    /// out.
+    #[test]
+    fn intercepted_route_hosts_need_both_the_grant_and_a_rule_to_enforce() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+        let route = |id: &str, host: &str, intercept: bool, inspects: bool| EgressRoute {
+            id: id.into(),
+            host: host.into(),
+            port: 443,
+            rules: if inspects {
+                vec![EndpointRule {
+                    id: None,
+                    method: None,
+                    path: "/**".into(),
+                    outcome: RouteOutcome::Deny,
+                }]
+            } else {
+                Vec::new()
+            },
+            otherwise: RouteOutcome::Allow,
+            intercept,
+        };
+        let policy = NetworkPolicy::deny_all().with_routes(vec![
+            route("granted-and-ruled", "a.example.test", true, true),
+            route("ruled-only", "b.example.test", false, true),
+            route("granted-only", "c.example.test", true, false),
+            route("neither", "d.example.test", false, false),
+        ]);
+        assert_eq!(policy.intercepted_route_hosts(), ["a.example.test"]);
+        assert!(
+            NetworkPolicy::deny_all()
+                .intercepted_route_hosts()
+                .is_empty()
+        );
     }
 }

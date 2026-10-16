@@ -30,7 +30,22 @@ use mvm_client::bundle::{BundleSigner, HostBundleSigner};
 use mvm_client::{BuilderBundleRequest, build_and_export_bundle_on};
 use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore, key_id_from_pubkey};
 
-const ROOTFS: &[u8] = b"an ext4 image the flake built";
+/// A stand-in image: an ext4 superblock declaring 4 KiB blocks, which is
+/// all the host seal reads, over two blocks of otherwise empty bytes.
+const ROOTFS_IMAGE: [u8; 8192] = {
+    let mut image = [0u8; 8192];
+    image[1024 + 24] = 2;
+    image[1024 + 56] = 0x53;
+    image[1024 + 57] = 0xEF;
+    let note = b"an ext4 image the flake built";
+    let mut i = 0;
+    while i < note.len() {
+        image[4096 + i] = note[i];
+        i += 1;
+    }
+    image
+};
+const ROOTFS: &[u8] = &ROOTFS_IMAGE;
 const KERNEL: &[u8] = b"a kernel the flake built";
 const SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true}"#;
 const SEALED_SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true,"sealed":true}"#;

@@ -3,6 +3,7 @@
 pub mod build;
 pub mod build_cache;
 pub mod dev_build;
+pub mod frozen;
 pub mod orchestrator;
 pub mod vsock_builder;
 

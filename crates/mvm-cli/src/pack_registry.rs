@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use tempfile::TempDir;
 
-use mvm_client::policy_profiles::{PolicyRef, ProfileFile, builtin};
+use mvm_client::registry_pack_local::profile_pack_dependencies;
 use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
@@ -37,21 +37,6 @@ const MANIFEST_FILE: &str = "manifest.json";
 const SIGNATURE_FILE: &str = "manifest.sigstore.json";
 const FILES_DIR: &str = "files";
 const MAX_PACKS_PER_PULL: usize = 128;
-
-#[derive(Debug, Clone, Copy)]
-enum PolicyDependencyKind {
-    Profile,
-    Group,
-}
-
-impl PolicyDependencyKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Profile => "profile",
-            Self::Group => "group",
-        }
-    }
-}
 
 /// Registry configuration: one base URL, overridable for tests and mirrors.
 #[derive(Debug, Clone)]
@@ -431,59 +416,6 @@ fn register_dependency(
     Ok(true)
 }
 
-fn profile_pack_dependencies(text: &str) -> Result<Vec<PackReference>> {
-    let profile: ProfileFile = toml::from_str(text).context("parsing signed pack profile")?;
-    let mut dependencies = Vec::new();
-    for name in profile.extends.to_vec() {
-        add_policy_dependency(&name, PolicyDependencyKind::Profile, &mut dependencies)?;
-    }
-    for name in profile.groups.include {
-        add_policy_dependency(&name, PolicyDependencyKind::Group, &mut dependencies)?;
-    }
-    for block in profile.when {
-        for name in block.include {
-            add_policy_dependency(&name, PolicyDependencyKind::Group, &mut dependencies)?;
-        }
-    }
-    Ok(dependencies)
-}
-
-fn add_policy_dependency(
-    name: &str,
-    kind: PolicyDependencyKind,
-    dependencies: &mut Vec<PackReference>,
-) -> Result<()> {
-    let reference = PolicyRef::parse(name).map_err(|reason| {
-        anyhow::anyhow!("invalid signed pack policy reference {name:?}: {reason}")
-    })?;
-    match reference {
-        PolicyRef::Pack { .. } => {
-            let pack: PackReference = name
-                .parse()
-                .with_context(|| format!("invalid pack reference {name:?}"))?;
-            if !dependencies.contains(&pack) {
-                dependencies.push(pack);
-            }
-        }
-        PolicyRef::Name(local) => {
-            let exists = match kind {
-                PolicyDependencyKind::Profile => builtin::profile(&local).is_some(),
-                PolicyDependencyKind::Group => builtin::group(&local).is_some(),
-            };
-            if !exists {
-                bail!(
-                    "{local:?} is not a built-in {}; signed packs cannot import local policy",
-                    kind.label()
-                );
-            }
-        }
-        PolicyRef::Path(_) => {
-            bail!("signed pack profile cannot follow a filesystem policy path: {name:?}")
-        }
-    }
-    Ok(())
-}
-
 fn declared_pack_dependencies(
     installed: &InstalledRegistryPack,
     verified: &VerifiedRegistryPack,
@@ -596,7 +528,12 @@ fn pull_one(
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.
-        mvm_core::registry_pack::install_registry_pack(fetched.staged_path(), &verified)?
+        mvm_core::registry_pack_store::refresh_pinned_registry_pack(
+            &mvm_core::config::registry_pack_cache_dir(),
+            &lock_path,
+            fetched.staged_path(),
+            &verified,
+        )?
     } else {
         adopt_install_and_pin(
             &PackAdoption {
