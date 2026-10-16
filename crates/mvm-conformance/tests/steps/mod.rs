@@ -23,6 +23,7 @@ mod machine_journey;
 mod network_surface;
 mod oci_unpack;
 mod one_transport;
+mod pack_build;
 mod policy_approval;
 mod readme_contract;
 mod runtime_overlay;

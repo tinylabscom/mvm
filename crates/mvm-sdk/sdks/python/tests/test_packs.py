@@ -19,6 +19,15 @@ from mvm.packs import Pack, PackSpecError, canonical_json, pack
 FIXTURES = Path(__file__).resolve().parents[4] / "mvm-contract/tests/fixtures/pack-spec-v1"
 
 
+def test_pack_authoring_is_exported_on_the_public_sdk_surface() -> None:
+    import mvm
+
+    assert "packs" in mvm.__all__
+    assert mvm.packs.pack is pack
+    assert mvm.packs.Pack is Pack
+    assert isinstance(mvm.packs.pack("acme/hello", "1.0.0"), Pack)
+
+
 def _fixture(name: str) -> dict:
     return json.loads((FIXTURES / f"{name}.json").read_text())
 
