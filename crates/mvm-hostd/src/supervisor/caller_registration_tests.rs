@@ -147,6 +147,7 @@ fn canonical_descriptor_cannot_substitute_for_consumed_caller_admission() {
     let mut cfg = startup_config(&admitted, &registration);
     // This test exercises admission only, not descriptor adoption or a VM.
     cfg.kernel_fd = Some(123);
+    std::fs::remove_file(&cfg.kernel).unwrap();
     cfg.caller_registration = None;
     assert!(prepare_startup(&cfg).is_err());
     cfg.caller_registration = Some(registration);

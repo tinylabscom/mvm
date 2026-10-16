@@ -103,11 +103,13 @@ pub fn prepare_startup(
 pub fn load_boot_inputs(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<Option<Vec<u8>>> {
-    anyhow::ensure!(
-        cfg.kernel.is_file(),
-        "kernel {} is not a readable file",
-        cfg.kernel.display()
-    );
+    if cfg.kernel_fd.is_none() {
+        anyhow::ensure!(
+            cfg.kernel.is_file(),
+            "kernel {} is not a readable file",
+            cfg.kernel.display()
+        );
+    }
     cfg.initramfs
         .as_ref()
         .map(std::fs::read)
