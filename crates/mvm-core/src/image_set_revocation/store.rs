@@ -83,7 +83,7 @@ pub struct ImageSetRevocationStore {
 
 /// Original applied feed bytes authenticated together with their checkpoint.
 ///
-/// This is evidence for the time passed to `load_with_proof`, not an evergreen
+/// This is evidence for the time passed to `capture_applied_proof`, not an evergreen
 /// freshness capability. A consumer must verify the original bytes again at
 /// its actual admission time and enforce its own persisted checkpoint.
 ///
@@ -154,13 +154,13 @@ impl ImageSetRevocationStore {
         &self,
         now: DateTime<Utc>,
     ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationStoreError> {
-        Ok(self.load_with_proof(now)?.verified)
+        Ok(self.capture_applied_proof(now)?.verified)
     }
 
     /// Retain the exact bounded store read, never a later re-read or a
     /// reserialized document. Uses the same canonical signer, freshness and
     /// persisted-checkpoint checks as `load`.
-    pub fn load_with_proof(
+    pub fn capture_applied_proof(
         &self,
         now: DateTime<Utc>,
     ) -> Result<RetainedImageSetRevocationProof, ImageSetRevocationStoreError> {

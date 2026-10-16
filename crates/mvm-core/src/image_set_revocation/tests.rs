@@ -407,7 +407,9 @@ fn an_applied_list_loads_back_with_private_files() {
         .expect("update");
     let loaded = store.load(at(3)).expect("load");
     assert_eq!(loaded.checkpoint(), &checkpoint);
-    let retained = store.load_with_proof(at(3)).expect("retain applied proof");
+    let retained = store
+        .capture_applied_proof(at(3))
+        .expect("retain applied proof");
     assert_eq!(retained.verified(), &loaded);
     assert_eq!(retained.document(), bytes);
     assert_eq!(retained.signature_bundle(), bundle_for_publication(1));
@@ -430,7 +432,7 @@ fn retained_feed_keeps_originals_across_new_publication_but_is_not_evergreen() {
     let first = document(&list(at(1), at(20)));
     let first_signature = bundle_for_publication(1);
     store.update(&first, &first_signature, at(2)).unwrap();
-    let retained = store.load_with_proof(at(3)).unwrap();
+    let retained = store.capture_applied_proof(at(3)).unwrap();
     let next = document(&list(at(4), at(20)));
     store
         .update(&next, &bundle_for_publication(2), at(5))
@@ -438,11 +440,11 @@ fn retained_feed_keeps_originals_across_new_publication_but_is_not_evergreen() {
     assert_eq!(retained.document(), first);
     assert_eq!(retained.signature_bundle(), first_signature);
     assert_eq!(retained.verified().checkpoint().publication, 1);
-    let current = store.load_with_proof(at(6)).unwrap();
+    let current = store.capture_applied_proof(at(6)).unwrap();
     assert_eq!(current.document(), next);
     assert_eq!(current.verified().checkpoint().publication, 2);
     assert!(matches!(
-        store.load_with_proof(at(20)),
+        store.capture_applied_proof(at(20)),
         Err(ImageSetRevocationStoreError::Verification(
             ImageSetRevocationError::Expired { .. }
         ))

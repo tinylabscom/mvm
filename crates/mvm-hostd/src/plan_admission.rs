@@ -544,7 +544,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         })?;
         let verified_bundle = if let Some(config) = posture.runtime_config {
             if let Some(owner) = &config.canonical_kernel {
-                mvm_core::plan::bundle::verify_plan_bundle_with_kernel(
+                mvm_core::plan::bundle::verify_canonical_plan_bundle(
                     pin,
                     ctx.resolver,
                     ctx.trust,

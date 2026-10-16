@@ -270,7 +270,7 @@ impl PublishedImageSet {
     /// not authorize a consumer launch.
     pub fn retained_publisher_proof(&self) -> Result<RetainedPublisherProof> {
         let revocations = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
-            .load_with_proof(chrono::Utc::now())
+            .capture_applied_proof(chrono::Utc::now())
             .context("current signed image-set revocations required for portable kernel proof")?;
         let proof = mvm_core::image_set::read_cached_image_set_root_proof(
             &mvm_core::image_set::image_set_root_proof_cache(),

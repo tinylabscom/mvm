@@ -651,7 +651,7 @@ pub fn verify_plan_bundle(
 
 /// The canonical lane additionally requires the SAME in-process owner and
 /// actual launch selection. There is no path/hash/JSON fallback.
-pub fn verify_plan_bundle_with_kernel(
+pub fn verify_canonical_plan_bundle(
     pin: &PlanArtifact,
     resolver: &dyn BundleResolver,
     trust: &dyn TrustStore,

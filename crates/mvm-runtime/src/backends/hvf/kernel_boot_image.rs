@@ -150,7 +150,9 @@ mod tests {
         let mut ram = GuestRam::new(HVF_PAGE_SIZE).unwrap();
         let loaded = source.load_into(&mut ram, 0).unwrap();
         assert_eq!(loaded, image.len());
-        assert_eq!(&ram.snapshot_bytes()[..image.len()], image);
+        let actual = ram.snapshot_bytes();
+        assert_eq!(&actual[..image.len()], image);
+        assert!(actual[image.len()..].iter().all(|byte| *byte == 0));
         assert!(source.loaded_artifact(&ram, 0, loaded).unwrap().is_some());
     }
 
