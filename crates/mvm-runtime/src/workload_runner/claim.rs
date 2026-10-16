@@ -18,7 +18,9 @@ use mvm_core::vm_backend::VmId;
 
 use crate::network_endpoint_spawn::EndpointGuard;
 use crate::workload_runner::runner::FlowMuxIdentitySource;
-use crate::workload_runner::runner::{NetworkEndpointSpawnRequest, NetworkEndpointSpawner};
+use crate::workload_runner::runner::{
+    NetworkEndpointSpawnRequest, NetworkEndpointSpawner, TelemetryStart,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimRefusal {
@@ -64,6 +66,69 @@ pub enum ClaimRefusal {
         requested: u64,
         ceiling: u64,
     },
+    /// The network policy the claim would install in the child's endpoint is
+    /// not the one its admitted plan recorded. A child's destinations come from
+    /// its own signed plan and nowhere else, so a policy the plan does not name
+    /// is refused before the endpoint exists.
+    #[error(
+        "the claim's network policy (sha256 {got}) is not the policy its admitted plan \
+         recorded; a claimed child's endpoint enforces only its own plan's policy"
+    )]
+    PolicyNotAdmitted { got: String },
+}
+
+/// Refuse a claim whose network policy is not the one its admitted plan
+/// recorded.
+///
+/// Admission records the resolved policy's digest among the plan's policy
+/// asset identities, and the plan is signed. The claim hands the runner the
+/// policy it will install in the child's own endpoint, so this binds that
+/// policy to the signed plan: a parent's policy, a sibling's, or any other the
+/// caller supplied is refused. A plan that records no policy identity admits
+/// only a claim that allows nothing outbound, because there is then nothing to
+/// bind a permissive policy to.
+pub fn bind_claim_policy_to_plan(
+    asset_identities: &[mvm_core::plan::AssetIdentity],
+    policy: &NetworkPolicy,
+) -> Result<(), ClaimRefusal> {
+    let got = mvm_core::policy::network_policy::content_sha256(policy);
+    let mut recorded = asset_identities
+        .iter()
+        .filter(|asset| asset.kind == mvm_core::plan::AssetKind::Policy)
+        .peekable();
+    let bound = match recorded.peek() {
+        None => !policy.admits_outbound(),
+        Some(_) => recorded.any(|asset| asset.digest == got),
+    };
+    if bound {
+        Ok(())
+    } else {
+        Err(ClaimRefusal::PolicyNotAdmitted { got })
+    }
+}
+
+/// The grant a claimed child's admitted plan is compared against.
+///
+/// A factory parent is sealed with no grant: it ran no workload and holds no
+/// authority to pass on, and an absent grant is deny-all egress. For a parent
+/// booted without the guest egress client that is exactly right. A parent booted
+/// with it carries the client and no destinations, and it never has an endpoint
+/// of its own. Every destination a child of it may reach is resolved from the
+/// child's own signed plan into the child's own endpoint, the same way a cold
+/// boot of that plan resolves it, so the egress half of the bound is the child's
+/// admitted allow-list. Every other dimension keeps the parent's sealed value.
+pub fn claim_parent_grant_bound(
+    parent: Option<&mvm_contract::grants::Grants>,
+    parent_boots_egress_client: bool,
+    child: Option<&mvm_contract::grants::Grants>,
+) -> Option<mvm_contract::grants::Grants> {
+    if !parent_boots_egress_client || parent.is_some() {
+        return parent.cloned();
+    }
+    Some(mvm_contract::grants::Grants {
+        egress: child.and_then(|grants| grants.egress.clone()),
+        ..mvm_contract::grants::Grants::default()
+    })
 }
 
 /// Refuse a claimed child whose admitted plan asks for more than this host's
@@ -154,7 +219,21 @@ pub struct EndpointSpawnInputs<'a> {
 pub struct EndpointHandle {
     egress_uds: Option<PathBuf>,
     identity_drive: Option<PathBuf>,
+    telemetry: TelemetryStart,
     guard: EndpointGuard,
+}
+
+impl Drop for EndpointHandle {
+    fn drop(&mut self) {
+        if self.guard.vm_name.is_none() {
+            // Defused: the VM is up, so a held collector start may begin.
+            self.telemetry.release();
+        } else {
+            // Armed: the launch failed. Begin nothing new, and let a running
+            // start finish before the guard reaps what it started.
+            self.telemetry.abandon();
+        }
+    }
 }
 
 impl EndpointHandle {
@@ -172,6 +251,8 @@ impl EndpointHandle {
 
     /// Disarm the reaper: the VM is up and the `stop` path now owns teardown.
     pub fn defuse(&mut self) {
+        // The collector start stays in flight: joining here would put it on
+        // the launch path it was moved off. Dropping the handle joins it.
         self.guard.defuse();
     }
 }
@@ -239,10 +320,19 @@ impl<'a> ClaimGuards<'a> {
             && inputs.ingress.is_empty()
             && inputs.tools.is_empty()
         {
+            let identity_drive = self.spawner.prepare_identity(&request)?;
+            // No endpoint, but still a VM-lifetime collector: telemetry does
+            // not depend on whether the workload has egress to mediate.
+            let telemetry = self.spawner.start_telemetry_without_endpoint(&request);
             return Ok(EndpointHandle {
                 egress_uds: None,
-                identity_drive: self.spawner.prepare_identity(&request)?,
-                guard: EndpointGuard::defused(),
+                identity_drive,
+                guard: if telemetry.provisioned {
+                    EndpointGuard::new(&vm.0)
+                } else {
+                    EndpointGuard::defused()
+                },
+                telemetry,
             });
         }
         // No protocol choice is made here any more. Whether a workload carries
@@ -254,6 +344,7 @@ impl<'a> ClaimGuards<'a> {
         Ok(EndpointHandle {
             egress_uds: Some(spawned.egress_uds),
             identity_drive: spawned.identity_drive,
+            telemetry: TelemetryStart::default(),
             guard: EndpointGuard::new(&vm.0),
         })
     }
@@ -262,6 +353,81 @@ impl<'a> ClaimGuards<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn policy_identity(policy: &NetworkPolicy) -> mvm_core::plan::AssetIdentity {
+        mvm_core::plan::AssetIdentity::new(
+            mvm_core::plan::AssetKind::Policy,
+            "tenant:vm",
+            mvm_core::policy::network_policy::content_sha256(policy),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_claim_policy_binds_only_to_the_policy_its_plan_recorded() {
+        let admitted =
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]);
+        let recorded = [policy_identity(&admitted)];
+        assert!(bind_claim_policy_to_plan(&recorded, &admitted).is_ok());
+        for other in [
+            NetworkPolicy::unrestricted(),
+            NetworkPolicy::deny_all(),
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                8443,
+            )]),
+        ] {
+            assert!(
+                matches!(
+                    bind_claim_policy_to_plan(&recorded, &other),
+                    Err(ClaimRefusal::PolicyNotAdmitted { .. })
+                ),
+                "{other:?} must not bind to a plan that recorded another policy"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plan_recording_no_policy_admits_only_a_claim_that_reaches_nothing() {
+        assert!(bind_claim_policy_to_plan(&[], &NetworkPolicy::deny_all()).is_ok());
+        assert!(matches!(
+            bind_claim_policy_to_plan(&[], &NetworkPolicy::unrestricted()),
+            Err(ClaimRefusal::PolicyNotAdmitted { .. })
+        ));
+    }
+
+    #[test]
+    fn only_an_egress_parent_with_no_sealed_grant_takes_the_childs_allow_list() {
+        let child = mvm_contract::grants::Grants {
+            egress: Some(mvm_contract::grants::EgressGrant {
+                allow: vec![mvm_core::policy::network_policy::HostPort::new(
+                    "api.example.com",
+                    443,
+                )],
+            }),
+            ..Default::default()
+        };
+        let bound = claim_parent_grant_bound(None, true, Some(&child)).unwrap();
+        assert_eq!(bound.egress, child.egress);
+        assert_eq!(bound.cpu, None);
+        assert_eq!(bound.drive, None);
+        assert_eq!(bound.display_input, None);
+
+        assert_eq!(
+            claim_parent_grant_bound(None, false, Some(&child)),
+            None,
+            "a parent without the client stays sealed deny-all"
+        );
+        let sealed = mvm_contract::grants::Grants::default();
+        assert_eq!(
+            claim_parent_grant_bound(Some(&sealed), true, Some(&child)),
+            Some(sealed),
+            "a parent that sealed a grant keeps it"
+        );
+    }
 
     #[test]
     fn bind_accepts_matching_and_rejects_mismatched_rootfs() {
@@ -307,9 +473,19 @@ mod tests {
         seen_vm: Mutex<Option<String>>,
         identity_vm: Mutex<Option<String>>,
         fail_identity: bool,
+        collect_telemetry: bool,
+        telemetry_vm: Mutex<Option<String>>,
     }
 
     impl NetworkEndpointSpawner for FakeSpawner {
+        fn start_telemetry_without_endpoint(
+            &self,
+            req: &NetworkEndpointSpawnRequest<'_>,
+        ) -> TelemetryStart {
+            *self.telemetry_vm.lock().unwrap() = Some(req.vm_name.to_string());
+            TelemetryStart::provisioned(self.collect_telemetry)
+        }
+
         fn prepare_identity(
             &self,
             req: &NetworkEndpointSpawnRequest<'_>,
@@ -386,6 +562,36 @@ mod tests {
         assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), Some("child-a"));
 
         // Disarm the reaper so drop doesn't chase a nonexistent endpoint.
+        child.defuse();
+    }
+
+    #[test]
+    fn a_boot_without_an_endpoint_still_starts_its_telemetry_collector() {
+        let spawner = FakeSpawner {
+            collect_telemetry: true,
+            ..FakeSpawner::default()
+        };
+        let guards = ClaimGuards::new(&spawner);
+        let redaction = RedactionPolicy::default();
+        let policy = NetworkPolicy::deny_all();
+        let state = tempfile::tempdir().unwrap();
+
+        let mut child = guards
+            .spawn_endpoint(
+                &VmId("child-collected".into()),
+                &endpoint_inputs(state.path(), &redaction, &policy),
+            )
+            .expect("deny-all fast path succeeds");
+
+        assert_eq!(child.egress_uds(), None, "still no egress channel");
+        assert_eq!(spawner.seen_vm.lock().unwrap().as_deref(), None);
+        assert_eq!(
+            spawner.telemetry_vm.lock().unwrap().as_deref(),
+            Some("child-collected"),
+            "the collector is started for this boot"
+        );
+        // A started collector arms the guard, so a failed launch reaps it.
+        assert!(child.guard.vm_name.is_some());
         child.defuse();
     }
 

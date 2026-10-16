@@ -115,6 +115,22 @@ pub fn state_has_bound_secrets(state_dir: &Path) -> Result<bool> {
         .is_some_and(plan_json_has_bound_secrets))
 }
 
+/// Whether this launch's endpoint must terminate TLS under a certificate minted
+/// for its own destinations: its plan binds a secret, or its policy grants a
+/// route interception.
+///
+/// The guest is handed that certificate at boot and trusts it from memory
+/// afterwards. A child restored from a shared parent trusts only what the
+/// parent was handed, and the parent was booted before any launch named a
+/// destination, so a launch answering `true` here cannot be served by one.
+pub fn launch_terminates_egress_tls(config: &VmStartConfig) -> bool {
+    config
+        .plan_json
+        .as_deref()
+        .is_some_and(plan_json_has_bound_secrets)
+        || !config.network_policy.intercepted_route_hosts().is_empty()
+}
+
 /// Whether this launch's guest boots with its authenticated vsock client
 /// started — the *effective* client enablement, not just the raw policy.
 ///

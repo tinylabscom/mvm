@@ -50,10 +50,12 @@ pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         .with_context(|| format!("advancing epoch counter for {snap_dir}"))?;
     let _sidecar = mvm_core::crypto::snapshot_hmac::seal(
         snap_path,
-        &files,
-        next_epoch,
-        mvmctl_version,
-        secrecy::ExposeSecret::expose_secret(&key),
+        &mvm_core::crypto::snapshot_hmac::SnapshotIntegrityParams::new(
+            &files,
+            next_epoch,
+            mvmctl_version,
+            secrecy::ExposeSecret::expose_secret(&key),
+        ),
     )
     .with_context(|| format!("sealing snapshot at {snap_dir}"))?;
     // Additionally content-address + Ed25519-sign the snapshot under

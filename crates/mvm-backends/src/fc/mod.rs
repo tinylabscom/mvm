@@ -11,9 +11,11 @@ pub mod fc_api;
 pub mod fork_devices;
 pub mod guards;
 pub mod host;
+pub mod idle_pool;
 pub mod io;
 pub mod lifecycle;
 pub mod observe;
+pub mod runtime_artifacts;
 pub mod snapshot;
 pub mod snapshot_decode;
 
@@ -27,6 +29,7 @@ pub use host::*;
 pub use io::*;
 pub use lifecycle::*;
 pub use observe::*;
+pub use runtime_artifacts::ForkRuntimeEvidence;
 pub use snapshot::*;
 pub use snapshot_decode::UndecodableSnapshot;
 

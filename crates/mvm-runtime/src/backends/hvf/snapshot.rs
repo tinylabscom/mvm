@@ -533,8 +533,13 @@ pub fn encode_hvf_snapshot_frame(
 /// come from the mapping, never from a file a restore mapped it from: pages the
 /// guest wrote since its own restore are private copies, and those are the
 /// bytes the new snapshot has to carry.
+///
+/// The image is guest memory in the clear, so it lands on a fresh 0600 inode
+/// rather than truncating whatever is at `path`: a link there is replaced, not
+/// written through, and a file a restore still has mapped is never shortened
+/// under it.
 pub fn write_ram_image(ram: &GuestRam, path: &std::path::Path) -> std::io::Result<RamLayout> {
-    let mut file = std::fs::File::create(path)?;
+    let mut file = mvm_core::util::atomic_io::open_private_truncated(path)?;
     ram.write_to(&mut file)?;
     file.sync_all()?;
     Ok(RamLayout::whole_file(ram.len()))
@@ -1213,8 +1218,30 @@ mod tests {
     /// to its file, so such an assertion would pass with or without the clone
     /// and prove nothing; the file identity checked here is what protects.
     #[test]
+    fn a_ram_image_is_a_fresh_owner_only_file_and_never_written_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let ram_path = dir.path().join("memory.bin");
+        std::os::unix::fs::symlink(&victim, &ram_path).unwrap();
+        let mut ram = GuestRam::new(TEST_RAM_LEN).unwrap();
+        ram.copy_at(0, b"SYNTHETIC_MARKER").unwrap();
+
+        write_ram_image(&ram, &ram_path).unwrap();
+
+        let meta = std::fs::symlink_metadata(&ram_path).unwrap();
+        assert!(meta.file_type().is_file());
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert!(write_ram_image(&ram, &dir.path().join("absent/memory.bin")).is_err());
+    }
+
+    #[test]
     fn a_captured_image_round_trips_through_verification_into_a_private_mapping() {
         use mvm_vmm::host::restore_image::VerifiedRestoreFile;
+        use mvm_vmm::runtime_artifacts::{Observer, RuntimeArtifact, RuntimeArtifacts};
         use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1223,6 +1250,20 @@ mod tests {
         let state = dir.path().join("state");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut observer = Observer::bind(
+            &state,
+            Some(RuntimeArtifacts {
+                kernel: None,
+                initramfs: Some(
+                    RuntimeArtifact::loaded("/generation/initrd".into(), b"loaded").unwrap(),
+                ),
+                disks: vec![],
+                kernel_cmdline: "consumed cmdline".into(),
+                firecracker_drives: None,
+            }),
+        )
+        .unwrap();
+        let evidence = observer.snapshot_payload().unwrap();
         let mut captured = GuestRam::new(TEST_RAM_LEN).unwrap();
         captured.copy_at(0, b"first page").unwrap();
         captured.copy_at(HVF_PAGE_SIZE, b"second page").unwrap();
@@ -1238,7 +1279,7 @@ mod tests {
             b"devices",
             b"gic",
             &[sample_state()],
-            b"",
+            &evidence,
         )
         .unwrap();
         let frame_path = dir.path().join("memory.bin.hvf-frame");
@@ -1254,6 +1295,10 @@ mod tests {
             ram: verified(&ram_path),
             frame: verified(&frame_path),
         };
+        let expected_frame_digest =
+            mvm_core::crypto::image_verify::sha256_file(&frame_path).unwrap();
+        std::fs::write(&frame_path, b"tampered frame").unwrap();
+        assert!(VerifiedRestoreFile::prepare(&frame_path, &state, &expected_frame_digest).is_err());
 
         let tamper = |byte: u8| {
             std::fs::OpenOptions::new()
@@ -1274,7 +1319,18 @@ mod tests {
 
         tamper(0xee);
         let mut restored = GuestRam::new(TEST_RAM_LEN).unwrap();
-        assert_eq!(map_restore_image(&image, &mut restored).unwrap(), frame);
+        let restored_frame = map_restore_image(&image, &mut restored).unwrap();
+        assert_eq!(restored_frame, frame);
+        let parsed =
+            parse_hvf_snapshot_frame(&restored_frame, HVF_SNAPSHOT_BACKEND_KIND, TEST_RAM_LEN)
+                .unwrap();
+        assert_eq!(parsed.artifact_digests, evidence);
+        observer
+            .inherit_verified_snapshot(parsed.artifact_digests)
+            .unwrap();
+        let recaptured = observer.snapshot_payload().unwrap();
+        observer.inherit_verified_snapshot(&recaptured).unwrap();
+        assert_eq!(observer.snapshot_payload().unwrap(), recaptured);
         let regions = restored.backing_regions(0);
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert_eq!(

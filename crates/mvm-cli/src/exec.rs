@@ -715,7 +715,9 @@ fn run_inner(
     // Run the command + always tear down. The wasm backend has no guest
     // agent; the module already ran inside `start`, so we just collect its
     // exit status instead of waiting for a vsock console.
-    let run_outcome = if backend.name() == "wasm" {
+    let run_outcome = if let Err(error) = start_config.wait_for_admission_durability() {
+        Err(error)
+    } else if backend.name() == "wasm" {
         match run_wasm_module(&backend, &vm_name) {
             Ok(code) => Ok((Either::Left(code), None)),
             Err(e) => Err(e),
@@ -1433,18 +1435,16 @@ pub fn resolve_launch(
             assets: shape.assets,
             volumes: &start_config.volumes,
             bundle_archive: bundle_archive.as_deref(),
+            runtime_config: Some(&start_config),
         })?
     {
-        start_config.tenant_id = Some(sub.tenant_id);
-        start_config.plan_json = Some(sub.plan_json);
-        start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
+        let read_only_materialized_images = sub.apply_to(&mut start_config);
         for volume in &mut start_config.volumes {
-            if sub.read_only_materialized_images.contains(&volume.host)
+            if read_only_materialized_images.contains(&volume.host)
                 || volume
                     .materialized_image
                     .as_ref()
-                    .is_some_and(|image| sub.read_only_materialized_images.contains(image))
+                    .is_some_and(|image| read_only_materialized_images.contains(image))
             {
                 volume.read_only = true;
             }

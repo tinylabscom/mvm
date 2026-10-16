@@ -493,9 +493,18 @@ impl BackendImageSupport {
     #[must_use]
     pub fn for_backend(kind: BackendKind) -> Option<Self> {
         let (guest_arches, kernels) = match kind {
-            BackendKind::Firecracker | BackendKind::Qemu | BackendKind::Mock => (
+            BackendKind::Firecracker | BackendKind::Mock => (
                 vec![GuestArch::X86_64, GuestArch::Aarch64],
                 vec![KernelFormat::Elf, KernelFormat::Image],
+            ),
+            // QEMU's x86 direct-kernel loader accepts a bzImage (`Raw`) or an
+            // uncompressed ELF, but only when the ELF carries a PVH entry note
+            // (CONFIG_PVH=y). `check_direct_boot_loadable` enforces the PVH
+            // property at boot time; this declaration adds `Raw` so the image
+            // set can also offer a bzImage to QEMU.
+            BackendKind::Qemu => (
+                vec![GuestArch::X86_64, GuestArch::Aarch64],
+                vec![KernelFormat::Elf, KernelFormat::Raw, KernelFormat::Image],
             ),
             BackendKind::Hvf => (vec![GuestArch::Aarch64], vec![KernelFormat::Image]),
             BackendKind::Libkrun => (vec![GuestArch::X86_64], vec![KernelFormat::Elf]),

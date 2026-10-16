@@ -4,23 +4,21 @@ on:
   push:
     tags:
       - "v*"
-  # Manual dry-run: validate the release build + packaging (binaries, host-bin
-  # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
-  # `dry_run=true` (the default) runs only the `build` job and skips the
-  # publishing `release` job and `verify-release`. A real
-  # release still happens via a `v*` tag push; an explicit `dry_run=false`
-  # dispatch publishes too (escape hatch).
+  # Manual validation runs the pre-publication build, packaging and native
+  # gates without creating a release. Explicit dry_run=false may rehearse the
+  # throwaway draft API where environment policy permits; it cannot mint the
+  # trusted tag identity or promote a public release. Production uses a v* tag.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build + package only; do NOT publish (no GitHub release, no crates.io)"
+        description: "Validate without a release (true); false permits a throwaway draft rehearsal, never public publication"
         type: boolean
         default: true
 
 permissions:
   contents: write
   id-token: write        # Required for cosign keyless signing via OIDC
-  actions: write         # Required to dispatch publish-crates workflow
+  actions: write         # Required for post-promotion workflow dispatch
   attestations: write    # Required to record build provenance for the release binaries
 
 env:
@@ -321,6 +319,22 @@ jobs:
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --producer-adhoc --require-cli-inventory \
+            --payload staging/mvmctl-aarch64-apple-darwin \
+            --report "${RUNNER_TEMP}/macos-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-producer-signing
+          path: ${{ runner.temp }}/macos-producer-signing.json
+          if-no-files-found: warn
+
       - name: Sign and notarize the staged macOS release
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
         env:
@@ -366,6 +380,29 @@ jobs:
 
           # Generate SHA256 checksum for the tarball
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+
+      - name: Inspect final macOS package bytes
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notary=()
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            notary=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
+          fi
+          python3 scripts/release/verify_macos_package.py \
+            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz \
+            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory \
+            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json" \
+            "${notary[@]}" --report "${RUNNER_TEMP}/macos-final-package.json"
+
+      - name: Retain final macOS package inspection
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-final-package
+          path: ${{ runner.temp }}/macos-final-package.json
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -466,10 +503,9 @@ jobs:
     # this condition; a job listed and not checked is worse than one that was
     # never added, because it reads as covered.
     #
-    # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
-    # (the `build` job) but never reaches this publish job — only a tag push or
-    # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    # Default manual validation never creates even a draft release. Explicit
+    # draft API rehearsals remain subject to the environment policy below.
+    if: ${{ !cancelled() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -729,21 +765,6 @@ jobs:
             echo "no dry-run draft ${tag} to delete"
           fi
 
-      # The "release: published" event fired by `gh release create` runs under
-      # GITHUB_TOKEN, which by design does not trigger downstream workflows.
-      # workflow_dispatch is exempt from that rule, so chain publish-crates
-      # explicitly here. This keeps crates.io in sync with GitHub releases.
-      - name: Trigger crates.io publish workflow
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh workflow run publish-crates.yml \
-            --ref "${TAG_NAME}" \
-            -f tag="${TAG_NAME}" \
-            -f dry_run=false
-
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle
   # + an entry in the combined checksums manifest, and that the SBOM is signed.
@@ -824,6 +845,54 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
+  # This report witnesses the current signed image pin with the released CLI.
+  # Staged schema-3 image candidates are validated separately with that same CLI;
+  # requiring one here would introduce a circular rollout dependency.
+  # ARM Linux boot remains unverified: there is no ARM Linux KVM runner.
+  published-installed-boot:
+    needs: [verify-release, first-run-smoke]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installed-boot-lane-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/boot-lanes
+      - name: Reauthenticate and aggregate both installed boot lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 scripts/published-installed-boot.py aggregate \
+            --tag "$TAG_NAME" --lanes "${RUNNER_TEMP}/boot-lanes" \
+            --assets "${RUNNER_TEMP}/boot-assets" \
+            --out "${RUNNER_TEMP}/published-installed-boot/installed-boot.json"
+      - name: Attest the installed boot report
+        id: boot-attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json
+      - name: Keep the offline attestation bundle beside the report
+        env:
+          BUNDLE: ${{ steps.boot-attestation.outputs.bundle-path }}
+        run: |
+          test -s "$BUNDLE"
+          cp "$BUNDLE" "${RUNNER_TEMP}/published-installed-boot/installed-boot.json.bundle"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-installed-boot-v1
+          overwrite: true
+          path: ${{ runner.temp }}/published-installed-boot
+          if-no-files-found: error
+          retention-days: 90
+
   published-package-smoke:
     needs: [verify-release]
     if: ${{ github.event_name == 'push' }}
@@ -846,8 +915,8 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.first-run-smoke.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
+    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

@@ -146,7 +146,7 @@ fn platform_process_executable(_pid: i32) -> Option<PathBuf> {
     None
 }
 
-/// What [`signal_if_executable`] did.
+/// What [`signal_if_executable`] or [`signal_if_identity`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuardedSignal {
     /// The process was running an accepted executable and was sent the signal.
@@ -154,7 +154,7 @@ pub enum GuardedSignal {
     /// No live process holds the PID, so there was nothing to signal.
     Exited,
     /// The process is live, but its executable could not be read (`None`) or
-    /// was not accepted. Nothing was sent.
+    /// was not accepted (including identity rejection). Nothing was sent.
     Refused(Option<PathBuf>),
 }
 
@@ -175,6 +175,213 @@ pub fn signal_if_executable(
         return Ok(GuardedSignal::Refused(None));
     }
     platform_signal_if_executable(pid, signal, accept)
+}
+
+/// Signal a recorded Linux process identity without a numeric-PID fallback.
+///
+/// `accept` runs only after opening a pidfd and receiving the executable. It
+/// must validate the recorded identity, including an exact raw `/proc/PID/stat`
+/// field-22 starttime (reject missing evidence), and any endpoint/socket checks.
+/// The starttime is re-read after the callback and the pidfd is probed last:
+/// validation of a replacement PID cannot authorize signalling the old process.
+///
+/// `Refused` means identity validation failed, `Exited` means the process vanished.
+/// Unsupported pidfds/platforms return `ErrorKind::Unsupported`; inspection or
+/// signal permission failures return `PermissionDenied`. No privileges are
+/// elevated. Signal zero is rejected: `Sent` always means a signal was delivered.
+/// Unlike [`signal_if_executable`], this API never calls `kill`.
+pub fn signal_if_identity(
+    pid: i32,
+    signal: libc::c_int,
+    accept: &dyn Fn(&Path) -> bool,
+) -> std::io::Result<GuardedSignal> {
+    if pid <= 1 {
+        return Ok(GuardedSignal::Refused(None));
+    }
+    if signal == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "identity signalling requires a nonzero signal",
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        identity_signal_with(
+            signal,
+            accept,
+            || open_identity_pidfd(pid),
+            || {
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+                parse_proc_starttime(&stat)
+            },
+            || std::fs::read_link(format!("/proc/{pid}/exe")).map(without_deleted_marker),
+            pidfd_send_signal,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = accept;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "identity signalling requires Linux pidfds",
+        ))
+    }
+}
+
+/// One original Linux process handle, retained across multiple identity checks.
+/// There is deliberately no fallback on kernels without pidfds.
+#[cfg(target_os = "linux")]
+pub struct RetainedProcess {
+    pid: i32,
+    start_ticks: u64,
+    fd: std::os::fd::OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl RetainedProcess {
+    /// Open before collecting any registration evidence.
+    pub fn open(pid: i32) -> std::io::Result<Self> {
+        if pid <= 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid PID",
+            ));
+        }
+        let fd = open_identity_pidfd(pid)?;
+        let start_ticks =
+            parse_proc_starttime(&std::fs::read_to_string(format!("/proc/{pid}/stat"))?)?;
+        if !pidfd_send_signal(&fd, 0)? {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+        Ok(Self {
+            pid,
+            start_ticks,
+            fd,
+        })
+    }
+
+    pub fn start_ticks(&self) -> u64 {
+        self.start_ticks
+    }
+
+    /// Check the retained handle without delivering a signal.
+    pub fn check(&self, accept: &dyn Fn(&Path) -> bool) -> std::io::Result<GuardedSignal> {
+        self.checked_signal(0, accept)
+    }
+
+    /// Validate and signal through this exact handle, never a newly opened one.
+    /// The callback must check all additional recorded identity bindings.
+    pub fn signal(
+        &self,
+        signal: libc::c_int,
+        accept: &dyn Fn(&Path) -> bool,
+    ) -> std::io::Result<GuardedSignal> {
+        if signal <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid signal",
+            ));
+        }
+        self.checked_signal(signal, accept)
+    }
+
+    fn checked_signal(
+        &self,
+        signal: libc::c_int,
+        accept: &dyn Fn(&Path) -> bool,
+    ) -> std::io::Result<GuardedSignal> {
+        identity_signal_with(
+            signal,
+            accept,
+            || Ok(&self.fd),
+            || {
+                let ticks = parse_proc_starttime(&std::fs::read_to_string(format!(
+                    "/proc/{}/stat",
+                    self.pid
+                ))?)?;
+                if ticks != self.start_ticks {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "process identity changed",
+                    ));
+                }
+                Ok(ticks)
+            },
+            || std::fs::read_link(format!("/proc/{}/exe", self.pid)),
+            |fd, signal| pidfd_send_signal(fd, signal),
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_identity_pidfd(pid: i32) -> std::io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: pidfd_open takes scalar arguments and returns a new descriptor.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if raw < 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(match error.raw_os_error() {
+            Some(libc::ENOSYS) | Some(libc::EINVAL) | Some(libc::EOPNOTSUPP) => {
+                std::io::Error::new(std::io::ErrorKind::Unsupported, error)
+            }
+            _ => error,
+        });
+    }
+    let raw = i32::try_from(raw).map_err(|_| std::io::Error::other("pidfd out of range"))?;
+    // SAFETY: only this owner closes the newly opened pidfd.
+    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_starttime(stat: &str) -> std::io::Result<u64> {
+    // comm can contain spaces and ')' characters. Fields after its final ')'
+    // begin at field 3; field 22 is therefore index 19.
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .and_then(|field| field.parse().ok())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid process starttime")
+        })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn identity_signal_with<H>(
+    signal: libc::c_int,
+    accept: &dyn Fn(&Path) -> bool,
+    open: impl FnOnce() -> std::io::Result<H>,
+    starttime: impl Fn() -> std::io::Result<u64>,
+    executable: impl FnOnce() -> std::io::Result<PathBuf>,
+    send: impl Fn(&H, libc::c_int) -> std::io::Result<bool>,
+) -> std::io::Result<GuardedSignal> {
+    let attempt = || {
+        // Keep the owned handle in scope through every check and both sends.
+        let handle = open().map_err(|error| match error.raw_os_error() {
+            Some(libc::EINVAL) => std::io::Error::new(std::io::ErrorKind::Unsupported, error),
+            _ => error,
+        })?;
+        let before = starttime()?;
+        let path = executable()?;
+        let accepted = accept(&path);
+        let after = starttime()?;
+        if !send(&handle, 0)? {
+            return Ok(GuardedSignal::Exited);
+        }
+        if !accepted || before != after {
+            return Ok(GuardedSignal::Refused(Some(path)));
+        }
+        if send(&handle, signal)? {
+            Ok(GuardedSignal::Sent)
+        } else {
+            Ok(GuardedSignal::Exited)
+        }
+    };
+    attempt().or_else(|error: std::io::Error| match error.raw_os_error() {
+        Some(libc::ESRCH) | Some(libc::ENOENT) => Ok(GuardedSignal::Exited),
+        Some(libc::ENOSYS) | Some(libc::EOPNOTSUPP) => {
+            Err(std::io::Error::new(std::io::ErrorKind::Unsupported, error))
+        }
+        _ => Err(error),
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -281,6 +488,212 @@ fn inspect_then_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_starttime_is_raw_field_22_even_with_complex_comm() {
+        let fields = std::iter::repeat_n("0", 19).collect::<Vec<_>>().join(" ");
+        let stat = format!("42 (name ) with spaces) {fields} 18446744073709551615 9");
+        assert_eq!(parse_proc_starttime(&stat).unwrap(), u64::MAX);
+        for invalid in ["", "42 (name) 0", "42 (name) malformed"] {
+            assert_eq!(
+                parse_proc_starttime(invalid).unwrap_err().kind(),
+                std::io::ErrorKind::InvalidData
+            );
+        }
+    }
+
+    #[test]
+    fn identity_open_errors_never_inspect_or_signal_a_numeric_pid() {
+        for (errno, kind) in [
+            (libc::ENOSYS, std::io::ErrorKind::Unsupported),
+            (libc::EINVAL, std::io::ErrorKind::Unsupported),
+            (libc::EPERM, std::io::ErrorKind::PermissionDenied),
+        ] {
+            let result = identity_signal_with::<()>(
+                libc::SIGTERM,
+                &|_| panic!("must not accept without a pidfd"),
+                || Err(std::io::Error::from_raw_os_error(errno)),
+                || panic!("must not inspect without a pidfd"),
+                || panic!("must not inspect without a pidfd"),
+                |_, _| panic!("must not signal without a pidfd"),
+            );
+            assert_eq!(result.unwrap_err().kind(), kind);
+        }
+        assert_eq!(
+            identity_signal_with::<()>(
+                libc::SIGTERM,
+                &|_| panic!("missing PID"),
+                || Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
+                || panic!("missing PID"),
+                || panic!("missing PID"),
+                |_, _| panic!("missing PID"),
+            )
+            .unwrap(),
+            GuardedSignal::Exited
+        );
+    }
+
+    #[test]
+    fn identity_validation_and_signalling_retain_the_handle_in_order() {
+        use std::cell::{Cell, RefCell};
+        let held = Cell::new(false);
+        struct Handle<'a>(&'a Cell<bool>);
+        impl Drop for Handle<'_> {
+            fn drop(&mut self) {
+                self.0.set(false);
+            }
+        }
+        // Accepted identity, callback rejecting absent/mismatched evidence,
+        // changed starttime, and replacement identity while old pidfd is dead.
+        for (accepted, changed, alive, expected) in [
+            (true, false, true, GuardedSignal::Sent),
+            (
+                false,
+                false,
+                true,
+                GuardedSignal::Refused(Some("/fc".into())),
+            ),
+            (true, true, true, GuardedSignal::Refused(Some("/fc".into()))),
+            (true, false, false, GuardedSignal::Exited),
+        ] {
+            let reads = Cell::new(0);
+            let signals = RefCell::new(Vec::new());
+            let result = identity_signal_with(
+                libc::SIGTERM,
+                &|path| {
+                    assert!(held.get());
+                    assert_eq!(path, Path::new("/fc"));
+                    assert_eq!(reads.get(), 1);
+                    accepted
+                },
+                || {
+                    held.set(true);
+                    Ok(Handle(&held))
+                },
+                || {
+                    assert!(held.get());
+                    let n = reads.get();
+                    reads.set(n + 1);
+                    Ok(if changed && n > 0 { 23 } else { 22 })
+                },
+                || {
+                    assert!(held.get());
+                    Ok("/fc".into())
+                },
+                |_, signal| {
+                    assert!(held.get());
+                    assert_eq!(reads.get(), 2);
+                    signals.borrow_mut().push(signal);
+                    Ok(alive)
+                },
+            );
+            assert_eq!(result.unwrap(), expected);
+            assert!(!held.get(), "owned handle closes after operation");
+            assert_eq!(
+                *signals.borrow(),
+                if expected == GuardedSignal::Sent {
+                    vec![0, libc::SIGTERM]
+                } else {
+                    vec![0]
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn identity_signal_permission_and_exit_are_not_success() {
+        for errno in [libc::EPERM, libc::EACCES, libc::ESRCH] {
+            let result = identity_signal_with(
+                libc::SIGTERM,
+                &|_| true,
+                || Ok(()),
+                || Ok(22),
+                || Ok("/fc".into()),
+                |_, signal| {
+                    if signal == 0 {
+                        Ok(true)
+                    } else {
+                        Err(std::io::Error::from_raw_os_error(errno))
+                    }
+                },
+            );
+            if errno == libc::ESRCH {
+                assert_eq!(result.unwrap(), GuardedSignal::Exited);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+        assert_eq!(
+            signal_if_identity(42, 0, &|_| true).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn identity_callback_rejects_missing_or_mismatched_recorded_starttime() {
+        for expected in [None, Some(21), Some(22)] {
+            let sent = std::cell::Cell::new(false);
+            let result = identity_signal_with(
+                libc::SIGTERM,
+                &|exe| exe == Path::new("/fc") && expected == Some(22),
+                || Ok(()),
+                || Ok(22),
+                || Ok("/fc".into()),
+                |_, signal| {
+                    if signal != 0 {
+                        sent.set(true);
+                    }
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(sent.get(), expected == Some(22));
+            assert_eq!(
+                result,
+                if expected == Some(22) {
+                    GuardedSignal::Sent
+                } else {
+                    GuardedSignal::Refused(Some("/fc".into()))
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn identity_inspection_failure_is_not_silent_success() {
+        for errno in [libc::ENOENT, libc::EACCES] {
+            let result = identity_signal_with(
+                libc::SIGTERM,
+                &|_| panic!("inspection failed"),
+                || Ok(()),
+                || Err(std::io::Error::from_raw_os_error(errno)),
+                || panic!("inspection failed"),
+                |_, _| panic!("inspection failed"),
+            );
+            if errno == libc::ENOENT {
+                assert_eq!(result.unwrap(), GuardedSignal::Exited);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn identity_signal_is_unsupported_without_linux_pidfds() {
+        assert_eq!(
+            signal_if_identity(42, libc::SIGTERM, &|_| panic!("no pidfd"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Unsupported
+        );
+    }
 
     #[test]
     fn process_executable_names_this_process_binary() {

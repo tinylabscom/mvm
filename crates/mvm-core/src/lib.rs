@@ -6,6 +6,7 @@
 // unsafe carve-out for process-wide env mutation in tests.
 
 pub mod action;
+pub mod admission_durability;
 pub mod arch;
 pub mod audit_verify;
 pub mod build_env;

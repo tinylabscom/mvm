@@ -41,6 +41,13 @@
 //!
 //! - `MVM_RUNTIME_BOOT_INITRD`, `MVM_RUNTIME_BOOT_ROOTFS_VERITY`, and
 //!   `MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH` to exercise a sealed rootfs boot.
+//! - `MVM_RUNTIME_BOOT_OVERLAY`, `MVM_RUNTIME_BOOT_OVERLAY_VERITY`,
+//!   `MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH` and `MVM_RUNTIME_BOOT_RUNTIME_VERSION`
+//!   (or the `overlay`/`overlay-verity`/`overlay-roothash`/`runtime-version`
+//!   TOML fields) attach the runtime overlay. The launch-time evidence gate
+//!   verifies that runtime against the checked source cache of the home this
+//!   runs under, so run it with an `MVM_HOME` whose cache built the overlay.
+//!   The runtime's initramfs is resolved from the same cache — no knob.
 //! - `MVM_RUNTIME_BOOT_GRANT=1` (or `grant = true` in the TOML config) to
 //!   provision each boot with the signed verb-grant sidecar an admitted run
 //!   carries. Every backend boots guests under `mvm.require_grant=1`, so a
@@ -81,11 +88,15 @@ const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
 /// `/mvm/runtime`, which is the runtime overlay attached as a second
 /// virtio-blk drive. Booting one without the overlay panics the guest at
 /// `Attempted to kill init!` before the agent can bind vsock, so a harness that
-/// cannot attach an overlay cannot boot a prod image at all. All three are
-/// required together, matching what the backend demands.
+/// cannot attach an overlay cannot boot a prod image at all. The path, verity
+/// sidecar, roothash and runtime version are required together, matching what
+/// the backend and the launch-time evidence gate demand.
 const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
 const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
 const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
+/// The runtime's own version, binding the overlay quadruple to the checked
+/// source cache the launch-time evidence gate verifies against.
+const RUNTIME_VERSION_VAR: &str = "MVM_RUNTIME_BOOT_RUNTIME_VERSION";
 const GRANT_VAR: &str = "MVM_RUNTIME_BOOT_GRANT";
 
 const DEFAULT_BACKEND: &str = "firecracker";
@@ -352,6 +363,10 @@ struct BenchSpec {
     cpus: u32,
     memory_mib: u32,
     overlay: Option<OverlaySpec>,
+    /// The runtime's initramfs, resolved from the checked source cache the
+    /// overlay's version names. The launch-time evidence gate authenticates
+    /// the whole runtime set, so an overlay boot carries it.
+    runtime_initramfs: Option<PathBuf>,
     rootfs_integrity: Option<RootfsIntegritySpec>,
     /// Provision each boot with the signed verb-grant sidecar an admitted run
     /// carries, so the guest agent authorizes the stop-time flush verb and
@@ -370,14 +385,17 @@ struct RootfsIntegritySpec {
     roothash: String,
 }
 
-/// All three or none. The backend attaches the overlay only when the path, the
+/// All four or none. The backend attaches the overlay only when the path, the
 /// verity sidecar and the roothash are all present, so accepting a partial set
 /// here would boot without an overlay and fail as though none was configured.
+/// The version is what binds that set to a checked runtime: the launch-time
+/// evidence gate refuses an overlay it cannot name a version for.
 #[derive(Debug, Clone)]
 struct OverlaySpec {
     path: PathBuf,
     verity: PathBuf,
     roothash: String,
+    version: String,
 }
 
 impl BenchSpec {
@@ -391,6 +409,10 @@ impl BenchSpec {
         let mut evidence = config.evidence.clone();
         evidence.report_path = env_path_opt("MVM_RUNTIME_BOOT_REPORT", evidence.report_path);
         let overlay = overlay_spec(&config)?;
+        let runtime_initramfs = overlay
+            .as_ref()
+            .map(|overlay| resolve_runtime_initramfs(&overlay.version))
+            .transpose()?;
         let rootfs_integrity = rootfs_integrity_spec(&config)?;
         let kernel = required_path(KERNEL_VAR, config.kernel)?;
         let rootfs = required_path(ROOTFS_VAR, config.rootfs)?;
@@ -414,6 +436,7 @@ impl BenchSpec {
             cpus: env_u32(CPUS_VAR, config.cpus, 1)?,
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
             overlay,
+            runtime_initramfs,
             rootfs_integrity,
             grant: env_bool(GRANT_VAR, config.grant, false)?,
             evidence,
@@ -445,6 +468,8 @@ struct RawBenchConfig {
     overlay_verity: Option<PathBuf>,
     #[serde(alias = "overlay_roothash")]
     overlay_roothash: Option<String>,
+    #[serde(alias = "runtime_version")]
+    runtime_version: Option<String>,
     grant: Option<bool>,
     #[serde(default)]
     evidence: evidence::Options,
@@ -793,10 +818,17 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
         name,
         rootfs_path: spec.rootfs.to_string_lossy().into_owned(),
         kernel_path: Some(spec.kernel.to_string_lossy().into_owned()),
+        // The sealed-rootfs mode names its own initramfs; an overlay boot's
+        // initramfs is the runtime's, resolved from the checked source cache.
         initrd_path: spec
             .rootfs_integrity
             .as_ref()
-            .map(|integrity| integrity.initrd.to_string_lossy().into_owned()),
+            .map(|integrity| integrity.initrd.to_string_lossy().into_owned())
+            .or_else(|| {
+                spec.runtime_initramfs
+                    .as_ref()
+                    .map(|initramfs| initramfs.to_string_lossy().into_owned())
+            }),
         verity_path: spec
             .rootfs_integrity
             .as_ref()
@@ -818,6 +850,7 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
             .as_ref()
             .map(|o| o.verity.to_string_lossy().into_owned()),
         runtime_overlay_roothash: spec.overlay.as_ref().map(|o| o.roothash.clone()),
+        runtime_overlay_version: spec.overlay.as_ref().map(|o| o.version.clone()),
         ..Default::default()
     }
 }
@@ -929,14 +962,18 @@ fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
 }
 
 fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
+    // Resolve through the shared per-VM socket namespace, which moves every
+    // socket to the short fallback when a deep MVM_HOME would overflow a Unix
+    // socket path — the same endpoints the driver binds and its RPC clients
+    // dial, so a deep home cannot split the two.
     match backend {
-        "firecracker" => Ok(mvm_core::config::vm_state_dir(name)
-            .join("runtime")
-            .join("v.sock")),
-        "libkrun" | "krun" => Ok(mvm_core::config::vm_state_dir(name).join(format!(
-            "vsock-{}.sock",
-            mvm_agentd::vsock::GUEST_AGENT_PORT
+        "firecracker" => Ok(PathBuf::from(mvm_agentd::vsock::vsock_uds_path(
+            &mvm_core::config::vm_state_dir(name).to_string_lossy(),
         ))),
+        "libkrun" | "krun" => Ok(mvm_core::config::vm_vsock_port_socket(
+            name,
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+        )),
         other => bail!(
             "{READY_VAR}=guest-agent is not wired for backend {other:?}; use {READY_VAR}=start-return"
         ),
@@ -989,27 +1026,35 @@ fn assert_within_budget(label: &str, actual: Duration, budget: Duration) {
     );
 }
 
-/// Resolve the overlay triple, refusing a partial one. A silently-dropped
+/// Resolve the overlay quadruple, refusing a partial one. A silently-dropped
 /// overlay is indistinguishable at the console from an image with no agent, so
 /// name the missing piece here rather than let the guest panic explain it.
+/// Without the version the launch-time evidence gate cannot name the runtime
+/// the overlay claims to be, and refuses the boot.
 fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
     let path = env_path_opt(OVERLAY_VAR, config.overlay.clone());
     let verity = env_path_opt(OVERLAY_VERITY_VAR, config.overlay_verity.clone());
     let roothash = env_string_opt(OVERLAY_ROOTHASH_VAR, config.overlay_roothash.clone());
-    match (path, verity, roothash) {
-        (None, None, None) => Ok(None),
-        (Some(path), Some(verity), Some(roothash)) => {
+    let version = env_string_opt(RUNTIME_VERSION_VAR, config.runtime_version.clone());
+    match (path, verity, roothash, version) {
+        (None, None, None, None) => Ok(None),
+        (Some(path), Some(verity), Some(roothash), Some(version)) => {
             let roothash = roothash.trim().to_string();
             if roothash.is_empty() {
                 anyhow::bail!("{OVERLAY_ROOTHASH_VAR} is set but empty");
+            }
+            let version = version.trim().to_string();
+            if version.is_empty() {
+                anyhow::bail!("{RUNTIME_VERSION_VAR} is set but empty");
             }
             Ok(Some(OverlaySpec {
                 path,
                 verity,
                 roothash,
+                version,
             }))
         }
-        (path, verity, roothash) => {
+        (path, verity, roothash, version) => {
             let mut missing = Vec::new();
             if path.is_none() {
                 missing.push(OVERLAY_VAR);
@@ -1020,13 +1065,43 @@ fn overlay_spec(config: &RawBenchConfig) -> Result<Option<OverlaySpec>> {
             if roothash.is_none() {
                 missing.push(OVERLAY_ROOTHASH_VAR);
             }
+            if version.is_none() {
+                missing.push(RUNTIME_VERSION_VAR);
+            }
             anyhow::bail!(
                 "runtime overlay is half-configured; the backend attaches it only \
-                 when all three are set. Missing: {}",
+                 when all four are set. Missing: {}",
                 missing.join(", ")
             )
         }
     }
+}
+
+/// The runtime's initramfs, built from the same checked source cache the
+/// launch-time evidence gate verifies the overlay against. A real launch gets
+/// it from the runtime resolver; the bench resolves it the same way rather
+/// than taking a path a config file could point anywhere.
+fn resolve_runtime_initramfs(version: &str) -> Result<PathBuf> {
+    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let workspace = mvm_build::image_source::guest_runtime_source_checkout()
+        .context("the runtime initramfs resolves from the developer checkout's source cache")?;
+    let arch = mvm_core::arch::GuestArch::host();
+    let runtime =
+        mvm_build::guest_runtime::cached_source_guest_runtime(&cache, version, arch, &workspace)?
+            .with_context(|| {
+            format!(
+                "no checked source runtime for {version} in {}; assemble the runtime \
+                     overlay into this home first",
+                cache.display()
+            )
+        })?;
+    let initramfs = mvm_build::initramfs::build_initramfs_from_guest_runtime(
+        &mvm_build::runtime_pieces::initramfs_cache_root(&cache),
+        version,
+        arch,
+        &runtime,
+    )?;
+    Ok(initramfs.image_path)
 }
 
 /// Resolve the sealed-rootfs triple, refusing partial or malformed inputs.
@@ -1380,20 +1455,22 @@ fn overlay_spec_is_absent_when_nothing_is_configured() {
 }
 
 #[test]
-fn overlay_spec_accepts_the_complete_triple() {
+fn overlay_spec_accepts_the_complete_quadruple() {
     let config = RawBenchConfig {
         overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
         overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
         overlay_roothash: Some("  deadbeef\n".to_string()),
+        runtime_version: Some(" 0.24.0 \n".to_string()),
         ..RawBenchConfig::default()
     };
     let spec = overlay_spec(&config)
-        .expect("complete triple is valid")
-        .expect("complete triple yields an overlay");
+        .expect("complete quadruple is valid")
+        .expect("complete quadruple yields an overlay");
     assert_eq!(spec.path, PathBuf::from("/tmp/overlay.ext4"));
     assert_eq!(spec.verity, PathBuf::from("/tmp/overlay.verity"));
     // Trimmed: the roothash is read from a file that ends in a newline.
     assert_eq!(spec.roothash, "deadbeef");
+    assert_eq!(spec.version, "0.24.0");
 }
 
 #[test]
@@ -1414,7 +1491,7 @@ fn overlay_spec_refuses_a_half_configured_overlay_and_names_what_is_missing() {
         .unwrap_or_else(|| panic!("error should name what is missing: {err}"));
     assert_eq!(
         listed,
-        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}")
+        format!("{OVERLAY_VERITY_VAR}, {OVERLAY_ROOTHASH_VAR}, {RUNTIME_VERSION_VAR}")
     );
 }
 
@@ -1424,6 +1501,7 @@ fn overlay_spec_refuses_a_blank_roothash() {
         overlay: Some(PathBuf::from("/tmp/overlay.ext4")),
         overlay_verity: Some(PathBuf::from("/tmp/overlay.verity")),
         overlay_roothash: Some("   \n".to_string()),
+        runtime_version: Some("0.24.0".to_string()),
         ..RawBenchConfig::default()
     };
     let err = overlay_spec(&config)
@@ -1505,6 +1583,7 @@ fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
         cpus: 1,
         memory_mib: 256,
         overlay,
+        runtime_initramfs: None,
         rootfs_integrity: None,
         grant: false,
         evidence: evidence::Options::default(),
@@ -1517,6 +1596,7 @@ fn overlay_fixture() -> OverlaySpec {
         path: PathBuf::from("/img/overlay.ext4"),
         verity: PathBuf::from("/img/overlay.verity"),
         roothash: "b".repeat(64),
+        version: "0.24.0".into(),
     }
 }
 
@@ -1548,6 +1628,45 @@ fn a_configured_overlay_declares_required_overlay() {}
 
 #[test]
 fn no_overlay_stays_rootfs_only() {}
+
+/// An overlay boot carries the runtime's initramfs resolved from the checked
+/// source cache; a sealed-rootfs boot keeps its own.
+#[test]
+fn start_config_carries_the_runtime_initramfs_for_an_overlay_boot() {
+    let mut spec = prod_shaped_spec(Some(overlay_fixture()));
+    spec.runtime_initramfs = Some(PathBuf::from("/cache/initramfs/0.24.0/initramfs.cpio.gz"));
+    let config = start_config(&spec, "bench".to_string());
+    assert_eq!(
+        config.initrd_path.as_deref(),
+        Some("/cache/initramfs/0.24.0/initramfs.cpio.gz")
+    );
+
+    spec.rootfs_integrity = Some(rootfs_integrity_fixture());
+    let config = start_config(&spec, "sealed-bench".to_string());
+    assert_eq!(
+        config.initrd_path.as_deref(),
+        Some("/img/initramfs.cpio.gz"),
+        "the sealed-rootfs mode's own initramfs wins"
+    );
+}
+
+/// The bench dials the guest agent at the endpoint the shared resolver names —
+/// the one the driver binds — including when a deep home moves every socket
+/// into the short fallback namespace. Hand-rolling `state_dir/runtime/v.sock`
+/// here once meant the bench polled a path nothing created.
+#[test]
+fn the_bench_dials_the_vsock_endpoint_the_driver_binds() {
+    let name = "mvm-bench-socket-resolution";
+    let dir = mvm_core::config::vm_state_dir(name);
+    assert_eq!(
+        guest_agent_socket_path("firecracker", name).unwrap(),
+        PathBuf::from(mvm_agentd::vsock::vsock_uds_path(&dir.to_string_lossy()))
+    );
+    assert_eq!(
+        guest_agent_socket_path("libkrun", name).unwrap(),
+        mvm_core::config::vm_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT)
+    );
+}
 
 /// The regression this file exists to prevent, asserted where it actually
 /// bites: on the kernel cmdline. Attaching the overlay drive is not the same as

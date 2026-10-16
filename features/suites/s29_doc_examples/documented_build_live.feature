@@ -44,3 +44,29 @@ Feature: The documented flake build runs for real
     When I install the sealed bundle into a fresh home that trusts its builder
     Then the command exits with code 0
     And the install reports a bundle content address
+
+  # Locking is offline; building requires the builder VM, prepared guest
+  # runtime and workload kernel, and network access to the pinned Nix inputs.
+  # The ordinary hermetic lane skips this scenario through the @live gate.
+  # A successful build includes a zero-exit health boot before signing.
+  @live
+  Scenario: the documented pack build health-boots and signs a frozen workload
+    Given a local pack build fixture
+    When I run mvmctl against the pack fixture with "pack lock pack.json --mvm-revision 543e2dc1b5401d743688ab2da57a43b7d6b463a1"
+    Then the command exits with code 0
+    When I run mvmctl against the live pack fixture with "pack build pack.json --out build.mvmpkg"
+    Then the command exits with code 0
+    And the pack build reports a signed archive
+    When I install the sealed bundle into a fresh home that trusts its builder
+    Then the command exits with code 0
+    And the install reports a bundle content address
+
+  Scenario: a pack build refuses source drift before building or signing
+    Given a local pack build fixture
+    When I run mvmctl against the pack fixture with "pack lock pack.json --mvm-revision 543e2dc1b5401d743688ab2da57a43b7d6b463a1"
+    Then the command exits with code 0
+    When the pack fixture source changes after locking
+    And I run mvmctl against the pack fixture with "pack build pack.json --out build.mvmpkg"
+    Then the command exits with code 1
+    And the error output contains "source_tree_sha256"
+    And the pack fixture has no archive or build progress

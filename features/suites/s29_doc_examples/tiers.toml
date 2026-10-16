@@ -129,6 +129,11 @@ tier = "exec"
 fixture = "release-signature"
 
 [[command]]
+path = "env verify-runtime"
+tier = "parse"
+reason = "authenticates a Sigstore-signed guest-runtime release archive and the selected overlay, verity and initramfs bytes against its declaration; the tree carries a signed fixture for a checksum manifest (`env verify-release`) but none for a runtime release archive, so there is nothing an isolated home could execute this against"
+
+[[command]]
 path = "explain"
 tier = "parse"
 reason = "names a completed machine whose refusal history belongs to the caller"
@@ -332,6 +337,11 @@ path = "machine stop"
 tier = "live"
 
 [[command]]
+path = "machine telemetry"
+tier = "parse"
+reason = "reads the records a booted machine's collector kept, so the documented form needs a VM that ran; the hermetic s34_telemetry_capture scenarios execute it in an isolated home against records their fixtures collected, and a live witness is follow-on work"
+
+[[command]]
 path = "machine undo"
 tier = "parse"
 reason = "needs a machine with an apply journal; the s26 BDD scenarios exercise the empty-history path hermetically, exec-tier fixtures are follow-on"
@@ -427,6 +437,11 @@ tier = "exec"
 [[command]]
 path = "ops metrics"
 tier = "exec"
+
+[[command]]
+path = "pack build"
+tier = "live"
+reason = "builds the frozen flake in the builder VM, health-boots its entrypoint, and signs the result; the live pack scenario installs the resulting archive in a fresh trusting home"
 
 [[command]]
 path = "pack download"

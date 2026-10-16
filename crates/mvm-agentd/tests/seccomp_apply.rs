@@ -7,13 +7,20 @@
 //! (cumulative-subset, no duplicates, manifest roundtrip). They don't
 //! exercise the BPF program at runtime. This test does:
 //!
-//! 1. Spawn `mvm-seccomp-apply <tier> -- syscall-probe`.
+//! 1. Spawn `mvm-seccomp-apply <tier> -- syscall-probe`. For the `groups`
+//!    probe the test spawns the probe directly with a tier it installs on
+//!    itself (`syscall-probe groups <tier>`): the shim's apply-then-exec
+//!    goes through std's `Command::exec`, which resets SIGPIPE after the
+//!    filter is installed, and `essential` grants no `rt_sigaction` for the
+//!    reset — so the shim's handoff dies there, while a process confined
+//!    after startup, the agent's own ordering, does not.
 //! 2. The probe attempts `socket(AF_INET, SOCK_STREAM, 0)`, or the
-//!    `AF_VSOCK` equivalent when asked.
+//!    `AF_VSOCK` equivalent when asked, or `getgroups(0, NULL)`.
 //! 3. Assert the probe's exit code matches the tier's promise:
 //!    - `unrestricted` / `network` → 0 (call allowed)
 //!    - `standard` → `EPERM` (call denied with seccomp errno-action)
 //!    - `vsock` → `AF_VSOCK` passes the filter, `AF_INET` is `EPERM`
+//!    - every enforcing tier → `getgroups` succeeds without changing groups
 //!
 //! Linux-only because seccomp is a Linux kernel feature. The crate
 //! still builds on macOS (the gated stub binaries pass `cargo check`),
@@ -45,6 +52,17 @@ fn run_family_under(tier: &str, family: &str) -> Output {
         .expect("spawn mvm-seccomp-apply")
 }
 
+/// The groups probe installs the tier on itself rather than going through
+/// the shim — the file header has why the shim's exec handoff cannot reach
+/// `essential`.
+fn run_groups_self_confined(tier: &str) -> Output {
+    Command::new(probe())
+        .arg("groups")
+        .arg(tier)
+        .output()
+        .expect("spawn syscall-probe")
+}
+
 /// The filter let `socket` through. The probe exits 0 when the socket opened
 /// and with the errno otherwise; a kernel without the vsock transport loaded
 /// answers `AF_VSOCK` with `EAFNOSUPPORT`, which is the kernel speaking after
@@ -66,6 +84,19 @@ fn assert_denied_by_the_filter(out: &Output, what: &str) {
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+#[test]
+fn every_enforcing_tier_allows_reading_supplementary_groups() {
+    for tier in ["essential", "minimal", "standard", "vsock", "network"] {
+        let out = run_groups_self_confined(tier);
+        assert!(
+            out.status.success(),
+            "getgroups must succeed under {tier}; status={:?} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
 #[test]

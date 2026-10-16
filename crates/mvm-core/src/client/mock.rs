@@ -102,17 +102,11 @@ impl MockStream {
     }
 }
 
-/// The length of the line the collector persists for `record`: the
-/// envelope when it carries a receive time, the bare record otherwise.
+/// The length of the sealed line the collector persists for `record`, so the
+/// mock's cursors are the byte offsets the real reader hands out.
 fn persisted_line_len(record: &ReceivedRecord) -> u64 {
-    let line = match record.received_at_ms {
-        Some(received_at_ms) => ReceivedRecord::encode_line(received_at_ms, &record.record),
-        None => serde_json::to_vec(&record.record).map(|mut line| {
-            line.push(b'\n');
-            line
-        }),
-    };
-    line.expect("a built telemetry record serializes").len() as u64
+    ReceivedRecord::sealed_line_len(record.received_at_ms.unwrap_or(0), &record.record)
+        .expect("a built telemetry record serializes")
 }
 
 impl Default for MockBackend {
@@ -493,6 +487,7 @@ mod tests {
             vm_name: "quiet".into(),
             state: CollectorState::Collecting { generation: 2 },
             shed: 1,
+            losses: Default::default(),
             snapshot_age_ms: Some(400),
             records_bytes: 0,
         };
@@ -520,9 +515,7 @@ mod tests {
         let id = running(&mock, "chatty").await;
         let records: Vec<ReceivedRecord> = (1..=3).map(telemetry_record).collect();
         let line_len = |r: &ReceivedRecord| {
-            ReceivedRecord::encode_line(r.received_at_ms.unwrap(), &r.record)
-                .unwrap()
-                .len() as u64
+            ReceivedRecord::sealed_line_len(r.received_at_ms.unwrap(), &r.record).unwrap()
         };
         let ends: Vec<u64> = records
             .iter()

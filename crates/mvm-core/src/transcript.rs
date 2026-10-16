@@ -1509,10 +1509,25 @@ mod tests {
                 Err(TranscriptError::SealedRootMismatch)
             );
         }
+        let payload_path = dir.path().join(&terminal.chunks[0].file);
+        let ciphertext = std::fs::read(&payload_path).unwrap();
+        let manifest_bytes = serde_json::to_vec(&terminal).unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILENAME);
+        std::fs::write(&manifest_path, &manifest_bytes).unwrap();
         assert_eq!(
             export(&terminal, dir.path(), &fixed_key(1)),
             Err(TranscriptError::PayloadExpired)
         );
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_bytes);
+        assert_eq!(
+            export_chunks(&terminal, dir.path(), &fixed_key(1)),
+            Err(TranscriptError::PayloadExpired)
+        );
+        assert_eq!(std::fs::read(&payload_path).unwrap(), ciphertext);
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), manifest_bytes);
+        verify_sealed_root(&terminal).unwrap();
+        verify_chunks(&terminal, dir.path()).unwrap();
         assert_eq!(
             terminal.retained_plaintext_bytes().unwrap(),
             b"synthetic".len() as u64

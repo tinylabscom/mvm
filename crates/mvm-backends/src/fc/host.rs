@@ -354,9 +354,27 @@ pub fn is_firecracker_pid_running(pid: u32) -> Result<bool> {
 /// A live process whose identity cannot be confirmed — its `/proc` entry
 /// hidden, its command line unreadable, no `--api-sock` on it — is an error,
 /// because a caller treats "not ours" as "already stopped".
+///
+/// A VMM claimed from the idle pool was started with the pool's socket on its
+/// command line; its claim recorded that path beside the VM's socket, and it is
+/// accepted too.
 pub fn is_firecracker_for_socket(pid: u32, api_socket: &Path) -> Result<bool> {
-    identity_from(observe_process(pid)?, api_socket)
+    let view = observe_process(pid)?;
+    let origin = super::idle_pool::claim_origin_for(api_socket);
+    identity_from_any(view, api_socket, origin.as_deref())
         .with_context(|| format!("confirming which VM pid {pid} serves"))
+}
+
+/// [`identity_from`] against the VM's socket, or the pool socket its VMM was
+/// claimed from.
+fn identity_from_any(view: ProcessView, api_socket: &Path, origin: Option<&Path>) -> Result<bool> {
+    if identity_from(view.clone(), api_socket)? {
+        return Ok(true);
+    }
+    match origin {
+        Some(origin) => identity_from(view, origin),
+        None => Ok(false),
+    }
 }
 
 /// What the process table says about one pid.
@@ -529,6 +547,41 @@ fn comm_path_is_firecracker(path: &std::path::Path) -> Result<bool> {
 /// Name of the Firecracker VM-state file produced by `PUT /snapshot/create`.
 pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
 
+/// Read the rootfs path from a running Firecracker VM's live configuration.
+///
+/// Queries `GET /vm/config` through the VM's API socket and returns the
+/// `path_on_host` of the drive whose `drive_id` is `"rootfs"`. This is the
+/// path Firecracker actually has open, which may differ from the one
+/// `mode.json` recorded at start time when the image was since evicted and
+/// re-pulled at a different content-addressed path.
+fn rootfs_from_vm_config(vm_name: &str) -> Result<PathBuf> {
+    let vm_dir = super::resolve_running_vm_dir(vm_name)?;
+    let socket = PathBuf::from(super::fc_api_socket_path(&vm_dir));
+    let body = super::call(&socket, "GET", "/vm/config", None)
+        .with_context(|| format!("GET /vm/config for VM '{vm_name}'"))?;
+    #[derive(serde::Deserialize)]
+    struct Drives {
+        #[serde(default)]
+        drives: Vec<Drive>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Drive {
+        drive_id: String,
+        #[serde(default)]
+        path_on_host: Option<String>,
+    }
+    let drives: Drives = serde_json::from_str(&body)
+        .with_context(|| format!("parsing GET /vm/config for VM '{vm_name}'"))?;
+    for drive in &drives.drives {
+        if drive.drive_id == "rootfs"
+            && let Some(path) = &drive.path_on_host
+        {
+            return Ok(PathBuf::from(path));
+        }
+    }
+    anyhow::bail!("GET /vm/config for VM '{}' has no rootfs drive", vm_name)
+}
+
 /// Bridges the checkpoint `VmFullControl` trait to a running Firecracker VM.
 ///
 /// `save_memory(memory_path)` pauses the VM (via `PATCH /vm`), creates a full
@@ -544,7 +597,8 @@ pub const FC_VMSTATE_FILENAME: &str = "vmstate.bin";
 /// blob when the sidecar file is absent.
 ///
 /// `rootfs_path()` is read from the `mode.json` sidecar that `record_from_rootfs`
-/// writes at FC start time.
+/// writes at FC start time; if that path no longer exists on disk, falls back
+/// to `GET /vm/config` for the live rootfs Firecracker has open.
 pub struct FcVmFullControl {
     vm_name: String,
 }
@@ -555,9 +609,30 @@ impl FcVmFullControl {
             vm_name: vm_name.into(),
         }
     }
+
+    fn runtime_meta(&self) -> Result<mvm_vmm::host::runtime_meta::VmRuntimeMeta> {
+        mvm_vmm::host::runtime_meta::read(&self.vm_name)
+            .with_context(|| {
+                format!(
+                    "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
+                    self.vm_name
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no mode.json found for VM '{}'; was it started with `mvmctl machine run`?",
+                    self.vm_name
+                )
+            })
+    }
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        let dir = super::resolve_running_vm_dir(&self.vm_name)?;
+        super::runtime_artifacts::query(Path::new(&super::fc_api_socket_path(&dir)))
+    }
+
     fn pause(&self) -> Result<()> {
         super::pause_vm(&self.vm_name)
             .with_context(|| format!("pausing Firecracker VM '{}'", self.vm_name))
@@ -589,29 +664,47 @@ impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl {
     }
 
     fn rootfs_path(&self) -> Result<PathBuf> {
-        let meta = mvm_vmm::host::runtime_meta::read(&self.vm_name)
-            .with_context(|| {
-                format!(
-                    "reading mode.json for Firecracker VM '{}' to resolve rootfs path",
-                    self.vm_name
-                )
-            })?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no mode.json found for VM '{}'; was it started with `mvmctl machine run`?",
-                    self.vm_name
-                )
-            })?;
-        let rootfs_str = meta.rootfs_path.ok_or_else(|| {
+        let rootfs_str = self.runtime_meta()?.rootfs_path.ok_or_else(|| {
             anyhow::anyhow!(
                 "mode.json for VM '{}' has no rootfs_path field (started before rootfs tracking?)",
                 self.vm_name
             )
         })?;
-        Ok(PathBuf::from(rootfs_str))
+        let recorded = PathBuf::from(&rootfs_str);
+        if recorded.is_file() {
+            return Ok(recorded);
+        }
+        // The rootfs path recorded at start time can become stale when the
+        // image is evicted and re-pulled at a different content-addressed
+        // path. Fall back to the actual rootfs Firecracker has open, read
+        // from its API so the device anchors a fork builds from point at a
+        // path that exists.
+        tracing::info!(
+            vm = %self.vm_name,
+            recorded = %rootfs_str,
+            "recorded rootfs path missing; querying Firecracker for the live rootfs"
+        );
+        rootfs_from_vm_config(&self.vm_name).with_context(|| {
+            format!(
+                "recorded rootfs {} is gone and Firecracker's live config did not \
+             name an alternative for VM '{}'",
+                rootfs_str, self.vm_name
+            )
+        })
     }
 
+    /// The paths this VM's Firecracker names. A restored VM's Firecracker still
+    /// names the paths its snapshot embedded, which its restore made resolve to
+    /// this VM's own copies; a snapshot of it embeds them again.
     fn device_anchors(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
+        let files = self.device_anchor_files()?;
+        Ok(self
+            .runtime_meta()?
+            .restored_device_anchors
+            .unwrap_or(files))
+    }
+
+    fn device_anchor_files(&self) -> anyhow::Result<mvm_core::checkpoint::DeviceAnchors> {
         let vm_dir = super::resolve_running_vm_dir(&self.vm_name)
             .with_context(|| format!("resolving VM dir for '{}'", self.vm_name))?;
         // A fork finds the parent's state dir as the vsock socket's
@@ -748,10 +841,25 @@ impl FcForkRestorer {
         &self,
         child_vm_name: &str,
         child_dir: &std::path::Path,
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            runtime_evidence.reseeded_identity_sha256.is_none(),
+            "prepared children must inherit their authenticated identity"
+        );
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
         let io = self.prepare_fork_load(child_vm_name, child_dir, None)?;
-        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        if let Err(error) =
+            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        {
+            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -773,7 +881,99 @@ fn child_io(
     })
 }
 
+/// Point every late-volume slot a claim uses at its image on a paused child,
+/// tearing the child down if any of them cannot be.
+pub(crate) fn attach_late_volumes(
+    io: &super::io::FirecrackerIO,
+    late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+) -> anyhow::Result<()> {
+    for volume in late_volumes {
+        if let Err(error) = io.repoint_drive(&format!("blk{}", volume.slot), &volume.source) {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(io);
+            return Err(error.context("attaching a late volume to the restored child"));
+        }
+    }
+    Ok(())
+}
+
+/// The resume half of a preloaded fork: re-verify the paused child's restored
+/// layout against the claim's authenticated evidence, point its late-volume
+/// slots at the claim's images, and only then resume it. The preload verified
+/// this layout when it loaded, but the VMM has been paused and waiting on a
+/// claim since, so the resume re-authenticates the same manifest rather than
+/// trusting a VMM nobody has looked at. The layout check runs before the
+/// repoint because the capture records the parent's own paths, which attaching
+/// a late volume deliberately replaces; any failure tears the child down
+/// instead of letting an unverified or half-attached guest run.
+pub(crate) fn resume_preloaded_fork_child(
+    io: &super::io::FirecrackerIO,
+    child_dir: &std::path::Path,
+    runtime_artifacts_sha256: Option<&str>,
+    device_anchors_sha256: Option<&str>,
+    late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let expected = super::runtime_artifacts::authenticated_fork_capture(
+        child_dir,
+        &super::ForkRuntimeEvidence {
+            observation_sha256: runtime_artifacts_sha256
+                .context("Firecracker prepared claim requires authenticated runtime evidence")?,
+            anchors_sha256: device_anchors_sha256
+                .context("prepared claim requires authenticated device anchors")?,
+            reseeded_identity_sha256: None,
+        },
+    )?;
+    if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+    {
+        let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
+        return Err(error.context("prepared runtime verification"));
+    }
+    attach_late_volumes(io, late_volumes)?;
+    mvm_vmm::snapshot::resume_verified_or_teardown(io)
+}
+
 impl FcForkRestorer {
+    /// Stage the child's snapshot, verify the paused device layout against the
+    /// authenticated capture, point its late-volume slots at the claim's images
+    /// while it is still paused, and only then resume it. The layout check runs
+    /// before the repoint: the capture records the parent's own paths, which
+    /// attaching a late volume deliberately replaces.
+    pub fn restore_fork_attaching(
+        &self,
+        child_vm_name: &str,
+        child_dir: &std::path::Path,
+        cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+        late_volumes: &[mvm_vmm::driver::traits::LateVolumeAttach],
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
+    ) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+        if late_volumes.is_empty() {
+            return self.restore_fork(child_vm_name, child_dir, cpu_grant, runtime_evidence);
+        }
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
+        let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        if let Err(error) =
+            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            return Err(error);
+        }
+        attach_late_volumes(&io, late_volumes)?;
+        if let Err(error) = <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
+        {
+            let _ =
+                <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
+            return Err(error.context("resume after attaching late volumes"));
+        }
+        Ok(())
+    }
+
     /// Stage the child's snapshot and resume it. The fork-restore callback
     /// `fork_vm_full_fc` takes.
     pub fn restore_fork(
@@ -781,10 +981,20 @@ impl FcForkRestorer {
         child_vm_name: &str,
         child_dir: &std::path::Path,
         cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+        runtime_evidence: &super::ForkRuntimeEvidence<'_>,
     ) -> anyhow::Result<()> {
+        let expected =
+            super::runtime_artifacts::authenticated_fork_capture(child_dir, runtime_evidence)?;
         let io = self.prepare_fork_load(child_vm_name, child_dir, cpu_grant)?;
-        mvm_vmm::snapshot::guarded_fork_load_resume(&io, child_dir)
-            .with_context(|| format!("FC warm-restore for forked child '{child_vm_name}' failed"))
+        mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
+            format!("FC warm-restore for forked child '{child_vm_name}' failed")
+        })?;
+        let resumed = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+            .and_then(|()| mvm_vmm::snapshot::SnapshotIO::resume(&io));
+        if resumed.is_err() {
+            let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
+        }
+        resumed
     }
 }
 
@@ -900,6 +1110,28 @@ mod tests {
         assert!(identity_from(equals, mine).unwrap());
     }
 
+    /// A VMM claimed from the idle pool still names the pool socket it was
+    /// started with. The claim's record makes it this VM's; without one, or
+    /// for another pool socket, it is not.
+    #[test]
+    fn a_claimed_vmm_is_identified_by_the_pool_socket_its_claim_recorded() {
+        let mine = std::path::Path::new("/state/vms/vm-a/fc.socket");
+        let origin = std::path::Path::new("/state/fc-idle/idle-1f/fc.socket");
+        let claimed = || {
+            firecracker(&[
+                "firecracker",
+                "--api-sock",
+                "/state/fc-idle/idle-1f/fc.socket",
+            ])
+        };
+        assert!(identity_from_any(claimed(), mine, Some(origin)).unwrap());
+        assert!(!identity_from_any(claimed(), mine, None).unwrap());
+        let other = std::path::Path::new("/state/fc-idle/idle-2a/fc.socket");
+        assert!(!identity_from_any(claimed(), mine, Some(other)).unwrap());
+        let own = firecracker(&["firecracker", "--api-sock", "/state/vms/vm-a/fc.socket"]);
+        assert!(identity_from_any(own, mine, Some(origin)).unwrap());
+    }
+
     /// Only a positively different answer is "not ours": a process that is
     /// gone, is not Firecracker, or serves another VM's socket.
     #[test]
@@ -997,6 +1229,83 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use mvm_vmm::checkpoint::VmFullControl as _;
+
+    #[test]
+    fn rootfs_from_vm_config_selects_only_the_rootfs_drive() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixListener;
+        use std::time::Duration;
+
+        let _lock = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let home = socket_short_home();
+        env.set("MVM_HOME", home.path());
+        let vm_name = "config-rootfs";
+        let vm_dir = super::super::resolve_running_vm_dir(vm_name).unwrap();
+        let socket = PathBuf::from(super::super::fc_api_socket_path(&vm_dir));
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(socket).unwrap();
+        let responses = [
+            r#"{"drives":[{"drive_id":"config","path_on_host":"/config.ext4"},{"drive_id":"rootfs","path_on_host":"/rootfs.ext4"},{"drive_id":"data","path_on_host":"/data.ext4"}]}"#,
+            r#"{"drives":[{"drive_id":"config","path_on_host":"/config.ext4"}]}"#,
+            r#"{"drives":[{"drive_id":"rootfs"},{"drive_id":"data","path_on_host":"/data.ext4"}]}"#,
+        ];
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| {
+                for body in responses {
+                    let mut ready = libc::pollfd {
+                        fd: listener.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    // SAFETY: the live listener owns the descriptor and `ready`
+                    // is one initialized pollfd for the duration of the call.
+                    assert_eq!(unsafe { libc::poll(&mut ready, 1, 5_000) }, 1);
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .unwrap();
+                    let mut reader = BufReader::new(&stream);
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    assert_eq!(line, "GET /vm/config HTTP/1.1\r\n");
+                    loop {
+                        line.clear();
+                        assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                }
+            });
+            let results: Vec<_> = (0..responses.len())
+                .map(|_| rootfs_from_vm_config(vm_name))
+                .collect();
+            server.join().unwrap();
+            let mut results = results.into_iter();
+            assert_eq!(
+                results.next().unwrap().unwrap(),
+                PathBuf::from("/rootfs.ext4")
+            );
+            for result in results {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "GET /vm/config for VM 'config-rootfs' has no rootfs drive"
+                );
+            }
+        });
+    }
 
     /// Firecracker's restore launches through a shell rather than a `Command`,
     /// so its bound reaches the launch *line* as a prefix. This asserts the
@@ -1182,6 +1491,45 @@ mod tests {
                 &vm_dir.to_string_lossy()
             ))
         );
+    }
+
+    /// A VM restored from a snapshot reports, as the paths its snapshot embeds,
+    /// the ones its restore inherited, because its Firecracker still names
+    /// them; the files a capture copies are still its own.
+    #[test]
+    fn a_restored_vm_embeds_its_inherited_anchors_and_copies_its_own_files() {
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = socket_short_home();
+        env.set("MVM_HOME", tmp.path());
+
+        let vm_name = "restored-anchor-test";
+        let vm_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let rootfs = vm_dir.join("rootfs.ext4");
+        std::fs::File::create(&rootfs).unwrap();
+        std::fs::File::create(vm_dir.join("config.ext4")).unwrap();
+        let inherited = mvm_core::checkpoint::DeviceAnchors {
+            rootfs: "/parent/rootfs.ext4".into(),
+            rootfs_verity: None,
+            config: Some("/parent/vm/config.ext4".into()),
+            secrets: None,
+            identity: None,
+            vsock: "/parent/vm/runtime/v.sock".into(),
+        };
+        let mut meta =
+            mvm_vmm::host::runtime_meta::dev_attached(mvm_core::vm_backend::StartMode::Detached);
+        meta.rootfs_path = Some(rootfs.to_string_lossy().into_owned());
+        meta.restored_device_anchors = Some(inherited.clone());
+        mvm_vmm::host::runtime_meta::write(vm_name, &meta).unwrap();
+
+        let ctl = FcVmFullControl::new(vm_name);
+        assert_eq!(ctl.device_anchors().unwrap(), inherited);
+        let files = ctl.device_anchor_files().unwrap();
+        assert_eq!(files.rootfs, rootfs);
+        assert_eq!(files.config, Some(vm_dir.join("config.ext4")));
     }
 
     /// `device_anchors` fails with a clear message when the VM has no persisted

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease;
 use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply, ToolOrigin};
+use mvm_core::protocol::host_tool::ToolReleaseResponse;
 use mvm_core::substitution_wire::WireRequest;
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -185,6 +186,9 @@ impl SubstitutionService {
             }
             ConnectorRequest::Release(release) => {
                 self.release_tool_invocation(&release.release);
+                // A repeated release also succeeds: acknowledgement means the
+                // binding is retired, not that this call removed it first.
+                write_json_frame(&mut stream, &ToolReleaseResponse { released: true }).await?;
             }
         }
         Ok(())
@@ -260,9 +264,11 @@ mod server_tests {
         let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
         for tool in ["read", "write", "unlisted"] {
             let (mut client, server) = UnixStream::pair().expect("socket pair");
-            let service = Arc::clone(&service);
+            let decision_service = Arc::clone(&service);
             let handler =
-                tokio::spawn(async move { service.handle_connector_connection(server).await });
+                tokio::spawn(
+                    async move { decision_service.handle_connector_connection(server).await },
+                );
             let request = ToolCheckRequest {
                 tool: tool.into(),
                 executable: Some(format!("/bin/{tool}")),
@@ -283,7 +289,38 @@ mod server_tests {
                 .await
                 .expect("read decision");
             if tool == "read" {
-                assert!(matches!(reply, ToolDecisionReply::AllowBound { .. }));
+                let ToolDecisionReply::AllowBound { binding } = reply else {
+                    panic!("allowed invocation must have a binding");
+                };
+                // Exercise the real connector handler, including a retry of
+                // the same release after its first acknowledgement.
+                for _ in 0..2 {
+                    let (mut release_client, release_server) =
+                        UnixStream::pair().expect("release socket pair");
+                    let release_service = Arc::clone(&service);
+                    let release_handler = tokio::spawn(async move {
+                        release_service
+                            .handle_connector_connection(release_server)
+                            .await
+                    });
+                    write_json_frame(
+                        &mut release_client,
+                        &mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease {
+                            release: binding.clone(),
+                        },
+                    )
+                    .await
+                    .expect("send release");
+                    let ack: mvm_core::protocol::host_tool::ToolReleaseResponse =
+                        read_json_frame(&mut release_client, MAX_FRAME_BYTES)
+                            .await
+                            .expect("read release acknowledgement");
+                    assert!(ack.released);
+                    release_handler
+                        .await
+                        .expect("release handler join")
+                        .expect("serve release");
+                }
             } else {
                 assert_eq!(reply, ToolDecisionReply::Deny);
             }

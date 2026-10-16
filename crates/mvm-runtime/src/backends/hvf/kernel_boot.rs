@@ -15,17 +15,19 @@
 //! It then panics mounting the root fs because none is supplied — providing a
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "kernel_boot_image.rs"]
+mod image;
+use image::KernelImageSource;
+
 use super::HvfError;
+use super::guest_ram::GuestRam;
 #[cfg(test)]
-use super::guest_ram::HVF_PAGE_SIZE;
-use super::guest_ram::{GuestRam, page_rounded_len};
+use super::guest_ram::{HVF_PAGE_SIZE, page_rounded_len};
 pub use super::host_channels::HostChannels;
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::mmio_layout::{
@@ -39,13 +41,13 @@ use super::vcpu::esr_ec;
 use super::{BootFault, default_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::device_state::{SnapshotDeviceState, capture_device_states};
+use crate::vmm::fdt;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
 use crate::vmm::virtio::{DiskImage, VirtioBlk};
 use crate::vmm::virtio_balloon::VirtioBalloon;
 use crate::vmm::virtio_rng::VirtioRng;
 use crate::vmm::vsock::VirtioVsock;
-use crate::vmm::{fdt, kernel_image};
 use mvm_core::usage_capture::{Mechanism, Metric, UsageCapture};
 use mvm_core::vcpu_quota::VcpuQuotaRecord;
 use mvm_vmm::host::process_usage;
@@ -460,72 +462,6 @@ pub fn boot_kernel_until(params: KernelBootUntilParams<'_>) -> Result<KernelBoot
     boot_kernel_impl(params)
 }
 
-#[derive(Clone, Copy)]
-enum KernelImageSource<'a> {
-    Bytes(&'a [u8]),
-    File(&'a Path),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct KernelImageMeta {
-    file_len: usize,
-    reserved_len: usize,
-}
-
-impl KernelImageMeta {
-    fn new(file_len: usize, image_size: u64, file_backed: bool) -> Result<Self, HvfError> {
-        let image_size =
-            usize::try_from(image_size).map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
-        let mapped_len = if file_backed {
-            page_rounded_len(file_len)?
-        } else {
-            file_len
-        };
-        Ok(Self {
-            file_len,
-            reserved_len: mapped_len.max(image_size),
-        })
-    }
-}
-
-impl KernelImageSource<'_> {
-    fn metadata(self) -> Result<KernelImageMeta, HvfError> {
-        match self {
-            Self::Bytes(image) => {
-                let hdr = kernel_image::parse(image)
-                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
-                KernelImageMeta::new(image.len(), hdr.image_size, false)
-            }
-            Self::File(path) => {
-                let mut file = File::open(path)
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?;
-                let mut header = [0_u8; 64];
-                file.read_exact(&mut header)
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelRead(e.kind())))?;
-                let hdr = kernel_image::parse(&header)
-                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
-                let len = file
-                    .metadata()
-                    .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
-                    .len()
-                    .try_into()
-                    .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
-                KernelImageMeta::new(len, hdr.image_size, true)
-            }
-        }
-    }
-
-    fn load_into(self, ram: &mut GuestRam, offset: usize) -> Result<(), HvfError> {
-        match self {
-            Self::Bytes(image) => ram.copy_at(offset, image),
-            Self::File(path) => {
-                let meta = self.metadata()?;
-                ram.map_private_file_at(offset, path, meta.file_len)
-            }
-        }
-    }
-}
-
 fn initrd_load_offset(
     kernel_end: usize,
     initrd_len: usize,
@@ -567,7 +503,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         timeout,
         stop,
         paused,
-        channels,
+        mut channels,
         cpu_millicores,
         quota_record,
     } = params;
@@ -635,6 +571,21 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
             bootargs.push_str(extra);
         }
     }
+    if let Some(observer) = &mut channels.runtime_observer {
+        if let Some(frame) = &restore_frame {
+            let parsed = super::snapshot::parse_hvf_snapshot_frame(
+                frame,
+                HVF_SNAPSHOT_BACKEND_KIND,
+                guest_ram.len(),
+            )
+            .map_err(|_| HvfError::SnapshotState("runtime evidence frame invalid"))?;
+            observer
+                .inherit_verified_snapshot(parsed.artifact_digests)
+                .map_err(|_| HvfError::SnapshotState("runtime evidence lineage invalid"))?;
+        } else {
+            observer.set_kernel_cmdline(bootargs.clone());
+        }
+    }
     let initrd_bounds = initramfs.map(|rd| {
         (
             RAM_BASE + initrd_off as u64,
@@ -670,7 +621,12 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     }
 
     if restore_frame.is_none() {
-        kernel.load_into(&mut guest_ram, load_off)?;
+        let loaded_len = kernel.load_into(&mut guest_ram, load_off)?;
+        if let Some(observer) = &mut channels.runtime_observer
+            && let Some(artifact) = kernel.loaded_artifact(&guest_ram, load_off, loaded_len)?
+        {
+            observer.set_loaded_kernel(artifact);
+        }
         guest_ram.copy_at(dtb_off, &dtb)?;
         if let Some(rd) = initramfs {
             guest_ram.copy_at(initrd_off, rd)?;
@@ -708,6 +664,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
+                runtime_observer: channels.runtime_observer,
                 console_sink: channels.console_sink,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
@@ -779,6 +736,7 @@ struct RunInputs {
     builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
+    runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     console_sink: Option<Box<dyn std::io::Write + Send>>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
@@ -1040,6 +998,7 @@ struct PrimaryRun<'a> {
     /// writing it would have them racing to create and remove the same path.
     pause_ack: Arc<AtomicBool>,
     pause_state: Option<PathBuf>,
+    runtime_observer: Option<mvm_vmm::runtime_artifacts::Observer>,
     snapshot: SnapshotPaths,
     /// CPUs this machine has. A snapshot frame holds one vCPU's registers, so a
     /// request that arrives on a machine with more is refused rather than
@@ -1059,6 +1018,7 @@ fn run_primary<B: run::DeviceBus>(
         guest_ram,
         pause_ack,
         pause_state,
+        runtime_observer,
         snapshot,
         vcpus,
     } = input;
@@ -1067,6 +1027,7 @@ fn run_primary<B: run::DeviceBus>(
         ram: snapshot_ram,
         frame: snapshot_frame,
     } = snapshot;
+    let runtime_observer = runtime_observer.as_ref();
 
     run::run_on_bus(
         vcpu,
@@ -1084,6 +1045,9 @@ fn run_primary<B: run::DeviceBus>(
             should_pause: move || {
                 let requested = shared.paused.load(Ordering::Relaxed)
                     || shared.handoff_fence.is_some_and(|fence| fence.held());
+                if !requested && let Some(observer) = runtime_observer {
+                    observer.service(|| None::<()>);
+                }
                 if requested {
                     if !pause_ack.swap(true, Ordering::AcqRel)
                         && let Some(path) = &pause_state
@@ -1098,6 +1062,19 @@ fn run_primary<B: run::DeviceBus>(
                 requested
             },
             on_pause: move |vcpu: &HvfVcpu, devices: &[&dyn SnapshotDeviceState]| {
+                if let Some(observer) = runtime_observer {
+                    observer.service(|| {
+                        let parked = shared
+                            .parked_states
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Secondaries must clear their parked state under this
+                        // same lock before resuming. The primary is here.
+                        (shared.paused.load(Ordering::Acquire)
+                            && parked.iter().skip(1).all(Option::is_some))
+                        .then_some(parked)
+                    });
+                }
                 if let Some(fence) = shared.handoff_fence {
                     fence.acknowledge(0);
                 }
@@ -1142,6 +1119,11 @@ fn run_primary<B: run::DeviceBus>(
                 let mut vcpu_states = Vec::with_capacity(vcpus as usize);
                 vcpu_states.push(vcpu.capture_state()?);
                 vcpu_states.extend(secondary_states);
+                let artifact_digests = runtime_observer
+                    .map(|observer| observer.snapshot_payload())
+                    .transpose()
+                    .map_err(|_| HvfError::SnapshotState("runtime evidence capture failed"))?
+                    .unwrap_or_default();
                 let frame = super::snapshot::encode_hvf_snapshot_frame(
                     HVF_SNAPSHOT_BACKEND_KIND,
                     0,
@@ -1149,7 +1131,7 @@ fn run_primary<B: run::DeviceBus>(
                     &device_bytes,
                     &gic_bytes,
                     &vcpu_states,
-                    &[],
+                    &artifact_digests,
                 )
                 .map_err(|_| HvfError::SnapshotState("snapshot frame encode failed"))?;
                 mvm_core::util::atomic_io::atomic_write(frame_path, &frame)
@@ -1459,6 +1441,7 @@ unsafe fn run(
         console_data_sockets,
         builder_control_sockets,
         console_log,
+        runtime_observer,
         console_sink,
         pause_state,
         snapshot_request,
@@ -1940,6 +1923,7 @@ unsafe fn run(
                 guest_ram: &*guest_ram,
                 pause_ack,
                 pause_state,
+                runtime_observer,
                 snapshot: SnapshotPaths {
                     request: snapshot_request,
                     ram: snapshot_ram,
@@ -2535,6 +2519,33 @@ mod tests {
         assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
         let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
         assert_eq!(mapped, b"Zbcdefgh");
+    }
+
+    #[test]
+    fn raw_image_kernel_observation_hashes_exact_loaded_artifact_not_padding_or_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        let image = arm64_image(128, (HVF_PAGE_SIZE * 2) as u64);
+        std::fs::write(&kernel, &image).unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 3).unwrap();
+        let loaded_len = KernelImageSource::File(&kernel)
+            .load_into(&mut ram, HVF_PAGE_SIZE)
+            .unwrap();
+        assert_eq!(loaded_len, image.len());
+        std::fs::rename(&kernel, dir.path().join("original")).unwrap();
+        std::fs::write(&kernel, b"replacement").unwrap();
+        let observation = KernelImageSource::File(&kernel)
+            .loaded_artifact(&ram, HVF_PAGE_SIZE, loaded_len)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            observation.sha256,
+            mvm_core::plan::bundle::sha256_hex(&image)
+        );
+        assert_ne!(
+            observation.sha256,
+            mvm_core::crypto::image_verify::sha256_file(&kernel).unwrap()
+        );
     }
 
     /// The point of the split: the four things an operator can actually do

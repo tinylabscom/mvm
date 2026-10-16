@@ -363,6 +363,17 @@ impl NetworkPolicy {
         }
     }
 
+    /// Hosts of the routes whose rules this policy grants interception for, in
+    /// route order. The endpoint terminates TLS for each of them, so a boot
+    /// needs an egress certificate that covers them.
+    pub fn intercepted_route_hosts(&self) -> Vec<String> {
+        self.routes()
+            .iter()
+            .filter(|route| route.intercept && route.inspects())
+            .map(|route| route.host.clone())
+            .collect()
+    }
+
     /// Attach endpoint routes, replacing any already present.
     #[must_use]
     pub fn with_routes(mut self, new_routes: Vec<crate::policy::routes::EgressRoute>) -> Self {
@@ -1541,6 +1552,45 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         assert!(policy.ai().is_none());
     }
+    #[test]
+    fn certificate_hosts_require_both_interception_and_inspection() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let mut routes = Vec::new();
+        for intercept in [false, true] {
+            for inspect in [false, true] {
+                routes.push(EgressRoute {
+                    id: format!("route-{}-{}", u8::from(intercept), u8::from(inspect)),
+                    host: format!(
+                        "host-{}-{}.example.test",
+                        u8::from(intercept),
+                        u8::from(inspect)
+                    ),
+                    port: 443,
+                    intercept,
+                    rules: if inspect {
+                        vec![EndpointRule {
+                            id: None,
+                            method: Some("GET".into()),
+                            path: "/**".into(),
+                            outcome: RouteOutcome::Allow,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    otherwise: RouteOutcome::Allow,
+                });
+            }
+        }
+        for policy in [NetworkPolicy::unrestricted(), NetworkPolicy::deny_all()] {
+            assert!(policy.intercepted_route_hosts().is_empty());
+            assert_eq!(
+                policy.with_routes(routes.clone()).intercepted_route_hosts(),
+                ["host-1-1.example.test"]
+            );
+        }
+    }
+
     #[test]
     fn endpoint_routes_are_returned_for_both_policy_forms() {
         let route: crate::policy::routes::EgressRoute =

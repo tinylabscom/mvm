@@ -335,6 +335,10 @@ pub fn open_on(
     plane: &Arc<HostAssuranceV1Handler>,
     request: OpenSession<'_>,
 ) -> Result<MvmBinding, SessionRefusal> {
+    request
+        .admitted
+        .require_assurance_runtime(request.vm)
+        .map_err(|error| SessionRefusal::Unbindable(error.to_string()))?;
     let plan = request.admitted.plan();
     if !plan_binds_assurance(plan) {
         return Err(SessionRefusal::ServiceNotBound);
@@ -1394,6 +1398,7 @@ pub fn open_for_boot(
     vm: &str,
     admitted: &AdmittedPlan,
 ) -> Result<MvmBinding> {
+    admitted.require_assurance_runtime(vm)?;
     let plane = host_assurance_plane().ok_or_else(|| {
         anyhow::anyhow!(
             "this process holds no assurance plane, so the declared campaign has nowhere to run"
@@ -1617,7 +1622,76 @@ mod tests {
     fn admitted_for(plan: ExecutionPlan) -> AdmittedPlan {
         let signer_id = "host:test".to_string();
         let signed = sign(&plan, &EdKey::from_bytes(&[7u8; 32]), &signer_id);
-        AdmittedPlan::for_test(plan, signer_id, signed)
+        AdmittedPlan::for_test(plan, signer_id, signed).with_mock_assurance_runtime_for_test("vm-a")
+    }
+
+    #[test]
+    fn campaign_open_refuses_missing_runtime_evidence_or_a_different_vm() {
+        let plan = bound_plan();
+        let signer_id = "host:test".to_string();
+        let signed = sign(&plan, &EdKey::from_bytes(&[7u8; 32]), &signer_id);
+        let admitted = AdmittedPlan::for_test(plan, signer_id, signed);
+        let directory = tempfile::tempdir().unwrap();
+        let emitter = Arc::new(
+            AuditEmitter::with_dir(EdKey::from_bytes(&[21u8; 32]), directory.path()).unwrap(),
+        );
+        let campaign = CampaignRequest {
+            declaration: declaration(),
+            emitter,
+            policy_ceiling: default_policy_ceiling(),
+            policy: NetworkPolicy::deny_all(),
+            backend: "mock".to_string(),
+            now_unix_ms: NOW_MS,
+        };
+        assert!(
+            open_for_boot(&campaign, "vm-a", &admitted)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime binding")
+        );
+        let plane = Arc::new(HostAssuranceV1Handler::new());
+        let error = open_on(
+            &plane,
+            OpenSession {
+                vm: "vm-a",
+                admitted: &admitted,
+                declaration: &campaign.declaration,
+                emitter: &campaign.emitter,
+                policy_ceiling: &campaign.policy_ceiling,
+                policy: campaign.policy.clone(),
+                backend: &campaign.backend,
+                now_unix_ms: campaign.now_unix_ms,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SessionRefusal::Unbindable(_)));
+        assert!(plane.binding_for("vm-a").is_none());
+
+        // This fixture tests identity enforcement, not runtime authentication.
+        let admitted = admitted.with_mock_assurance_runtime_for_test("vm-b");
+        assert!(
+            open_for_boot(&campaign, "vm-a", &admitted)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime-bound launch identity")
+        );
+        let error = open_on(
+            &plane,
+            OpenSession {
+                vm: "vm-a",
+                admitted: &admitted,
+                declaration: &campaign.declaration,
+                emitter: &campaign.emitter,
+                policy_ceiling: &campaign.policy_ceiling,
+                policy: campaign.policy.clone(),
+                backend: &campaign.backend,
+                now_unix_ms: campaign.now_unix_ms,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, SessionRefusal::Unbindable(_)));
+        assert!(plane.binding_for("vm-a").is_none());
+        assert!(plane.binding_for("vm-b").is_none());
     }
 
     struct Opened {

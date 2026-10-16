@@ -141,13 +141,10 @@ pub fn shares_from_vm_volumes(volumes: &[VmVolume]) -> Vec<mvm_core::plan::HostS
 
 /// Attach the verity-sealed runtime overlay (the guest-binary disk carrying
 /// the agent) from the cache, through the same resolver the CLI's boot paths
-/// consume (`RuntimeOverlayResolver` + `resolve_cached_runtime_overlay` — the
-/// version-matched entry, else the pinned image set's member; a pure cache
-/// probe: no build, no download, no nix). Without the overlay a runtime-lean OCI rootfs has no
-/// guest agent to exec and panics init, so this runs on every in-process
-/// boot exactly as it does on the CLI path. Non-fatal on a cold cache under
-/// `PreferOverlay` (the guest falls back to a baked agent when it has one);
-/// fails closed when the policy is `RequiredOverlay`.
+/// consume (`RuntimeOverlayResolver` + `resolve_cached_runtime_overlay`).
+/// This is only a cache selection: `attach_guest_runtime` authenticates the
+/// complete overlay/initramfs pair before publishing it to a launch config.
+/// A missing overlay fails closed; no build or download runs here.
 pub(crate) fn attach_runtime_overlay_from_cache(
     config: &mut VmStartConfig,
     backend_name: &str,
@@ -184,8 +181,42 @@ pub(crate) fn attach_runtime_overlay_from_cache(
 /// userspace and the host sees only an agent that never answers. The
 /// initramfs comes from the same resolution every other launch path uses.
 pub(crate) fn attach_guest_runtime(config: &mut VmStartConfig, backend_name: &str) -> Result<()> {
-    attach_runtime_overlay_from_cache(config, backend_name)?;
-    mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached(config, backend_name)
+    if !mvm_runtime::universal_initramfs::KERNEL_BOOTING_HYPERVISORS.contains(&backend_name) {
+        return Ok(());
+    }
+    let mut selected = config.clone();
+    attach_runtime_overlay_from_cache(&mut selected, backend_name)?;
+    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    selected.runtime_release_proof = match &config.runtime_release_proof {
+        Some(proof) => Some(proof.clone()),
+        None => mvm_build::guest_runtime::cached_runtime_release_proof(&cache, version, arch)?,
+    };
+    selected.unsigned_runtime_development = selected.runtime_release_proof.is_none();
+    selected.source_runtime_archive_sha256 = if selected.unsigned_runtime_development {
+        let checked =
+            mvm_build::guest_runtime::source::check_source_runtime(&cache, version, arch)?;
+        if let Some(expected) = config.source_runtime_archive_sha256.as_deref() {
+            anyhow::ensure!(
+                expected == checked.archive_sha256(),
+                "source runtime archive differs from the originally selected archive"
+            );
+        }
+        Some(checked.archive_sha256().to_owned())
+    } else {
+        None
+    };
+    let initramfs = mvm_fs::initramfs::InitramfsResolver::new(cache.join("initramfs"), version)
+        .resolve(&arch.to_string())
+        .context("cached initramfs required for local boot; prepare the guest runtime first")?;
+    selected.initrd_path = Some(initramfs.image_path.display().to_string());
+    mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+        &selected,
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+    )?;
+    *config = selected;
+    Ok(())
 }
 
 /// Admit `req` through the signed-plan gate and boot it on `backend`.
@@ -724,9 +755,8 @@ mod tests {
     }
 
     /// The overlay attachment mirrors the CLI's matrix: workload VMM
-    /// backends probe the version-keyed cache (cold cache falls back to a
-    /// legacy boot under `PreferOverlay`, fails closed under
-    /// `RequiredOverlay`); non-VMM backends (the mock) skip entirely.
+    /// backends probe the version-keyed cache and fail closed on a miss;
+    /// non-VMM backends (the mock) skip entirely.
     #[test]
     fn runtime_overlay_attachment_fails_closed_on_a_cold_cache() {
         let data = tempfile::tempdir().unwrap();
@@ -758,12 +788,80 @@ mod tests {
     /// panics before userspace; that is what every transient in-process launch
     /// did while this path attached the overlay alone.
     #[test]
+    fn cached_runtime_propagates_checked_source_and_refuses_tampering_without_fallback() {
+        for (backend, target) in ["hvf", "apple-container"].into_iter().flat_map(|backend| {
+            ["overlay", "initramfs", "release-triplet", "explicit-proof"]
+                .map(|target| (backend, target))
+        }) {
+            let data = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(data.path());
+            crate::test_fixtures::install_runtime_overlay(data.path());
+            let mut config = VmStartConfig {
+                kernel_path: Some("/kernel".into()),
+                ..Default::default()
+            };
+            attach_guest_runtime(&mut config, backend).unwrap();
+            assert!(config.unsigned_runtime_development);
+            assert!(config.runtime_release_proof.is_none());
+            mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+                &config,
+                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+            )
+            .unwrap();
+            let mut request = VmStartConfig::default();
+            match target {
+                "overlay" => {
+                    std::fs::write(config.runtime_overlay_path.as_ref().unwrap(), b"tampered")
+                        .unwrap()
+                }
+                "initramfs" => {
+                    std::fs::write(config.initrd_path.as_ref().unwrap(), b"tampered").unwrap()
+                }
+                "release-triplet" => {
+                    let directory = data
+                        .path()
+                        .join("cache/guest-runtime/releases")
+                        .join(env!("CARGO_PKG_VERSION"));
+                    std::fs::create_dir_all(&directory).unwrap();
+                    let asset =
+                        mvm_build::guest_bins::guest_bins_archive_name(env!("CARGO_PKG_VERSION"));
+                    std::fs::write(directory.join(format!("{asset}.sha256")), b"invalid").unwrap();
+                }
+                "explicit-proof" => {
+                    request.runtime_release_proof =
+                        Some(mvm_core::protocol::runtime_release::RuntimeReleaseProof {
+                            archive: data.path().join("absent-archive"),
+                            checksum: data.path().join("absent-checksum"),
+                            signature_bundle: data.path().join("absent-bundle"),
+                            archive_sha256: "ab".repeat(32),
+                            version: env!("CARGO_PKG_VERSION").into(),
+                            arch: mvm_core::arch::GuestArch::host(),
+                        });
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                attach_guest_runtime(&mut request, backend).is_err(),
+                "{backend}: {target}"
+            );
+            assert!(
+                request.runtime_overlay_path.is_none(),
+                "failed selection must be atomic"
+            );
+            assert!(
+                !request.unsigned_runtime_development,
+                "failure must not grant source admission"
+            );
+        }
+    }
+
+    #[test]
     fn a_local_boot_attaches_the_initramfs_that_mounts_its_overlay() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(data.path());
         crate::test_fixtures::install_runtime_overlay(data.path());
-        mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(data.path());
 
         // Every kernel-booting backend, so one that boots the initramfs
         // without the overlay it mounts cannot slip in again.

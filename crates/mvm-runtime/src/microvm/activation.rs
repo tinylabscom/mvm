@@ -386,7 +386,7 @@ fn probe_roothash_sidecar(rootfs_path: &str) -> Option<String> {
 }
 
 /// Translate configured volumes into the exact devices the runner attached.
-fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
+pub(crate) fn build_volume_configs(config: &VmStartConfig) -> Result<Vec<VolumeConfig>> {
     let block_devices = mvm_vmm::host::spec_map::workload_volume_devices(config);
     let extension_mountpoints = config
         .extensions

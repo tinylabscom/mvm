@@ -2163,6 +2163,34 @@ mod tests {
     }
 
     #[test]
+    fn a_regular_file_without_execute_bits_is_not_a_granted_program() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let program = std::fs::canonicalize(program).unwrap();
+        let refused = program_identity_refusal(&program).expect("read permission is not execution");
+        assert_eq!(
+            refused,
+            format!("{} is not an executable regular file", program.display())
+        );
+    }
+
+    #[test]
+    fn an_executable_in_an_untrusted_directory_is_not_a_stable_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("app");
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let program = std::fs::canonicalize(program).unwrap();
+        let refused = program_identity_refusal(&program)
+            .expect("a read-only executable in a user-controlled tree is not grantable");
+        assert!(refused.contains("other than root"), "{refused}");
+    }
+
+    #[test]
     fn a_missing_or_non_executable_granted_program_is_refused() {
         let grant = verb_grant_with_terminal(&["/nonexistent/app"]);
         let refused = refusal_message(enforce_application_terminal_grant(

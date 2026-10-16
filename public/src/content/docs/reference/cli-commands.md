@@ -26,7 +26,7 @@ verification under `trust`. Domains that already own their own subcommands
 | Group / top-level          | Commands                                                                                                                                                                |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Daily drivers (top-level)  | `machine` (`run`/`fork`/`restore`/`exec`/`console`/`logs`/`ls`/`stop`/`forward`/…), `build`, `doctor`, `init`, `bootstrap`                                              |
-| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
+| `machine <sub>` (advanced) | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `telemetry`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>`              | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
@@ -103,6 +103,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine wait <name> --timeout <secs> --interval-ms <ms>`                                                        | Tune the deadline and poll cadence. Defaults: 60s / 250ms.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine boot-report <name>`                                                                                     | Print a single readiness snapshot + per-phase boot timings. Plan 76 Phase 4.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine boot-report <name> --json`                                                                              | Same payload as JSON.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `mvmctl machine telemetry <name>`                                                                                       | What the host collected from the guest: collector status, host and guest losses by reason, recent records (spans, events, logs, stdio, coverage) and incomplete spans. Read from the host's files; no guest RPC, so a detached machine reads the same way. |
+| `mvmctl machine telemetry <name> --follow`                                                                              | Keep printing new records as they arrive. |
+| `mvmctl machine telemetry <name> --json`                                                                                | Status, summary and records as one JSON object. |
 | `mvmctl machine fork <parent> --as <child>`                                                                             | Snapshot a running machine as a `vm_full` checkpoint and branch it into a fresh child VM with a new identity. The child is admitted through the same path as `machine warm-restore`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl machine fork <parent> --branch <slug>`                                                                          | Auto-name the child `<parent>-<slug>-<timestamp>` instead of using `--as`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `mvmctl machine restore <checkpoint> --as <child>`                                                                      | Branch an existing `vm_full` checkpoint into a fresh child VM with a new identity.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -135,6 +138,54 @@ startup.
 | `mvmctl env update --force`                       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
 | `mvmctl env update --skip-verify`                 | Skip the archive's own signature check; the signed checksum manifest is still verified and still binds the archive                                                                                                                                            |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
+
+### Offline selected runtime verification
+
+`mvmctl env verify-runtime --config launch.json --version 1.2.3 --arch x86_64 --json`
+authenticates a CLI release runtime and checks the selected overlay, verity and
+initramfs bytes against the declaration in that same signed archive. This is a
+release-only diagnostic: success is not a boot capability, retained file
+ownership, or proof that a guest executed the runtime.
+
+`--config` reads runtime-selection fields from launch configuration JSON, not a
+separate binding file or a public serialization contract for `VmStartConfig`.
+It requires `runtime_release_proof` (with `archive`, `checksum`,
+`signature_bundle`, `archive_sha256`, `version` and `arch`),
+`runtime_overlay_version`, `runtime_overlay_path`,
+`runtime_overlay_verity_path`, `runtime_overlay_roothash` and `initrd_path`.
+Unrelated machine settings are ignored. Paths are read as supplied (relative
+paths are relative to the command's working directory). Version strings must
+match exactly; `v1.2.3` is not normalized to `1.2.3`. `--arch` accepts only
+`x86_64` or `aarch64` and need not match the host.
+
+The command rejects `unsigned_runtime_development: true`, a non-null
+`source_runtime_archive_sha256`, and any non-null `bundle_boot_assets`,
+`legacy_bundle_runtime` or `legacy_portable_runtime`. Missing or partial artifact
+selections, invalid signatures, mismatched hashes, roots or incompatible
+protocol declarations fail with a nonzero exit status and no JSON success
+report. Normal developer Source launch is unchanged.
+
+`--json` is required. On success stdout contains one object with this stable
+schema; errors are diagnostics on stderr:
+
+| Field | Type and meaning |
+| --- | --- |
+| `schema_version` | Integer, `1` |
+| `expected_version` | String, exact verified `--version` |
+| `expected_arch` | String, verified `x86_64` or `aarch64` |
+| `provenance` | String, `cli-release` |
+| `archive_sha256` | Lowercase hexadecimal SHA-256 of the authenticated archive |
+| `checked_overlay_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected overlay bytes |
+| `checked_overlay_verity_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected verity bytes |
+| `checked_initramfs_sha256` | Lowercase hexadecimal SHA-256 checked against actual selected initramfs bytes |
+| `checked_overlay_roothash` | Authenticated overlay root matched against the selected root |
+| `protocol_version` | Integer, authenticated runtime protocol version |
+| `min_supported_protocol_version` | Integer, authenticated minimum supported protocol version |
+
+Verification performs no downloads, cache lookup, installation or builds, and
+does not fall back to mutable artifact sidecar metadata. Selected artifact bytes
+are checked without creating a selected-runtime snapshot; files can change after
+the diagnostic returns, so launch must independently verify and own its inputs.
 
 ## Building
 
@@ -293,6 +344,12 @@ root, and signed audit proof. It never cleans export destinations or recursively
 sweeps arbitrary paths. Symlinks, hard-linked payloads, invalid clocks, missing
 authority, and conflicting evidence refuse cleanup. Unaccounted missing payload
 remains corruption, not successful expiry.
+
+An expired export is a read refusal, not a cleanup operation: it leaves the
+stored ciphertext and manifest unchanged. Use authenticated reconciliation for
+payload removal; an export failure is not evidence that deletion completed.
+Neither expiry nor reconciliation erases plaintext exports already held by an
+authorized recipient.
 
 Unattended producer startup/tick maintenance and hourly generation rotation need
 the protected capture lifecycle owner; the explicit command alone does not
@@ -509,6 +566,55 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl build guest-bins` | From a source checkout, build (or reuse from the guest-build cache) every guest artifact mvm owns, for `aarch64` and `x86_64`, and write `mvm-guest-bins-v<version>.tar.gz` and its `.sha256` into the current directory. The archive holds, per architecture: `<arch>/bin/` — `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint` and `mvm-setpriv` as static musl executables (only `mvm-egress-client` and `mvm-addon-dns` are built with `mvm-agentd`'s `addons` feature); `<arch>/initramfs/mvm-guest-agent` — the size-tuned static agent the universal initramfs runs as `/init`; and `<arch>/lib/glibc/` and `<arch>/lib/musl/` — `libmvm_host_services.so`, `libcuda.so.1`, `libcudart.so` and `libnvidia-ml.so.1`, the glibc objects linked against glibc 2.34. `sdk-py/mvm/` carries the in-guest Python SDK once for both architectures. Every executable is checked to be a static ELF for its architecture, and every shared object to be one for its architecture that needs its libc and nothing outside that libc's base libraries, before it is packaged. `manifest.json` records each member's sha256, the workspace version, the producing commit (`source.worktree` is `dirty`, with a fingerprint of the changes, when the tree did not match it), and the guest-source and host-services cdylib source fingerprints; the written archive is re-verified against it before the command reports success. Cross-compiling the glibc objects needs the pinned toolchain's `*-unknown-linux-gnu` targets, which `just payload::toolchain` installs |
 | `mvmctl build guest-bins --out <dir>` | Write the archive and its checksum into `<dir>` (created if missing) |
 | `mvmctl build guest-bins --arch x86_64` | Build only the named architecture; repeat `--arch` for more than one |
+
+Guest-bins manifest schema 2 also records an `assemblies` declaration per guest
+architecture: assembly format 1, the guest control protocol and its minimum
+supported version, SHA-256 digests of the deterministic overlay image, verity
+tree and compressed initramfs, and the overlay's verity root. The producer
+computes these from the exact captured archive members before signing; no
+cache fingerprint authenticates them. A producer whose compiled protocol
+source differs from the selected checkout refuses the build: rebuild `mvmctl`
+from that checkout first.
+
+Release runtime verification requires these declarations for both architectures
+and rejects unsupported schemas or assembly formats. Source development
+artifacts remain unsigned; legacy schema 1 development caches remain readable
+but are never release evidence. Authenticating these
+declarations and copying matching artifact bytes is not, by itself, assurance
+of what a detached VM executed: launch admission must still bind those owned
+bytes to the backend for the VM's lifetime.
+
+Cold workload starts and newly booted standby parents bind release artifacts
+to fresh private generations under
+`$MVM_HOME/runtime-evidence/<vm-name>/` (normally
+`~/.mvm/runtime-evidence/<vm-name>/`). The launcher authenticates the signed
+release, checks the selected guest RPC protocol and verity root, and copies
+and hashes the selected overlay, verity tree and initramfs in the same read
+stream. It publishes the generation before spawning and boots those private
+paths, not the mutable cache paths. A deserialized proof or a source-cache
+fingerprint grants no authority.
+
+Contributor runtimes use a separate, explicitly unsigned source-integrity
+path, available only to binaries whose compiled distribution channel permits
+source builds. The launcher checks the actual checkout and source archive,
+derives the runtime declaration, and checks the selected artifact bytes before
+snapshotting. Choosing a development flag is not authorization, and choosing a
+sealed workload does not disable the contributor workflow. Source integrity
+does not become signed-release assurance.
+
+The retained namespace is canonicalized and its ancestor ownership and write
+permissions are checked before use. A private VM directory beneath an
+unprotected writable ancestor is refused; private permissions on the leaf
+alone cannot prevent another account from replacing the pathname.
+
+These generations deliberately outlive launch handles, failed starts and VM
+stops. Current backend stop interfaces do not prove which launch generation
+they terminated; PID disappearance alone cannot authorize deletion. Launch
+and stop logs report the retained directory, generation count and byte count.
+Account for this retained disk usage. Do not remove a generation merely because
+a PID file is absent or a VM name was reused: remove it only after independently
+establishing that no running, detached, restoring or forked VM can still read
+it. There is no automatic runtime-generation garbage collection.
 
 ## Networks
 
@@ -883,9 +989,20 @@ start launches if it is not already running, watches the session and runs
 `machine session reap` once it expires. That sweep stops a Firecracker machine
 through the same `sudo` signal `machine stop` uses, and the host agent has no
 terminal, so it needs `sudo` that does not prompt; where `sudo` prompts, the
-session is stopped by the next `machine session` command instead. A session
-that stops this way leaves the same host state a `machine stop` does: its
-helper processes are stopped and no pid file is left behind.
+session is stopped by the next `machine session` command instead.
+
+HVF stop uses authenticated instance control and confirms the supervisor's actual
+process exit and successful finalization before cleanup. A missing endpoint, key,
+or lifetime proof is an error, not evidence that the machine stopped. Older HVF
+instances without this control protocol require separate operator recovery; there
+is no PID-based stop fallback. Runtime and session evidence is retained on refusal.
+An owned launch can prove its normal exit after its endpoint closes; a later
+detached client cannot reconstruct that proof from a missing PID file.
+
+HVF wall-clock and session expiry preserve the hard timeout exit code 124, without
+adding a guest-execution grace period. A hard expiry does not claim graceful
+capture or helper finalization, so it retains runtime evidence and automatic
+cleanup can still refuse. Other backends retain their existing expiry cleanup.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
@@ -1289,10 +1406,13 @@ mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
 ```
 
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
-metadata, universal initramfs, and runtime overlay. Runtime members are acquired
-from the existing authenticated image-set pin; the original image-set manifest
-is carried unchanged. Materialization finishes before the CLI loads its host
-signing key. The builder never receives the publisher key.
+metadata, universal initramfs, runtime overlay and its verity tree. The kernel
+comes from the authenticated Linux image-set pin; the original image-set
+manifest is carried unchanged. Runtime assets come from the matching signed CLI
+release, with the original archive, checksum and both signature bundles retained
+inside the package. Source-built runtime bytes cannot substitute for these
+release proofs. Materialization finishes before the CLI loads its host signing
+key. The builder never receives the publisher key.
 
 `--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
 Packaging currently requires the selected architecture to match the host;
@@ -1315,11 +1435,19 @@ never falls back to an untrusted builder or replaces that seal through one.
 `--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
 not currently supported by that shared exporter.
 
-Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
-They retain the original image-set identity while carrying only the selected
-architecture's runtime archives, not the full builder/base-image release set.
-Older readers refuse these packages. Existing schema 3 packages and full
-embedded image sets retain their existing semantics.
+New portable OCI packages use bundle schema 6's explicit CLI-runtime declaration.
+The consumer verifies the package signature and inventory, then independently
+authenticates the retained CLI-runtime release and checks the prepared overlay,
+verity tree and initramfs against its assembly declaration. Consumer launch does
+not build, assemble, download or use a producer runtime cache. Readers supporting
+only schema 5 or earlier refuse these packages. Existing bundles retain their
+existing semantics; CLI and historical boot-asset declarations cannot be mixed.
+
+The package publisher binds the selected kernel bytes to the embedded Linux
+manifest. This structural binding is not independent Linux-publisher signature
+or current-revocation evidence; applications requiring that stronger authority
+must satisfy their separate admission requirements. A successful archive check
+alone is not a launch-readiness or protected-observer acceptance result.
 
 Bundles carrying their own boot assets use the cold-boot path. The current
 warm-pool preparation command cannot prepare a parent from an archive's pinned
@@ -1442,6 +1570,26 @@ completed checkpoint restore emits a chain-signed `checkpoint.restored` entry
 and an image restore an `image.reverted` entry, each carrying the initiating
 verb (`revert` / `rewind` / `advance`) as its `via` label.
 
+Full-VM captures also record the runtime configuration observed while the
+backend is paused. An external runtime must match an authenticated, retained
+runtime generation; a launch metadata file alone is not sufficient. Restore
+and fork authenticate the checkpoint first, then reverify that generation and
+the captured runtime evidence before loading it. Older full-VM checkpoints
+without this evidence are refused with a recapture instruction. This does not
+replace the base-image integrity or admission checks for runtimes baked into
+the root filesystem. Retained runtime artifacts and release proofs must remain
+available for later restores. Restoring a checkpoint does not turn its inherited
+RAM into a newly measured boot; runtime evidence must retain that distinction.
+
+Firecracker runtime observation supports repository-managed devices with
+canonical `blk{slot}` identifiers. Capture and restore bind their complete
+device layout, including writable devices, and recheck read-only backing
+bytes before resuming. The identifiers preserve the managed launch's device
+mapping when Firecracker returns restored configuration in a different array
+order. This is verified configuration lineage under the protected host-state
+boundary, not an independent measurement of loaded guest RAM or MMIO slots.
+Arbitrary unmanaged Firecracker device identifiers are refused.
+
 A target is a checkpoint id or a `sha256:<hex>` content-address; a digest may
 name a node in the checkpoint store, the image store, or (rarely) both, in which
 case `--kind checkpoint\|image` disambiguates it. Image nodes have no id — their
@@ -1521,7 +1669,7 @@ concept over a different store.
 | `mvmctl agent-session park <id> --reason <reason> [--journal-cursor <n>] [--approval-head <sha256:...>] [--retain-for <duration>] [--expected-generation <n>] [--json]`                                                                | Release an active session's sandbox. `--reason` is one of `approval-wait`, `idle`, `host-shutdown`, `operator`, `retention-demotion`, and selects the storage tier and the default retention deadline. Emits a `session.parked` chain entry.    |
 | `mvmctl agent-session resume <id> --backend <name> --image <ref> --image-sha256 <hex> --cpus <n> --mem-mib <n> [--kernel-sha256 <hex>] [--approval-head <sha256:...>] [--boot [--kernel <path>]] [--expected-generation <n>] [--json]` | Re-admit a parked session under a freshly signed `ExecutionPlan`. Emits a `session.resumed` chain entry.                                                                                                                                        |
 | `mvmctl agent-session renew <id> --for <duration> [--expected-generation <n>] [--expected-deadline <unix>] [--json]`                                                                                                                   | Move a parked session's retention deadline to `--for` from now. Extend-only. Emits a `session.renewed` chain entry.                                                                                                                             |
-| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched |
+| `mvmctl agent-session replay <id> [--from <checkpoint>] [--as <name>] [--dry-run] [--timeout <secs>]` | Verify the session's step timeline against the signed audit chain, fork-boot a checkpoint on it (default: the session's base, recorded before its first prompt) and re-deliver every prompt recorded after it to the fork's agent, in journal order. Each re-delivery is grant-checked against the fork's plan, chain-audited with `delivery=replay`, and recorded in the fork's ledger so a re-run never sends a prompt twice. The session and its machine are untouched. The fork is a machine in its own right: a prompt to it is recorded and step-checkpointed under the fork's own session, which replays in turn |
 
 `open` is what gives the other four subcommands something to act on: `park` and
 `resume` both need a record that already exists, and nothing else on the host
@@ -1870,6 +2018,12 @@ running microVM.
 
 ## Packs, Bundles, and Dependencies
 
+Pack discovery reads only root `index.json` with `schema_version: 2`. Versions
+are catalog objects containing `version` and `manifest_sha256`; search displays
+their version strings. Pull checks the catalog digest against exact manifest
+bytes before adoption or installation. This untrusted discovery hash does not
+replace publisher signatures or existing authenticated installed pins.
+
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
@@ -1893,7 +2047,7 @@ running microVM.
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1981,20 +2135,59 @@ remains explicitly unsupported. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
-`pool warm` is optional. Unnamed runs already leave one standby of each image
-they boot (see [One-shot Run](#one-shot-run-transient-runner)), so a second run
-of an image is warm without it; `pool warm` makes the first one warm too, or
-holds more than one standby of an image:
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch of a warm-eligible shape, enable claims
+explicitly:
 
 ```bash
 mvmctl image pull alpine
 mvmctl pool warm --image alpine          # optional pre-warm
-mvmctl machine run --image alpine -- /bin/true   # claims it
+MVM_RESIDENCY=warm mvmctl machine run --image alpine -- /bin/true   # claims it
 ```
 
-A launch with no matching standby cold-boots rather than failing. Named launches
-and shapes with extra volumes (including directory mounts) or allowed egress
-always take the cold path. `MVM_RESIDENCY=cold` turns implicit standbys off.
+Without a source flag, `pool warm` warms the most recently pulled images,
+bounded by the residency standby target (at least one). With no pull history
+it warms the default image. `pool warm --default` selects the default image
+regardless of pull history; it conflicts with the explicit source flags.
+
+`pool warm` takes the same source a launch names: `--image`, `--manifest`
+(a manifest, a built slot, an installed bundle sha256 or a signed `.mvmpkg`
+archive) or `--flake` with an optional `--flake-profile`. An archive is
+verified and installed exactly as `machine run` does it. Standbys are keyed by
+the verified bundle or slot digest and the image digest, so a launch of a
+different artifact, or of the same rootfs under the host runtime, never claims
+one. A bundle that pins its own boot assets (`bundle build`) keeps its cold
+path: the guest runtime it pins predates the claim handshake. `pool warm`
+refuses that bundle before preparing a standby, rather than creating capacity
+that no launch can claim.
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches attempt a claim
+when standbys are enabled. If no compatible standby is ready, the launch
+declares a cold boot rather than reporting it as a warm claim. Named launches,
+launches with standbys disabled, and volume shapes no late-volume slot can
+serve retain their cold path.
+
+On Firecracker, a launch with up to four read-only directory mounts
+(`--mount DIR:PATH:ro`) claims the same standby a launch without them would.
+Every standby boots four read-only placeholder slots; the claim re-checks each
+mount against the shares its signed plan admitted, including the content digest
+the plan pinned, points a slot at the launch's own materialized image before the
+child resumes, and has the guest mount it read-only by its label before the
+claim commits. The guest's mount helper exists only in a standby's guest and
+exits on that first restore, before any workload process starts. A writable
+mount, a disk volume, or more than four mounts keeps the cold path, as does
+every volume launch on other backends.
+
+A launch that allows egress (`--allow-host`, `--net`) claims a standby warmed
+with `pool warm --egress`, or the one an earlier egress-allowing run left
+behind. That standby's guest starts its egress client but holds no policy and
+no destinations; the claim spawns the child's own endpoint under the policy its
+signed plan recorded, and refuses any other. A launch whose endpoint must
+terminate TLS for its own destinations (a bound secret or an intercepted route)
+keeps its cold path, because a shared standby cannot hold a certificate minted
+for them.
 
 Pack inspection reports `official_status: "established"` only for a fully verified
 `mvm/` pack whose signer matches the reserved MVM publisher identity and whose

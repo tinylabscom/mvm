@@ -44,15 +44,25 @@ use crate::policy::security::AgentProfile;
 /// readable because `members` defaults to an empty list.
 /// Version 4 adds architecture-scoped boot assets; older readers refuse them.
 /// Version 5 adds the signed environment descriptor member
-/// ([`BundleMember::Environment`]). A bundle carrying it must declare schema 5,
+/// ([`BundleMember::Environment`]). A bundle carrying it requires at least schema 5,
 /// so a version-4 reader refuses it at the schema sniff with
 /// `UnsupportedSchema` instead of failing on an unknown member class. Exporters
 /// stamp the lowest schema a bundle's members need, so a bundle without a
 /// descriptor stays readable by version-4 readers.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 5;
+/// Version 6 separates the signed CLI runtime from the original Linux image set.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 6;
 
 /// The first schema that may carry [`BundleMember::Environment`].
 pub const ENVIRONMENT_MEMBER_MIN_SCHEMA: u32 = 5;
+
+/// The first schema that may carry architecture-scoped boot assets.
+pub const BOOT_ASSETS_MEMBER_MIN_SCHEMA: u32 = 4;
+
+/// The first schema that may carry the signed portable CLI runtime.
+pub const CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA: u32 = 6;
+
+/// The first schema that may carry backend-neutral members.
+pub const BUNDLE_MEMBERS_MIN_SCHEMA: u32 = 3;
 
 /// Filename inside the archive for the canonical-JSON manifest.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
@@ -178,6 +188,10 @@ pub enum BundleMember {
     /// and initramfs artifacts for `BundleManifest::arch` packaged. Workload
     /// kernel and rootfs remain ordinary bundle artifacts. Requires schema 4.
     EmbeddedBootAssets { manifest_artifact: String },
+    /// Original Linux image-set identity plus a durable signed CLI runtime and
+    /// its prepared boot artifacts. Requires schema 6; never selects retired
+    /// runtime members from the image set.
+    EmbeddedCliBootAssets(EmbeddedCliBootAssets),
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -196,6 +210,41 @@ pub enum BundleMember {
     /// permitted by the bundle's [`BundleMember::SecurityPosture`], and the
     /// launch is still held to the posture and the host's ceilings.
     Environment(EnvironmentDescriptor),
+}
+
+impl BundleMember {
+    /// Canonical per-member schema floor, shared by exporters and verifiers.
+    pub const fn minimum_schema_version(&self) -> u32 {
+        match self {
+            Self::EmbeddedBootAssets { .. } => BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+            Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+            Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
+            Self::EmbeddedImageSet { .. }
+            | Self::KernelCmdline { .. }
+            | Self::SecurityPosture(_)
+            | Self::BuildProvenance(_) => BUNDLE_MEMBERS_MIN_SCHEMA,
+        }
+    }
+}
+
+/// Names refer to ordinary bundle artifacts, not host paths or cache keys.
+/// Release authentication and assembly verification happen again before boot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddedCliBootAssets {
+    pub manifest_artifact: String,
+    pub version: String,
+    pub arch: String,
+    pub archive_artifact: String,
+    pub checksum_artifact: String,
+    pub signature_bundle_artifact: String,
+    pub checksum_signature_bundle_artifact: String,
+    pub overlay_artifact: String,
+    pub overlay_verity_artifact: String,
+    pub initramfs_artifact: String,
+    pub overlay_roothash: String,
+    pub protocol_version: u32,
+    pub min_supported_protocol_version: u32,
 }
 
 /// The publisher's declared security posture for a bundled workload.
@@ -445,11 +494,49 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_five() {
+    fn bundle_schema_version_is_six() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 5);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 6);
         assert_eq!(ENVIRONMENT_MEMBER_MIN_SCHEMA, 5);
+        assert_eq!(CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, 6);
+    }
+
+    #[test]
+    fn cli_boot_member_requires_complete_explicit_identity_and_proofs() {
+        let value = serde_json::json!({
+            "class":"embedded_cli_boot_assets", "manifest_artifact":"boot-image-set.json",
+            "version":"1.2.3", "arch":"aarch64", "archive_artifact":"runtime.tar.gz",
+            "checksum_artifact":"runtime.sha256", "signature_bundle_artifact":"runtime.bundle",
+            "checksum_signature_bundle_artifact":"runtime.sha256.bundle",
+            "overlay_artifact":"overlay.ext4", "overlay_verity_artifact":"overlay.verity",
+            "initramfs_artifact":"initrd", "overlay_roothash":"a".repeat(64),
+            "protocol_version":2, "min_supported_protocol_version":2
+        });
+        let member: BundleMember = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(member.minimum_schema_version(), 6);
+        assert_eq!(serde_json::to_value(member).unwrap(), value);
+        for field in value
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "class")
+        {
+            let mut incomplete = value.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<BundleMember>(incomplete).is_err(),
+                "{field}"
+            );
+        }
+        let mut unsigned = value;
+        unsigned["verified"] = true.into();
+        assert!(serde_json::from_value::<BundleMember>(unsigned).is_err());
+        let old =
+            br#"{"class":"embedded_boot_assets","manifest_artifact":"original-image-set.json"}"#;
+        let member: BundleMember = serde_json::from_slice(old).unwrap();
+        assert_eq!(member.minimum_schema_version(), 4);
+        assert_eq!(serde_json::to_vec(&member).unwrap(), old);
     }
 
     fn environment() -> EnvironmentDescriptor {

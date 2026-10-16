@@ -251,6 +251,16 @@ fn a_first_command_that_prints_the_token_passes() {
             && transcript.contains("a boot allowed example.com fetched it in"),
         "{transcript}"
     );
+    assert_eq!(
+        std::fs::read_to_string(smoke.out().join("boot-results.jsonl")).unwrap(),
+        concat!(
+            "{\"name\":\"cold\",\"result\":\"success\"}\n",
+            "{\"name\":\"cache-reuse\",\"result\":\"success\"}\n",
+            "{\"name\":\"sdk-sidecar\",\"result\":\"success\"}\n",
+            "{\"name\":\"egress\",\"result\":\"success\"}\n"
+        ),
+        "each completed boot must emit exactly one structured success record"
+    );
 }
 
 /// A release whose network endpoint dies after the guest authenticates boots
@@ -281,6 +291,15 @@ fn an_egress_boot_that_fails_fails_the_smoke() {
     assert!(
         transcript.contains("waiting for the network endpoint's authenticated session"),
         "the transcript must carry the egress boot's stderr: {transcript}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(smoke.out().join("boot-results.jsonl")).unwrap(),
+        concat!(
+            "{\"name\":\"cold\",\"result\":\"success\"}\n",
+            "{\"name\":\"cache-reuse\",\"result\":\"success\"}\n",
+            "{\"name\":\"sdk-sidecar\",\"result\":\"success\"}\n"
+        ),
+        "a failed egress boot must never acquire a success record"
     );
 }
 

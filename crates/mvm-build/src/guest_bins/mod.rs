@@ -52,6 +52,7 @@ use tar::{EntryType, Header};
 use crate::guest_agent_build::{self, GuestAgentBuildError};
 use crate::image_source::RepoIdentity;
 
+pub mod assembly;
 pub mod cdylib;
 pub mod extras;
 pub mod member;
@@ -64,8 +65,9 @@ pub use member::{GuestBinsMember, MemberError};
 /// Name of the manifest member inside the archive.
 pub const GUEST_BINS_MANIFEST_FILE: &str = "manifest.json";
 
-/// The manifest format this build writes and accepts.
-pub const GUEST_BINS_MANIFEST_SCHEMA: u32 = 1;
+/// The manifest format this build writes and requires for release evidence.
+/// The generic member reader also accepts schema 1 development archives.
+pub const GUEST_BINS_MANIFEST_SCHEMA: u32 = 2;
 
 /// Largest single member a verifier will hash. Guest binaries are a few MiB;
 /// the cap exists so a hostile archive cannot stream without bound.
@@ -97,6 +99,10 @@ pub struct GuestBinsManifest {
     pub source: RepoIdentity,
     /// Archive-relative member path → lowercase hex sha256.
     pub files: BTreeMap<String, String>,
+    /// Deterministic boot artifacts computed from these exact members.
+    /// Empty only for partial development artifacts, never assured releases.
+    #[serde(default)]
+    pub assemblies: BTreeMap<GuestArch, assembly::RuntimeAssembly>,
 }
 
 /// The two source fingerprints a manifest records.
@@ -137,7 +143,7 @@ pub enum GuestBinsError {
     #[error("archive has no {GUEST_BINS_MANIFEST_FILE}")]
     MissingManifest,
     #[error(
-        "archive manifest schema {found} is not the supported schema {GUEST_BINS_MANIFEST_SCHEMA}"
+        "archive manifest schema {found} is unsupported for this operation (release schema is {GUEST_BINS_MANIFEST_SCHEMA})"
     )]
     UnsupportedSchema { found: u32 },
     #[error("archive manifest lists no binaries")]
@@ -160,6 +166,8 @@ pub enum GuestBinsError {
     Manifest(#[from] serde_json::Error),
     #[error("guest-bins io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("guest-bins runtime assembly: {0}")]
+    Assembly(String),
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -181,6 +189,7 @@ pub struct GuestBinsArtifact {
     fingerprints: GuestBinsFingerprints,
     source: RepoIdentity,
     members: BTreeMap<String, MemberBytes>,
+    assemblies: BTreeMap<GuestArch, assembly::RuntimeAssembly>,
 }
 
 impl GuestBinsArtifact {
@@ -194,6 +203,7 @@ impl GuestBinsArtifact {
             fingerprints,
             source,
             members: BTreeMap::new(),
+            assemblies: BTreeMap::new(),
         }
     }
 
@@ -222,6 +232,7 @@ impl GuestBinsArtifact {
                 bytes,
             },
         );
+        self.assemblies.clear();
         Ok(())
     }
 
@@ -238,6 +249,7 @@ impl GuestBinsArtifact {
                 .iter()
                 .map(|(member, entry)| (member.clone(), sha256_hex(&entry.bytes)))
                 .collect(),
+            assemblies: self.assemblies.clone(),
         }
     }
 
@@ -372,7 +384,7 @@ fn check_manifest_against(
     manifest: &GuestBinsManifest,
     digests: &BTreeMap<String, String>,
 ) -> Result<(), GuestBinsError> {
-    if manifest.schema_version != GUEST_BINS_MANIFEST_SCHEMA {
+    if !matches!(manifest.schema_version, 1 | GUEST_BINS_MANIFEST_SCHEMA) {
         return Err(GuestBinsError::UnsupportedSchema {
             found: manifest.schema_version,
         });
@@ -447,6 +459,7 @@ pub struct GuestBinsBuild {
 /// Build (or reuse from cache) every guest artifact for each requested
 /// architecture, add the Python SDK, and write the artifact.
 pub fn build_guest_bins(build: &GuestBinsBuild) -> Result<WrittenGuestBins, GuestBinsError> {
+    assembly::verify_protocol_source(&build.workspace_root)?;
     let fingerprints = GuestBinsFingerprints::of_tree(&build.workspace_root)?;
     // Read before anything compiles, so the identity names the tree the
     // compiles read.
@@ -460,6 +473,7 @@ pub fn build_guest_bins(build: &GuestBinsBuild) -> Result<WrittenGuestBins, Gues
     for (member, path) in python_sdk::python_sdk_members(&build.workspace_root)? {
         artifact.add(&member, &path)?;
     }
+    artifact.declare_runtime_assemblies()?;
     artifact.write(&build.out_dir)
 }
 

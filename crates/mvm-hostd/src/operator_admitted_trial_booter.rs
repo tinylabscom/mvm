@@ -63,9 +63,6 @@ const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_TRUST_BYTES: u64 = 1024 * 1024;
 const MAX_DESTINATIONS: usize = 32;
-/// Assurance extensions require the current guest sidecar contract. Older
-/// OCI materializations cannot activate the read-only extension volume.
-const MIN_ASSURANCE_GUEST_PROTOCOL_VERSION: u8 = 2;
 
 /// Strict operator-owned configuration for a concrete admitted provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +135,20 @@ pub struct ProviderWorkloadConfig {
     pub artifact_digest: Sha256Digest,
     pub kernel_path: Option<PathBuf>,
     pub kernel_digest: Option<Sha256Digest>,
+    #[serde(default)]
+    pub runtime_overlay_path: Option<PathBuf>,
+    #[serde(default)]
+    pub runtime_overlay_verity_path: Option<PathBuf>,
+    #[serde(default)]
+    pub runtime_overlay_roothash: Option<String>,
+    #[serde(default)]
+    pub runtime_overlay_version: Option<String>,
+    #[serde(default)]
+    pub initrd_path: Option<PathBuf>,
+    #[serde(default)]
+    pub runtime_release_proof: Option<mvm_core::protocol::runtime_release::RuntimeReleaseProof>,
+    #[serde(default)]
+    pub legacy_bundle_runtime: Option<mvm_core::vm_backend::LegacyBundleRuntimeProof>,
     pub verity_path: Option<PathBuf>,
     pub roothash: Option<String>,
     pub backend: ProviderBackend,
@@ -306,7 +317,6 @@ impl OperatorConfiguredTrialBooter {
             &self.config.workload.artifact_digest,
             "workload rootfs",
         )?;
-        verify_assurance_guest_protocol(&self.config.workload.rootfs_path)?;
         let kernel_sha = self.verify_kernel()?;
         let backend_name = self.config.workload.backend.name();
         AnyBackend::require_hypervisor_selectable(backend_name)?;
@@ -635,6 +645,30 @@ impl OperatorConfiguredTrialBooter {
     }
 }
 
+pub(crate) fn verify_assurance_guest_protocol(
+    config: &VmStartConfig,
+) -> Result<Option<mvm_build::guest_runtime::evidence::VerifiedRuntimeManifest>> {
+    if config.unsigned_runtime_development {
+        anyhow::bail!("assurance refuses unsigned development runtimes");
+    }
+    let verified = mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+        config,
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+    )
+    .context("verifying assurance guest runtime")?;
+    match verified {
+        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Release(release)) => {
+            Ok(Some(release))
+        }
+        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::Source(_)) => {
+            anyhow::bail!("assurance requires a released runtime, not a source runtime");
+        }
+        Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyBundle(_))
+        | Some(mvm_runtime::runtime_evidence::VerifiedLaunchRuntime::LegacyPortable(_)) => Ok(None),
+        None => anyhow::bail!("assurance requires authenticated guest runtime provenance"),
+    }
+}
+
 fn workload_start_config(
     workload: &ProviderWorkloadConfig,
     tenant: &AssuranceId,
@@ -654,32 +688,44 @@ fn workload_start_config(
             .as_ref()
             .map(|path| path.display().to_string()),
         roothash: workload.roothash.clone(),
+        runtime_overlay_path: workload
+            .runtime_overlay_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_overlay_verity_path: workload
+            .runtime_overlay_verity_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_overlay_roothash: workload.runtime_overlay_roothash.clone(),
+        runtime_overlay_version: workload.runtime_overlay_version.clone(),
+        initrd_path: workload
+            .initrd_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        runtime_release_proof: workload.runtime_release_proof.clone(),
+        legacy_bundle_runtime: workload.legacy_bundle_runtime.clone(),
         cpus: workload.cpus,
         memory_mib: workload.memory_mib,
         tenant_id: Some(tenant.as_str().to_string()),
         network_policy: network_policy.clone(),
         ..Default::default()
     };
-    crate::run::attach_guest_runtime(&mut config, backend_name)
-        .context("resolving guest runtime for admitted assurance boot")?;
-    Ok(config)
-}
-
-fn verify_assurance_guest_protocol(rootfs: &Path) -> Result<()> {
-    let parent = rootfs
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("workload rootfs has no parent directory"))?;
-    let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(parent)
-        .context("reading workload guest metadata")?
-        .ok_or_else(|| anyhow::anyhow!("workload rootfs is missing mvm-meta.json metadata"))?;
-    if sidecar.protocol_version < MIN_ASSURANCE_GUEST_PROTOCOL_VERSION {
-        anyhow::bail!(
-            "workload guest protocol {} is too old for assurance extensions; need at least {}",
-            sidecar.protocol_version,
-            MIN_ASSURANCE_GUEST_PROTOCOL_VERSION
-        );
+    // Resolve the ordinary cached runtime only when the operator has not
+    // selected one. Partial or invalid explicit selections must fail closed,
+    // not be replaced with a different runtime.
+    if config.runtime_overlay_path.is_none()
+        && config.runtime_overlay_verity_path.is_none()
+        && config.runtime_overlay_roothash.is_none()
+        && config.runtime_overlay_version.is_none()
+        && config.initrd_path.is_none()
+        && config.runtime_release_proof.is_none()
+        && config.legacy_bundle_runtime.is_none()
+    {
+        crate::run::attach_guest_runtime(&mut config, backend_name)
+            .context("resolving guest runtime for admitted assurance boot")?;
     }
-    Ok(())
+    verify_assurance_guest_protocol(&config)?;
+    Ok(config)
 }
 
 impl AdmittedTrialBooter for OperatorConfiguredTrialBooter {
@@ -709,11 +755,19 @@ impl ProviderBootConfig {
         for path in [
             self.workload.kernel_path.as_deref(),
             self.workload.verity_path.as_deref(),
+            self.workload.runtime_overlay_path.as_deref(),
+            self.workload.runtime_overlay_verity_path.as_deref(),
+            self.workload.initrd_path.as_deref(),
         ]
         .into_iter()
         .flatten()
         {
             require_absolute(path)?;
+        }
+        if let Some(proof) = &self.workload.runtime_release_proof {
+            for path in [&proof.archive, &proof.checksum, &proof.signature_bundle] {
+                require_absolute(path)?;
+            }
         }
         if self.workload.kernel_path.is_some() != self.workload.kernel_digest.is_some() {
             anyhow::bail!("kernel path and digest must be supplied together");
@@ -897,15 +951,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assurance_guest_protocol_requires_current_sidecar() {
+    fn assurance_guest_protocol_refuses_unauthed_current_sidecar() {
         let root = tempfile::tempdir().expect("sidecar directory");
         let rootfs = root.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
         let mut sidecar =
             mvm_build::builder_vm::GuestSidecar::for_oci_run("assurance-workload", true, false);
-        sidecar.protocol_version = MIN_ASSURANCE_GUEST_PROTOCOL_VERSION;
+        sidecar.protocol_version =
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION as u8;
         sidecar.write_to_dir(root.path()).expect("sidecar");
-        verify_assurance_guest_protocol(&rootfs).expect("current sidecar is accepted");
+        verify_assurance_guest_protocol(&VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        })
+        .expect_err("current baked agent metadata alone is not authenticated provenance");
     }
 
     #[test]
@@ -915,10 +974,14 @@ mod tests {
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
         let mut sidecar =
             mvm_build::builder_vm::GuestSidecar::for_oci_run("assurance-workload", true, false);
-        sidecar.protocol_version = MIN_ASSURANCE_GUEST_PROTOCOL_VERSION - 1;
+        sidecar.protocol_version =
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION as u8 - 1;
         sidecar.write_to_dir(root.path()).expect("sidecar");
-        let error = verify_assurance_guest_protocol(&rootfs).expect_err("legacy sidecar");
-        assert!(error.to_string().contains("too old"));
+        verify_assurance_guest_protocol(&VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        })
+        .expect_err("incompatible baked agent sidecar");
     }
 
     #[test]
@@ -926,18 +989,89 @@ mod tests {
         let root = tempfile::tempdir().expect("sidecar directory");
         let rootfs = root.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
-        let error = verify_assurance_guest_protocol(&rootfs).expect_err("missing sidecar");
-        assert!(error.to_string().contains("missing mvm-meta.json"));
+        verify_assurance_guest_protocol(&VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            ..Default::default()
+        })
+        .expect_err("missing sidecar cannot prove baked agent compatibility");
     }
 
     #[test]
-    fn assurance_start_config_attaches_the_guest_runtime() {
+    fn assurance_refuses_unsigned_request_even_with_forged_plan() {
+        let config = VmStartConfig {
+            unsigned_runtime_development: true,
+            plan_json: Some(r#"{"build_mode":"dev","verified":true}"#.to_string()),
+            ..Default::default()
+        };
+        let error = verify_assurance_guest_protocol(&config).expect_err("unsigned refused");
+        assert!(error.to_string().contains("unsigned"));
+    }
+
+    #[test]
+    fn assurance_cli_initramfs_requires_release_proof() {
+        let root = tempfile::tempdir().expect("sidecar directory");
+        let rootfs = root.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"base without an agent").expect("rootfs");
+        let mut sidecar =
+            mvm_build::builder_vm::GuestSidecar::for_oci_run("assurance-workload", true, false);
+        sidecar.protocol_version = 0;
+        sidecar.write_to_dir(root.path()).expect("sidecar");
+        verify_assurance_guest_protocol(&VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            runtime_overlay_path: Some(root.path().join("runtime.ext4").display().to_string()),
+            initrd_path: Some(root.path().join("initramfs").display().to_string()),
+            ..Default::default()
+        })
+        .expect_err("base metadata is not guest runtime proof");
+    }
+
+    #[test]
+    fn assurance_explicit_overlay_cannot_borrow_baked_agent_metadata() {
+        let root = tempfile::tempdir().expect("sidecar directory");
+        let rootfs = root.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"legacy rootfs").expect("rootfs");
+        let mut sidecar =
+            mvm_build::builder_vm::GuestSidecar::for_oci_run("assurance-workload", true, false);
+        sidecar.protocol_version =
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION as u8;
+        sidecar.write_to_dir(root.path()).expect("sidecar");
+        let overlay = root.path().join("unsigned.ext4");
+        std::fs::write(&overlay, b"unsigned runtime").expect("overlay");
+        verify_assurance_guest_protocol(&VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            runtime_overlay_path: Some(overlay.display().to_string()),
+            ..Default::default()
+        })
+        .expect_err("selected runtime requires its own signed evidence");
+    }
+
+    #[test]
+    fn assurance_protocol_number_alone_does_not_prove_a_baked_agent() {
+        for (agent_binary, runtime_lean) in [("stub", false), ("real", true)] {
+            let root = tempfile::tempdir().expect("sidecar directory");
+            let rootfs = root.path().join("rootfs.ext4");
+            std::fs::write(&rootfs, b"base").expect("rootfs");
+            let mut sidecar =
+                mvm_build::builder_vm::GuestSidecar::for_oci_run("base", true, runtime_lean);
+            sidecar.agent_binary = agent_binary.to_string();
+            sidecar.protocol_version =
+                mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION as u8;
+            sidecar.write_to_dir(root.path()).expect("sidecar");
+            verify_assurance_guest_protocol(&VmStartConfig {
+                rootfs_path: rootfs.display().to_string(),
+                ..Default::default()
+            })
+            .expect_err("a stub or runtime-lean base is not a baked guest agent");
+        }
+    }
+
+    #[test]
+    fn assurance_start_config_refuses_cached_source_runtime() {
         let (_environment, home) = crate::test_fixtures::isolated_mvm_home();
         crate::test_fixtures::install_runtime_overlay(home.path());
-        mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(home.path());
         let rootfs = home.path().join("workload.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("rootfs");
-        let workload = ProviderWorkloadConfig {
+        let mut workload = ProviderWorkloadConfig {
             image_name: AssuranceId::parse("assurance-workload").expect("image name"),
             rootfs_path: rootfs,
             artifact_digest: Sha256Digest::parse(format!("sha256:{}", "11".repeat(32)))
@@ -946,6 +1080,13 @@ mod tests {
             kernel_digest: Some(
                 Sha256Digest::parse(format!("sha256:{}", "22".repeat(32))).expect("kernel digest"),
             ),
+            runtime_overlay_path: None,
+            runtime_overlay_verity_path: None,
+            runtime_overlay_roothash: None,
+            runtime_overlay_version: None,
+            initrd_path: None,
+            runtime_release_proof: None,
+            legacy_bundle_runtime: None,
             verity_path: None,
             roothash: None,
             backend: ProviderBackend::Firecracker,
@@ -953,20 +1094,27 @@ mod tests {
             memory_mib: 256,
             boot_timeout_seconds: 60,
         };
-        let config = workload_start_config(
+        let error = workload_start_config(
             &workload,
             &AssuranceId::parse("assurance-tenant").expect("tenant"),
             &NetworkPolicy::deny_all(),
             "assurance-runtime-test",
             "firecracker",
         )
-        .expect("cached guest runtime is attached");
+        .expect_err("a cached source runtime must not satisfy assurance");
+        assert!(format!("{error:#}").contains("unsigned development runtimes"));
 
-        assert!(config.runtime_overlay_path.is_some());
-        assert!(config.runtime_overlay_verity_path.is_some());
-        assert!(config.runtime_overlay_roothash.is_some());
-        assert!(config.runtime_overlay_version.is_some());
-        assert!(config.initrd_path.is_some());
+        // An incomplete operator selection must not be replaced by that cache.
+        workload.runtime_overlay_path = Some(home.path().join("selected.ext4"));
+        let error = workload_start_config(
+            &workload,
+            &AssuranceId::parse("assurance-tenant").expect("tenant"),
+            &NetworkPolicy::deny_all(),
+            "assurance-runtime-test",
+            "firecracker",
+        )
+        .expect_err("partial explicit runtime must fail without cache fallback");
+        assert!(format!("{error:#}").contains("selected guest runtime has no version"));
     }
 
     fn signed_extension_pack(
@@ -1259,7 +1407,8 @@ mod tests {
         std::fs::write(&rootfs_path, b"admitted workload").expect("workload rootfs");
         let mut guest_sidecar =
             mvm_build::builder_vm::GuestSidecar::for_oci_run("assurance-workload", true, false);
-        guest_sidecar.protocol_version = MIN_ASSURANCE_GUEST_PROTOCOL_VERSION;
+        guest_sidecar.protocol_version =
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION as u8;
         guest_sidecar
             .write_to_dir(state.path())
             .expect("guest sidecar");
@@ -1301,6 +1450,13 @@ mod tests {
                 artifact_digest,
                 kernel_path: None,
                 kernel_digest: None,
+                runtime_overlay_path: None,
+                runtime_overlay_verity_path: None,
+                runtime_overlay_roothash: None,
+                runtime_overlay_version: None,
+                initrd_path: None,
+                runtime_release_proof: None,
+                legacy_bundle_runtime: None,
                 verity_path: None,
                 roothash: None,
                 backend: ProviderBackend::Firecracker,

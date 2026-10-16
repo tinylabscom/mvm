@@ -1,4 +1,5 @@
-//! OTLP/HTTP JSON encoding of finished spans.
+//! OTLP/HTTP JSON encoding of finished spans, and of standalone events as
+//! log records.
 //!
 //! Follows the protobuf JSON mapping OTLP specifies: camelCase field names,
 //! trace and span ids as lowercase hex rather than base64, 64-bit integers
@@ -196,6 +197,100 @@ fn encode_span(span: &SpanRecord) -> Span {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportLogsServiceRequest {
+    resource_logs: Vec<ResourceLogs>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceLogs {
+    resource: Resource,
+    scope_logs: Vec<ScopeLogs>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopeLogs {
+    scope: Scope,
+    log_records: Vec<LogRecord>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LogRecord {
+    time_unix_nano: String,
+    observed_time_unix_nano: String,
+    severity_number: u8,
+    severity_text: String,
+    body: AnyValue,
+    attributes: Vec<KeyValue>,
+}
+
+/// The OTLP severity number for a `tracing` level name: the first number of
+/// each of OTLP's TRACE/DEBUG/INFO/WARN/ERROR ranges, 0 (unspecified) for
+/// anything else.
+fn severity_number(level: &str) -> u8 {
+    match level {
+        "TRACE" => 1,
+        "DEBUG" => 5,
+        "INFO" => 9,
+        "WARN" => 13,
+        "ERROR" => 17,
+        _ => 0,
+    }
+}
+
+/// A standalone event as an OTLP log record: its name is the body, its level
+/// the severity, its other fields the attributes. Never a span: an event with
+/// no enclosing span did not take any time, and a span fabricated around it
+/// would claim a successful operation nobody ran.
+fn encode_log(event: &EventRecord) -> LogRecord {
+    let level = event
+        .attributes
+        .iter()
+        .find_map(|(key, value)| match (key.as_str(), value) {
+            ("level", AttrValue::Str(level)) => Some(level.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let attributes = event
+        .attributes
+        .iter()
+        .filter(|(key, _)| key != "level")
+        .map(|(key, value)| KeyValue::new(key, value))
+        .collect();
+    let time = unix_nanos(event.time);
+    LogRecord {
+        observed_time_unix_nano: time.clone(),
+        time_unix_nano: time,
+        severity_number: severity_number(&level),
+        severity_text: level,
+        body: AnyValue::String(event.name.clone()),
+        attributes,
+    }
+}
+
+/// Serialize one batch of standalone events to a logs-signal request body.
+pub(crate) fn encode_log_batch(resource: &ResourceInfo, events: &[EventRecord]) -> Vec<u8> {
+    let request = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            resource: Resource {
+                attributes: resource.attributes(),
+            },
+            scope_logs: vec![ScopeLogs {
+                scope: Scope {
+                    name: SCOPE_NAME,
+                    version: env!("CARGO_PKG_VERSION"),
+                },
+                log_records: events.iter().map(encode_log).collect(),
+            }],
+        }],
+    };
+    serde_json::to_vec(&request).unwrap_or_default()
+}
+
 fn encode_event(event: &EventRecord) -> Event {
     Event {
         time_unix_nano: unix_nanos(event.time),
@@ -309,6 +404,29 @@ mod tests {
                     }],
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn a_standalone_event_encodes_as_a_log_record_not_a_span() {
+        let event = EventRecord {
+            time: at(1_000),
+            name: "cache miss".into(),
+            attributes: vec![
+                ("level".into(), AttrValue::Str("WARN".into())),
+                ("key".into(), AttrValue::Str("abc".into())),
+            ],
+        };
+        let body: Value = serde_json::from_slice(&encode_log_batch(&resource(), &[event])).unwrap();
+        assert!(body.get("resourceSpans").is_none(), "no span is fabricated");
+        let record = &body["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0];
+        assert_eq!(record["timeUnixNano"], "1000");
+        assert_eq!(record["severityNumber"], 13);
+        assert_eq!(record["severityText"], "WARN");
+        assert_eq!(record["body"], json!({"stringValue": "cache miss"}));
+        assert_eq!(
+            record["attributes"],
+            json!([{"key": "key", "value": {"stringValue": "abc"}}])
         );
     }
 

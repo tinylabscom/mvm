@@ -15,7 +15,7 @@ use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
-    RunPosture, SystemClock, admit_for_run,
+    SystemClock, admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -40,6 +40,7 @@ mod audit;
 mod bundle_binding;
 pub mod bundle_environment;
 pub mod bundle_posture;
+mod durability;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod policy;
@@ -51,6 +52,7 @@ pub mod run_secrets;
 pub mod secrets;
 
 pub use bundle_binding::{BundlePin, InheritedBundle};
+pub use durability::admit_plan_for_boot_syncing_beside_boot;
 pub use instructions::InstructionSources;
 
 /// A content-bound asset. Operator-declared files and internally selected
@@ -121,6 +123,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// boot. When present, both labeled digests and the byte count are
     /// reverified before plan synthesis.
     pub boot_artifact_identity: Option<&'a BootArtifactIdentity>,
+    /// The exact selected runtime, verified before it can contribute assurance.
+    pub runtime_config: Option<&'a mvm_core::vm_backend::VmStartConfig>,
     pub cpus: u32,
     pub mem_mib: u64,
     /// The transport this launch gives the guest, recorded on the plan.
@@ -404,6 +408,22 @@ pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
+    let (context, durability) = admit(p, ingress, durability::AdmissionSync::Inline)?;
+    debug_assert!(
+        durability.is_settled(),
+        "an inline admission is already durable"
+    );
+    Ok(context)
+}
+
+fn admit(
+    p: AdmitPlanForBootParams<'_>,
+    ingress: Vec<mvm_core::plan::IngressMapping>,
+    sync: durability::AdmissionSync,
+) -> Result<(
+    AdmissionContext,
+    mvm_core::admission_durability::AdmissionDurability,
+)> {
     // A production boot runs only verified released images, for every
     // managed artifact it resolves. The tiers recorded with those images
     // decide (below): a local-dev managed image is refused however it was
@@ -689,12 +709,7 @@ pub fn admit_plan_for_boot_configured_ingress(
     // reference name, so the caller adds the resolved bytes' hash — an
     // operator comparing identities sees which exact policy content was
     // admitted, not just its name.
-    let network_policy_digest = {
-        use sha2::Digest as _;
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(serde_json::to_vec(&p.network_policy).expect("policy serializes"));
-        hex::encode(hasher.finalize())
-    };
+    let network_policy_digest = mvm_core::policy::network_policy::content_sha256(&p.network_policy);
 
     let seccomp_tier = mvm_core::plan::workload_seccomp_tier(
         p.seccomp_tier,
@@ -809,18 +824,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         p.ledger,
         p.keys_dir,
         admission_ctx.as_ref(),
-        // A caller that already resolved its backend hands the typed kind over,
-        // and the grant gate measures against the mechanisms that tier really
-        // has. A caller that has not resolved one yet passes `None` and gets
-        // the fail-closed answer: a sealed run refuses a grant whose
-        // enforceability nothing can confirm, a dev run is warned. The plan's
-        // own `runtime_profile` is never consulted for this — it is a label its
-        // author chose, and believing it would let a mislabelled plan pick the
-        // controls it is measured against.
-        match p.backend_kind {
-            Some(kind) => RunPosture::on_backend(variant, kind),
-            None => RunPosture::without_backend(variant),
-        },
+        crate::admission::run_grants::run_posture(variant, p.backend_kind, p.runtime_config),
     )
     .or_else(|err| -> Result<_> {
         if let Some(refused) =
@@ -989,14 +993,29 @@ pub fn admit_plan_for_boot_configured_ingress(
         ms = (t_emitter - t_signer).as_secs_f64() * 1000.0,
         "admit: policy + emitter build"
     );
-    // One batch, one fsync. These entries all have to be durable before the
-    // same thing — this plan booting — and nothing between them acts on the
-    // one before it, so syncing each separately bought no ordering. It cost
-    // one `F_FULLFSYNC` each, which is 7.4ms on an Apple-silicon host and
-    // ~42ms on the KVM box's array. The batch closes here, before the caller
-    // gets an `AdmissionContext` to boot from, and a failed flush is an error
-    // rather than a warning.
-    emitter.batched(|| {
+    // The validated tenant bundle is loaded once and delivered to the bridge
+    // for the live L4 enforcement path. Local-default plans retain the bridge's
+    // mandatory-deny posture by carrying no bundle.
+    let policy_bundle = resolved.bundle;
+
+    // The admitted L7 egress boundary recorded in the chain-signed log so a
+    // receipt can name the destinations without re-resolving policy refs.
+    let egress_destinations = policy_bundle
+        .as_ref()
+        .map(|b| b.egress.allow_list.clone())
+        .unwrap_or_default();
+
+    // One batch, one fsync. Every admission-path entry has to be durable
+    // before the same thing — this plan's workload running — and nothing
+    // between them acts on the one before it, so syncing each separately
+    // bought no ordering. The batch covers the admission record, its decision
+    // record, the grant, the shares, the asset identities, the policy
+    // resolution and the egress destinations: all entries that used to
+    // trigger their own fsync now share the single flush. A failed write
+    // inside the batch is an error here; a failed sync is an error wherever
+    // the caller waits for it, which is here unless it asked to sync beside
+    // the boot.
+    let record = || {
         mvm_hostd::audit::durability::record_admission(
             Some(&emitter),
             admitted.plan(),
@@ -1021,29 +1040,28 @@ pub fn admit_plan_for_boot_configured_ingress(
         emitter
             .emit_asset_identities(admitted.plan())
             .context("recording admitted asset identities in the audit chain")?;
+        // Policy resolution and egress destinations are non-fatal records
+        // that used to live outside the batch, each triggering its own
+        // fsync. Folding them in saves two serial F_FULLFSYNCs (~15ms on
+        // Apple silicon, ~84ms on KVM arrays) with no ordering loss.
+        emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
+        if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
+            tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
+        }
         Ok(())
-    })?;
+    };
+    let durability = match sync {
+        durability::AdmissionSync::Inline => {
+            emitter.batched(record)?;
+            mvm_core::admission_durability::AdmissionDurability::settled(Ok(()))
+        }
+        durability::AdmissionSync::BesideBoot => emitter.batched_sync_detached(record)?.1,
+    };
     tracing::debug!(
         ms = t_emitter.elapsed().as_secs_f64() * 1000.0,
+        ?sync,
         "admit: record_admission (batched fsync)"
     );
-
-    emit_policy_resolved(admitted.plan(), &emitter, resolved.kind);
-
-    // The validated tenant bundle is loaded once and delivered to the bridge
-    // for the live L4 enforcement path. Local-default plans retain the bridge's
-    // mandatory-deny posture by carrying no bundle.
-    let policy_bundle = resolved.bundle;
-
-    // Record the admitted L7 egress boundary in the chain-signed log so a
-    // receipt can name the destinations without re-resolving policy refs.
-    let egress_destinations = policy_bundle
-        .as_ref()
-        .map(|b| b.egress.allow_list.clone())
-        .unwrap_or_default();
-    if let Err(e) = emitter.emit_egress_destinations(admitted.plan(), &egress_destinations) {
-        tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
-    }
 
     let context = AdmissionContext {
         admitted,
@@ -1065,7 +1083,7 @@ pub fn admit_plan_for_boot_configured_ingress(
         return Err(err);
     }
 
-    Ok(context)
+    Ok((context, durability))
 }
 
 /// Resolve a local deployment record only when it sits beside the exact
@@ -1357,6 +1375,25 @@ pub fn enforce_shares(
         .context("admission share check")
 }
 
+/// The claim-time sibling of [`enforce_shares`]: re-check every volume a warm
+/// claim will attach against the shares its signed plan admitted, immediately
+/// before the claim, exactly as a cold boot checks them before it attaches
+/// anything. The volume must be named by the plan, and a directory whose
+/// content digest the plan pinned must still hash to it. A launch with no
+/// volumes attaches nothing, so its plan is never decoded here.
+pub fn enforce_shares_for_claim(
+    volumes: &[mvm_core::vm_backend::VmVolume],
+    plan_json: &str,
+) -> Result<()> {
+    if volumes.is_empty() {
+        return Ok(());
+    }
+    let plan = mvm_core::plan::plan_from_admitted_json(plan_json)
+        .context("a warm claim attaching volumes needs its admitted plan")?;
+    mvm_hostd::plan_admission::enforce_admitted_shares(volumes, &plan)
+        .context("checking the volumes a warm claim attaches against its admitted shares")
+}
+
 /// Refuse to boot if the kernel about to be loaded is not the one the verified
 /// `ExecutionPlan` pinned.
 ///
@@ -1610,6 +1647,71 @@ mod host_signer_pubkey_config_tests {
     }
 }
 
+#[cfg(test)]
+mod claim_shares_tests {
+    use super::*;
+    use mvm_core::plan::test_support::PlanFixture;
+    use mvm_core::vm_backend::VmVolume;
+
+    fn read_only_mount(guest: &str) -> VmVolume {
+        VmVolume {
+            host: "/workspace".into(),
+            guest: guest.into(),
+            materialized_image: Some(format!("/cache{guest}.ext4")),
+            read_only: true,
+            ..Default::default()
+        }
+    }
+
+    /// A volume the signed plan never admitted is refused before any parent is
+    /// touched, and so is a launch with volumes whose plan cannot be read.
+    #[test]
+    fn a_volume_the_plan_did_not_admit_is_refused_before_the_claim() {
+        let volumes = vec![read_only_mount("/data")];
+        let plan = PlanFixture::new().build();
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        let err = enforce_shares_for_claim(&volumes, &plan_json).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not named in the signed"),
+            "{err:#}"
+        );
+        assert!(enforce_shares_for_claim(&volumes, "not a plan").is_err());
+        assert!(enforce_shares_for_claim(&[], "not a plan").is_ok());
+    }
+
+    /// The content digest a plan pinned for a mount is re-checked right before
+    /// the claim, as a cold boot re-checks it: an image whose bytes changed
+    /// after admission is refused, the unchanged one is attached.
+    #[test]
+    fn a_mount_whose_bytes_changed_after_admission_is_refused_before_the_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("mount.ext4");
+        std::fs::write(&image, b"admitted bytes").unwrap();
+        let mut volume = read_only_mount("/data");
+        volume.materialized_image = Some(image.display().to_string());
+        let volumes = vec![volume.clone()];
+
+        let mut plan = PlanFixture::new().build();
+        plan.shares = vec![mvm_core::plan::HostShareGrant {
+            tag: "uvol0".into(),
+            host_path: volume.host.clone(),
+            guest_path: volume.guest.clone(),
+            kind: mvm_core::plan::ShareKind::DirShare,
+            read_only: true,
+            encrypted: false,
+            content_sha256: Some(mvm_core::crypto::image_verify::sha256_file(&image).unwrap()),
+        }];
+        let plan_json = serde_json::to_string(&plan).unwrap();
+        enforce_shares_for_claim(&volumes, &plan_json).expect("unchanged bytes are attached");
+
+        std::fs::write(&image, b"changed after admission").unwrap();
+        assert!(
+            enforce_shares_for_claim(&volumes, &plan_json).is_err(),
+            "bytes the plan never vouched for must not reach a claimed child"
+        );
+    }
+}
+
 // ── admit_plan_for_boot tests ────────────────────────────
 //
 // These tests stay scoped to the helper rather than `cmd_run` itself
@@ -1689,6 +1791,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-pinned",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: rootfs,
@@ -1737,6 +1840,68 @@ pub(crate) mod admit_plan_tests {
 
         let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    /// Admission that leaves its sync beside the boot still writes the whole
+    /// admission before it returns; the handle it hands back is only the sync.
+    #[test]
+    fn a_beside_boot_admission_is_written_before_it_returns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let rootfs = write_rootfs(dir.path(), b"beside-boot rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let (context, durability) =
+            admit_plan_for_boot_syncing_beside_boot(params).expect("admission succeeds");
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).expect("chain");
+        assert!(
+            chain.contains("plan.admitted")
+                && chain.contains(context.admitted.plan_id().0.as_str()),
+            "the admission is on the chain before the sync is waited for: {chain}"
+        );
+        durability.wait().expect("the sync succeeds");
+    }
+
+    /// The host budget is a refusal, and refusals do not wait for a boot: a
+    /// beside-boot admission over budget fails before it returns, so there is
+    /// no config for a VMM to start from and nothing is recorded as admitted.
+    #[test]
+    fn a_beside_boot_admission_refuses_an_over_budget_boot_before_returning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let config = mvm_core::user_config::MvmConfig {
+            host_budget_memory_mib: Some(64),
+            ..Default::default()
+        };
+        mvm_core::user_config::save(&config, None).expect("host config");
+        let rootfs = write_rootfs(dir.path(), b"over-budget rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+
+        let error = match admit_plan_for_boot_syncing_beside_boot(params) {
+            Ok(_) => panic!("a 512 MiB boot must not fit a 64 MiB host budget"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("budget"),
+            "the refusal names the budget: {error:#}"
+        );
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl")).unwrap_or_default();
+        assert!(
+            !chain.contains("plan.admitted"),
+            "a refused boot is not recorded as admitted: {chain}"
+        );
     }
 
     #[test]
@@ -2016,6 +2181,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-happy",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2086,6 +2252,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-missing",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
@@ -2173,6 +2340,7 @@ pub(crate) mod admit_plan_tests {
                 backend_kind: None,
                 tenant: "local",
                 vm_name: "vm-transport",
+                runtime_config: None,
                 backend_name: "firecracker",
                 configured_images_dir: None,
                 rootfs_path: &rootfs,
@@ -2232,6 +2400,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-1",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2271,6 +2440,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-2",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2325,6 +2495,7 @@ pub(crate) mod admit_plan_tests {
             tenant: "local",
             vm_name,
             backend_name: "firecracker",
+            runtime_config: None,
             configured_images_dir: None,
             rootfs_path: &rootfs,
             kernel_path: None,
@@ -2497,6 +2668,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-local-default",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2562,6 +2734,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-allow-list",
+            runtime_config: None,
             backend_name: "libkrun",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2644,6 +2817,7 @@ pub(crate) mod admit_plan_tests {
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-unrestricted",
+            runtime_config: None,
             backend_name: "hvf",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2824,6 +2998,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-non-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2893,6 +3068,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -2951,6 +3127,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-shell-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3036,6 +3213,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3099,6 +3277,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-entrypoint-unknown-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3154,6 +3333,7 @@ pub(crate) mod admit_plan_tests {
             boot_artifact_identity: None,
             tenant: "local",
             vm_name: "vm-dev-shell",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3567,6 +3747,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-shares",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3678,6 +3859,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-granted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3855,6 +4037,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-over-ceiling",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,
@@ -3926,6 +4109,7 @@ allow_hosts = ["localhost:8443"]
             network_mode: mvm_contract::plan::NetworkMode::default(),
             tenant: "local",
             vm_name: "vm-ungranted",
+            runtime_config: None,
             backend_name: "firecracker",
             configured_images_dir: None,
             rootfs_path: &rootfs,

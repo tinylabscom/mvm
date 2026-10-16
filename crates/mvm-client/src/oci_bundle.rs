@@ -1,7 +1,8 @@
 //! Materialize OCI content once, then sign a portable package on the caller.
 //!
 //! Acquisition uses the ordinary OCI fetch/unpack/materialization pipeline.
-//! Runtime assets come from the existing authenticated image-set pin. Neither
+//! The kernel comes from the authenticated Linux image-set pin; runtime assets
+//! come from the signed CLI release and travel with their original proofs. Neither
 //! the OCI materializer nor the builder receives the caller's signing key.
 
 mod assets;
@@ -196,11 +197,41 @@ pub fn export_materialized_oci_bundle(
         builder_id: None,
         artifacts: Default::default(),
     });
-    inputs.boot_assets = Some(mvm_bundler::BootAssetsInputs {
+    let runtime_artifacts = [
+        (
+            assets.runtime.archive_artifact.as_str(),
+            assets.release_proof.archive.as_path(),
+        ),
+        (
+            assets.runtime.checksum_artifact.as_str(),
+            assets.release_proof.checksum.as_path(),
+        ),
+        (
+            assets.runtime.signature_bundle_artifact.as_str(),
+            assets.release_proof.signature_bundle.as_path(),
+        ),
+        (
+            assets.runtime.checksum_signature_bundle_artifact.as_str(),
+            assets.checksum_signature_bundle.as_path(),
+        ),
+        (
+            assets.runtime.overlay_artifact.as_str(),
+            assets.runtime_overlay.as_path(),
+        ),
+        (
+            assets.runtime.overlay_verity_artifact.as_str(),
+            assets.runtime_overlay_verity.as_path(),
+        ),
+        (
+            assets.runtime.initramfs_artifact.as_str(),
+            assets.initrd.as_path(),
+        ),
+    ];
+    inputs.cli_boot_assets = Some(mvm_bundler::CliBootAssetsInputs {
         manifest_bytes: assets.image_set.manifest_bytes(),
         manifest_sha256: set.root(),
-        runtime_overlay: &assets.runtime_overlay,
-        initramfs: &assets.initramfs_archive,
+        runtime: &assets.runtime,
+        artifacts: &runtime_artifacts,
     });
     if let Some((bytes, roothash)) = &verity {
         inputs = inputs.verity(bytes, roothash);

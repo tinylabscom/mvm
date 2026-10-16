@@ -19,6 +19,7 @@ pub(super) mod sign;
 pub(super) mod uninstall;
 pub(super) mod update;
 pub(super) mod verify_release;
+pub(super) mod verify_runtime;
 
 // Re-export the top-level `Cli` so files inside this group can keep
 // using `super::Cli`.
