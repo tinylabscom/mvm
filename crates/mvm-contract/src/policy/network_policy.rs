@@ -1553,6 +1553,45 @@ mod tests {
         assert!(policy.ai().is_none());
     }
     #[test]
+    fn certificate_hosts_require_both_interception_and_inspection() {
+        use crate::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let mut routes = Vec::new();
+        for intercept in [false, true] {
+            for inspect in [false, true] {
+                routes.push(EgressRoute {
+                    id: format!("route-{}-{}", u8::from(intercept), u8::from(inspect)),
+                    host: format!(
+                        "host-{}-{}.example.test",
+                        u8::from(intercept),
+                        u8::from(inspect)
+                    ),
+                    port: 443,
+                    intercept,
+                    rules: if inspect {
+                        vec![EndpointRule {
+                            id: None,
+                            method: Some("GET".into()),
+                            path: "/**".into(),
+                            outcome: RouteOutcome::Allow,
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    otherwise: RouteOutcome::Allow,
+                });
+            }
+        }
+        for policy in [NetworkPolicy::unrestricted(), NetworkPolicy::deny_all()] {
+            assert!(policy.intercepted_route_hosts().is_empty());
+            assert_eq!(
+                policy.with_routes(routes.clone()).intercepted_route_hosts(),
+                ["host-1-1.example.test"]
+            );
+        }
+    }
+
+    #[test]
     fn endpoint_routes_are_returned_for_both_policy_forms() {
         let route: crate::policy::routes::EgressRoute =
             serde_json::from_str(r#"{"id":"api","host":"api.example.test"}"#).unwrap();

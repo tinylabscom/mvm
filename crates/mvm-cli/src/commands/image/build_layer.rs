@@ -234,7 +234,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unsupported_input_leaves_no_published_output() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-image-build-layer-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let source = tmp.path().join("staged");
         fs::create_dir(&source).unwrap();
         let _socket = std::os::unix::net::UnixListener::bind(source.join("socket")).unwrap();

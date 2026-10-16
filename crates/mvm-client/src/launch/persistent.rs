@@ -401,6 +401,19 @@ pub fn start_persistent_oci_machine(
             .as_deref()
             .map(std::path::Path::new),
     )?;
+    let _built_runtime = mvm_hostd::plan_admission::prepare_built_pack_start(
+        &admission.admitted,
+        &mut start_config,
+        crate::backend_kind_for(backend_name),
+    )
+    .inspect_err(|error| {
+        emit_failed(&admission, "registry-pack-boot", error);
+    })?;
+    if let Some(runtime) = &_built_runtime {
+        runtime.verify_config(&start_config).inspect_err(|error| {
+            emit_failed(&admission, "registry-pack-runtime", error);
+        })?;
+    }
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
     let started = match crate::start_prepared(backend, &start_config) {

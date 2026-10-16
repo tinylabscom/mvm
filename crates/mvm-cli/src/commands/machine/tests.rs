@@ -3,7 +3,8 @@ use super::remove::{
     remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
 };
 use super::runtime::{
-    PostStart, post_start_action, resolve_persistent_spec, transient_volume_warning,
+    PostStart, effective_hypervisor, needs_built_pack_preflight, post_start_action,
+    preflight_registry_pack_image, resolve_persistent_spec, transient_volume_warning,
 };
 use super::*;
 use crate::commands::{Cli, Commands};
@@ -1738,6 +1739,92 @@ fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
     let err = resolve_persistent_spec(&reconnect, "web", None, None)
         .expect_err("reconnect to a missing machine errors");
     assert!(err.to_string().contains("does not exist"), "msg: {err}");
+}
+
+#[test]
+fn persistent_machine_run_persists_a_preselected_pack_pin_as_its_only_source() {
+    let _state = IsolatedMachineState::new();
+    let mut args = parse_run(&["run", "--name", "python", "--detach"]).expect("parse");
+    args.run.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    let (spec, _) =
+        resolve_persistent_spec(&args, "python", None, None).expect("create pack-backed machine");
+
+    assert_eq!(
+        spec.registry_pack_image
+            .as_ref()
+            .map(|pin| pin.reference().to_string())
+            .as_deref(),
+        Some("runtime/python@1.1.0")
+    );
+    assert!(spec.image.is_none());
+    assert!(spec.manifest.is_none());
+    assert!(spec.deployment.is_none());
+    assert!(!spec.runtime_pack);
+}
+
+#[test]
+fn source_pack_preflight_does_not_treat_its_pin_as_a_built_image() {
+    let _state = IsolatedMachineState::new();
+    let mut spec = spec_fixture("source");
+    spec.manifest = Some("verified-source-slot".into());
+    spec.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    preflight_registry_pack_image(&spec, Some("firecracker"))
+        .expect("Source pack slot is handled by the Source validator");
+}
+
+#[test]
+fn persistent_preflight_uses_the_backend_selected_for_the_actual_start() {
+    let mut env = TestEnv::new();
+    env.set("MVM_HYPERVISOR", "libkrun");
+    assert_eq!(effective_hypervisor(None), "libkrun");
+    assert_eq!(effective_hypervisor(Some("firecracker")), "firecracker");
+}
+
+#[test]
+fn persistent_preflight_is_skipped_only_for_an_already_running_reuse() {
+    assert!(!needs_built_pack_preflight(&SpecReconcile::Reuse, true));
+    assert!(needs_built_pack_preflight(&SpecReconcile::Reuse, false));
+    assert!(needs_built_pack_preflight(&SpecReconcile::Create, true));
+    assert!(needs_built_pack_preflight(
+        &SpecReconcile::Recreate {
+            changed: "source".into(),
+        },
+        true
+    ));
+}
+
+#[test]
+fn fresh_transient_machine_run_accepts_a_preselected_pack_pin_as_its_source() {
+    let _state = IsolatedMachineState::new();
+    let mut args =
+        parse_run(&["run", "--policy", "runtime/python@1.1.0", "--", "/bin/true"]).expect("parse");
+    args.run.registry_pack_image = Some(
+        mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pack pin"),
+    );
+
+    assert_eq!(
+        args.resolve_mode(false)
+            .expect("built pack is a boot source"),
+        MachineRunMode::Transient
+    );
 }
 
 #[test]

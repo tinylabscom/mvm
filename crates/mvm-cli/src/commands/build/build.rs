@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use crate::ui;
 
+#[cfg(test)]
+use mvm_core::manifest::key_for_manifest_identity;
 use mvm_core::manifest::{
-    self, MANIFEST_SCHEMA_VERSION, Manifest, PersistedManifest, Provenance,
-    key_for_manifest_identity, resolve_manifest_config_path,
+    self, Manifest, PersistedManifest, Provenance, resolve_manifest_config_path,
 };
 use mvm_core::naming::validate_flake_ref;
 use mvm_core::user_config::MvmConfig;
@@ -817,23 +818,7 @@ fn flake_slot_manifest(
     profile: Option<&str>,
     backend: &str,
 ) -> PersistedManifest {
-    let synthetic_path = format!("<flake-slot>/{resolved_flake_ref}");
-    PersistedManifest {
-        schema_version: MANIFEST_SCHEMA_VERSION,
-        manifest_path: synthetic_path.clone(),
-        manifest_hash: key_for_manifest_identity(&synthetic_path),
-        flake_ref: resolved_flake_ref.to_string(),
-        profile: profile.unwrap_or("default").to_string(),
-        vcpus: 2,
-        mem_mib: 512,
-        mem_initial_mib: None,
-        data_disk_mib: 0,
-        name: None,
-        backend: backend.to_string(),
-        provenance: Provenance::current(),
-        created_at: mvm_core::time::utc_now(),
-        updated_at: mvm_core::time::utc_now(),
-    }
+    PersistedManifest::from_flake_identity(resolved_flake_ref, profile, backend)
 }
 
 /// Read the volume's `meta.json.annotations.lockfile_sha256`. Returns

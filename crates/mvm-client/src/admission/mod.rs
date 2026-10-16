@@ -1726,6 +1726,13 @@ pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
+    fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        (env, home)
+    }
+
     pub(super) fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
         let path = dir.join("rootfs.ext4");
         let mut f = std::fs::File::create(&path).expect("create rootfs");
@@ -1827,6 +1834,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_binds_the_caller_commitment_into_the_plan() {
+        let _home = isolated_home();
         let dir = tempfile::tempdir().expect("tempdir");
         let rootfs = write_rootfs(dir.path(), b"committed rootfs");
         let keys_dir = dir.path().join("keys");
@@ -1931,6 +1939,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn asset_identity_audit_failure_refuses_admission_before_boot() {
+        let _home = isolated_home();
         let dir = tempfile::tempdir().expect("tempdir");
         let rootfs = write_rootfs(dir.path(), b"asset audit rootfs");
         let declared = dir.path().join("declared-input.txt");
@@ -2021,6 +2030,7 @@ pub(crate) mod admit_plan_tests {
         params.keys_dir = Some(&keys_dir);
         params.audit_dir = Some(&audit_dir);
         params.assets = vec![AssetSpec::RegistryPack(pin)];
+        params.backend_kind = Some(mvm_core::vm_backend::BackendKind::Firecracker);
 
         let admitted = admit_plan_for_boot(params).expect("signed pack admission");
         let asset = admitted
@@ -2032,6 +2042,43 @@ pub(crate) mod admit_plan_tests {
             .expect("signed plan pins pack identity");
         assert_eq!(asset.name, reference.to_string());
         assert_eq!(asset.digest, digest.as_str());
+
+        let mut substrate = crate::entrypoint::SessionAuditSubstrate {
+            tenant_id: admitted.admitted.plan().tenant.0.clone(),
+            plan_json: serde_json::to_string(admitted.admitted.signed()).unwrap(),
+            caller_registration: None,
+            bundle_json: None,
+            config_files: Vec::new(),
+            read_only_materialized_images: vec!["admitted-image.ext4".into()],
+            built_pack_check: admitted.admitted.built_pack_boot_check().unwrap(),
+            durability: Some(
+                mvm_core::admission_durability::AdmissionDurability::settled(Err(anyhow::anyhow!(
+                    "audit sync refused"
+                ))),
+            ),
+        };
+        let check = substrate
+            .built_pack_check
+            .take()
+            .expect("admitted pack check");
+        let mut config = mvm_core::vm_backend::VmStartConfig::default();
+        assert_eq!(substrate.apply_to(&mut config), vec!["admitted-image.ext4"]);
+        assert!(
+            check
+                .prepare(&mut config, mvm_core::vm_backend::BackendKind::Firecracker)
+                .unwrap()
+                .is_none(),
+            "a signed Source pack retains its existing non-built launch path"
+        );
+        assert!(
+            config
+                .admission_durability
+                .as_ref()
+                .unwrap()
+                .wait()
+                .is_err(),
+            "carrying the image check must not drop a failed admission sync"
+        );
 
         let chain = std::fs::read_to_string(audit_dir.join("local.jsonl"))
             .expect("read admitted audit chain");
@@ -2047,6 +2094,7 @@ pub(crate) mod admit_plan_tests {
     /// the CLI's only admission seam.
     #[test]
     fn the_booting_kernel_is_pinned_into_the_signed_plan() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2090,6 +2138,7 @@ pub(crate) mod admit_plan_tests {
     /// name rather than sign a plan for a boot QEMU will reject.
     #[test]
     fn qemu_admission_refuses_an_elf_kernel_qemu_cannot_load() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2134,6 +2183,7 @@ pub(crate) mod admit_plan_tests {
     /// visible.
     #[test]
     fn a_kernel_swapped_after_admission_is_refused() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2168,6 +2218,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admits_real_rootfs_and_returns_plan_id() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2240,6 +2291,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_failure_when_rootfs_missing() {
+        let _home = isolated_home();
         // sha256_file fails when the file does not exist; the helper
         // must propagate the error with context naming the rootfs path.
         let keys_dir = tempfile::tempdir().unwrap();
@@ -2321,6 +2373,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn the_admitted_plan_records_the_transport_the_launch_derived() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2384,6 +2437,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn two_admissions_in_same_run_produce_distinct_plan_ids() {
+        let _home = isolated_home();
         // The shared ledger is the per-`cmd_run` replay-store. Two
         // admissions with different rootfs hashes (or even same hash —
         // synthesize_plan generates fresh nonces) must both succeed.
@@ -2531,6 +2585,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn emit_boot_posture_audits_the_root_strategy_label() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-boot-posture");
@@ -2554,6 +2609,7 @@ pub(crate) mod admit_plan_tests {
     /// each branch is pinned to the entries it alone writes.
     #[test]
     fn a_transient_run_that_booted_records_launched_and_posture() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-ok");
@@ -2583,6 +2639,7 @@ pub(crate) mod admit_plan_tests {
     /// of an image can be told apart from a run that should have been warm.
     #[test]
     fn a_cold_transient_run_records_why_it_was_cold() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-cold");
@@ -2611,6 +2668,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_transient_run_that_failed_records_failed_and_not_launched() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-err");
@@ -2652,6 +2710,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_emits_policy_resolved_for_default_local_default_refs() {
+        let _home = isolated_home();
         // The synthesized plan defaults to `local-default` on every
         // ref; validation succeeds without a bundle. The hook must
         // record that resolution without implying a live control.
@@ -2720,6 +2779,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_weaves_allow_list_into_signed_generated_policy_bundle() {
+        let _home = isolated_home();
         use mvm_core::network_policy::{HostPort, NetworkPolicy};
 
         let keys_dir = tempfile::tempdir().unwrap();
@@ -2805,6 +2865,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn admission_weaves_unrestricted_policy_into_signed_generated_policy_bundle() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2917,6 +2978,7 @@ pub(crate) mod admit_plan_tests {
     /// not.
     #[test]
     fn admission_hashes_directory_shares_and_leaves_disk_shares_alone() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -2980,6 +3042,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_non_shell_entrypoint_with_the_grant_is_admitted_under_prod() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3054,6 +3117,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_shell_entrypoint_without_the_grant_is_admitted_output_streaming_is_unconditional() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3113,6 +3177,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_shell_entrypoint_with_the_grant_is_refused_and_names_the_reason() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3176,6 +3241,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_ad_hoc_override_does_not_bypass_the_sealed_input_grant_gate() {
+        let _home = isolated_home();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"unit-only rootfs");
         let ledger = InMemoryNonceLedger::new();
@@ -3194,6 +3260,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_unresolved_entrypoint_with_the_grant_is_refused() {
+        let _home = isolated_home();
         // The gate's fail-closed arm. Before it, every launch path passed an
         // empty argv and the shell refusal could never fire — a control that
         // reported present and was structurally dormant. An entrypoint nobody
@@ -3259,6 +3326,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn an_unresolved_entrypoint_without_the_grant_still_boots() {
+        let _home = isolated_home();
         // Every launch path that never asks for streamed stdin passes an
         // unresolved entrypoint, so the fail-closed arm above must be
         // reachable only through the grant — otherwise this would refuse to
@@ -3315,6 +3383,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn a_dev_profile_shell_entrypoint_with_the_grant_is_not_refused() {
+        let _home = isolated_home();
         // The refusal is scoped to the sealed-production tier
         // (restrict_agent_verbs). A dev/interactive/ad-hoc run already carries
         // a DevOnly Exec grant, so it must not fire there — it would be a
@@ -3474,6 +3543,7 @@ pub(crate) mod admit_plan_tests {
 
     #[test]
     fn parallel_admissions_keep_their_captured_image_source_contexts() {
+        let _home = isolated_home();
         let rootfs_dir = tempfile::tempdir().unwrap();
         let rootfs = write_rootfs(rootfs_dir.path(), b"parallel admission image");
         let configured = std::path::Path::new("/nonexistent/mvm-images");
@@ -3514,6 +3584,7 @@ pub(crate) mod admit_plan_tests {
     #[cfg(not(feature = "release-channel"))]
     #[test]
     fn a_contributor_sealed_boot_with_a_configured_checkout_and_an_unmanaged_image_is_admitted() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3536,6 +3607,7 @@ pub(crate) mod admit_plan_tests {
     /// scoped to the production tier, not to the variable.
     #[test]
     fn a_development_admission_is_not_refused_for_a_configured_local_image_checkout() {
+        let _home = isolated_home();
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();

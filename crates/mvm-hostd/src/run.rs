@@ -94,6 +94,9 @@ pub struct LocalRunRequest {
     /// rootfs must hash to the plan's pinned image digest. `None` is every
     /// ordinary local run, which synthesizes its plan as before.
     pub signed_plan: Option<mvm_core::plan::SignedExecutionPlan>,
+    /// Exact registry image identity, never a saved payload path. The signed
+    /// plan must carry this pin and final host boot verification reopens it.
+    pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
 }
 
 /// Admission substrate for a local run: the clock and replay ledger that drive
@@ -309,7 +312,17 @@ pub fn admit_and_boot_local(
         bundle_pin: None,
         deps_volume: None,
         shares: shares_from_vm_volumes(&req.volumes),
-        assets: Vec::new(),
+        assets: req
+            .registry_pack_image
+            .iter()
+            .map(|pin| {
+                mvm_core::plan::AssetIdentity::new(
+                    mvm_core::plan::AssetKind::RegistryPack,
+                    pin.reference().to_string(),
+                    pin.manifest_sha256().as_str(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         redaction: Default::default(),
         reversible_replacement: Default::default(),
         tools: Default::default(),
@@ -386,6 +399,16 @@ fn admit_signed_and_boot_local(
         signed, ctx.clock, ctx.ledger, None, posture,
     )?;
     let plan = admitted.plan();
+    if let Some(pin) = &req.registry_pack_image {
+        anyhow::ensure!(
+            plan.asset_identities.iter().any(|asset| {
+                asset.kind == mvm_core::plan::AssetKind::RegistryPack
+                    && asset.name == pin.reference().to_string()
+                    && asset.digest == pin.manifest_sha256().as_str()
+            }),
+            "signed plan does not authorize the requested built registry image pin"
+        );
+    }
 
     // The plan pins the workload image by digest; the resolved rootfs must BE
     // that image. Synthesized plans get this by construction (synthesis stamps
@@ -485,6 +508,7 @@ mod tests {
             }],
             secret_release: SecretReleasePolicy::PlanBound,
             signed_plan: None,
+            registry_pack_image: None,
         };
 
         let started = admit_and_boot_local(
@@ -548,6 +572,7 @@ mod tests {
                 secrets: Vec::new(),
                 secret_release: SecretReleasePolicy::PlanBound,
                 signed_plan: None,
+                registry_pack_image: None,
             };
             let error = admit_and_boot_local(
                 &backend,
@@ -655,6 +680,7 @@ mod tests {
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
+            registry_pack_image: None,
         };
         let started = admit_and_boot_local(
             &backend,
@@ -726,6 +752,7 @@ mod tests {
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
+            registry_pack_image: None,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -924,6 +951,7 @@ mod tests {
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: None,
+            registry_pack_image: None,
         };
         let err = admit_and_boot_local(
             &backend,
@@ -999,6 +1027,7 @@ mod signed_boot_tests {
             secrets: Vec::new(),
             secret_release: SecretReleasePolicy::None,
             signed_plan: Some(mvm_core::plan::sign_plan(&plan, &fleet_key(), "fleet-prod")),
+            registry_pack_image: None,
         }
     }
 
