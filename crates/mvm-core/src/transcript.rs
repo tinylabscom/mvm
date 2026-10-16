@@ -20,6 +20,8 @@ use crate::crypto::aead;
 
 pub mod evidence;
 pub mod evidence_pressure;
+#[cfg(unix)]
+pub mod local_store;
 mod retention;
 mod ring;
 #[cfg(unix)]
@@ -557,6 +559,45 @@ pub struct TranscriptWriterConfig {
     pub payload_encoding: PayloadEncoding,
     pub recipient: String,
     pub wrapped_data_key_b64: String,
+}
+
+/// An integrity snapshot of unsigned, empty configuration, not a producer or
+/// terminal lifecycle assertion. Kept private to the fixed-layout local store.
+#[cfg(unix)]
+fn initial_manifest(config: TranscriptWriterConfig) -> Result<TranscriptManifest, TranscriptError> {
+    validate_protection(
+        config.at_rest,
+        config.generation_budget,
+        config.payload_encoding,
+        config.created_unix_secs,
+    )?;
+    let mut manifest = TranscriptManifest {
+        format_version: if config.at_rest.is_some() {
+            TRANSCRIPT_MANIFEST_FORMAT_VERSION
+        } else {
+            LEGACY_TRANSCRIPT_MANIFEST_FORMAT_VERSION
+        },
+        capture_id: config.capture_id,
+        binding: config.binding,
+        bounds: config.bounds,
+        created_unix_secs: config.created_unix_secs,
+        at_rest: config.at_rest,
+        generation_budget: config.generation_budget,
+        payload_encoding: config.payload_encoding,
+        sealed_unix_secs: None,
+        wrapped_data_key_b64: config.wrapped_data_key_b64,
+        recipient: config.recipient,
+        retention: config.retention,
+        chunks: Vec::new(),
+        refused_chunks: 0,
+        refused_bytes: 0,
+        evicted_chunks: 0,
+        evicted_bytes: 0,
+        adopted: false,
+        sealed_root_hex: String::new(),
+    };
+    manifest.sealed_root_hex = sealed_root_hex(&manifest)?;
+    Ok(manifest)
 }
 
 impl TranscriptWriter {

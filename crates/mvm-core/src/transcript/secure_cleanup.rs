@@ -67,6 +67,11 @@ impl Drop for CaptureProducerDirectory {
 
 #[cfg(unix)]
 impl CaptureDirectory {
+    /// Internal entry point for a directory already opened beneath a pinned home.
+    pub(super) fn from_owned_directory(dir: File) -> io::Result<Self> {
+        Self::lock(dir)
+    }
+
     /// Pin an already trusted configured root, then walk a bounded relative
     /// capture path without following any descendant symlink.
     pub fn open(root: &Path, relative: &Path) -> io::Result<Self> {
@@ -226,6 +231,12 @@ impl CaptureDirectory {
 }
 
 impl CaptureReadDirectory {
+    /// Internal entry point retaining the existing protected-reader validation.
+    pub(super) fn from_owned_directory(dir: File) -> io::Result<Self> {
+        private_directory(&dir)?;
+        Self::lock(dir, ReadPermissions::Protected)
+    }
+
     pub fn open(root: &Path, relative: &Path) -> io::Result<Self> {
         let mut dir = open_existing_directory(root)?;
         let components: Vec<_> = relative.components().collect();
@@ -689,6 +700,34 @@ mod tests {
         assert!(duplicate.metadata().unwrap().is_dir());
         drop(next);
         drop(duplicate);
+    }
+
+    #[test]
+    fn owned_directory_constructors_release_lexically_and_on_failed_validation() {
+        let root = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(root.path()).unwrap();
+        let file = open_existing_directory(root.path()).unwrap();
+        let duplicate = file.try_clone().unwrap();
+        let exclusive = CaptureDirectory::from_owned_directory(file).unwrap();
+        assert!(CaptureReadDirectory::existing(root.path()).is_err());
+        drop(exclusive);
+        let shared = CaptureReadDirectory::from_owned_directory(
+            open_existing_directory(root.path()).unwrap(),
+        )
+        .unwrap();
+        assert!(CaptureDirectory::for_writer(root.path()).is_err());
+        drop(shared);
+        let next = CaptureDirectory::for_writer(root.path()).unwrap();
+        drop(next);
+        assert!(duplicate.metadata().unwrap().is_dir());
+        std::fs::create_dir(root.path().join(WRITER_LOCK_FILENAME)).unwrap();
+        let file = open_existing_directory(root.path()).unwrap();
+        let failed_duplicate = file.try_clone().unwrap();
+        assert!(CaptureReadDirectory::from_owned_directory(file).is_err());
+        // The failed shared guard explicitly unlocks despite its duplicate.
+        let next = CaptureDirectory::for_writer(root.path()).unwrap();
+        drop(next);
+        assert!(failed_duplicate.metadata().unwrap().is_dir());
     }
 
     #[test]
