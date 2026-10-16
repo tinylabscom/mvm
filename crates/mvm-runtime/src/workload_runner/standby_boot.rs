@@ -132,6 +132,7 @@ pub fn factory_parent_config(
         template_id: _,
         rootfs_path: _,
         kernel_path: _,
+        canonical_kernel,
         revision_hash: _,
         flake_ref: _,
         profile: _,
@@ -183,6 +184,12 @@ pub fn factory_parent_config(
         mem_initial_mib,
     } = launch;
 
+    if canonical_kernel.is_some() {
+        return Err(StandbyError::SpawnFailed(
+            "canonical kernel custody is cold-only; standby reuse is unsupported".into(),
+        ));
+    }
+
     // Every launch resolves a block root now. The comparison is kept rather
     // than dropped because a standby spec written before that was true is
     // still on disk, and it records the strategy it was warmed under: a parent
@@ -201,6 +208,7 @@ pub fn factory_parent_config(
         template_id: spec.template_id.clone(),
         rootfs_path: image.to_string(),
         kernel_path: Some(spec.kernel_path.clone()),
+        canonical_kernel: None,
         cpus: u32::from(spec.vcpus),
         cpu_grant: None,
         memory_mib: spec.mem_mib,

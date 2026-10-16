@@ -1389,6 +1389,14 @@ streams verification of the signed manifest and every artifact's size and hash,
 enforces the size caps (2 GiB per entry, 4 GiB in total), checks posture
 coherence (a `sealed-prod` posture must cover a dm-verity rootfs and require
 authentication), and confirms the host architecture before printing a preview.
+Verification success (exit 0) is not a launch-readiness or freshness guarantee.
+The read-only preview does not prepare a runtime, apply a revocation feed,
+install the archive, or boot a VM. JSON reports `runnable_here: null` (unknown),
+`host_arch_compatible: true`, and `backend_compatibility_checked`, which is true
+only after at least one embedded image set was actually checked for `--backend`.
+Consumers of the former unconditional boolean must handle the nullable field.
+Neither cache-file presence nor package-publisher declarations establish
+canonical Linux authority or current-policy admission.
 The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
@@ -1448,6 +1456,24 @@ manifest. This structural binding is not independent Linux-publisher signature
 or current-revocation evidence; applications requiring that stronger authority
 must satisfy their separate admission requirements. A successful archive check
 alone is not a launch-readiness or protected-observer acceptance result.
+
+Schema 7's closed `canonical_linux_proof` member names the original Linux
+manifest and signature plus the original revocation document and signature.
+These are inventory references, not a publisher-authored permission or an
+evergreen freshness assertion. They must pair with the same Linux manifest
+selected by the CLI-runtime member. Older readers refuse the higher schema;
+missing, aliased, oversized, orphaned or repeated proof references are refused.
+The current plan-admission and client launch paths explicitly refuse this
+member until retained selected-kernel backend custody is supported. Recognizing
+its structure or verifying its application envelope does not enable execution.
+The explicit library preparation API, `launch::canonical_linux::prepare_canonical_linux`,
+is separate from archive preview: it snapshots a pinned Unix archive with
+bounded streaming I/O, authenticates the original feed and Linux root, verifies
+the selected kernel bytes, then applies the signed feed through the existing
+rollback-protected consumer store. It reloads effective policy after that update
+and whenever checked kernel bytes are requested. Its prepared owner is not a
+plan-admission or native-start capability. No command silently opts into that
+policy update, and preparation does not remove the launch refusal.
 
 Bundles carrying their own boot assets use the cold-boot path. The current
 warm-pool preparation command cannot prepare a parent from an archive's pinned

@@ -50,7 +50,8 @@ use crate::policy::security::AgentProfile;
 /// stamp the lowest schema a bundle's members need, so a bundle without a
 /// descriptor stays readable by version-4 readers.
 /// Version 6 separates the signed CLI runtime from the original Linux image set.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 6;
+/// Version 7 carries original canonical Linux publisher and revocation proofs.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 7;
 
 /// The first schema that may carry [`BundleMember::Environment`].
 pub const ENVIRONMENT_MEMBER_MIN_SCHEMA: u32 = 5;
@@ -60,6 +61,9 @@ pub const BOOT_ASSETS_MEMBER_MIN_SCHEMA: u32 = 4;
 
 /// The first schema that may carry the signed portable CLI runtime.
 pub const CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA: u32 = 6;
+
+/// The first schema that carries original canonical Linux proof references.
+pub const CANONICAL_LINUX_PROOF_MIN_SCHEMA: u32 = 7;
 
 /// The first schema that may carry backend-neutral members.
 pub const BUNDLE_MEMBERS_MIN_SCHEMA: u32 = 3;
@@ -192,6 +196,9 @@ pub enum BundleMember {
     /// its prepared boot artifacts. Requires schema 6; never selects retired
     /// runtime members from the image set.
     EmbeddedCliBootAssets(EmbeddedCliBootAssets),
+    /// Original canonical Linux root and revocation proof inventory references.
+    /// Data to reverify at admission, never a publisher-authored permission.
+    CanonicalLinuxProof(CanonicalLinuxProof),
     /// The kernel command line the publisher built and tested the workload
     /// with. Advisory: the launcher derives the command line it boots with,
     /// so a bundle cannot use this to switch off dm-verity or redirect init.
@@ -218,6 +225,7 @@ impl BundleMember {
         match self {
             Self::EmbeddedBootAssets { .. } => BOOT_ASSETS_MEMBER_MIN_SCHEMA,
             Self::EmbeddedCliBootAssets(_) => CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+            Self::CanonicalLinuxProof(_) => CANONICAL_LINUX_PROOF_MIN_SCHEMA,
             Self::Environment(_) => ENVIRONMENT_MEMBER_MIN_SCHEMA,
             Self::EmbeddedImageSet { .. }
             | Self::KernelCmdline { .. }
@@ -245,6 +253,19 @@ pub struct EmbeddedCliBootAssets {
     pub overlay_roothash: String,
     pub protocol_version: u32,
     pub min_supported_protocol_version: u32,
+}
+
+/// Archive inventory names, not host paths, trust roots or verification flags.
+/// The manifest reference must be the same Linux root used by CLI boot assets.
+/// Consumers reverify original signatures, their compiled pin, current time
+/// and local checkpoint; export-time freshness is not an evergreen grant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CanonicalLinuxProof {
+    pub manifest_artifact: String,
+    pub signature_bundle_artifact: String,
+    pub revocation_document_artifact: String,
+    pub revocation_signature_bundle_artifact: String,
 }
 
 /// The publisher's declared security posture for a bundled workload.
@@ -494,12 +515,48 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_six() {
+    fn bundle_schema_version_is_seven() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 6);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 7);
         assert_eq!(ENVIRONMENT_MEMBER_MIN_SCHEMA, 5);
         assert_eq!(CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, 6);
+        assert_eq!(CANONICAL_LINUX_PROOF_MIN_SCHEMA, 7);
+    }
+
+    #[test]
+    fn canonical_linux_proof_is_closed_complete_and_requires_schema_seven() {
+        let value = serde_json::json!({
+            "class": "canonical_linux_proof",
+            "manifest_artifact": "boot-image-set.json",
+            "signature_bundle_artifact": "boot-image-set.json.bundle",
+            "revocation_document_artifact": "image-revocations.json",
+            "revocation_signature_bundle_artifact": "image-revocations.json.bundle"
+        });
+        let member: BundleMember = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(member.minimum_schema_version(), 7);
+        assert_eq!(serde_json::to_value(member).unwrap(), value);
+        for field in value
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|key| *key != "class")
+        {
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<BundleMember>(missing).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["verified", "allow", "signer_key_id", "source_permission"] {
+            let mut forged = value.clone();
+            forged[field] = true.into();
+            assert!(
+                serde_json::from_value::<BundleMember>(forged).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

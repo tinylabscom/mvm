@@ -257,6 +257,15 @@ fn main() -> anyhow::Result<()> {
         .context("read HvfSupervisorConfig from stdin")?;
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
+    let held_kernel = cfg
+        .kernel_fd
+        .map(mvm_vmm::host::restore_image::adopt_inherited)
+        .transpose()
+        .context("adopt verified kernel descriptor")?;
+    anyhow::ensure!(
+        held_kernel.is_none() || cfg.restore_descriptors()?.is_none(),
+        "canonical kernel descriptor cannot enter a restore/warm boot"
+    );
     let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
     use mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus as CaptureStatus;
     let state_dir = cfg
@@ -491,8 +500,18 @@ fn main() -> anyhow::Result<()> {
     CaptureStatus::Running.publish(state_dir)?;
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
         .context("publish protected supervisor PID")?;
+    let kernel_boot = match held_kernel.as_ref() {
+        Some(kernel) => mvm_runtime::backends::hvf::KernelBootUntilParams::builder_descriptor(
+            kernel,
+            &cfg.kernel,
+            timeout,
+        ),
+        None => {
+            mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
+        }
+    };
     let result = mvm_runtime::backends::hvf::boot_kernel_until(
-        mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
+        kernel_boot
             .initramfs(initramfs.as_deref())
             .disks(disks)
             .vsock(cfg.vsock)

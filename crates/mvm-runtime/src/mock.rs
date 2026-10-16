@@ -511,6 +511,7 @@ mod tests {
             source_runtime_archive_sha256: None,
             unsigned_runtime_development: false,
             bundle_boot_assets: None,
+            canonical_kernel: None,
             revision_hash: "abc".to_string(),
             flake_ref: ".".to_string(),
             profile: Some("default".to_string()),

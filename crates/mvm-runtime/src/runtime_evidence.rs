@@ -674,6 +674,9 @@ pub(crate) struct RuntimeLifecycleLease {
 }
 
 impl RuntimeLifecycleLease {
+    pub(crate) fn canonical_kernel_record(&self) -> PathBuf {
+        self.directory.join("canonical-kernel.json")
+    }
     pub(crate) fn acquire(vm_name: &str) -> Result<Self> {
         mvm_core::naming::validate_vm_name(vm_name)?;
         let root = namespace::root(true)?;

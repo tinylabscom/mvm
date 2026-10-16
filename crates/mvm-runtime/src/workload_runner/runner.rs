@@ -347,12 +347,22 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         }
         let lifecycle =
             crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
+        anyhow::ensure!(
+            !crate::kernel_custody::has_retained_kernel(&lifecycle)?,
+            "canonical kernel lifetime for this VM is still unresolved"
+        );
         let bound_config = lifecycle.bind(inputs.config)?;
+        let kernel_binding = crate::kernel_custody::KernelBoundLaunch::bind(
+            bound_config,
+            self.driver.kind(),
+            &lifecycle,
+        )?;
+        let bound_config = kernel_binding.config();
         let bound_cmdline = if bound_config.runtime_release_proof.is_some()
             || bound_config.unsigned_runtime_development
         {
             cmdline::runner_cmdline(
-                &bound_config,
+                bound_config,
                 &vm_state_dir(&bound_config.name),
                 |has_disk| self.driver.workload_base_bootargs(has_disk),
             )
@@ -360,19 +370,38 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             inputs.cmdline.clone()
         };
         let inputs = &WorkloadLaunchInputs {
-            config: &bound_config,
+            config: bound_config,
             tenant: inputs.tenant,
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
             cmdline: bound_cmdline,
         };
-        self.boot_bound_workload(inputs)
+        self.boot_bound_workload_guarded(inputs, Some(&kernel_binding))
     }
 
     /// Maps an already-bound configuration into a backend boot. Production
     /// callers must hold the lifecycle lease and pass the verifier's paths.
+    #[cfg(test)]
     fn boot_bound_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
+        self.boot_bound_workload_guarded(inputs, None)
+    }
+
+    fn boot_bound_workload_guarded(
+        &self,
+        inputs: &WorkloadLaunchInputs<'_>,
+        kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            inputs.config.canonical_kernel.is_none() || kernel.is_some(),
+            "canonical kernel launch has no actual final-config custody guard"
+        );
+        if let Some(kernel) = kernel {
+            anyhow::ensure!(
+                std::ptr::eq(inputs.config, kernel.config()),
+                "launch substituted the final config object"
+            );
+        }
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -460,12 +489,21 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             retention: plan_stream_retention(inputs.config.plan_json.as_deref()),
         };
         durability::wait_for_unactivated_boot(inputs.config)?;
+        if let Some(kernel) = kernel {
+            kernel.before_boot(&spec)?;
+        }
         let streamer = Arc::clone(&self.console_streamer);
         let vm = console_boot::boot_while_starting_console(
-            || self.driver.boot(&spec),
+            || match kernel {
+                Some(kernel) => kernel.boot(&self.driver, &spec),
+                None => self.driver.boot(&spec),
+            },
             || streamer.start(&capture),
             || trace.mark("driver_boot"),
         )?;
+        if let Some(kernel) = kernel {
+            kernel.observe_booted(&*vm)?;
+        }
         trace.mark("console_stream_start");
 
         // Universal initramfs path: the guest PID-1 agent waits for a signed

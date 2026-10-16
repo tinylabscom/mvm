@@ -59,11 +59,14 @@ pub use validate::{
     validate_structure,
 };
 pub use verify::{
-    ImageSetVerification, VerifiedArtifact, VerifiedImageSet, VerifiedImageSetRoot,
-    VerifiedSelectedArtifacts, cache_image_set_root, image_set_root_proof_cache,
-    read_cached_image_set_root, verify_image_set, verify_image_set_artifacts,
-    verify_image_set_root,
+    ImageSetVerification, RetainedImageSetRootProof, VerifiedArtifact, VerifiedImageSet,
+    VerifiedImageSetRoot, VerifiedSelectedArtifacts, cache_image_set_root,
+    image_set_root_proof_cache, read_cached_image_set_root, read_cached_image_set_root_proof,
+    verify_image_set, verify_image_set_artifacts, verify_image_set_root,
 };
+
+#[cfg(all(test, feature = "manifest-verify"))]
+pub(crate) use verify::published_root;
 
 pub const IMAGE_SET_SCHEMA_VERSION: u32 = 3;
 pub const LEGACY_IMAGE_SET_SCHEMA_VERSION: u32 = 2;

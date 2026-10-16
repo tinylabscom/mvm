@@ -187,6 +187,13 @@ fn stream_artifacts<'p>(
         let Some(artifact) = declared.get(path.as_str()) else {
             continue;
         };
+        if entry.size() != artifact.size_bytes {
+            return Err(BundleVerifyError::ArtifactSizeMismatch {
+                name: artifact.name.clone(),
+                declared: artifact.size_bytes,
+                actual: entry.size(),
+            });
+        }
         if !seen.insert(path.clone()) {
             return Err(BundleVerifyError::ManifestParse(format!(
                 "archive carries {path} more than once"
@@ -255,6 +262,9 @@ fn image_set_manifest_paths(manifest: &BundleManifest) -> BTreeSet<String> {
             BundleMember::EmbeddedCliBootAssets(runtime) => {
                 manifest.find_by_name(&runtime.manifest_artifact)
             }
+            BundleMember::CanonicalLinuxProof(proof) => {
+                manifest.find_by_name(&proof.manifest_artifact)
+            }
             _ => None,
         })
         .map(|artifact| artifact.path.clone())
@@ -284,6 +294,259 @@ impl VerifiedBundleFile {
             self.key_id.clone(),
         )
     }
+}
+
+/// Owns only the selected kernel/proof files from one pinned private archive
+/// snapshot. This is application-envelope integrity, not canonical Linux
+/// authority or permission to start a VM.
+#[derive(Debug)]
+pub struct CapturedCanonicalLinuxInputs {
+    _archive: File,
+    directory_path: PathBuf,
+    directory_guard: std::sync::Mutex<Option<tempfile::TempDir>>,
+    manifest: BundleManifest,
+    pin: super::PlanArtifact,
+    proof: super::CanonicalLinuxProof,
+    kernel: BundleArtifact,
+    selected: BTreeMap<String, PathBuf>,
+}
+
+impl CapturedCanonicalLinuxInputs {
+    /// Resource location only, not execution or cleanup authority.
+    pub fn generation_dir(&self) -> &Path {
+        &self.directory_path
+    }
+
+    /// One-way retention before a native reader can exist.
+    pub fn retain_generation(&self) -> Result<()> {
+        if let Some(directory) = self
+            .directory_guard
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kernel generation guard poisoned"))?
+            .take()
+        {
+            let retained = directory.keep();
+            anyhow::ensure!(
+                retained == self.directory_path,
+                "kernel generation retention changed its identity"
+            );
+        }
+        Ok(())
+    }
+    pub fn manifest(&self) -> &BundleManifest {
+        &self.manifest
+    }
+    pub fn pin(&self) -> &super::PlanArtifact {
+        &self.pin
+    }
+    pub fn proof(&self) -> &super::CanonicalLinuxProof {
+        &self.proof
+    }
+    pub fn kernel(&self) -> &BundleArtifact {
+        &self.kernel
+    }
+
+    /// Reopen a retained regular file without following a link and verify the
+    /// actual stream against its signed inventory. No ambient path is returned.
+    pub fn open_artifact(&self, name: &str) -> Result<File> {
+        use std::io::{Seek, SeekFrom};
+        let path = self
+            .selected
+            .get(name)
+            .context("artifact was not retained")?;
+        let declaration = self
+            .manifest
+            .find_by_name(name)
+            .context("artifact declaration missing")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let mut file = options.open(path)?;
+        let metadata = file.metadata()?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() == declaration.size_bytes,
+            "retained artifact is not regular or has changed size"
+        );
+        let mut digest = HashingWriter::new(io::sink());
+        io::copy(
+            &mut Read::by_ref(&mut file).take(declaration.size_bytes + 1),
+            &mut digest,
+        )?;
+        let (size, hash) = digest.finish();
+        check_artifact_digest(declaration, size, hash)?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+}
+
+/// Snapshot a pinned archive with bounded streaming I/O, then retain only the
+/// canonical-proof inputs. Re-verification runs on our private snapshot, not
+/// multiple independently mutable reads of the caller's path.
+///
+/// The caller must still apply the canonical Linux lock/signature/revocation
+/// verifier and bind the selected kernel to an admitted native operation.
+pub fn capture_canonical_linux_inputs(
+    archive: &Path,
+    pin: &super::PlanArtifact,
+    trust: &dyn TrustStore,
+) -> Result<CapturedCanonicalLinuxInputs> {
+    use std::io::{Seek, SeekFrom};
+    anyhow::ensure!(
+        cfg!(unix),
+        "canonical Linux proof capture is unsupported on this platform"
+    );
+    const MAX_RAW_ARCHIVE: u64 = super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024;
+    const MAX_KERNEL: u64 = 256 * 1024 * 1024;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let mut input = options.open(archive)?;
+    let metadata = input.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= MAX_RAW_ARCHIVE,
+        "bundle archive is not regular or exceeds the capture bound"
+    );
+    // An authenticated metadata preflight can refuse an oversized selected
+    // kernel before copying a multi-GiB workload archive. It is not authority
+    // for the later snapshot: that exact snapshot is independently verified.
+    let (head, signature) = read_manifest_entries(input.try_clone()?)?;
+    let (head, key) = verify_signed_manifest(&head, &signature, trust)?;
+    let pinned_signature = pin.signature_bytes().context("invalid pinned signature")?;
+    anyhow::ensure!(
+        key == pin.key_id && signature.as_slice() == pinned_signature.as_slice(),
+        "archive preflight publisher or signature differs from its pin"
+    );
+    anyhow::ensure!(
+        head.members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_))),
+        "canonical Linux proof is required"
+    );
+    let preflight_kernel = head
+        .find_by_role(&super::ArtifactRole::Kernel)
+        .context("kernel missing")?;
+    anyhow::ensure!(
+        preflight_kernel.size_bytes > 0 && preflight_kernel.size_bytes <= MAX_KERNEL,
+        "selected kernel exceeds the capture bound"
+    );
+    input.seek(SeekFrom::Start(0))?;
+    let parent = crate::config::mvm_home_strict()?.join("canonical-kernel-generations");
+    crate::config::create_private_dir(&parent)?;
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(&parent)?.file_type().is_symlink(),
+        "canonical kernel generation parent cannot be a symlink"
+    );
+    let directory = tempfile::Builder::new()
+        .prefix("kernel-")
+        .tempdir_in(&parent)?;
+    crate::config::create_private_dir(directory.path())?;
+    let snapshot_path = directory.path().join("archive.mvmpkg");
+    let mut snapshot = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&snapshot_path)?;
+    let mut writer = HashingWriter::new(&mut snapshot);
+    io::copy(&mut input.take(MAX_RAW_ARCHIVE + 1), &mut writer)?;
+    let (size, digest) = writer.finish();
+    anyhow::ensure!(
+        size <= MAX_RAW_ARCHIVE && digest == pin.bundle_sha256,
+        "captured archive differs from its exact pin or exceeds the capture bound"
+    );
+    snapshot.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&snapshot_path, std::fs::Permissions::from_mode(0o400))?;
+    }
+    let verified = verify_bundle_file(&snapshot_path, trust)?;
+    anyhow::ensure!(
+        &verified.plan_artifact() == pin,
+        "captured archive publisher or signature pin differs"
+    );
+    let proof = verified
+        .manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::CanonicalLinuxProof(proof) => Some(proof.clone()),
+            _ => None,
+        })
+        .context("canonical Linux proof is required")?;
+    let kernel = verified
+        .manifest
+        .find_by_role(&super::ArtifactRole::Kernel)
+        .context("selected kernel is missing")?
+        .clone();
+    anyhow::ensure!(
+        kernel.size_bytes > 0 && kernel.size_bytes <= MAX_KERNEL,
+        "selected kernel exceeds the capture bound"
+    );
+    let mut selected = BTreeMap::new();
+    for (index, name) in [
+        &kernel.name,
+        &proof.manifest_artifact,
+        &proof.signature_bundle_artifact,
+        &proof.revocation_document_artifact,
+        &proof.revocation_signature_bundle_artifact,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        anyhow::ensure!(
+            verified
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|a| a.name == *name)
+                .count()
+                == 1,
+            "selected artifact declaration is missing or ambiguous"
+        );
+        anyhow::ensure!(
+            selected
+                .insert(
+                    name.clone(),
+                    directory.path().join(format!("member-{index}"))
+                )
+                .is_none(),
+            "selected canonical inputs alias"
+        );
+    }
+    stream_artifacts(
+        open_archive(&snapshot_path)?,
+        &verified.manifest,
+        |artifact| {
+            selected
+                .get(&artifact.name)
+                .map_or(Destination::Discard, |path| Destination::File(path))
+        },
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in selected.values() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))?;
+        }
+    }
+    Ok(CapturedCanonicalLinuxInputs {
+        _archive: snapshot,
+        directory_path: directory.path().to_owned(),
+        directory_guard: std::sync::Mutex::new(Some(directory)),
+        manifest: verified.manifest,
+        pin: pin.clone(),
+        proof,
+        kernel,
+        selected,
+    })
 }
 
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {

@@ -31,6 +31,7 @@ mod legacy_portable_runtime;
 pub use legacy_bundle_runtime::fixtures::signed_legacy_runtime_fixture;
 #[cfg(any(test, feature = "test-support"))]
 pub use legacy_portable_runtime::fixtures::signed_legacy_portable_runtime_fixture;
+mod kernel_custody;
 pub mod machine;
 pub mod runtime_evidence;
 pub mod sdk_sidecar;

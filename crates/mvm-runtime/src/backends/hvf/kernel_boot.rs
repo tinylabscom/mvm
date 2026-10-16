@@ -325,6 +325,21 @@ pub struct KernelBootUntilParams<'a> {
 }
 
 impl<'a> KernelBootUntilParams<'a> {
+    /// Load the already adopted read-only kernel descriptor without any
+    /// pathname reopen. `label` is diagnostic, never a source to open.
+    pub fn builder_descriptor(
+        kernel: &'a std::fs::File,
+        label: &'a Path,
+        timeout: Duration,
+    ) -> KernelBootUntilParamsBuilder<'a> {
+        let mut builder = Self::builder_file(label, timeout);
+        builder.kernel = KernelImageSource::HeldFile {
+            file: kernel,
+            label,
+        };
+        builder
+    }
+
     pub fn builder(image: &'a [u8], timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
         KernelBootUntilParamsBuilder {
             kernel: KernelImageSource::Bytes(image),

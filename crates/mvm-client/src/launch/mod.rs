@@ -11,6 +11,7 @@
 pub mod boot_order;
 pub mod budget_charge;
 pub mod bundle_runtime;
+pub mod canonical_linux;
 pub mod detached;
 pub mod grants_report;
 pub mod machine_start;

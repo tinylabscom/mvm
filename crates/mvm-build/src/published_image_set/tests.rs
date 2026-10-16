@@ -7,6 +7,19 @@ use mvm_core::util::test_env::TestEnv;
 const ARCH: GuestArch = GuestArch::Aarch64;
 const MEMBER: &str = "stage0-vmlinux-aarch64";
 
+#[test]
+fn portable_publisher_proof_requires_current_feed_even_for_fixture_acquisition() {
+    let mut env = unsigned_env();
+    let home = tempfile::tempdir().unwrap();
+    env.isolate_mvm_home(home.path());
+    let served = tempfile::tempdir().unwrap();
+    let fixture = ImageSetFixture::complete();
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+    let error = set.retained_publisher_proof().unwrap_err();
+    assert!(format!("{error:#}").contains("current signed image-set revocations required"));
+    assert!(!mvm_core::image_set::image_set_root_proof_cache().exists());
+}
+
 fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
     use mvm_fs::ext4::{Node, Owner};
     let mut nodes = ["/etc", "/etc/mvm"]

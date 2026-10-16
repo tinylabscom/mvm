@@ -114,6 +114,58 @@ fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_memb
                 .schema_version,
             6
         );
+        // A correctly signed, structurally complete new carrier is not a
+        // native kernel-custody grant. Shared plan admission must refuse it
+        // until actual backend ownership is implemented.
+        {
+            use mvm_core::plan::bundle::{
+                ArtifactRole, BundleArtifact, BundleResolveError, BundleResolver,
+                CanonicalLinuxProof, PlanBundleError, sha256_hex, verify_bundle_file,
+                verify_plan_bundle, write_bundle,
+            };
+            struct MemoryArchive(Vec<u8>);
+            impl BundleResolver for MemoryArchive {
+                fn resolve(&self, _: &str) -> Result<Vec<u8>, BundleResolveError> {
+                    Ok(self.0.clone())
+                }
+            }
+            let mut canonical = verified.manifest.clone();
+            canonical.schema_version = 7;
+            canonical
+                .members
+                .push(BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+                    manifest_artifact: declaration.manifest_artifact.clone(),
+                    signature_bundle_artifact: "linux.bundle".into(),
+                    revocation_document_artifact: "revocations.json".into(),
+                    revocation_signature_bundle_artifact: "revocations.bundle".into(),
+                }));
+            let mut payload: Vec<_> = verified.artifacts.clone().into_iter().collect();
+            for name in ["linux.bundle", "revocations.json", "revocations.bundle"] {
+                let bytes = b"not canonical proof".to_vec();
+                let path = format!("artifacts/{name}");
+                canonical.artifacts.push(BundleArtifact {
+                    name: name.into(),
+                    role: ArtifactRole::Other,
+                    path: path.clone(),
+                    sha256: sha256_hex(&bytes),
+                    size_bytes: bytes.len() as u64,
+                });
+                payload.push((path, bytes));
+            }
+            let archive = write_bundle(&canonical, &publisher.key, payload).unwrap();
+            let path = dir.path().join("canonical.mvmpkg");
+            std::fs::write(&path, &archive).unwrap();
+            let structural = verify_bundle_file(&path, &publisher).unwrap();
+            assert_eq!(structural.manifest.schema_version, 7);
+            assert!(matches!(
+                verify_plan_bundle(
+                    &structural.plan_artifact(),
+                    &MemoryArchive(archive),
+                    &publisher
+                ),
+                Err(PlanBundleError::CanonicalKernelCustodyRequired)
+            ));
+        }
         let calls = publisher.calls.get();
         let mut missing = inputs.clone();
         missing.cli_boot_assets.as_mut().unwrap().artifacts = &files[1..];

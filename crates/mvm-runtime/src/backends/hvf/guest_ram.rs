@@ -290,7 +290,7 @@ impl GuestRam {
 
     /// Replace `len` bytes at `offset` with a private COW mapping of `file`
     /// starting at `file_offset`.
-    fn map_private_fd_at(
+    pub(crate) fn map_private_fd_at(
         &mut self,
         offset: usize,
         file: &File,

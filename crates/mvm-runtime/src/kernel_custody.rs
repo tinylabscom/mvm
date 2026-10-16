@@ -1,0 +1,422 @@
+//! Actual final-config handoff and conservative canonical-kernel retention.
+//! The disk record is a private resource index, never execution authority.
+
+use anyhow::{Context, Result, ensure};
+use mvm_core::protocol::vm_backend::{BackendKind, VmStartConfig};
+use mvm_vmm::driver::spec::{KernelImage, VmmSpec};
+use mvm_vmm::driver::traits::RunningVm;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+use crate::runtime_evidence::RuntimeLifecycleLease;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KernelUse {
+    version: u32,
+    vm: String,
+    generation: String,
+    device: u64,
+    inode: u64,
+    #[cfg(unix)]
+    instance: Option<mvm_core::protocol::hvf_control::HvfInstance>,
+}
+
+/// Owns the exact final config subsequently borrowed for endpoint/spec/boot.
+pub(crate) struct KernelBoundLaunch {
+    config: VmStartConfig,
+    backend: BackendKind,
+    record: PathBuf,
+    #[cfg(unix)]
+    kernel: Option<mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+}
+
+impl KernelBoundLaunch {
+    pub(crate) fn bind(
+        config: VmStartConfig,
+        backend: BackendKind,
+        lifecycle: &RuntimeLifecycleLease,
+    ) -> Result<Self> {
+        let record = lifecycle.canonical_kernel_record();
+        ensure!(
+            !record_exists(&record)?,
+            "a canonical kernel generation is still retained for this VM; stop/absence must be resolved before reuse"
+        );
+        #[cfg(unix)]
+        let mut kernel = None;
+        if let Some(owner) = &config.canonical_kernel {
+            // Other backends retain their existing explicit refusal until
+            // they provide equally instance-bound lifetime evidence.
+            ensure!(
+                cfg!(unix) && backend == BackendKind::Hvf,
+                "this backend does not support canonical kernel lifetime custody"
+            );
+            let host = mvm_build::stage0_kernel::current_image_set_protocol_support();
+            // This layer owns artifact mechanics, not plan-admission authority.
+            // The native supervisor requires the existing consumed caller
+            // launch capability before using a canonical kernel descriptor.
+            owner.retain_for_native_handoff(&config, backend, &host)?;
+            #[cfg(unix)]
+            {
+                // Reuse the existing unlinked, read-only descriptor custody:
+                // hash the private clone that the native child will consume.
+                kernel = Some(mvm_vmm::host::restore_image::VerifiedRestoreFile::prepare(
+                    &owner.kernel_path(),
+                    owner.generation_dir(),
+                    owner.kernel_sha256(),
+                )?);
+            }
+            let generation = owner
+                .generation_dir()
+                .file_name()
+                .and_then(|n| n.to_str())
+                .context("kernel generation identity missing")?
+                .to_owned();
+            let (device, inode) = directory_identity(owner.generation_dir())?;
+            let pending = KernelUse {
+                version: 1,
+                vm: config.name.clone(),
+                generation,
+                device,
+                inode,
+                #[cfg(unix)]
+                instance: None,
+            };
+            mvm_core::util::atomic_io::write_private_new(&record, &serde_json::to_vec(&pending)?)?;
+        }
+        Ok(Self {
+            config,
+            backend,
+            record,
+            #[cfg(unix)]
+            kernel,
+        })
+    }
+
+    pub(crate) fn config(&self) -> &VmStartConfig {
+        &self.config
+    }
+
+    pub(crate) fn boot(
+        &self,
+        driver: &dyn mvm_vmm::driver::traits::VmmDriver,
+        spec: &VmmSpec,
+    ) -> Result<Box<dyn RunningVm>> {
+        self.before_boot(spec)?;
+        #[cfg(unix)]
+        if let Some(kernel) = &self.kernel {
+            return driver.boot_verified_kernel(spec, kernel);
+        }
+        driver.boot(spec)
+    }
+
+    /// Validate the physical recipe passed to the driver, not a reconstructed
+    /// client path or an author-supplied digest.
+    pub(crate) fn before_boot(&self, spec: &VmmSpec) -> Result<()> {
+        if let Some(owner) = &self.config.canonical_kernel {
+            owner.verify_config(
+                &self.config,
+                self.backend,
+                &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+            )?;
+            ensure!(
+                spec.name == self.config.name
+                    && spec.kernel == KernelImage::Path(owner.kernel_path()),
+                "physical VMM recipe substituted the bound kernel or VM"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observe_booted(&self, vm: &dyn RunningVm) -> Result<()> {
+        let Some(owner) = &self.config.canonical_kernel else {
+            return Ok(());
+        };
+        ensure!(vm.id().0 == self.config.name, "driver returned another VM");
+        #[cfg(unix)]
+        {
+            let instance = vm
+                .authenticated_hvf_instance()?
+                .context("started VM has no authenticated lifetime identity; kernel retained")?;
+            ensure!(
+                instance.vm_id == self.config.name,
+                "kernel reader identity belongs to another VM"
+            );
+            let mut record = read_record(&self.record)?;
+            ensure!(
+                record.generation
+                    == owner
+                        .generation_dir()
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy(),
+                "kernel generation index changed during start"
+            );
+            record.instance = Some(instance);
+            mvm_core::util::atomic_io::atomic_write_durable(
+                &self.record,
+                &serde_json::to_vec(&record)?,
+            )?;
+            Ok(())
+        }
+        #[cfg(not(unix))]
+        anyhow::bail!("canonical kernel lifetime observation unsupported")
+    }
+}
+
+fn read_record(path: &Path) -> Result<KernelUse> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    ensure!(
+        file.metadata()?.is_file() && file.metadata()?.len() <= 16 * 1024,
+        "kernel lifetime index is not a bounded regular file"
+    );
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() <= 16 * 1024,
+        "kernel lifetime index grew beyond its bound"
+    );
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn directory_identity(path: &Path) -> Result<(u64, u64)> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "kernel generation is not a directory"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments and observes this process only.
+        let uid = unsafe { libc::geteuid() };
+        ensure!(
+            metadata.uid() == uid && metadata.mode() & 0o077 == 0,
+            "kernel generation is not owner-private"
+        );
+        Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("kernel generation identity is unsupported")
+}
+
+/// Only a real opaque driver exit proof can release a recorded generation.
+/// No stop ack, PID-file absence or caller boolean reaches this deletion.
+#[cfg(unix)]
+pub(crate) fn release_after_confirmed_exit(
+    lifecycle: &RuntimeLifecycleLease,
+    proof: &mvm_vmm::host::hvf_stop::ConfirmedExit,
+) -> Result<()> {
+    release_generation(lifecycle, proof.instance(), || proof.verify_current())
+}
+
+// Resource deletion mechanics only. The sole production caller above supplies
+// the existing opaque exit proof, never a deserialized record or a stop result.
+#[cfg(unix)]
+fn release_generation(
+    lifecycle: &RuntimeLifecycleLease,
+    exited: &mvm_core::protocol::hvf_control::HvfInstance,
+    recheck_exit: impl Fn() -> Result<()>,
+) -> Result<()> {
+    let path = lifecycle.canonical_kernel_record();
+    if !record_exists(&path)? {
+        return Ok(());
+    }
+    recheck_exit()?;
+    let record = read_record(&path)?;
+    ensure!(
+        record.version == 1
+            && record.vm == exited.vm_id
+            && record.instance.as_ref() == Some(exited),
+        "kernel generation is not bound to this confirmed VM exit; retained"
+    );
+    ensure!(
+        record.generation.starts_with("kernel-")
+            && record.generation.len() <= 96
+            && record
+                .generation
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+        "invalid kernel generation index"
+    );
+    let parent = mvm_core::config::mvm_home_strict()?.join("canonical-kernel-generations");
+    let generation = parent.join(&record.generation);
+    ensure!(
+        directory_identity(&generation)? == (record.device, record.inode),
+        "kernel generation directory identity changed; retained"
+    );
+    recheck_exit()?;
+    std::fs::remove_dir_all(&generation)?;
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
+pub(crate) fn has_retained_kernel(lifecycle: &RuntimeLifecycleLease) -> Result<bool> {
+    record_exists(&lifecycle.canonical_kernel_record())
+}
+
+fn record_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(all(test, unix, feature = "manifest-verify"))]
+#[path = "kernel_custody/native_handoff_tests.rs"]
+mod native_handoff_tests;
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use mvm_core::util::test_env::TestEnv;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn pending_or_corrupt_lifetime_blocks_reuse_without_deleting_evidence() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-retention-unit").unwrap();
+        let record = lease.canonical_kernel_record();
+        let pending = KernelUse {
+            version: 1,
+            vm: "kernel-retention-unit".into(),
+            generation: "kernel-unit".into(),
+            device: 1,
+            inode: 2,
+            instance: None,
+        };
+        let bytes = serde_json::to_vec(&pending).unwrap();
+        mvm_core::util::atomic_io::write_private_new(&record, &bytes).unwrap();
+        let config = VmStartConfig {
+            name: pending.vm,
+            ..Default::default()
+        };
+        assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Hvf, &lease).is_err());
+        assert_eq!(std::fs::read(&record).unwrap(), bytes);
+        std::fs::write(&record, b"uncertain interrupted write").unwrap();
+        assert!(has_retained_kernel(&lease).unwrap());
+        assert!(KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease).is_err());
+        assert!(read_record(&record).is_err());
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            b"uncertain interrupted write"
+        );
+    }
+
+    #[test]
+    fn dangling_lifetime_index_is_not_absence_and_is_never_followed() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-symlink-unit").unwrap();
+        let record = lease.canonical_kernel_record();
+        symlink(home.path().join("absent-target"), &record).unwrap();
+        assert!(has_retained_kernel(&lease).unwrap());
+        assert!(read_record(&record).is_err());
+        assert!(
+            KernelBoundLaunch::bind(
+                VmStartConfig {
+                    name: "kernel-symlink-unit".into(),
+                    ..Default::default()
+                },
+                BackendKind::Hvf,
+                &lease,
+            )
+            .is_err()
+        );
+        assert!(
+            std::fs::symlink_metadata(&record)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
+    fn generation_identity_rejects_substitution_symlink_and_public_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let generation = directory.path().join("kernel-selected");
+        std::fs::create_dir(&generation).unwrap();
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let first = directory_identity(&generation).unwrap();
+        let held = directory.path().join("kernel-held");
+        std::fs::rename(&generation, &held).unwrap();
+        std::fs::create_dir(&generation).unwrap();
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_ne!(directory_identity(&generation).unwrap(), first);
+        let link = directory.path().join("kernel-link");
+        symlink(&held, &link).unwrap();
+        assert!(directory_identity(&link).is_err());
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(directory_identity(&generation).is_err());
+    }
+
+    #[test]
+    fn cleanup_mechanics_retain_uncertainty_and_release_only_matching_generation() {
+        use mvm_core::protocol::hvf_control::HvfInstance;
+        use std::cell::Cell;
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-cleanup-unit").unwrap();
+        let generation = home.path().join("canonical-kernel-generations/kernel-unit");
+        mvm_core::config::create_private_dir(&generation).unwrap();
+        std::fs::write(generation.join("selected-kernel"), b"unit payload").unwrap();
+        let (device, inode) = directory_identity(&generation).unwrap();
+        let instance = HvfInstance {
+            vm_id: "kernel-cleanup-unit".into(),
+            boot_nonce: [3; 32],
+        };
+        let mut record = KernelUse {
+            version: 1,
+            vm: instance.vm_id.clone(),
+            generation: "kernel-unit".into(),
+            device,
+            inode,
+            instance: None,
+        };
+        let path = lease.canonical_kernel_record();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        // These closures model exit-proof outcomes for deletion mechanics;
+        // they do not construct an opaque proof or claim a process has exited.
+        assert!(release_generation(&lease, &instance, || Ok(())).is_err());
+        record.instance = Some(instance.clone());
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let mut other = instance.clone();
+        other.boot_nonce = [4; 32];
+        assert!(release_generation(&lease, &other, || Ok(())).is_err());
+        let checks = Cell::new(0);
+        assert!(
+            release_generation(&lease, &instance, || {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    anyhow::bail!("unit identity advanced during cleanup")
+                }
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(generation.exists());
+        assert!(path.exists());
+        let checks = Cell::new(0);
+        release_generation(&lease, &instance, || {
+            checks.set(checks.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(checks.get(), 2);
+        assert!(!generation.exists());
+        assert!(!path.exists());
+    }
+}

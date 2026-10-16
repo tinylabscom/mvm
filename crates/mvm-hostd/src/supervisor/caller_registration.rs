@@ -68,6 +68,10 @@ pub fn prepare_startup(
     cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
 ) -> Result<Option<PreparedCallerStartup>> {
     let Some(registration) = cfg.caller_registration.as_ref() else {
+        anyhow::ensure!(
+            cfg.kernel_fd.is_none(),
+            "verified kernel descriptor requires actual consumed caller admission"
+        );
         return Ok(None);
     };
     anyhow::ensure!(

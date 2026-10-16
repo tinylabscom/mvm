@@ -249,6 +249,7 @@ pub fn hvf_child_restore_config(
         // that is still running off it. A restored child is not a builder.
         builder_egress_endpoint: None,
         kernel: parent.kernel.clone(),
+        kernel_fd: None,
         cmdline: parent.cmdline.clone(),
         memory_mib: parent.memory_mib,
         // A restored child resumes the parent's saved vCPU state, so it must
@@ -571,6 +572,7 @@ mod tests {
             trusted_builder_egress: false,
             builder_egress_endpoint: None,
             kernel: state.join("Image"),
+            kernel_fd: None,
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
             memory_mib: 512,
             vcpus: 1,
