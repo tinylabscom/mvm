@@ -1170,12 +1170,10 @@ impl VmmDriver for FcDriver {
             "fc boot: process spawn + API socket"
         );
 
-        // Take ownership of the API socket so the config sequence below can
-        // speak to it in-process. Firecracker was launched through `sudo` and
-        // created the socket as root; without this every call would need its
-        // own `sudo curl`.
-        crate::fc::adopt_api_socket(&socket)
-            .context("adopting the Firecracker API socket for the invoking user")?;
+        // The launcher handed the API socket to the invoking user, so the
+        // config sequence below speaks to it in-process. Firecracker was
+        // launched through `sudo` and created the socket as root; without that
+        // hand-off every call would need its own `sudo curl`.
 
         // Drive the NIC-less API config sequence, asking only for what the
         // Firecracker behind this socket supports. All PUTs share one

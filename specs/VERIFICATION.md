@@ -9,7 +9,7 @@ prove each gate can fail.
 
 | Rule | What it says | Enforced by |
 | --- | --- | --- |
-| R1 | The model is the single source. Every claim lives in `model/*.toml`, and `CONFORMANCE.md` is generated from it. | `cargo run -p xtask -- check-conformance` |
+| R1 | The model is the single source. Every claim lives in `model/*.toml`, and `docs/CONFORMANCE.md` is generated from it. | `cargo run -p xtask -- check-conformance` |
 | R2 | Levels are load-bearing. A claim is `some-true`, `build`, or `open`, and the two registers are never blurred. | `cargo run -p xtask -- check-honesty` |
 | R3 | A capability begins as a register row, then a scenario, then a witness. | `cargo test -p mvm-conformance --test meta` |
 | R4 | Nothing is deferred. No deferral marker, no stub, no capability behind a flag that turns it off. | `cargo run -p xtask -- check-deferrals` |
@@ -25,7 +25,7 @@ row below records a defect that was planted to prove the gate fires.
 | `check-build-egress-callers` (vacuity) | Point the gate at a tree with no allow-listed call site, i.e. the state it would reach if the constructor were renamed and the gate silently stopped checking anything | yes — refused rather than passing empty |
 | `check-verified-kernel-reads` | Add a boot path that takes `cached_kernel_path` and accepts it on `is_file()` — the shape of the Firecracker arm and the kernel-less-image fallback that both booted an unverified kernel | yes — named the file and line, refused |
 | `check-verified-kernel-reads` (vacuity) | Point the gate at a tree where no file pairs the location helper with `resolve_kernel`, i.e. the state it would reach if either were renamed | yes — refused rather than passing empty |
-| `check-conformance` (R1) | Edit `CONFORMANCE.md` so it disagrees with `model/claims.toml` | yes |
+| `check-conformance` (R1) | Edit `docs/CONFORMANCE.md` so it disagrees with `model/claims.toml` | yes |
 | `check-honesty` (R2) | Add "MVM-SEC-07 proves cargo deps are audited" to `README.md` | yes |
 | `meta` (R3) | Register `MVM-SEC-99` with no scenario, or remove a scenario's ID tag | yes |
 | `check-deferrals` (R4) | Add `// TODO example` to a production source file outside an exemption | yes |

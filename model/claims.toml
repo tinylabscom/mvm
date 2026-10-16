@@ -1,7 +1,7 @@
 # model/claims.toml --- the conformance ID register.
 #
 # Every numbered security claim this repository asserts, in one place, so that
-# nothing is referenced without being defined. `CONFORMANCE.md` is generated
+# nothing is referenced without being defined. `docs/CONFORMANCE.md` is generated
 # from this file. A claim whose ID is not listed here fails `check-conformance`,
 # and a claim listed here with no scenario and no witness fails it too.
 #

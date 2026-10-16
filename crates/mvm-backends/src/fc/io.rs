@@ -201,6 +201,14 @@ impl FirecrackerIO {
         if let Some(devices) = fork {
             self.retarget_fork_drives(devices)?;
         }
+        // The load bound the vsock socket as the VMM's own user; the claim
+        // dials it as the invoking one.
+        let vsock_uds = match fork {
+            Some(devices) => devices.child_vsock_uds().to_path_buf(),
+            None => PathBuf::from(super::firecracker_vsock_uds_path(&vm_dir.to_string_lossy())),
+        };
+        super::secure_restored_vsock_socket(&vsock_uds)
+            .context("restrict the restored Firecracker vsock socket to the invoking user")?;
         Ok(())
     }
 
