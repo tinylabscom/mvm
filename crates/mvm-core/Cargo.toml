@@ -79,6 +79,12 @@ rcgen = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 mvm-http = { workspace = true, optional = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mvm-macho-sign = { path = "../deps/mvm-macho-sign" }
+security-framework = "3.7"
+core-foundation = "0.10"
+plist = "1"
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
 # No-follow proof reads and the Linux seccomp syscall table use host ABI constants.

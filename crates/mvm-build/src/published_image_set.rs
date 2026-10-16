@@ -576,6 +576,14 @@ pub fn verify_base_image_contract(
     if marker != format!("{version}\n").as_bytes() {
         bail!("base-image contract marker does not match authenticated declaration {version}");
     }
+    let filesystem = ext4_view::Ext4::load_from_path(image)
+        .context("read base-image contract marker metadata")?;
+    let metadata = filesystem
+        .symlink_metadata(mvm_core::image_set::BASE_IMAGE_CONTRACT_MARKER)
+        .context("read base-image contract marker mode")?;
+    if u32::from(metadata.mode()) & 0o7777 != 0o444 {
+        bail!("base-image contract marker must have exact mode 0444");
+    }
     Ok(())
 }
 

@@ -16,17 +16,16 @@ use crate::packs::Sha256Hex;
 /// Whether a checkout's files match its commit.
 ///
 /// On the wire: `{"state": "clean"}` or
-/// `{"state": "dirty", "fingerprint": "<sha256>"}`. Anything else — a clean
-/// state carrying a fingerprint, a dirty one without — is refused rather than
-/// read as the nearest shape.
+/// `{"state": "dirty", "fingerprint_version": 2, "fingerprint": "<sha256>"}`.
+/// Legacy clean identities remain readable. Legacy dirty identities cannot be
+/// verified using the new algorithm and require rebuilding the local set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "RawWorktreeState", into = "RawWorktreeState")]
 pub enum WorktreeState {
     Clean,
-    /// Differs from its commit. The fingerprint covers the tracked diff against
-    /// `HEAD`, the status listing, and every untracked, non-ignored file's
-    /// path and contents, so two different dirty trees on one commit do not
-    /// share an identity.
+    /// Differs from its commit. The version-2 fingerprint covers HEAD, the
+    /// staged entries (including conflicts), tracked working files and
+    /// non-ignored untracked files using a language-neutral binary encoding.
     Dirty {
         fingerprint: Sha256Hex,
     },
@@ -63,19 +62,43 @@ enum StateName {
 #[serde(deny_unknown_fields)]
 struct RawWorktreeState {
     state: StateName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
     fingerprint: Option<Sha256Hex>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    fingerprint_version: Option<u32>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 impl TryFrom<RawWorktreeState> for WorktreeState {
     type Error = &'static str;
 
     fn try_from(raw: RawWorktreeState) -> Result<Self, Self::Error> {
-        match (raw.state, raw.fingerprint) {
-            (StateName::Clean, None) => Ok(Self::Clean),
-            (StateName::Dirty, Some(fingerprint)) => Ok(Self::Dirty { fingerprint }),
-            (StateName::Clean, Some(_)) => Err("a clean worktree has no fingerprint"),
-            (StateName::Dirty, None) => Err("a dirty worktree needs its fingerprint"),
+        match (raw.state, raw.fingerprint, raw.fingerprint_version) {
+            (StateName::Clean, None, None) => Ok(Self::Clean),
+            (StateName::Clean, _, _) => Err("a clean worktree has no fingerprint or version"),
+            (StateName::Dirty, Some(fingerprint), Some(2)) => Ok(Self::Dirty { fingerprint }),
+            (StateName::Dirty, _, None) => Err(
+                "legacy dirty checkout identity cannot be verified; rebuild the local image set",
+            ),
+            (StateName::Dirty, _, Some(2)) => Err("a dirty worktree needs its fingerprint"),
+            (StateName::Dirty, _, Some(_)) => {
+                Err("unsupported dirty checkout fingerprint version; rebuild the local image set")
+            }
         }
     }
 }
@@ -86,10 +109,12 @@ impl From<WorktreeState> for RawWorktreeState {
             WorktreeState::Clean => Self {
                 state: StateName::Clean,
                 fingerprint: None,
+                fingerprint_version: None,
             },
             WorktreeState::Dirty { fingerprint } => Self {
                 state: StateName::Dirty,
                 fingerprint: Some(fingerprint),
+                fingerprint_version: Some(2),
             },
         }
     }

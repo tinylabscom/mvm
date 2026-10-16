@@ -322,6 +322,23 @@ unchanged. Cooperating writers hold the same lease. This is not an adversarial
 same-user namespace guarantee: hostile host-user processes that ignore the lease,
 storage snapshots and open descriptors remain outside this trusted-host boundary.
 
+## Acceptance evidence and its limits
+
+Reconciliation of the six criteria of the parent issue against landed code.
+"Witnessed" names a test that exists; every limit is stated rather than implied.
+
+| Criterion | Evidence | Limit |
+|---|---|---|
+| Classify diagnostics, telemetry, configuration, audit metadata and exports | Classification and surface inventory above; `xtask check-private-diagnostic-files` pins the writers | The inventory is a document, not generated from the code. A new writer outside the gate's scan is not covered. |
+| Which payloads need encrypted capture, which metadata may stay visible | Classification table; transcript manifest carries only digests, counts, timestamps and the wrapped key | Firecracker, libkrun and QEMU `console.log` and the other instance-scoped logs are private plaintext, not encrypted. |
+| Reuse the encrypted transcript facility | HVF console and workload output use the transcript envelope | Producer integration is per surface; surfaces outside it are not protected capture. |
+| Private creation for managed state | Private-creation helpers and the gate above | Builder console files are created by the VMM and are not individually narrowed. Private permissions are not encryption. |
+| Byte and time retention separate; audit verification preserved | Independent retention dimensions; `protected_lifetime_is_terminal_bound_and_immutable` witnesses that an expired payload is refused on both export paths and leaves ciphertext and manifest bytes unchanged; `operator_reconcile_expires_only_authorized_payload_and_preserves_evidence` witnesses that reconciliation removes only authorized ciphertext, keeps the manifest, wrapped key and sealed root verifiable, and turns the read refusal from "deadline passed" into "authenticated retirement" | Stopped, never-restarted captures are not physically deleted automatically. Expiry is a read refusal first and a deletion only after reconciliation. |
+| Validate with synthetic markers and lifecycle tests | Tests above use synthetic markers and assert the audit log carries none | No end-to-end witness boots a native workload through capture, expiry and reconciliation; the cold-launch witness is blocked as described above. Removing a file is not secure erasure. |
+
+This policy protects against unintended persistence under a trusted host. It
+does not describe confidential execution and gives no protection from the host.
+
 ## Required witnesses
 
 Use synthetic sensitive markers, never real customer data. Exercise protected

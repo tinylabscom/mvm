@@ -10,6 +10,7 @@ members = [
     # mvmd's; both register against this trait.
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
+    "crates/deps/mvm-macho-sign",
     "crates/mvm-runtime",
     "crates/mvm-vmm",
     "crates/mvm-fc-lifecycle",
@@ -263,6 +264,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"]
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
 secrecy = { version = "0.10", features = ["serde"] }
 sha2 = "0.11"
+sha1 = { version = "=0.10.6", default-features = false, features = ["std"] }
 # BLAKE3 for the Apple Container kernel's digest-pin sidecar — an order of
 # magnitude faster than SHA-256 on multi-hundred-MB kernels. Default
 # features (`std`) suffice for the streamed host-side hash; no rayon.
@@ -685,6 +687,10 @@ am-fs-ext4 = { path = "third_party/am-fs-ext4" }
 # on the reviewed 0.3.9 source at an immutable upstream revision until the
 # registry package is restored.
 arrayref = { path = "third_party/arrayref" }
+gix = { path = "third_party/gix-0.87.1" }
+gix-object = { path = "third_party/gix-object-0.64.1" }
+notify = { path = "third_party/notify-8.2.0" }
+io-extras = { path = "third_party/io-extras-0.19.0" }
 
 [profile.release]
 opt-level = 3

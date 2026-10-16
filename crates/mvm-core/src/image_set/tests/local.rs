@@ -8,9 +8,9 @@ use super::*;
 use crate::image_set::verify::verify_checked;
 use crate::packs::KeylessTrust;
 
-/// A set exactly as the image repository's `scripts/emit-local-manifest.py`
-/// writes it: two members over a clean image checkout and a dirty mvm
-/// checkout. A drift between that emitter and this parser fails here.
+/// A schema-2 structural fixture with the shared real-repository V2 identity.
+/// This is not a relabelled V1 digest. Actual schema-3 producer parity is
+/// exercised by mvm-build's explicit cross-language integration test.
 const EMITTED: &str = r#"{
   "schema_version": 2,
   "set_version": "0.0.0-local",
@@ -24,15 +24,16 @@ const EMITTED: &str = r#"{
         }
       },
       "mvm": {
-        "commit": "f62ac50d84e0e3b7b76da75223f51018b9e87148",
+        "commit": "d40e7ed3d340d03c7ad6910387c60943c0ff3d0d",
         "worktree": {
           "state": "dirty",
-          "fingerprint": "74037151d623ccabd3cd9bbf2d49dcb0844bee909bab25bed1953a9c8ad7f69e"
+          "fingerprint_version": 2,
+          "fingerprint": "62287e21e3b30dc2978c2e7e05f65e9770e6a641048161493425b0799c734bae"
         }
       }
     }
   },
-  "mvm_source_commit": "f62ac50d84e0e3b7b76da75223f51018b9e87148",
+  "mvm_source_commit": "d40e7ed3d340d03c7ad6910387c60943c0ff3d0d",
   "compatibility": {
     "guest_agent_protocol": {
       "min": 2,
@@ -400,13 +401,24 @@ mod wire {
         );
         assert_eq!(
             serde_json::to_value(dirty("x")).unwrap(),
-            serde_json::json!({"state": "dirty", "fingerprint": sha("x").as_str()})
+            serde_json::json!({
+                "state": "dirty",
+                "fingerprint_version": 2,
+                "fingerprint": sha("x").as_str()
+            })
         );
         for refused in [
             serde_json::json!({"state": "modified"}),
             serde_json::json!({"state": "dirty"}),
             serde_json::json!({"state": "dirty", "fingerprint": "abc"}),
             serde_json::json!({"state": "clean", "fingerprint": sha("x").as_str()}),
+            serde_json::json!({"state": "clean", "fingerprint": null}),
+            serde_json::json!({"state": "clean", "fingerprint_version": 2}),
+            serde_json::json!({"state": "dirty", "fingerprint_version": null, "fingerprint": sha("x").as_str()}),
+            serde_json::json!({"state": "dirty", "fingerprint_version": 1, "fingerprint": sha("x").as_str()}),
+            serde_json::json!({"state": "dirty", "fingerprint_version": 3, "fingerprint": sha("x").as_str()}),
+            serde_json::json!({"state": "dirty", "fingerprint_version": "2", "fingerprint": sha("x").as_str()}),
+            serde_json::json!({"state": "dirty", "fingerprint_version": 2.0, "fingerprint": sha("x").as_str()}),
             serde_json::json!("clean"),
         ] {
             assert!(
@@ -414,6 +426,9 @@ mod wire {
                 "{refused} must not parse"
             );
         }
+        let legacy = serde_json::json!({"state": "dirty", "fingerprint": sha("x").as_str()});
+        let error = serde_json::from_value::<WorktreeState>(legacy).unwrap_err();
+        assert!(error.to_string().contains("rebuild the local image set"));
     }
 
     #[test]
