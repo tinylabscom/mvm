@@ -81,6 +81,7 @@ pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
 pub mod telemetry;
+pub mod telemetry_summary;
 pub mod tool_mediation;
 pub mod volume;
 pub mod workspace_apply;

@@ -294,7 +294,10 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
         vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
         pid_file: &pid_file,
     };
-    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
+    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
+        timer_inputs,
+        Box::new(timer_inputs.exit_killer()),
+    ) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
@@ -303,7 +306,10 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     };
     // A session's idle timeout, for the same reason: no client is left to
     // enforce it once the one that started the session has exited.
-    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
+    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(
+        &timer_inputs,
+        Box::new(timer_inputs.exit_killer()),
+    );
 
     // Registered here rather than at the top of `main`: everything above this
     // line refuses to boot, and a refusal has no consumption worth recording.

@@ -24,9 +24,9 @@ kind: "skipped"
 export type EmitErrorCode = ("record_too_large" | "invalid_entry" | "audit_signer_error")
 /**
  * Reverse-DNS-like service identifier with a mandatory version segment.
- * 
+ *
  * Examples: `host.kv.v1`, `host.time.v1`, `host.cost.v1`, `broker.v1`.
- * 
+ *
  * Strings are validated at construction so the gate code can rely on the shape (in particular, the version segment is the rate-limiting parser for the binding gate).
  */
 export type ServiceId = string
@@ -122,7 +122,7 @@ chain_head: string
 }
 /**
  * The host-bound envelope every broker call rides on.
- * 
+ *
  * The envelope itself is strictly typed (`deny_unknown_fields`); the `payload` is `serde_json::Value` because per-handler payloads vary. The handler's `parse_payload` step is the *real* schema gate for payload contents.
  */
 export interface ServiceCall {
@@ -145,7 +145,7 @@ export interface CapabilityInvocation {
 binding: CapabilityBinding
 /**
  * Digest of the `ServiceCall::payload` value.
- * 
+ *
  * @minItems 32
  * @maxItems 32
  */
@@ -169,7 +169,7 @@ export interface CapabilityBinding {
 capability: CapabilityId
 /**
  * Digest of the complete descriptor approved by admission.
- * 
+ *
  * @minItems 32
  * @maxItems 32
  */

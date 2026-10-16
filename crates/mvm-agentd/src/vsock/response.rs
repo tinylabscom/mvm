@@ -286,6 +286,11 @@ pub enum GuestResponse {
         /// never asks never sees the field; `None` when admission failed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+        /// How many late volumes the guest mounted after this restore.
+        /// Reported only when the request named volumes; `None` when it named
+        /// none or the mount failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        volumes_mounted: Option<u32>,
     },
     /// Filesystem diff result.
     FsDiffResult { changes: Vec<FsChange> },
@@ -1094,6 +1099,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier: None,
+            volumes_mounted: None,
         };
         let json = serde_json::to_string(&ack).unwrap();
         match serde_json::from_str::<GuestResponse>(&json).unwrap() {
@@ -1133,6 +1139,7 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: Some(shortfall),
                 seccomp_tier: None,
+                volumes_mounted: None,
             };
             let json = serde_json::to_string(&ack).unwrap();
             assert!(json.contains(wire), "{json}");
@@ -1256,6 +1263,7 @@ mod tests {
                 clock_resynced: false,
                 reseed_shortfall: Some(ReseedShortfall::HelperMissing),
                 seccomp_tier: None,
+                volumes_mounted: None,
             },
             GuestResponse::FsDiffResult {
                 changes: vec![

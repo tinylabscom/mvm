@@ -19,6 +19,8 @@ pub mod page_merge;
 pub mod prompt_fixture;
 pub mod sharding;
 pub mod source_commands;
+/// Tells a run's registered standby apart from leaked VM state.
+pub mod standby_audit;
 /// Stops host processes a scenario left running against a home it owned.
 pub mod vmm_reaper;
 

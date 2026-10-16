@@ -1241,6 +1241,7 @@ mod tests {
     #[test]
     fn a_captured_image_round_trips_through_verification_into_a_private_mapping() {
         use mvm_vmm::host::restore_image::VerifiedRestoreFile;
+        use mvm_vmm::runtime_artifacts::{Observer, RuntimeArtifact, RuntimeArtifacts};
         use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 
         let dir = tempfile::tempdir().unwrap();
@@ -1249,6 +1250,20 @@ mod tests {
         let state = dir.path().join("state");
         std::fs::create_dir(&state).unwrap();
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut observer = Observer::bind(
+            &state,
+            Some(RuntimeArtifacts {
+                kernel: None,
+                initramfs: Some(
+                    RuntimeArtifact::loaded("/generation/initrd".into(), b"loaded").unwrap(),
+                ),
+                disks: vec![],
+                kernel_cmdline: "consumed cmdline".into(),
+                firecracker_drives: None,
+            }),
+        )
+        .unwrap();
+        let evidence = observer.snapshot_payload().unwrap();
         let mut captured = GuestRam::new(TEST_RAM_LEN).unwrap();
         captured.copy_at(0, b"first page").unwrap();
         captured.copy_at(HVF_PAGE_SIZE, b"second page").unwrap();
@@ -1264,7 +1279,7 @@ mod tests {
             b"devices",
             b"gic",
             &[sample_state()],
-            b"",
+            &evidence,
         )
         .unwrap();
         let frame_path = dir.path().join("memory.bin.hvf-frame");
@@ -1280,6 +1295,10 @@ mod tests {
             ram: verified(&ram_path),
             frame: verified(&frame_path),
         };
+        let expected_frame_digest =
+            mvm_core::crypto::image_verify::sha256_file(&frame_path).unwrap();
+        std::fs::write(&frame_path, b"tampered frame").unwrap();
+        assert!(VerifiedRestoreFile::prepare(&frame_path, &state, &expected_frame_digest).is_err());
 
         let tamper = |byte: u8| {
             std::fs::OpenOptions::new()
@@ -1300,7 +1319,18 @@ mod tests {
 
         tamper(0xee);
         let mut restored = GuestRam::new(TEST_RAM_LEN).unwrap();
-        assert_eq!(map_restore_image(&image, &mut restored).unwrap(), frame);
+        let restored_frame = map_restore_image(&image, &mut restored).unwrap();
+        assert_eq!(restored_frame, frame);
+        let parsed =
+            parse_hvf_snapshot_frame(&restored_frame, HVF_SNAPSHOT_BACKEND_KIND, TEST_RAM_LEN)
+                .unwrap();
+        assert_eq!(parsed.artifact_digests, evidence);
+        observer
+            .inherit_verified_snapshot(parsed.artifact_digests)
+            .unwrap();
+        let recaptured = observer.snapshot_payload().unwrap();
+        observer.inherit_verified_snapshot(&recaptured).unwrap();
+        assert_eq!(observer.snapshot_payload().unwrap(), recaptured);
         let regions = restored.backing_regions(0);
         assert_eq!(regions.len(), 1, "{regions:?}");
         assert_eq!(

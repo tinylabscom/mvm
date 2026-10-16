@@ -505,6 +505,11 @@ mod tests {
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
             runtime_overlay_version: None,
+            runtime_release_proof: None,
+            legacy_bundle_runtime: None,
+            legacy_portable_runtime: None,
+            source_runtime_archive_sha256: None,
+            unsigned_runtime_development: false,
             bundle_boot_assets: None,
             revision_hash: "abc".to_string(),
             flake_ref: ".".to_string(),
@@ -523,12 +528,14 @@ mod tests {
             runner_dir: None,
             tenant_id: None,
             plan_json: None,
+            caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,
             network_policy: Default::default(),
             dev_console: false,
             gpu: false,
             gpu_device: None,
+            admission_durability: None,
         }
     }
 

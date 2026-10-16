@@ -393,6 +393,7 @@ mod tests {
                     worktree: mvm_core::image_set::WorktreeState::Clean,
                 },
                 files: Default::default(),
+                assemblies: Default::default(),
             },
             origin: ReleaseGuestRuntimeOrigin::Installed,
         }

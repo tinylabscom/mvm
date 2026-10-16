@@ -552,7 +552,12 @@ impl FileLock {
 
 impl Drop for FileLock {
     fn drop(&mut self) {
-        // flock is released when the file descriptor is closed (automatic)
+        // An unrelated child can inherit this open file description between
+        // fork and exec despite CLOEXEC. Closing only our descriptor would
+        // extend this lexical guard's lock until that child reaches exec.
+        if let Err(error) = fs::File::unlock(&self._file) {
+            tracing::warn!(%error, "failed to release file lock");
+        }
     }
 }
 

@@ -2670,6 +2670,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3111,6 +3121,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -3294,6 +3305,7 @@ dependencies = [
  "aya",
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
  "etherparse",
@@ -3303,6 +3315,7 @@ dependencies = [
  "hmac",
  "httparse",
  "ipnet",
+ "keyring",
  "landlock",
  "leakguard",
  "libc",
@@ -3325,6 +3338,7 @@ dependencies = [
  "rustls",
  "seccompiler",
  "secrecy",
+ "security-framework",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -3337,6 +3351,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xtask",
  "zeroize",
 ]
@@ -3485,8 +3500,6 @@ dependencies = [
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-nix",
- "tree-sitter-python",
- "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -3515,11 +3528,13 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tracing",
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "wait-timeout",
  "zeroize",
 ]
 
@@ -4557,6 +4572,17 @@ name = "roff"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
+
+[[package]]
+name = "runmvm-client"
+version = "0.24.0"
+dependencies = [
+ "libloading",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "wait-timeout",
+]
 
 [[package]]
 name = "rustc-demangle"

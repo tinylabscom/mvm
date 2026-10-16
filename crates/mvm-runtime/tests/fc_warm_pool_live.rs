@@ -412,12 +412,24 @@ fn restore_child_and_read_random(
 ) -> ChildObservation {
     let child_dir = mvm_core::config::vm_state_dir(child_id);
     copy_checkpoint_content(store, checkpoint, meta, &child_dir);
+    let runtime_artifacts_sha256 = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == "runtime-artifacts.json")
+        .map(|blob| blob.sha256.as_str());
+    let device_anchors_sha256 = meta
+        .content
+        .iter()
+        .find(|blob| blob.name == "device-anchors.json")
+        .map(|blob| blob.sha256.as_str());
 
     let t_preload = Instant::now();
     let preloaded = driver
         .preload_standby_child(&PreloadChildRequest {
             child_vm_name: child_id,
             child_dir: &child_dir,
+            runtime_artifacts_sha256,
+            device_anchors_sha256,
         })
         .expect("preload Firecracker standby child");
     let preload_ms = t_preload.elapsed().as_millis();
@@ -433,6 +445,8 @@ fn restore_child_and_read_random(
     let resume_result = driver.resume_preloaded_child(&ChildForkRequest {
         child_vm_name: child_id,
         child_dir: &child_dir,
+        runtime_artifacts_sha256,
+        device_anchors_sha256,
         parent_vm_name: None,
         genid,
         // This direct driver witness stands up no host-side gating or broker
@@ -440,6 +454,7 @@ fn restore_child_and_read_random(
         channels: &[],
         cpu_grant: None,
         admitted_plan: None,
+        late_volumes: &[],
     });
     if let Err(ref e) = resume_result {
         eprintln!("preloaded child resume failed: {e:#}");
@@ -464,6 +479,7 @@ fn restore_child_and_read_random(
                 token: generation_token,
                 grant_envelope: None,
                 seccomp_tier: Some(SeccompTier::Standard),
+                volumes: Vec::new(),
             },
         )
         .expect("the restored child must complete the authenticated identity handshake");
@@ -675,6 +691,7 @@ fn fc_warm_pool_spawn_and_claim() {
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             // Firecracker keeps no supervisor-config blob.
             supervisor_config_src: None,
             tag: None,
@@ -700,6 +717,7 @@ fn fc_warm_pool_spawn_and_claim() {
             vm_name: parent_id.clone(),
             supervisor_config_digest: String::new(),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             supervisor_config_src: None,
             tag: None,
             created_unix: mvm_core::time::now_unix_secs(),

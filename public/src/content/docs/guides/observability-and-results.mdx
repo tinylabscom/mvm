@@ -26,6 +26,35 @@ return command status and enough evidence to debug or verify the run later.
 Keep identifiers everywhere. Keep payloads only where the caller explicitly
 asked for bounded output.
 
+## Guest telemetry
+
+Every workload microVM sends its telemetry — spans, standalone events, logs,
+stdout/stderr chunks, producer coverage and loss summaries — to a host
+collector that lives as long as the VM, over its own authenticated, encrypted
+vsock session. Collection is on by default and does not depend on a CLI being
+attached, an invocation, an egress grant or an OTLP endpoint.
+
+```sh
+mvmctl machine telemetry web            # status, losses, incomplete spans, recent records
+mvmctl machine telemetry web --follow   # keep printing as records arrive
+mvmctl machine telemetry web --json     # one object for tooling
+MVM_TELEMETRY_COLLECT=0 mvmctl run ...  # this launch collects nothing
+```
+
+Read the status before the records. A quiet feed is not evidence of health:
+the collector's state, its snapshot age and the loss counters are. Losses are
+counted by where they happened — the guest's queue, the host's write queue,
+the records file's cap, a failed write, or a record withheld because it
+carried a secret bound to the VM.
+
+The host scrubs before it stores: a record carrying a bound secret is
+withheld, and text is masked by the same redaction rules the stream
+transcript uses. The records file is sealed at rest and capped; it is a
+bounded window for inspection, not an archive.
+
+Known gaps are reported, not hidden: no guest producer emits spans yet, and
+the interval before the guest agent starts is reported as unavailable.
+
 ## Host-side eBPF egress telemetry
 
 On Linux, `mvm` can attach a host-side [eBPF](https://ebpf.io/) probe to the

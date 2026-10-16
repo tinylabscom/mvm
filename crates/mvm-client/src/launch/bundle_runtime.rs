@@ -37,6 +37,13 @@ pub fn installed_archive_for_rootfs(rootfs: &Path) -> Result<Option<PathBuf>> {
 
 /// False means an ordinary source or a legacy bundle without boot assets.
 pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<bool> {
+    let mut selected = config.clone();
+    let attached = attach_installed_bundle(&mut selected, backend)?;
+    *config = selected;
+    Ok(attached)
+}
+
+fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<bool> {
     let Some(archive) = installed_archive_for_rootfs(Path::new(&config.rootfs_path))? else {
         return Ok(false);
     };
@@ -58,6 +65,43 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
     let Some(boot) = &verified.boot_assets else {
         return Ok(false);
     };
+    ensure!(
+        config.legacy_bundle_runtime.is_none()
+            && config.runtime_release_proof.is_none()
+            && config.source_runtime_archive_sha256.is_none()
+            && !config.unsigned_runtime_development,
+        "conflicting portable runtime evidence"
+    );
+    let proof = mvm_core::vm_backend::LegacyPortableRuntimeProof {
+        archive: archive.clone(),
+        pin: verified.plan_artifact(),
+        manifest_sha256: boot.image_set.manifest_sha256.as_str().to_owned(),
+        arch: boot.arch,
+    };
+    if let Some(previous) = &config.legacy_portable_runtime {
+        ensure!(
+            previous == &proof,
+            "explicit portable proof differs from installed bundle"
+        );
+        mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+            config,
+            mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+        )?;
+    }
+    if let Some(pin) = &config.bundle_boot_assets {
+        ensure!(
+            pin.manifest_sha256 == boot.image_set.manifest_sha256 && pin.arch == boot.arch,
+            "explicit boot-assets pin differs from installed bundle"
+        );
+        let signed_initrd = verified
+            .manifest
+            .find_by_role(&ArtifactRole::Initrd)
+            .context("signed initrd missing")?;
+        ensure!(
+            pin.initrd_sha256.as_str() == signed_initrd.sha256,
+            "explicit initrd pin differs from installed bundle"
+        );
+    }
     ensure!(
         boot.arch == GuestArch::host(),
         "bundle boot-assets architecture differs from host"
@@ -125,6 +169,11 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         arch: boot.arch,
         initrd_sha256: mvm_core::packs::Sha256Hex::new(initrd_sha256)?,
     });
+    config.legacy_portable_runtime = Some(proof);
+    mvm_runtime::runtime_evidence::verify_runtime_for_launch(
+        config,
+        mvm_runtime::runtime_evidence::MIN_GUEST_RPC_PROTOCOL_VERSION,
+    )?;
     Ok(true)
 }
 
@@ -256,6 +305,79 @@ mod tests {
         }
     }
 
+    fn assert_retained_portable_reentry(selected: &VmStartConfig) {
+        use mvm_core::protocol::runtime_release::RuntimeLaunchBinding;
+
+        let retained = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::set_mode(retained.path(), 0o700).unwrap();
+        let copy = |source: &Path, name: &str| {
+            let path = retained.path().join(name);
+            std::fs::copy(source, &path).unwrap();
+            mvm_core::private_fs::set_mode(&path, 0o400).unwrap();
+            path
+        };
+        let mut proof = selected.legacy_portable_runtime.clone().unwrap();
+        proof.archive = copy(&proof.archive, "bundle.mvmpkg");
+        let binding = RuntimeLaunchBinding::LegacyPortable {
+            proof,
+            rootfs_path: copy(Path::new(&selected.rootfs_path), "rootfs"),
+            kernel_path: copy(
+                Path::new(selected.kernel_path.as_deref().unwrap()),
+                "kernel",
+            ),
+            overlay_path: copy(
+                Path::new(selected.runtime_overlay_path.as_deref().unwrap()),
+                "overlay.ext4",
+            ),
+            overlay_verity_path: copy(
+                Path::new(selected.runtime_overlay_verity_path.as_deref().unwrap()),
+                "overlay.verity",
+            ),
+            initramfs_path: copy(
+                Path::new(selected.initrd_path.as_deref().unwrap()),
+                "initramfs.cpio.gz",
+            ),
+            overlay_roothash: selected.runtime_overlay_roothash.clone().unwrap(),
+            version: selected.runtime_overlay_version.clone().unwrap(),
+        };
+        let mut reapplied = selected.clone();
+        binding.apply_to_config(&mut reapplied);
+        assert!(reapplied.bundle_boot_assets.is_none());
+        assert!(
+            installed_archive_for_rootfs(Path::new(&reapplied.rootfs_path))
+                .unwrap()
+                .is_none()
+        );
+        // There is no ambient cache entry for this version. Reentry must use
+        // the original portable proof and never resolve the caller's CLI hint.
+        let before = format!("{reapplied:?}");
+        super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+            &mut reapplied,
+            "qemu",
+            Some("absent-ambient-version"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(format!("{reapplied:?}"), before);
+
+        reapplied
+            .legacy_portable_runtime
+            .as_mut()
+            .unwrap()
+            .manifest_sha256 = "0".repeat(64);
+        let before = format!("{reapplied:?}");
+        assert!(
+            super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+                &mut reapplied,
+                "qemu",
+                Some("absent-ambient-version"),
+                None,
+            )
+            .is_err()
+        );
+        assert_eq!(format!("{reapplied:?}"), before);
+    }
+
     #[test]
     fn signed_boot_assets_attach_offline_and_refuse_missing_or_corrupt_members() {
         let home = tempfile::tempdir().unwrap();
@@ -294,6 +416,8 @@ mod tests {
             )
             .into_manifest();
         // Deliberately not the running CLI's locked root or release.
+        manifest.compatibility.guest_agent_protocol =
+            Some(mvm_core::image_set::ProtocolRange::new(2, 2).unwrap());
         manifest.set_version = ImageSetVersion::new(version).unwrap();
         if let mvm_core::image_set::ImageSetProducer::Release(release) = &mut manifest.producer {
             release.release_tag =
@@ -379,6 +503,58 @@ mod tests {
         assert!(!Path::new(&mvm_core::config::mvm_cache_dir()).exists());
         let mut attached = config.clone();
         assert!(attach_if_installed_bundle(&mut attached, "qemu").unwrap());
+        assert!(attached.legacy_portable_runtime.is_some());
+        assert_retained_portable_reentry(&attached);
+        let mut dispatched = config.clone();
+        super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+            &mut dispatched,
+            "qemu",
+            Some("not-the-cli-version"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatched.legacy_portable_runtime,
+            attached.legacy_portable_runtime
+        );
+        for mutation in 0..4 {
+            let mut refused = attached.clone();
+            match mutation {
+                0 => {
+                    refused
+                        .legacy_portable_runtime
+                        .as_mut()
+                        .unwrap()
+                        .manifest_sha256 = "0".repeat(64)
+                }
+                1 => {
+                    refused
+                        .legacy_portable_runtime
+                        .as_mut()
+                        .unwrap()
+                        .pin
+                        .bundle_sha256 = "0".repeat(64)
+                }
+                2 => refused.source_runtime_archive_sha256 = Some("0".repeat(64)),
+                3 => refused.initrd_path = refused.kernel_path.clone(),
+                _ => unreachable!(),
+            }
+            let original = format!("{refused:?}");
+            assert!(
+                super::super::runtime_source::attach_runtime_overlay_if_cached_version(
+                    &mut refused,
+                    "qemu",
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                format!("{refused:?}"),
+                original,
+                "config mutation {mutation}"
+            );
+        }
         assert_eq!(attached.roothash.as_deref(), Some(workload_hash.as_str()));
         let verity_path = PathBuf::from(attached.verity_path.as_ref().unwrap());
         assert!(!verity_path.with_extension("roothash").exists());
@@ -468,6 +644,7 @@ mod tests {
                     std::fs::write(&installed_member, corrupt).unwrap();
                 }
                 let mut refused = config.clone();
+                let original_config = format!("{refused:?}");
                 let error = super::super::runtime_source::attach_runtime_overlay_if_cached_version(
                     &mut refused,
                     "qemu",
@@ -487,6 +664,7 @@ mod tests {
                 assert!(refused.bundle_boot_assets.is_none());
                 assert!(refused.runtime_overlay_path.is_none());
                 assert!(refused.initrd_path.is_none());
+                assert_eq!(format!("{refused:?}"), original_config);
                 std::fs::write(&installed_member, &original).unwrap();
             }
         }

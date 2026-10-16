@@ -604,6 +604,7 @@ mod tests {
                 vm_name: "alpha".into(),
                 state: CollectorState::Connecting,
                 shed: 0,
+                losses: Default::default(),
                 snapshot_age_ms: None,
                 records_bytes: 0,
             },

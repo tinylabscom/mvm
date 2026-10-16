@@ -97,7 +97,10 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// 487 (was 486): the unpublished `mvm-fc-lifecycle` prototype adds one
 /// first-party workspace node; no new third-party dependencies or default
 /// mvmctl dependencies are introduced.
-const FEATURE_CLOSURE_BUDGET: usize = 487;
+///
+/// 489 (was 487): the standalone public Rust hostlib client adds one crate and
+/// libloading 0.8, retaining Rust 1.85 support without internal runtime dependencies.
+const FEATURE_CLOSURE_BUDGET: usize = 489;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

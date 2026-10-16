@@ -7,7 +7,7 @@
 
 /**
  * Kind of agent-side error reported via `EntrypointEvent::Error`.
- * 
+ *
  * The variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.
  */
 export type RunEntrypointError = ("PayloadCap" | "Timeout" | "Canceled" | "Busy" | "WrapperCrashed" | "NotReady" | "EntrypointInvalid" | "SessionKilled" | "InternalError")
@@ -47,9 +47,9 @@ kind: "timed_out"
 export type MachineId = string
 /**
  * Finer-grained "is this VM usable?" state, composed alongside the coarse [`InstanceStatus`] lifecycle.
- * 
+ *
  * `InstanceStatus::Running` means the backend accepted the VM and it has not stopped. `InstanceReadiness` explains *whether* it is actually usable: did the agent answer? Are integration probes green? Is a streaming operation currently throttled?
- * 
+ *
  * Readiness transitions are independent of lifecycle transitions — they do not gate or require `InstanceStatus` to move.
  */
 export type InstanceReadiness = ("launch_accepted" | "agent_connecting" | "agent_ready" | {
@@ -76,7 +76,7 @@ reason: BackpressureReason
 } | "stopping")
 /**
  * Why a streaming or queued operation is currently throttled.
- * 
+ *
  * Closed enum: every reason is named, and drift between host and guest fails the serde `deny_unknown_fields`-equivalent path (variants must match). Detail strings carried alongside this enum are bounded and redacted — never argv / env / stdin / stdout / stderr / filesystem paths.
  */
 export type BackpressureReason = ("guest_agent_unavailable" | {

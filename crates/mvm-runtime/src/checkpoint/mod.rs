@@ -19,6 +19,7 @@ mod diff;
 mod durability_tests;
 mod embedded_devices;
 mod gc;
+mod materialization;
 mod params;
 #[cfg(test)]
 mod protected_tests;
@@ -43,6 +44,8 @@ use restore_content::{
 };
 
 pub use gc::{ContentPruneReport, prune_unreferenced_content};
+use materialization::clone_or_materialize_blob;
+pub use materialization::materialized_source;
 pub use protection::verify_content_at_rest;
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
@@ -569,6 +572,9 @@ pub struct RestoredChild<'a> {
     /// The parent's content manifest, already verified against the signed
     /// chain. A restorer that verifies blobs on load checks them against this.
     pub content: &'a [ContentBlob],
+    /// Digest captured immediately after minting this child's fresh identity.
+    /// Absent for an inherited identity or a checkpoint with no identity drive.
+    pub reseeded_identity_sha256: Option<&'a str>,
 }
 
 /// Stages a forked child's snapshot into position and starts the VM. Taken as a
@@ -641,6 +647,7 @@ pub fn fork_checkpoint(
     .protection(parent.protection)
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
+    .runtime_launch_binding(parent.runtime_launch_binding)
     // An fs_quick branch presents no plan of its own, so the child inherits
     // rather than restates the parent's permission set — inheritance is the
     // only shape that cannot widen.
@@ -694,6 +701,7 @@ pub fn fork_vm_full(
     // Same fail-closed posture as fork_checkpoint: the parent's sealed record
     // must still match the digest the host signed at creation before we clone.
     verify_checkpoint_against_chain(anchor, &parent)?;
+    verify_checkpoint_runtime(store, &parent)?;
 
     if params.parent_liveness == ForkParentLiveness::MustBeStopped && vm_is_running(&parent.vm_name)
     {
@@ -719,7 +727,8 @@ pub fn fork_vm_full(
     // A fork branches a new VM identity, so it must never boot on the parent's
     // FlowMux signing key. The captured identity drive was just cloned into the
     // child's dir with the rest of the content; mint a fresh one over it.
-    reseed_forked_identity_drive(&params.child_vm_name, &params.dest_dir)?;
+    let reseeded_identity_sha256 =
+        reseed_forked_identity_drive(&params.child_vm_name, &params.dest_dir)?;
 
     validate_fork_verity_binding(&parent, &params.dest_dir)?;
 
@@ -736,6 +745,7 @@ pub fn fork_vm_full(
         )?
     };
     restore.restore(&RestoredChild {
+        reseeded_identity_sha256: reseeded_identity_sha256.as_deref(),
         vm_name: &params.child_vm_name,
         state_dir: &params.dest_dir,
         cpu_grant: child_grants.as_ref().and_then(|grants| grants.cpu),
@@ -754,6 +764,7 @@ pub fn fork_vm_full(
     .protection(parent.protection)
     .supervisor_config_digest(parent.supervisor_config_digest)
     .runtime_overlay_version(parent.runtime_overlay_version)
+    .runtime_launch_binding(parent.runtime_launch_binding)
     // The child's OWN grants, already checked to sit inside the parent's. A
     // grandchild is then bounded by what this restore actually got, not by the
     // wider set its grandparent held.
@@ -871,6 +882,10 @@ pub fn vm_is_running(vm_name: &str) -> bool {
 pub use mvm_core::checkpoint::DeviceAnchors;
 pub use mvm_vmm::checkpoint::VmFullControl;
 
+pub(crate) mod runtime_binding;
+pub use runtime_binding::verify_checkpoint_runtime;
+pub(crate) use runtime_binding::{metadata_blob_sha256, verify_checkpoint_runtime_at};
+
 /// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
 /// pause window. The disk clone happens while paused so memory and disk match.
 pub fn capture_vm_full(
@@ -934,6 +949,22 @@ fn capture_vm_full_inner(
     control.pause().context("pausing VM for vm_full capture")?;
     // From here, RESUME on every exit path so a failure never strands the guest.
     let captured = (|| {
+        let actual = control
+            .runtime_artifacts()
+            .context("querying the paused VM's runtime artifacts")?;
+        runtime_binding::verify_capture(params.runtime_launch_binding.as_ref(), &actual)?;
+        if let Some(source) = params.supervisor_config_src.as_deref() {
+            runtime_binding::capture_supervisor_config(
+                source,
+                &content_dir.join(SUPERVISOR_CONFIG_FILE_NAME),
+                &actual,
+            )?;
+        }
+        std::fs::write(
+            content_dir.join(runtime_binding::EVIDENCE_BLOB),
+            serde_json::to_vec(&actual)?,
+        )
+        .context("writing paused-runtime capture evidence")?;
         control
             .save_memory(&memory)
             .context("saving machine memory")?;
@@ -978,6 +1009,10 @@ fn capture_vm_full_inner(
             true,
         )?,
         protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?,
+        ContentBlob {
+            name: runtime_binding::EVIDENCE_BLOB.into(),
+            sha256: sha256_file_hex(&content_dir.join(runtime_binding::EVIDENCE_BLOB))?,
+        },
     ];
 
     for (blob, _) in &workspace {
@@ -1004,14 +1039,8 @@ fn capture_vm_full_inner(
     // Persist the launch config into the checkpoint when the backend provides one.
     // Restore needs it to rebuild the state dir the stop reaped. Backends that do
     // not persist a supervisor config omit this blob.
-    if let Some(ref src) = params.supervisor_config_src {
+    if params.supervisor_config_src.is_some() {
         let config_dst = content_dir.join(SUPERVISOR_CONFIG_FILE_NAME);
-        std::fs::copy(src, &config_dst).with_context(|| {
-            format!(
-                "copying supervisor config {} into checkpoint",
-                src.display()
-            )
-        })?;
         content.push(ContentBlob {
             name: SUPERVISOR_CONFIG_FILE_NAME.into(),
             sha256: sha256_file_hex(&config_dst)?,
@@ -1148,6 +1177,7 @@ fn capture_vm_full_inner(
         .content(content)
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_overlay_version(params.runtime_overlay_version)
+        .runtime_launch_binding(params.runtime_launch_binding)
         .snapshot_id(snapshot_id)
         .grants(params.grants)
         .session(params.session)
@@ -1286,6 +1316,7 @@ pub fn restore_checkpoint(
     // whatever its blobs happen to look like.
     verify_checkpoint_against_chain(anchor, &meta)?;
     verify_content_except(store, &meta, restore.verifies_on_load())?;
+    verify_checkpoint_runtime(store, &meta)?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
     // A restore killed before it returned left its plaintext behind.
     staging::reclaim_abandoned_restores(store.root());
@@ -1328,63 +1359,6 @@ pub fn restore_checkpoint(
         config_src,
         &content,
     )
-}
-
-fn clone_or_materialize_blob(
-    store: &CheckpointStore,
-    meta: &CheckpointMeta,
-    blob: &ContentBlob,
-    destination: &Path,
-) -> Result<()> {
-    let content_dir = store.content_dir(&meta.id);
-    chunks::validate_blob_name(&blob.name)?;
-    if chunks::is_chunked_blob(&content_dir, blob) {
-        chunks::materialize_blob_cached(
-            store.root(),
-            &meta.key_domain,
-            &content_dir,
-            blob,
-            destination,
-        )
-        .map(|_| ())
-        .with_context(|| format!("materializing checkpoint blob {}", blob.name))
-    } else {
-        crate::base::cow::clone_rootfs_for_instance(&content_dir.join(&blob.name), destination)
-            .map(|_| ())
-            .with_context(|| format!("cloning checkpoint blob {}", blob.name))
-    }
-}
-
-/// Rebuild a chunked blob as one contiguous file in caller-owned scratch.
-pub fn materialized_source(
-    store: &CheckpointStore,
-    meta: &CheckpointMeta,
-    name: &str,
-    scratch: &Path,
-) -> Result<PathBuf> {
-    let content_dir = store.content_dir(&meta.id);
-    let blob = meta
-        .content
-        .iter()
-        .find(|blob| blob.name == name)
-        .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
-    let destination = scratch.join(name);
-    if let Some(keys) = store.keys_for(meta)? {
-        sealed::materialize_blob(&keys, &content_dir, blob, &destination)
-            .with_context(|| format!("opening protected checkpoint blob {name}"))?;
-        return Ok(destination);
-    }
-    chunks::ensure_chunked_layout(&content_dir, meta)?;
-    chunks::materialize_blob_cached(
-        store.root(),
-        &meta.key_domain,
-        &content_dir,
-        blob,
-        &destination,
-    )
-    .map(|_| ())
-    .with_context(|| format!("materializing checkpoint blob {name}"))?;
-    Ok(destination)
 }
 
 fn sha256_file_hex(path: &Path) -> Result<String> {
@@ -1833,6 +1807,7 @@ mod tests {
             .content(meta.content.clone())
             .supervisor_config_digest(meta.supervisor_config_digest.clone())
             .runtime_overlay_version(meta.runtime_overlay_version.clone())
+            .runtime_launch_binding(meta.runtime_launch_binding.clone())
             .grants(meta.grants.clone())
             .session(Some(test_session_binding()))
             .build();
@@ -2135,6 +2110,16 @@ mod tests {
         events: RefCell<Vec<&'static str>>,
     }
     impl VmFullControl for MockControl {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+                kernel: None,
+                firecracker_drives: None,
+                initramfs: None,
+                disks: Vec::new(),
+                kernel_cmdline: String::new(),
+            })
+        }
+
         fn pause(&self) -> Result<()> {
             self.events.borrow_mut().push("pause");
             Ok(())
@@ -2147,7 +2132,19 @@ mod tests {
             self.events.borrow_mut().push("save");
             std::fs::write(memory_path, b"mem").unwrap();
             std::fs::write(format!("{}.machine-id", memory_path.display()), b"mid").unwrap();
+            std::fs::write(
+                memory_path.with_file_name(mvm_core::checkpoint::HVF_FRAME_BLOB),
+                b"mock-hvf-frame",
+            )
+            .unwrap();
             Ok(())
+        }
+        fn extra_content(&self, content_dir: &Path) -> Result<Vec<ContentBlob>> {
+            let name = mvm_core::checkpoint::HVF_FRAME_BLOB;
+            Ok(vec![ContentBlob {
+                name: name.into(),
+                sha256: sha256_file_hex(&content_dir.join(name))?,
+            }])
         }
         fn rootfs_path(&self) -> Result<PathBuf> {
             Ok(self.rootfs.clone())
@@ -2172,6 +2169,10 @@ mod tests {
     /// does for the warm pool.
     struct RetainingControl(MockControl);
     impl VmFullControl for RetainingControl {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            self.0.runtime_artifacts()
+        }
+
         fn pause(&self) -> Result<()> {
             self.0.pause()
         }
@@ -2209,6 +2210,7 @@ mod tests {
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 9,
@@ -2273,6 +2275,7 @@ mod tests {
                 vm_name: vm.into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 9,
@@ -2325,7 +2328,7 @@ mod tests {
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
-        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        std::fs::write(&config, br#"{"initramfs":null,"disks":[],"cmdline":null}"#).unwrap();
         let meta = capture_vm_full(
             &store,
             CaptureVmFullParams {
@@ -2333,6 +2336,7 @@ mod tests {
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 9,
@@ -2361,6 +2365,56 @@ mod tests {
     }
 
     #[test]
+    fn capture_refuses_unverified_runtime_metadata_and_resumes_without_saving() {
+        use mvm_core::protocol::runtime_release::{RuntimeLaunchBinding, RuntimeReleaseProof};
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live-rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = MockControl {
+            rootfs,
+            identity: None,
+            events: RefCell::new(vec![]),
+        };
+        let runtime = RuntimeLaunchBinding::CliAssembly(
+            mvm_core::protocol::runtime_release::CliRuntimeLaunchBinding {
+                provenance:
+                    mvm_core::protocol::runtime_release::RuntimeBindingProvenance::Release {
+                        proof: RuntimeReleaseProof {
+                            archive: "/release/archive".into(),
+                            checksum: "/release/checksum".into(),
+                            signature_bundle: "/release/signature".into(),
+                            archive_sha256: "ab".repeat(32),
+                            version: "1.2.3".into(),
+                            arch: mvm_core::arch::GuestArch::host(),
+                        },
+                    },
+                overlay_path: "/retained/runtime-one/overlay.ext4".into(),
+                overlay_verity_path: "/retained/runtime-one/overlay.verity".into(),
+                initramfs_path: "/retained/runtime-one/initramfs".into(),
+                overlay_roothash: "cd".repeat(32),
+            },
+        );
+        let params = CaptureVmFullParams::builder()
+            .id(CheckpointId::new("runtime-handoff"))
+            .vm_name("vm".into())
+            .supervisor_config_digest("config".into())
+            .runtime_overlay_version("1.2.3".to_string())
+            .runtime_launch_binding(Some(runtime.clone()))
+            .created_unix(1)
+            .retain_paused(false)
+            .build()
+            .unwrap();
+        assert!(capture_vm_full(&store, params, &ctl).is_err());
+        assert_eq!(*ctl.events.borrow(), vec!["pause", "resume"]);
+        assert!(
+            store
+                .read_meta(&CheckpointId::new("runtime-handoff"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn capture_vm_full_includes_sidecar_blob_when_present() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
@@ -2384,7 +2438,7 @@ mod tests {
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
-        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        std::fs::write(&config, br#"{"initramfs":null,"disks":[],"cmdline":null}"#).unwrap();
         let meta = capture_vm_full(
             &store,
             CaptureVmFullParams {
@@ -2392,6 +2446,7 @@ mod tests {
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 10,
@@ -2456,7 +2511,7 @@ mod tests {
             events: RefCell::new(vec![]),
         };
         let config = tmp.path().join("supervisor-config.json");
-        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        std::fs::write(&config, br#"{"initramfs":null,"disks":[],"cmdline":null}"#).unwrap();
         let meta = capture_vm_full(
             &store,
             CaptureVmFullParams {
@@ -2464,6 +2519,7 @@ mod tests {
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 11,
@@ -2516,7 +2572,7 @@ mod tests {
         let rootfs = tmp.join("live.ext4");
         std::fs::write(&rootfs, b"disk").unwrap();
         let config = tmp.join(format!("{id}-supervisor-config.json"));
-        std::fs::write(&config, b"{\"cfg\":true}").unwrap();
+        std::fs::write(&config, br#"{"initramfs":null,"disks":[],"cmdline":null}"#).unwrap();
         let ctl = MockControl {
             rootfs,
             identity: None,
@@ -2529,6 +2585,7 @@ mod tests {
                 vm_name: "origin".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 1,
@@ -2722,6 +2779,24 @@ mod tests {
         extra: Vec<(&'static str, &'static [u8])>,
     }
     impl VmFullControl for NoMachineIdControl {
+        fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+            Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+                kernel: None,
+                firecracker_drives: Some(vec![mvm_vmm::runtime_artifacts::FirecrackerDrive {
+                    drive_id: "blk0".into(),
+                    path: self.rootfs.clone(),
+                    is_root_device: true,
+                    is_read_only: true,
+                }]),
+                initramfs: None,
+                disks: vec![mvm_vmm::runtime_artifacts::RuntimeArtifact {
+                    path: self.rootfs.clone(),
+                    sha256: sha256_file_hex(&self.rootfs)?,
+                }],
+                kernel_cmdline: String::new(),
+            })
+        }
+
         fn pause(&self) -> Result<()> {
             Ok(())
         }
@@ -2780,6 +2855,7 @@ mod tests {
                 vm_name: "fc-vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
@@ -2837,6 +2913,7 @@ mod tests {
                 vm_name: "fc-vm".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 2,
@@ -2877,8 +2954,11 @@ mod tests {
     fn vm_full_origin_reports_retired_for_a_supervisor_config_only_checkpoint() {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
-        let meta = seed_vm_full_checkpoint(&store, tmp.path(), "supcfg-only");
+        let mut meta = seed_vm_full_checkpoint(&store, tmp.path(), "supcfg-only");
+        meta.content
+            .retain(|blob| blob.name != mvm_core::checkpoint::HVF_FRAME_BLOB);
         assert_eq!(vm_full_origin(&meta), Some(VmFullOrigin::Retired));
+        assert!(verify_checkpoint_runtime(&store, &meta).is_err());
     }
 
     #[test]
@@ -3132,6 +3212,7 @@ mod tests {
                 vm_name: "fc-origin".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
@@ -3322,6 +3403,7 @@ mod tests {
                 vm_name: "identity-parent".into(),
                 supervisor_config_digest: "d".into(),
                 runtime_overlay_version: None,
+                runtime_launch_binding: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,

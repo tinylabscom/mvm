@@ -244,6 +244,38 @@ impl ConfinementSpec {
         }
     }
 
+    /// Spec for the collector-only mode of `mvm-network-endpoint`: no
+    /// secrets, no stores, no forward leg — it parses untrusted guest
+    /// telemetry and writes the VM's sealed records file. Read-write on the
+    /// VM state dir (records, status, the signer socket) and on the directory
+    /// holding the per-port telemetry socket when that lives elsewhere;
+    /// read-only on the keys dir for the host anchor. The syscall set is the
+    /// shared confined-role table.
+    pub fn telemetry_collector(
+        state_dir: &Path,
+        telemetry_sock_dir: Option<&Path>,
+        keys_dir: PathBuf,
+    ) -> Self {
+        #[cfg(target_os = "linux")]
+        let allowed_syscalls: Vec<&'static str> = crate::jailer::seccomp::CONFINED_ROLE_SYSCALLS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        #[cfg(not(target_os = "linux"))]
+        let allowed_syscalls: Vec<&'static str> = Vec::new();
+        let mut read_write_paths = vec![state_dir.to_path_buf()];
+        if let Some(dir) = telemetry_sock_dir
+            && !dir.starts_with(state_dir)
+        {
+            read_write_paths.push(dir.to_path_buf());
+        }
+        Self {
+            readable_paths: existing_paths(vec![keys_dir]),
+            read_write_paths: existing_paths(read_write_paths),
+            allowed_syscalls,
+        }
+    }
+
     /// Permit the endpoint to create its authenticated-session marker inside
     /// one already-existing per-VM directory. Keeping this as an explicit
     /// opt-in preserves the narrower default for endpoints that do not expose
@@ -394,6 +426,33 @@ pub mod self_test;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_collector_only_spec_grants_its_state_dir_and_reads_only_keys() {
+        let state = tempfile::tempdir().unwrap();
+        let keys = tempfile::tempdir().unwrap();
+        let sockets = tempfile::tempdir().unwrap();
+        let spec = ConfinementSpec::telemetry_collector(
+            state.path(),
+            Some(sockets.path()),
+            keys.path().to_path_buf(),
+        );
+        assert_eq!(spec.readable_paths, vec![keys.path().to_path_buf()]);
+        assert_eq!(
+            spec.read_write_paths,
+            vec![state.path().to_path_buf(), sockets.path().to_path_buf()]
+        );
+        // No secret store, binding store, audit dir or TLS/DNS files.
+        assert!(!spec.readable_paths.iter().any(|p| p.starts_with("/etc")));
+
+        // A socket dir inside the state dir adds nothing.
+        let nested = ConfinementSpec::telemetry_collector(
+            state.path(),
+            Some(&state.path().join("vsock")),
+            keys.path().to_path_buf(),
+        );
+        assert_eq!(nested.read_write_paths, vec![state.path().to_path_buf()]);
+    }
+
     use super::*;
 
     #[test]

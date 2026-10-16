@@ -66,6 +66,28 @@ impl FirecrackerIO {
         self
     }
 
+    /// Point the drive `drive_id` of a paused VMM at `path`.
+    ///
+    /// Firecracker reopens the file, takes its size, and raises a config
+    /// change for the guest, so a restored guest sees the new capacity the
+    /// moment it resumes. The drive keeps the read-only flag it booted with.
+    pub fn repoint_drive(&self, drive_id: &str, path: &Path) -> Result<()> {
+        self.ensure_socket()?;
+        let body = serde_json::json!({
+            "drive_id": drive_id,
+            "path_on_host": path.to_string_lossy(),
+        })
+        .to_string();
+        super::call(
+            &self.socket_path,
+            "PATCH",
+            &format!("/drives/{drive_id}"),
+            Some(&body),
+        )
+        .with_context(|| format!("PATCH /drives/{drive_id}"))?;
+        Ok(())
+    }
+
     /// The scope prefix the fresh VMM's launch line carries, or empty when
     /// this host cannot scope it. The launch uses this exact value, so reading
     /// it back is reading what the restored guest actually runs inside.
@@ -179,6 +201,14 @@ impl FirecrackerIO {
         if let Some(devices) = fork {
             self.retarget_fork_drives(devices)?;
         }
+        // The load bound the vsock socket as the VMM's own user; the claim
+        // dials it as the invoking one.
+        let vsock_uds = match fork {
+            Some(devices) => devices.child_vsock_uds().to_path_buf(),
+            None => PathBuf::from(super::firecracker_vsock_uds_path(&vm_dir.to_string_lossy())),
+        };
+        super::secure_restored_vsock_socket(&vsock_uds)
+            .context("restrict the restored Firecracker vsock socket to the invoking user")?;
         Ok(())
     }
 
@@ -216,6 +246,11 @@ pub(crate) fn snapshot_guest_memory_mib(dir: &Path) -> u32 {
 }
 
 impl SnapshotIO for FirecrackerIO {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        self.ensure_socket()?;
+        super::runtime_artifacts::query(&self.socket_path)
+    }
+
     fn create_snapshot(&self, dir: &Path) -> Result<()> {
         self.ensure_socket()?;
         // Pause vCPUs first (Firecracker requires a paused VM

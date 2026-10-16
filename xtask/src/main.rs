@@ -694,7 +694,7 @@ fn main() -> Result<()> {
                 "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"
             );
             eprintln!(
-                "  check-conformance                      Verify model/*.toml is the single source and CONFORMANCE.md is up to date"
+                "  check-conformance                      Verify model/*.toml is the single source and docs/CONFORMANCE.md is up to date"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"

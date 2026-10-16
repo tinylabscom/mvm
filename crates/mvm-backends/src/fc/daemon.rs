@@ -98,6 +98,12 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
     run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
     await_started_firecracker(abs_dir, abs_socket, scope)?;
+    // Every launch, not only a cold boot: the snapshot-restore path starts its
+    // own fresh VMM through this same function and then speaks to the socket
+    // in-process, and a root-created socket it had not been handed refused the
+    // non-root claimer with EACCES.
+    adopt_api_socket(abs_socket)
+        .context("adopting the Firecracker API socket for the invoking user")?;
     ui::info("Firecracker started.");
     Ok(())
 }
@@ -454,12 +460,29 @@ fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Re
     crate::fc::fc_api::call(std::path::Path::new(socket), method, path, data).map(|_body| ())
 }
 
+/// Hand a restored Firecracker's vsock socket to the invoking user.
+///
+/// A snapshot load creates the restored device model, and the VMM binds the
+/// vsock socket the snapshot (or a fork's override) names right then — as root
+/// when it was launched through `sudo`. The claim that follows dials that
+/// socket as the invoking user, so a restore gives it the same hand-off a cold
+/// boot gives its vsock socket after `PUT /vsock`. A load that restored no
+/// vsock device bound nothing, and there is nothing to hand over.
+pub fn secure_restored_vsock_socket(vsock: &std::path::Path) -> Result<()> {
+    if !is_unix_socket(vsock) {
+        return Ok(());
+    }
+    secure_vsock_socket_for_caller(&vsock.to_string_lossy())
+}
+
 /// Hand the Firecracker-created API socket to the invoking user.
 ///
 /// Firecracker is launched through `sudo`, so it creates its API socket as
 /// root and nothing but root can dial it — which is why every API call used to
 /// be a `sudo curl`. Transferring ownership once, at mode 0600, lets the rest
-/// of the boot speak to the socket in-process.
+/// of the boot speak to the socket in-process. [`start_vm_firecracker_inner`]
+/// does this for every VMM it starts, so the cold boot and the snapshot
+/// restore cannot drift apart on it.
 ///
 /// Privilege justification: `chown` is privileged and must be done once, by the
 /// same `sudo` session that launched Firecracker. After this hand-off the rest
@@ -737,6 +760,69 @@ mod tests {
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
+    }
+
+    /// A restore whose snapshot carried no vsock device bound no socket, so
+    /// there is nothing to hand to the invoking user and no shell to run.
+    #[test]
+    fn a_restore_that_bound_no_vsock_socket_hands_nothing_over() {
+        use mvm_vmm::host::shell::mock as shell_mock;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&dir.path().join("runtime/v.sock"))
+            .expect("a missing vsock socket is not an error");
+        assert!(scripts.lock().expect("scripts lock").is_empty());
+    }
+
+    /// A restore that did bind the vsock socket hands it over exactly as a cold
+    /// boot does: `chown` through sudo for a non-root caller, a bare 0600 for
+    /// root.
+    #[test]
+    fn a_restored_vsock_socket_is_handed_to_the_invoking_user() {
+        use mvm_vmm::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("v.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&socket).expect("hand over the bound socket");
+
+        let scripts = scripts.lock().expect("scripts lock");
+        if effective_user_id() == 0 {
+            assert!(scripts.is_empty());
+            let mode = std::fs::metadata(&socket)
+                .expect("socket metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        } else {
+            assert_eq!(scripts.len(), 1, "{scripts:?}");
+            assert!(scripts[0].contains("sudo chown"), "{}", scripts[0]);
+            assert!(scripts[0].contains("v.sock"), "{}", scripts[0]);
+        }
     }
 
     #[test]

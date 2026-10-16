@@ -29,6 +29,11 @@ pub struct ChildForkRequest<'a> {
     /// The child's state dir, already holding the copy-on-write clone of the
     /// verified parent's own content.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    /// Saved-state Firecracker restores require it before loading any state.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
     /// Fresh VMGenID token, bound to the child's content-address, that the
     /// child must adopt so its CSPRNG diverges from the parent's.
     ///
@@ -73,6 +78,19 @@ pub struct ChildForkRequest<'a> {
     /// parent booted with no plan and would otherwise enforce none of them.
     /// A driver with no such process has nowhere to deliver it.
     pub admitted_plan: Option<&'a str>,
+    /// Read-only images to put behind the late-volume slots the parent booted,
+    /// before the child resumes. Empty for a claim that attaches none.
+    pub late_volumes: &'a [LateVolumeAttach],
+}
+
+/// One read-only image a claim attaches to a late-volume slot of a restored
+/// child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LateVolumeAttach {
+    /// The block slot the parent booted a placeholder in.
+    pub slot: u8,
+    /// The host image the slot serves from now on.
+    pub source: std::path::PathBuf,
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam
@@ -99,6 +117,10 @@ pub struct PreloadChildRequest<'a> {
     pub child_vm_name: &'a str,
     /// Canonical child state directory containing the materialized snapshot.
     pub child_dir: &'a Path,
+    /// Digest of runtime-artifacts.json from the authenticated parent manifest.
+    pub runtime_artifacts_sha256: Option<&'a str>,
+    /// Digest of device-anchors.json from that same authenticated manifest.
+    pub device_anchors_sha256: Option<&'a str>,
 }
 
 /// The process identity and control endpoint of a paused preloaded child.
@@ -140,6 +162,12 @@ pub trait VmmDriver: Send + Sync {
     /// the claim wires its authority-bearing channels.
     fn supports_preloaded_standby(&self) -> bool {
         false
+    }
+    /// How many read-only late-volume slots this VMM boots a warm parent with,
+    /// and can point at a claim's own images before the child resumes. Zero
+    /// means a claim can attach no volume and such a launch keeps its cold path.
+    fn late_volume_slots(&self) -> u8 {
+        0
     }
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;

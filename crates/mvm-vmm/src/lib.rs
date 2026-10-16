@@ -19,6 +19,7 @@ pub mod hvf_handoff;
 pub mod post_restore;
 pub mod qemu_arch;
 pub mod quota;
+pub mod runtime_artifacts;
 pub mod snapshot;
 pub mod vmm;
 pub mod vsock_egress_bridge;

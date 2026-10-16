@@ -1541,6 +1541,7 @@ mod tests {
             payload.push((path, bytes.clone()));
         }
         let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.schema_version = 4;
         manifest.arch = arch.to_string();
         manifest.members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: "image-set.json".into(),
@@ -1618,6 +1619,46 @@ mod tests {
                 .join(full.embedded_image_sets[0].manifest_sha256.as_str())
                 .exists()
         );
+    }
+
+    #[test]
+    fn schema4_file_plan_artifact_pins_the_original_signed_archive() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let payload = boot_payload(&image_set, GuestArch::Aarch64, &bytes);
+        let archive = boot_bundle(&sk, &image_set, "aarch64", &payload);
+        let expected = PlanArtifact::new(
+            bundle_sha256(&archive),
+            &extract_manifest_signature(&archive).unwrap(),
+            key_id_from_pubkey(&sk.verifying_key()),
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("original.mvmpkg");
+        std::fs::write(&path, &archive).unwrap();
+        let verified = verify_bundle_file(&path, &trust(&sk)).unwrap();
+        assert_eq!(verified.manifest.schema_version, 4);
+        assert!(verified.boot_assets.is_some());
+        assert_eq!(verified.plan_artifact(), expected);
+        let independently_verified = verify_plan_bundle(
+            &verified.plan_artifact(),
+            &FixedResolver(archive.clone()),
+            &trust(&sk),
+        )
+        .unwrap();
+        assert_eq!(independently_verified.manifest, verified.manifest);
+
+        let needle = b"\"schema_version\":4";
+        let position = archive
+            .windows(needle.len())
+            .position(|bytes| bytes == needle)
+            .unwrap();
+        let mut tampered = archive;
+        tampered[position + needle.len() - 1] = b'3';
+        std::fs::write(&path, tampered).unwrap();
+        assert!(matches!(
+            verify_bundle_file(&path, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
     }
 
     #[test]

@@ -924,6 +924,10 @@ impl VmmDriver for FcDriver {
         true
     }
 
+    fn late_volume_slots(&self) -> u8 {
+        mvm_agentd::late_volumes::MAX_SLOTS
+    }
+
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -941,8 +945,26 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             )));
         }
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|error| preload_spawn_error("create late-volume placeholders", error))?;
         crate::fc::FcForkRestorer
-            .restore_fork_paused(req.child_vm_name, req.child_dir)
+            .restore_fork_paused(
+                req.child_vm_name,
+                req.child_dir,
+                &crate::fc::ForkRuntimeEvidence {
+                    observation_sha256: req.runtime_artifacts_sha256.ok_or_else(|| {
+                        StandbyError::SpawnFailed(
+                            "Firecracker preload requires authenticated runtime evidence".into(),
+                        )
+                    })?,
+                    anchors_sha256: req.device_anchors_sha256.ok_or_else(|| {
+                        StandbyError::SpawnFailed(
+                            "Firecracker preload requires authenticated device anchors".into(),
+                        )
+                    })?,
+                    reseeded_identity_sha256: None,
+                },
+            )
             .map_err(|error| preload_spawn_error("load paused child", error))?;
         let pid = read_firecracker_pid(&req.child_dir.to_string_lossy())
             .map_err(|e| StandbyError::SpawnFailed(format!("read paused child pid: {e}")))?;
@@ -978,8 +1000,14 @@ impl VmmDriver for FcDriver {
             ))
         })?;
         let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
-        <crate::fc::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
-            .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e}")))
+        crate::fc::host::resume_preloaded_fork_child(
+            &io,
+            req.child_dir,
+            req.runtime_artifacts_sha256,
+            req.device_anchors_sha256,
+            req.late_volumes,
+        )
+        .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))
     }
 
     fn fork_standby_child(
@@ -1031,8 +1059,33 @@ impl VmmDriver for FcDriver {
         // device-model guard between load and resume refuses any snapshot
         // carrying a network interface, so a restored child cannot reintroduce a
         // path off the box that bypasses vsock.
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': creating late-volume placeholders: {e:#}",
+                req.child_vm_name
+            ))
+        })?;
         crate::fc::FcForkRestorer
-            .restore_fork(req.child_vm_name, req.child_dir, req.cpu_grant)
+            .restore_fork_attaching(
+                req.child_vm_name,
+                req.child_dir,
+                req.cpu_grant,
+                req.late_volumes,
+                &crate::fc::ForkRuntimeEvidence {
+                    observation_sha256: req.runtime_artifacts_sha256.ok_or_else(|| {
+                        StandbyError::ClaimFailed(
+                            "Firecracker restore requires authenticated runtime evidence".into(),
+                        )
+                    })?,
+                    anchors_sha256: req.device_anchors_sha256.ok_or_else(|| {
+                        StandbyError::ClaimFailed(
+                            "Firecracker restore requires authenticated device anchors".into(),
+                        )
+                    })?,
+                    reseeded_identity_sha256: None,
+                },
+            )
             .map_err(fork_restore_error)?;
         Ok(())
     }
@@ -1117,12 +1170,10 @@ impl VmmDriver for FcDriver {
             "fc boot: process spawn + API socket"
         );
 
-        // Take ownership of the API socket so the config sequence below can
-        // speak to it in-process. Firecracker was launched through `sudo` and
-        // created the socket as root; without this every call would need its
-        // own `sudo curl`.
-        crate::fc::adopt_api_socket(&socket)
-            .context("adopting the Firecracker API socket for the invoking user")?;
+        // The launcher handed the API socket to the invoking user, so the
+        // config sequence below speaks to it in-process. Firecracker was
+        // launched through `sudo` and created the socket as root; without that
+        // hand-off every call would need its own `sudo curl`.
 
         // Drive the NIC-less API config sequence, asking only for what the
         // Firecracker behind this socket supports. All PUTs share one
@@ -2586,11 +2637,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-1",
             child_dir: &missing,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2612,11 +2666,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2648,11 +2705,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-3",
             child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &channels,
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         // The restore has no Firecracker to talk to and no device anchors to

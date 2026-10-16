@@ -77,6 +77,9 @@
 #   MVM_SMOKE_EGRESS_RUN_BUDGET_SECS
 #                                  egress-boot budget; default 300
 #   MVM_SMOKE_KEEP                 set to 1 to keep the throwaway HOME
+#   MVM_SMOKE_STATE_FILE           optional file receiving the created HOME path
+#                                  (for the release evidence wrapper's cleanup)
+#   MVM_SMOKE_TEMP_PARENT          wrapper-owned parent (wrapper handles cleanup)
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
 #
 #   MVM_SMOKE_DOCTOR_BUDGET_SECS   `mvmctl doctor` budget, guest-runtime mode
@@ -134,7 +137,11 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 is required to bound the s
 
 # A short root: the machine's sockets live under it, and a Unix socket path
 # must fit in 104 bytes on macOS.
-ROOT="$(mktemp -d /tmp/mvm-fresh.XXXXXX)"
+if [ -n "${MVM_SMOKE_TEMP_PARENT:-}" ]; then
+  ROOT="$(mktemp -d "$MVM_SMOKE_TEMP_PARENT/s.XXX")"
+else
+  ROOT="$(mktemp -d /tmp/mvm-fresh.XXXXXX)"
+fi
 ROOT="$(cd "$ROOT" && pwd -P)"
 SMOKE_HOME="$ROOT/home"
 mkdir -p "$SMOKE_HOME" "$ROOT/tmp"
@@ -147,6 +154,8 @@ fi
 OUT="$(cd "$OUT" && pwd -P)"
 TRANSCRIPT="$OUT/transcript.log"
 : > "$TRANSCRIPT"
+BOOT_RESULTS="$OUT/boot-results.jsonl"
+: > "$BOOT_RESULTS"
 
 cleanup() {
   status=$?
@@ -163,7 +172,12 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+if [ -n "${MVM_SMOKE_STATE_FILE:-}" ]; then
+  printf '%s\n' "$SMOKE_HOME" > "$MVM_SMOKE_STATE_FILE"
+fi
+
 log() { printf '%s\n' "$*" | tee -a "$TRANSCRIPT"; }
+boot_pass() { printf '{"name":"%s","result":"success"}\n' "$1" >> "$BOOT_RESULTS"; }
 section() { log ""; log "=== $* ==="; }
 append() {
   if [ -s "$1" ]; then
@@ -455,6 +469,7 @@ section "first command (mvmctl machine run --image $IMAGE -- echo $TOKEN </dev/n
 boot_and_expect "first command" "$RUN_BUDGET" "$TOKEN" run \
   mvmctl machine run --image "$IMAGE" -- echo "$TOKEN"
 RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass cold
 
 CACHES_FIRST="$OUT/download-caches-after-first.txt"
 CACHES_SECOND="$OUT/download-caches-after-second.txt"
@@ -480,6 +495,7 @@ append "$CACHES_SECOND"
 REFETCHED="$(LC_ALL=C comm -23 "$CACHES_FIRST" "$CACHES_SECOND" | cut -d' ' -f3- | tr '\n' ' ')"
 [ -z "$REFETCHED" ] \
   || fail "the second boot replaced or removed what the first cached, so it fetched it again: $REFETCHED"
+boot_pass cache-reuse
 
 # The documented way to give a workload the SDK: binding an SDK-served host
 # service attaches the sidecar read-only at /mvm/sdk, downloading the published
@@ -492,6 +508,7 @@ section "SDK boot (mvmctl machine run --name smoke-sdk --image $IMAGE --host-ser
 boot_and_expect "SDK boot" "$SDK_RUN_BUDGET" "$TOKEN3" run-sdk \
   mvmctl machine run --name smoke-sdk --image "$IMAGE" --host-service "$SDK_SERVICE" -- sh -c "$SDK_SCRIPT"
 SDK_RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass sdk-sidecar
 
 # What every --allow-host, --net, --secret and --policy run depends on: the
 # guest's traffic leaves only through the network endpoint the release ships,
@@ -502,6 +519,7 @@ section "egress boot (mvmctl machine run --image $EGRESS_IMAGE --allow-host $EGR
 boot_and_expect "egress boot" "$EGRESS_RUN_BUDGET" "$TOKEN4" run-egress \
   mvmctl machine run --image "$EGRESS_IMAGE" --allow-host "$EGRESS_HOST" -- sh -c "$EGRESS_SCRIPT"
 EGRESS_RUN_ELAPSED="$STEP_ELAPSED"
+boot_pass egress
 
 # The boots above could only attach what the cache held. With the release's
 # guest runtime adopted, that is the pieces assembled from it and nothing from

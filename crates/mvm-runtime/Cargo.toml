@@ -94,6 +94,7 @@ flate2 = { workspace = true, optional = true }
 flate2.workspace = true
 # Used by tests/phase3c_supervisor_dispatch.rs only; the lib never names it.
 libkrun-sys.workspace = true
+mvm-build = { workspace = true, default-features = false, features = ["test-support"] }
 mvm-core = { workspace = true, features = ["test-support"] }
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
 # test that seeds a sidecar cache needs a real ELF object, not a stub.
@@ -123,6 +124,7 @@ test-support = [
     "dep:flate2",
     "mvm-core/test-support",
     "mvm-backends/test-support",
+    "mvm-build/test-support",
     "mvm-fs/test-support",
 ]
 # Debug-only Apple Silicon validation lane. The capability also requires a

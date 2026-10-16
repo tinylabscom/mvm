@@ -219,7 +219,12 @@ mod tests {
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
             runtime_overlay_version: None,
+            runtime_release_proof: None,
+            legacy_bundle_runtime: None,
+            unsigned_runtime_development: false,
+            source_runtime_archive_sha256: None,
             bundle_boot_assets: None,
+            legacy_portable_runtime: None,
             revision_hash: "abc".to_string(),
             flake_ref: "test".to_string(),
             profile: None,
@@ -237,12 +242,14 @@ mod tests {
             runner_dir: None,
             tenant_id: Some("tenant-1".to_string()),
             plan_json: None,
+            caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,
             network_policy: mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
             dev_console: false,
             gpu: false,
             gpu_device: None,
+            admission_durability: None,
         }
     }
 

@@ -49,6 +49,7 @@ members = [
     "crates/mvm-cli",
     "crates/mvm-hostd",
     "crates/mvm-client",
+    "crates/runmvm-client",
     "crates/mvm-mcp",
     # The host library the language SDKs load in-process instead of running
     # mvmctl. Top of the graph: nothing depends on it.
@@ -818,9 +819,10 @@ opt-level = 3
 [profile.dev.package.memchr]
 opt-level = 3
 
-# What goes to crates.io: the public crates and nothing else. `mvm-contract` is
-# the one library meant for outside consumers (no_std, no workspace
-# dependencies). Every other member is internal and says `publish = false`;
+# What goes to crates.io: the public crates and nothing else. `mvm-contract`
+# provides no_std contracts; `runmvm-client` is the standalone JSON host-library
+# client. Neither depends on internal workspace crates. Every other member is
+# internal and says `publish = false`;
 # mvmctl ships as release binaries, the installer, Homebrew and .deb/.rpm, not
 # from crates.io. `xtask publish-plan` publishes the shipped-dependency closure
 # of these roots, dependencies first, and `xtask check-publish-readiness`
@@ -831,7 +833,7 @@ opt-level = 3
 # `reason`; the plan then withholds that root and everything it alone needs,
 # so no internal crate is uploaded on behalf of a root that is not.
 [workspace.metadata.mvm.publish]
-roots = ["mvm-contract"]
+roots = ["mvm-contract", "runmvm-client"]
 
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries

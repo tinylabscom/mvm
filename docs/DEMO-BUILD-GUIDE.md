@@ -1,0 +1,167 @@
+# Demo Build Guide
+
+This guide explains how to build and deploy the mvm demo site with WebLinux support.
+
+Run the commands in this guide from the repository root unless a step changes directories.
+
+## Prerequisites
+
+### lima (required for Linux builder VM on macOS)
+
+The Linux builder VM uses [lima](https://github.com/lima-vm/lima) (a Linux VM manager for macOS). If you don't have it installed:
+
+```bash
+# macOS
+brew install lima
+
+# Linux
+# See https://github.com/lima-vm/lima#installation
+```
+
+**Windows:** Lima does not officially support Windows. For Windows development, use:
+
+- WSL2 with Linux builder VM (via lima inside WSL2)
+- Or use the [mvm-builderd](https://github.com/tinylabscom/mvm/blob/main/public/src/content/docs/guides/builder-vm.md) service
+
+The builder VM (`mvm-arm64`) is shared across all worktrees and is required for:
+
+- Building `qemu-wasm-smoke-pack` (for WebLinux demo)
+- Running `mvmctl` commands that boot microVMs
+- Nix builds and evaluations
+
+### Other prerequisites
+
+- [gh](https://cli.github.com/) - GitHub CLI (for `just site::qemu-pack`)
+- [pnpm](https://pnpm.io/) - Node.js package manager
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/) - WebAssembly packager
+
+## Overview
+
+The mvm demo site has two components:
+
+1. **Browser-tier WASM demo** (`web/mvm-demo/`) - Pure WebAssembly demo that runs on macOS
+2. **WebLinux demo** (`web/weblinux-demo/`) - Full Linux VM in browser via QEMU-Wasm
+
+The browser-tier WASM demo can be built on macOS, but the WebLinux demo requires the `qemu-wasm-smoke-pack` which can **only be built on Linux**.
+
+## Building the Demo (macOS)
+
+### Step 1: Build the browser-tier WASM demo
+
+```bash
+just site::demo
+```
+
+This produces assets at `public/public/demo/` (which gets copied to `public/dist/demo/` during the Astro build).
+
+### Step 2: Build/Download the WebLinux pack
+
+The WebLinux demo requires `qemu-wasm-smoke-pack` which contains:
+
+- `qemu-system-x86_64.{js,wasm,worker.js}` - QEMU runtime
+- `pack/` - firmware, kernel, rootfs
+- Preloaded assets (`pack.data`, `pack.js`)
+- `index.html`, `xterm-pty.js`
+
+#### Option A: Build in the Linux builder VM (recommended)
+
+```bash
+just site::qemu-pack
+```
+
+This will:
+
+1. Boot the Linux builder VM (if not running)
+2. Copy the nix flake to the VM
+3. Run `nix build .#qemu-wasm-smoke-pack` (10-30 minutes)
+4. Copy the pack back to `./qemu-wasm-smoke-pack`
+
+#### Option B: Download from GitHub releases
+
+```bash
+just site::qemu-pack [tag]
+```
+
+**Note:** The pack is NOT currently published to GitHub releases. This command is a template for when it becomes available.
+
+### Step 3: Stage and build the full demo
+
+```bash
+just site::demo-all ./qemu-wasm-smoke-pack
+```
+
+This will:
+
+1. Run `just site::demo` (browser-tier WASM)
+2. Run `./web/weblinux-demo/build.sh ./qemu-wasm-smoke-pack` (WebLinux)
+
+### Step 4: Build the Astro site
+
+```bash
+cd public && pnpm build
+```
+
+This produces `public/dist/` with all demo assets.
+
+### Step 5: Deploy
+
+```bash
+npx wrangler pages deploy public/dist --project-name=mvm --branch=main
+```
+
+## Quick Start (After First Setup)
+
+Once you've built the pack once, you can reuse it:
+
+```bash
+# Rebuild just the browser demo (fast)
+just site::demo
+
+# Stage both demos with existing pack
+just site::demo-all ./qemu-wasm-smoke-pack
+
+# Build Astro site
+cd public && pnpm build
+
+# Deploy
+npx wrangler pages deploy public/dist --project-name=mvm --branch=main
+```
+
+## Troubleshooting
+
+### Error: "qemu-wasm-smoke-pack not found"
+
+Run `just site::qemu-pack` first to build the pack.
+
+### Error: "Builder VM not found"
+
+Boot the builder VM (downloads and verifies the published builder image by default):
+
+```bash
+mvmctl env bootstrap
+```
+
+To build the builder image from a local `mvm-images` checkout (contributor only):
+
+```bash
+MVM_IMAGES_DIR=../mvm-images MVM_ALLOW_LOCAL_BUILDER_BUILD=1 \
+  bin/dev build image-set builder-vm
+```
+
+### Error: "qemu-wasm-smoke-pack.tar.gz not found in release"
+
+The pack isn't published to GitHub releases yet. Use `just site::qemu-pack` to build it.
+
+## File Locations
+
+| Path                    | Purpose                                                |
+| ----------------------- | ------------------------------------------------------ |
+| `web/mvm-demo/`         | Browser-tier WASM demo source                          |
+| `web/weblinux-demo/`    | WebLinux demo source                                   |
+| `public/public/demo/`   | Staging directory (before Astro build)                 |
+| `public/dist/demo/`     | Output directory (after Astro build)                   |
+| `qemu-wasm-smoke-pack/` | Built WebLinux pack (created by `just site::qemu-pack`) |
+
+## CI/CD
+
+The CI/CD pipeline (`.github/workflows/pages.yml`) builds the pack inside the builder VM and stages it before deploying to Cloudflare Pages.

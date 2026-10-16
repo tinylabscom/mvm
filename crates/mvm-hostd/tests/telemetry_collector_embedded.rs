@@ -18,6 +18,12 @@ use mvm_vmm::host::telemetry_provisioning::{
 };
 use tokio::sync::Mutex;
 
+/// The records data key the test hands the collector: base64 of 32 × 0x42.
+const RECORDS_KEY_B64: &str = "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
+
+/// Synthetic: never a real credential.
+const SYNTHETIC_SECRET: &str = "mvm-synthetic-secret-0123456789abcdef";
+
 fn wait_for(what: &str, timeout: Duration, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -71,46 +77,104 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
     let guest = std::thread::spawn(move || {
         use mvm_core::net::telemetry::TelemetrySender;
         use mvm_core::protocol::telemetry::{
-            CoverageState, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+            Attributes, BoundedList, CoverageState, Level, ProducerEpoch, RecordBody, SourceKind,
+            StdioStream, TelemetryRecord,
         };
         let (mut stream, _) = guest_listener.accept().unwrap();
         let mut sender = TelemetrySender::connect(&mut stream, guest_key, &anchor).unwrap();
-        let record = TelemetryRecord::builder()
-            .epoch(ProducerEpoch::new([5; 16]).unwrap())
-            .producer(1)
-            .sequence(1)
-            .source(SourceKind::GuestAgent)
-            .body(RecordBody::Coverage {
+        let record = |sequence: u64, body: RecordBody| {
+            TelemetryRecord::builder()
+                .epoch(ProducerEpoch::new([5; 16]).unwrap())
+                .producer(1)
+                .sequence(sequence)
+                .source(SourceKind::GuestAgent)
+                .body(body)
+                .build()
+                .unwrap()
+        };
+        // A workload that prints a credential it should never have held,
+        // through a log record and through stdout.
+        let leaked_log = record(
+            1,
+            RecordBody::Log {
+                context: None,
+                level: Level::Info,
+                message: format!("auth={SYNTHETIC_SECRET}")
+                    .as_str()
+                    .try_into()
+                    .unwrap(),
+                attributes: Attributes::new(Vec::new()).unwrap(),
+            },
+        );
+        let leaked_stdout = record(
+            2,
+            RecordBody::Stdio {
+                stream: StdioStream::Stdout,
+                bytes: BoundedList::new(SYNTHETIC_SECRET.as_bytes().to_vec()).unwrap(),
+            },
+        );
+        let coverage = record(
+            3,
+            RecordBody::Coverage {
                 state: CoverageState::Started,
                 code: "guest-agent".try_into().unwrap(),
-            })
-            .build()
-            .unwrap();
-        sender.send(&mut stream, &record).unwrap();
+            },
+        );
+        for record in [&leaked_log, &leaked_stdout, &coverage] {
+            sender.send(&mut stream, record).unwrap();
+        }
         let _ = release_rx.recv();
     });
 
+    let fingerprints = vec![
+        mvm_contract::stream::secret_fingerprint::SecretFingerprint::of(
+            SYNTHETIC_SECRET.as_bytes(),
+            mvm_contract::stream::secret_fingerprint::SecretCategory::HostSecret,
+        )
+        .unwrap(),
+    ];
     let config = TelemetryEmbedConfig {
         state_dir: state_dir.clone(),
         telemetry_sock,
         signer_sock,
         host_anchor_path: anchor_path,
         records_byte_cap: 64 * 1024,
+        records_key_b64: RECORDS_KEY_B64.to_string(),
     };
     // Started the way the endpoint starts it, off the async runtime's thread.
-    let embedded = tokio::task::spawn_blocking(move || start_embedded("vm-e2e", &config))
-        .await
-        .unwrap()
-        .expect("embedded collector starts");
+    let embedded = tokio::task::spawn_blocking(move || {
+        start_embedded(
+            "vm-e2e",
+            &config,
+            fingerprints,
+            mvm_hostd::stream::redact::StreamRedaction::curated(
+                &mvm_core::policy::RedactionPolicy::default(),
+            ),
+        )
+    })
+    .await
+    .unwrap()
+    .expect("embedded collector starts");
 
     // The first status snapshot precedes any dialing; then the session's
     // effects: the coverage record persisted and status reaching collecting.
     let status_path = state_dir.join(TELEMETRY_COLLECTOR_STATUS_FILE);
     assert!(status_path.exists(), "first snapshot precedes dialing");
     let records_path = state_dir.join(TELEMETRY_RECORDS_FILE);
+    let records_key = mvm_core::crypto::aead::Key::from_bytes([0x42; 32]);
+    let opened = |persisted: &[u8]| -> Vec<mvm_core::protocol::telemetry::served::ReceivedRecord> {
+        persisted
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                mvm_core::protocol::telemetry::served::ReceivedRecord::open_line(&records_key, line)
+                    .expect("every persisted line opens under the records key")
+            })
+            .collect()
+    };
     wait_for("the coverage record", Duration::from_secs(10), || {
-        std::fs::read_to_string(&records_path)
-            .map(|s| s.contains("guest-agent"))
+        std::fs::read(&records_path)
+            .map(|bytes| !opened(&bytes).is_empty())
             .unwrap_or(false)
     });
     wait_for("a collecting status", Duration::from_secs(10), || {
@@ -118,6 +182,30 @@ async fn the_embedded_collector_dials_authenticates_and_persists_what_it_receive
             .map(|s| s.contains("collecting"))
             .unwrap_or(false)
     });
+
+    // The two records carrying the bound secret never reached the disk, in
+    // any encoding the file uses, and the status names why they are missing.
+    let persisted = std::fs::read(&records_path).unwrap();
+    let records = opened(&persisted);
+    let decoded: Vec<_> = records.iter().map(|r| r.record.sequence()).collect();
+    assert_eq!(decoded, vec![3], "only the secret-free record was written");
+    assert!(
+        !String::from_utf8_lossy(&persisted).contains("guest-agent"),
+        "the file holds sealed lines, not plaintext"
+    );
+    for received in &records {
+        let text = String::from_utf8(received.record.encode().unwrap()).unwrap();
+        assert!(!text.contains(SYNTHETIC_SECRET), "no secret once opened");
+    }
+    wait_for(
+        "the withheld count in the status",
+        Duration::from_secs(10),
+        || {
+            std::fs::read_to_string(&status_path)
+                .map(|s| s.contains("\"secret_withheld\": 2"))
+                .unwrap_or(false)
+        },
+    );
 
     // End the guest session first so the collector's receive loop reaches a
     // boundary, then stop drains promptly.
