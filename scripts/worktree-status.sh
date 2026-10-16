@@ -65,8 +65,20 @@ git worktree list --porcelain | awk '
     [ "$path" = "$repo_root" ] && continue
     [ -d "$path" ] || continue
 
-    dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
-    ahead=$(git -C "$path" rev-list --count "${main_ref}..${head}" 2>/dev/null || echo 0)
+    # A registered worktree can outlive its git metadata: the directory still
+    # exists but its .git file is gone (partially cleaned scratch dir, pruned
+    # gitdir, unmounted volume). Every `git -C` probe then exits 128, which
+    # under pipefail + set -e kills the whole run. Such an entry is never
+    # SAFE — a human clears the registration with `git worktree prune`.
+    readable=1
+    git -C "$path" rev-parse --git-dir >/dev/null 2>&1 || readable=0
+
+    dirty=0
+    ahead=0
+    if [ "$readable" -eq 1 ]; then
+        dirty=$(git -C "$path" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        ahead=$(git -C "$path" rev-list --count "${main_ref}..${head}" 2>/dev/null || echo 0)
+    fi
 
     pr_num=""; pr_state=""; pr_head=""
     if [ -n "$prs" ] && [ "$branch" != "-" ]; then
@@ -81,7 +93,9 @@ git worktree list --porcelain | awk '
     in_use=0
     case "$ps_snapshot" in *"$path"*) in_use=1 ;; esac
 
-    if [ "$in_use" -eq 1 ]; then
+    if [ "$readable" -eq 0 ]; then
+        verdict="REVIEW (stale registration; run: git worktree prune)"
+    elif [ "$in_use" -eq 1 ]; then
         # A fresh worktree has no commits of its own yet, which otherwise reads
         # as "nothing here that isn't on main" — exactly the shape of one
         # somebody just created and is about to work in.

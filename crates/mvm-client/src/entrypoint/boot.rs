@@ -37,12 +37,35 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     /// The signed plan, serialized.
     pub plan_json: String,
+    /// Trusted admission's optional caller registration, never a producer ACK.
+    pub caller_registration: Option<mvm_core::vm_backend::caller_registration::CallerRegistration>,
     /// The tenant policy bundle the plan resolved, serialized, when it has one.
     pub bundle_json: Option<String>,
     /// Config-drive files the plan's guest boot config needs.
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
     /// Frozen host-directory images admission hardened to read-only.
     pub read_only_materialized_images: Vec<String>,
+    /// The admission's audit sync, when the admission left it running beside
+    /// the boot. Carried onto [`VmStartConfig::admission_durability`]; `None`
+    /// when the admission was already durable.
+    ///
+    /// [`VmStartConfig::admission_durability`]: mvm_core::vm_backend::VmStartConfig::admission_durability
+    pub durability: Option<mvm_core::admission_durability::AdmissionDurability>,
+}
+
+impl SessionAuditSubstrate {
+    /// Move the admitted substrate onto the start config its boot runs from,
+    /// returning the materialized images admission hardened to read-only so a
+    /// caller with volumes can fold them into its volume flags.
+    pub fn apply_to(self, start_config: &mut mvm_core::vm_backend::VmStartConfig) -> Vec<String> {
+        start_config.tenant_id = Some(self.tenant_id);
+        start_config.plan_json = Some(self.plan_json);
+        start_config.caller_registration = self.caller_registration;
+        start_config.bundle_json = self.bundle_json;
+        start_config.config_files.extend(self.config_files);
+        start_config.admission_durability = self.durability;
+        self.read_only_materialized_images
+    }
 }
 
 /// Admission callback: given what the boot resolved, produce the substrate the
@@ -91,6 +114,9 @@ pub struct AdmitInputs<'a> {
     /// archive, or the extracted files beside it, no longer match what the
     /// publisher signed.
     pub bundle_archive: Option<&'a std::path::Path>,
+    /// The selected runtime artifacts and their untrusted release proof.
+    /// Admission verifies this same config before the backend consumes it.
+    pub runtime_config: Option<&'a VmStartConfig>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -278,12 +304,10 @@ pub fn boot_session_vm(
         assets: &[],
         volumes: &start_config.volumes,
         bundle_archive: bundle_archive.as_deref(),
+        runtime_config: Some(&start_config),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
-    start_config.tenant_id = Some(substrate.tenant_id);
-    start_config.plan_json = Some(substrate.plan_json);
-    start_config.bundle_json = substrate.bundle_json;
-    start_config.config_files.extend(substrate.config_files);
+    substrate.apply_to(&mut start_config);
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;

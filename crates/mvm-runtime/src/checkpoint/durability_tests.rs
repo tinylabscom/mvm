@@ -24,6 +24,16 @@ struct Control {
 }
 
 impl VmFullControl for Control {
+    fn runtime_artifacts(&self) -> Result<mvm_vmm::runtime_artifacts::RuntimeArtifacts> {
+        Ok(mvm_vmm::runtime_artifacts::RuntimeArtifacts {
+            kernel: None,
+            firecracker_drives: None,
+            initramfs: None,
+            disks: Vec::new(),
+            kernel_cmdline: String::new(),
+        })
+    }
+
     fn pause(&self) -> Result<()> {
         Ok(())
     }
@@ -75,6 +85,7 @@ fn params(id: &str) -> CaptureVmFullParams {
         vm_name: "vm".into(),
         supervisor_config_digest: "d".into(),
         runtime_overlay_version: None,
+        runtime_launch_binding: None,
         supervisor_config_src: None,
         tag: None,
         created_unix: 1,

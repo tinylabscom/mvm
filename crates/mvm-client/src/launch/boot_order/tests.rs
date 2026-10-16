@@ -53,6 +53,7 @@ impl Host {
             kernel_path: None,
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
+            runtime_config: None,
             cpus: 1,
             mem_mib: 256,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,

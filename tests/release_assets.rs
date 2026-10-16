@@ -47,7 +47,7 @@ fn just_module(name: &str) -> String {
 /// 422.
 ///
 /// What a dry run cannot prove is asserted here too, by requiring the signing
-/// and downstream-trigger steps to stay tag-only: their keyless identity pins
+/// and attestation steps to stay tag-only: their keyless identity pins
 /// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
 /// a green dry run mean more than it does.
 #[test]
@@ -87,7 +87,6 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
     for step in [
         "Sign release tarballs, checksum manifests, and SBOM",
         "Attest build provenance for the release tarballs (release-provenance)",
-        "Trigger crates.io publish workflow",
     ] {
         let at = workflow
             .find(step)
@@ -99,6 +98,10 @@ fn a_dry_run_reaches_the_publish_step_without_a_tag() {
              refs/tags identity, and must not publish or trigger anything real"
         );
     }
+    assert!(
+        !workflow.contains("gh workflow run publish-crates.yml"),
+        "registry publication must remain separate from release creation"
+    );
 }
 
 /// The release must not carry a signing step for per-variant image manifests.
@@ -1507,21 +1510,56 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
         "one backend's failure must not hide the other's transcript"
     );
     let upload = smoke
-        .find("uses: actions/upload-artifact@")
+        .find("- name: Upload the transcript")
         .expect("the smoke must upload its transcript");
     assert!(
-        smoke[..upload].contains("if: always()"),
+        smoke[upload..].contains("if: always()")
+            && smoke[upload..].contains("uses: actions/upload-artifact@"),
         "the transcript matters most when the smoke fails"
+    );
+
+    let installed_boot = job_block(&workflow, "published-installed-boot");
+    assert!(
+        installed_boot.contains("needs: [verify-release, first-run-smoke]")
+            && installed_boot.contains("github.event_name == 'push'")
+            && installed_boot.contains("startsWith(github.ref, 'refs/tags/')")
+            && installed_boot.contains("scripts/published-installed-boot.py aggregate")
+            && installed_boot.contains("pattern: installed-boot-lane-*"),
+        "authoritative installed boot evidence requires both successful published lanes"
+    );
+    assert!(
+        installed_boot.contains("uses: actions/attest-build-provenance@")
+            && installed_boot.contains(
+                "subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json"
+            )
+            && installed_boot.contains("steps.boot-attestation.outputs.bundle-path")
+            && installed_boot.contains("installed-boot.json.bundle")
+            && installed_boot.contains("name: published-installed-boot-v1")
+            && installed_boot.contains("if-no-files-found: error"),
+        "the aggregate report must be attested and uploaded under its stable consumer contract"
+    );
+    assert!(
+        smoke.contains("scripts/published-installed-boot.py lane")
+            && smoke.contains("target: x86_64-unknown-linux-gnu")
+            && smoke.contains("target: aarch64-apple-darwin")
+            && smoke.contains("name: installed-boot-lane-${{ matrix.target }}")
+            && smoke
+                .contains("github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/')"),
+        "tag lanes emit installed-byte evidence; standalone dispatch remains diagnostic"
     );
 
     let promote = job_block(&workflow, "promote-release");
     assert!(
+        !workflow.contains("gh workflow run publish-crates.yml"),
+        "creating a GitHub release must not publish crates before installed-release gates"
+    );
+    assert!(
         promote.contains(
-            "    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]\n"
-        ) && promote.contains("needs.first-run-smoke.result == 'success'")
+            "    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]\n"
+        ) && promote.contains("needs.published-installed-boot.result == 'success'")
             && promote.contains("needs.published-package-smoke.result == 'success'")
             && promote.contains("needs.recipe-install-smoke.result == 'success'"),
-        "promotion must require first-run and published-package installation witnesses"
+        "promotion must require the attested installed-boot and package installation witnesses"
     );
     assert!(
         promote.contains("if [[ \"${TAG_NAME#v}\" == *-* ]]; then"),

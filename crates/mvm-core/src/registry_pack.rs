@@ -487,6 +487,14 @@ pub struct RegistryPackPublisherPolicy {
     publishers: Vec<RegistryPackPublisher>,
     #[serde(skip)]
     legacy_identity_expires_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    provenance: PublisherPolicyProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublisherPolicyProvenance {
+    Operator,
+    BuiltinDefault,
 }
 
 impl RegistryPackPublisherPolicy {
@@ -505,6 +513,7 @@ impl RegistryPackPublisherPolicy {
             schema_version: REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION,
             publishers,
             legacy_identity_expires_at: None,
+            provenance: PublisherPolicyProvenance::Operator,
         })
     }
 
@@ -574,32 +583,9 @@ pub const LEGACY_PACK_SIGNING_CUTOFF: &str = "2026-11-06T00:00:00Z";
 /// OIDC issuer that vouches for [`OFFICIAL_PACK_SIGNING_IDENTITY`].
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
-/// The publisher trust policy that applies when the operator has made no
-/// trust decision of their own. The `mvm` namespace is reserved to the exact
-/// current release identity. An operator policy may exclude it but cannot
-/// assign a different signer.
-/// Legacy `agent` and `runtime` identities expire at the stated cutoff.
-pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
-    let publishers = ["agent", "runtime", "mvm"]
-        .into_iter()
-        .map(|namespace| {
-            let mut identities = vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()];
-            if namespace != "mvm" {
-                identities.push(LEGACY_PACK_SIGNING_IDENTITY.to_string());
-            }
-            RegistryPackPublisher::new(namespace, OFFICIAL_PACK_SIGNING_ISSUER, identities)
-                .expect("the built-in publisher policy is built from valid constants")
-        })
-        .collect();
-    let mut policy = RegistryPackPublisherPolicy::new(publishers)
-        .expect("the built-in publisher policy has unique namespaces");
-    policy.legacy_identity_expires_at = Some(
-        DateTime::parse_from_rfc3339(LEGACY_PACK_SIGNING_CUTOFF)
-            .expect("the built-in legacy identity cutoff is valid")
-            .with_timezone(&Utc),
-    );
-    policy
-}
+mod historical;
+use historical::enforce_legacy_manifest_policy;
+pub use historical::official_publisher_policy;
 
 impl<'de> Deserialize<'de> for RegistryPackPublisherPolicy {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -769,6 +755,10 @@ pub enum RegistryPackVerificationError {
     UntrustedNamespace { namespace: String },
     #[error("registry-pack signature is invalid: {0}")]
     SignatureInvalid(String),
+    #[error(
+        "built-in publisher policy refuses this legacy manifest: no exact historical reference and byte digest exception applies"
+    )]
+    LegacyManifestNotAllowed,
     #[error("registry-pack manifest is not valid JSON: {0}")]
     ManifestParse(String),
     #[error("unsupported registry-pack manifest schema version {got}; expected {expected}")]
@@ -860,9 +850,17 @@ pub(crate) fn adopt_registry_pack_with(
     request: &PackAdoption<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
+    adopt_registry_pack_with_at(request, check_signature, Utc::now())
+}
+
+fn adopt_registry_pack_with_at(
+    request: &PackAdoption<'_>,
+    check_signature: RegistryPackSignatureChecker,
+    now: DateTime<Utc>,
+) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
     let trust = request
         .publisher_policy
-        .trust_for_namespace(request.requested.namespace())?;
+        .trust_for_namespace_at(request.requested.namespace(), now)?;
     let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
@@ -871,18 +869,27 @@ pub(crate) fn adopt_registry_pack_with(
         signer,
         None,
     )
+    .and_then(|verified| enforce_legacy_manifest_policy(request.publisher_policy, verified))
 }
 
 pub(crate) fn verify_registry_pack_with(
     request: &RegistryPackVerification<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
+    verify_registry_pack_with_at(request, check_signature, Utc::now())
+}
+
+fn verify_registry_pack_with_at(
+    request: &RegistryPackVerification<'_>,
+    check_signature: RegistryPackSignatureChecker,
+    now: DateTime<Utc>,
+) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
     let pin = request
         .lock
         .verify_manifest(request.requested, request.manifest_bytes)?;
     let trust = request
         .publisher_policy
-        .trust_for_namespace(pin.reference().namespace())?;
+        .trust_for_namespace_at(pin.reference().namespace(), now)?;
     let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
@@ -891,6 +898,7 @@ pub(crate) fn verify_registry_pack_with(
         signer,
         Some(pin),
     )
+    .and_then(|verified| enforce_legacy_manifest_policy(request.publisher_policy, verified))
 }
 
 fn finish_registry_pack_verification(
@@ -1492,13 +1500,13 @@ mod tests {
 
     const MANIFEST: &[u8] = br#"{"schema_version":1,"name":"python"}"#;
 
-    fn reference(value: &str) -> PackReference {
+    pub(super) fn reference(value: &str) -> PackReference {
         value
             .parse()
             .unwrap_or_else(|error| panic!("{value}: {error}"))
     }
 
-    fn pin(value: &str, bytes: &[u8]) -> PackPin {
+    pub(super) fn pin(value: &str, bytes: &[u8]) -> PackPin {
         PackPin::new(reference(value), Sha256Hex::from_bytes(bytes)).unwrap()
     }
 
@@ -1514,7 +1522,7 @@ mod tests {
         .unwrap()
     }
 
-    fn signed_manifest_bytes(reference: &str) -> Vec<u8> {
+    pub(super) fn signed_manifest_bytes(reference: &str) -> Vec<u8> {
         serde_json::to_vec(&RegistryPackManifest {
             schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
             reference: self::reference(reference),

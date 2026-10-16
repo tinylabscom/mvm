@@ -2658,7 +2658,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-agentd",
@@ -2667,6 +2667,16 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "libloading"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]
@@ -2845,7 +2855,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2876,7 +2886,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backends"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "ed25519-dalek",
@@ -2897,7 +2907,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -2934,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-bundler"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2947,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-capture"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2966,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3019,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-client"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3061,7 +3071,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-compiler"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "flate2",
  "globset",
@@ -3081,7 +3091,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-conformance"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3111,11 +3121,12 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
 name = "mvm-contract"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3135,7 +3146,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -3181,8 +3192,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-fc-lifecycle"
+version = "0.24.0"
+dependencies = [
+ "hex",
+ "libc",
+ "mvm-vmm",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "mvm-fs"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "am-fs-ext4",
  "async-trait",
@@ -3212,7 +3237,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3226,7 +3251,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-cuda-shim"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3235,7 +3260,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-cudart-shim"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3244,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-nvml-shim"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3253,7 +3278,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-gpu-shim-core"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
  "mvm-contract",
@@ -3263,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -3273,13 +3298,14 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "aya",
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
  "etherparse",
@@ -3289,6 +3315,7 @@ dependencies = [
  "hmac",
  "httparse",
  "ipnet",
+ "keyring",
  "landlock",
  "leakguard",
  "libc",
@@ -3311,6 +3338,7 @@ dependencies = [
  "rustls",
  "seccompiler",
  "secrecy",
+ "security-framework",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -3323,13 +3351,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xtask",
  "zeroize",
 ]
 
 [[package]]
 name = "mvm-hostlib"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3349,7 +3378,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-http"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -3369,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3383,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-net"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "mvm-contract",
  "mvm-core",
@@ -3392,7 +3421,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-observability"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "mvm-core",
  "mvm-http",
@@ -3406,7 +3435,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-runtime"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3449,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
@@ -3471,20 +3500,18 @@ dependencies = [
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-nix",
- "tree-sitter-python",
- "tree-sitter-typescript",
 ]
 
 [[package]]
 name = "mvm-setpriv"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "mvm-vmm"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3501,17 +3528,19 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tracing",
  "virtio-queue",
  "virtio-vsock",
  "vm-memory",
+ "wait-timeout",
  "zeroize",
 ]
 
 [[package]]
 name = "mvmctl"
-version = "0.23.1"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -3535,7 +3564,6 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.11.0",
  "tar",
  "tempfile",
@@ -4248,9 +4276,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.16"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -4544,6 +4572,17 @@ name = "roff"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
+
+[[package]]
+name = "runmvm-client"
+version = "0.24.0"
+dependencies = [
+ "libloading",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "wait-timeout",
+]
 
 [[package]]
 name = "rustc-demangle"
@@ -4925,19 +4964,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
 ]
 
 [[package]]
@@ -6079,12 +6105,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

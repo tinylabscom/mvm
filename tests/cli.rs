@@ -4,6 +4,61 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn env_verify_runtime_missing_proof_emits_no_success_json() {
+    let directory = tempfile::tempdir().expect("runtime verifier input directory");
+    let config = directory.path().join("launch.json");
+    std::fs::write(&config, b"{}").expect("write missing-proof config");
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "verify-runtime", "--config"])
+        .arg(config)
+        .args(["--version", "1.2.3", "--arch", "x86_64", "--json"])
+        .output()
+        .expect("run runtime verifier without proof");
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("runtime_release_proof is required"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn env_verify_runtime_help_and_parser_require_explicit_release_inputs() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["env", "verify-runtime", "--help"])
+        .output()
+        .expect("run runtime verifier help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in ["--config", "--version", "--arch", "--json"] {
+        assert!(help.contains(flag), "{help}");
+    }
+    for missing in ["--config", "--version", "--arch", "--json"] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        command.args(["env", "verify-runtime"]);
+        for (flag, value) in [
+            ("--config", Some("/does/not/exist.json")),
+            ("--version", Some("1.2.3")),
+            ("--arch", Some("x86_64")),
+            ("--json", None),
+        ] {
+            if flag != missing {
+                command.arg(flag);
+                if let Some(value) = value {
+                    command.arg(value);
+                }
+            }
+        }
+        let out = command.output().expect("run incomplete runtime verifier");
+        assert!(!out.status.success());
+        assert!(out.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(missing), "{stderr}");
+    }
+}
+
+#[test]
 fn build_compile_help_advertises_pinned_publication_input() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["build", "compile", "--help"])
@@ -2109,14 +2164,14 @@ fn stage_pack_registry(root: &std::path::Path) {
     let packs = root.join("packs");
     std::fs::create_dir_all(&packs).unwrap();
     std::fs::write(
-        packs.join("index.json"),
+        root.join("index.json"),
         serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "packs": [{
                 "namespace": "runtime",
                 "name": "python",
                 "description": "Python runtime pack",
-                "versions": ["1.2.3"],
+                "versions": [{"version":"1.2.3", "manifest_sha256":"0".repeat(64)}],
             }],
         }))
         .unwrap(),
@@ -2140,6 +2195,12 @@ fn stage_pack_registry(root: &std::path::Path) {
     )
     .unwrap();
     std::fs::write(pack.join("manifest.sigstore.json"), b"test bundle").unwrap();
+    let mut index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap()).unwrap();
+    index["packs"][0]["versions"][0]["manifest_sha256"] = serde_json::json!(
+        mvm_core::packs::Sha256Hex::from_bytes(&std::fs::read(pack.join("manifest.json")).unwrap())
+    );
+    std::fs::write(root.join("index.json"), serde_json::to_vec(&index).unwrap()).unwrap();
     std::fs::write(
         pack.join("files/pack/profile.toml"),
         b"[tools]\nallow = [\"git\"]\n",
@@ -2183,8 +2244,8 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     let pack = registry.path().join("packs/runtime/go/1.0.0");
     std::fs::create_dir_all(pack.join("files/pack")).expect("pack directory");
     std::fs::write(
-        registry.path().join("packs/index.json"),
-        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":["1.0.0"]}]}"#,
+        registry.path().join("index.json"),
+        br#"{"schema_version":2,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":[{"version":"1.0.0","manifest_sha256":"ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50"}]}]}"#,
     )
     .expect("registry index");
     std::fs::write(
@@ -2588,6 +2649,17 @@ fn image_revocations_fail_closed_without_an_applied_signed_list() {
             .exists(),
         "a refused list must not advance the checkpoint"
     );
+}
+
+/// `machine telemetry` reads what the host collected, so its help names the
+/// follow and JSON modes and the record cap.
+#[test]
+fn machine_telemetry_help_names_follow_json_and_tail() {
+    let help = help_text(&["machine", "telemetry", "--help"]);
+    for flag in ["--follow", "--json", "--tail"] {
+        assert!(help.contains(flag), "missing {flag}: {help}");
+    }
+    assert!(help.contains("Name of the machine"), "{help}");
 }
 
 /// The optional pre-warm path: `image pull --warm` and `image dev ensure

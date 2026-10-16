@@ -55,59 +55,6 @@ pub fn wait_for_pid_exit(
     mvm_vmm::host::process_exit::wait_for_pid_exit(pid, Instant::now() + timeout, observer)
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct TerminationTiming {
-    pub supervisor_signal: Duration,
-    pub pid_disappearance: Duration,
-    pub force_kill_wait: Duration,
-}
-
-/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. When
-/// the supervisor is still this process's child, reap it with `waitpid` so an
-/// already-exited zombie does not look alive for the full grace window.
-/// Shared by the `VmBackend` stop path and the hvf driver's `kill`.
-pub(crate) fn terminate_pid_timed(pid: libc::pid_t) -> Result<TerminationTiming> {
-    let observer = mvm_vmm::host::process_exit::ProcessExitObserver::arm(pid).ok();
-    let signal_started = Instant::now();
-    // SAFETY: signalling a pid we recorded from our own supervisor.
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
-    let supervisor_signal = signal_started.elapsed();
-
-    let wait_started = Instant::now();
-    let exited = wait_for_pid_exit(pid, Duration::from_secs(5), observer.as_ref());
-    let pid_disappearance = wait_started.elapsed();
-    if exited {
-        return Ok(TerminationTiming {
-            supervisor_signal,
-            pid_disappearance,
-            force_kill_wait: Duration::ZERO,
-        });
-    }
-
-    let force_started = Instant::now();
-    let force_kill_wait = if pid_alive(pid) {
-        // SAFETY: same pid.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
-        if !wait_for_pid_exit(pid, Duration::from_millis(500), observer.as_ref()) {
-            return Err(anyhow!(
-                "hvf supervisor pid {pid} could not be proven dead after SIGKILL"
-            ));
-        }
-        force_started.elapsed()
-    } else {
-        Duration::ZERO
-    };
-    Ok(TerminationTiming {
-        supervisor_signal,
-        pid_disappearance,
-        force_kill_wait,
-    })
-}
-
 /// Ask a running HVF supervisor to change its vCPU execution state.
 ///
 /// The supervisor owns the HVF VM and translates these signals into the

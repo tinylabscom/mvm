@@ -748,6 +748,24 @@ fn isolated_home_no_transient_request_dirs(world: &mut CliWorld) {
     );
 }
 
+/// How long the leak check waits, in total, for a detached standby refill to
+/// register the directories it is still populating. Each poll re-reads the
+/// pool, so a refill that registers early ends the wait early.
+const STANDBY_REFILL_POLL_DELAYS: [Duration; 6] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
+];
+
+/// An unnamed run leaves a standby behind for the next run, and its refill
+/// runs detached: the record under `pool/` can land after `machine run` has
+/// returned, and a preloaded child's directory exists before the record names
+/// it. So a new directory is a leak only once the refill has had its bounded
+/// chance to register it; anything a claimable record does not account for
+/// by then fails the step.
 #[then(expr = "the live mvm home has no new transient request state directories")]
 fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
     let home = world
@@ -758,16 +776,35 @@ fn live_home_no_new_transient_request_dirs(world: &mut CliWorld) {
         .live_request_dirs_before
         .as_ref()
         .expect("record the live request state before running the journey");
-    let after = vm_state_dirs(home).unwrap_or_else(|error| {
-        panic!(
-            "read transient VM state under live home {}: {error}",
-            home.display()
-        )
-    });
-    let leaked = after.difference(before).cloned().collect::<Vec<_>>();
-    assert!(
-        leaked.is_empty(),
-        "new transient request state directories remain: {leaked:?}"
+    let pool = mvm_runtime::standby_pool::SupervisorStandbyPool::at(home.join("pool"));
+    let mut last = None;
+    for (attempt, delay) in STANDBY_REFILL_POLL_DELAYS.iter().enumerate() {
+        let after = vm_state_dirs(home).unwrap_or_else(|error| {
+            panic!(
+                "read transient VM state under live home {}: {error}",
+                home.display()
+            )
+        });
+        let standbys = pool.list().unwrap_or_else(|error| {
+            panic!("read the standby pool under {}: {error}", home.display())
+        });
+        let audit = mvm_conformance::standby_audit::audit_new_state_dirs(
+            after.difference(before).cloned(),
+            &standbys,
+        );
+        if audit.is_clean() {
+            return;
+        }
+        last = Some(audit);
+        if attempt + 1 < STANDBY_REFILL_POLL_DELAYS.len() {
+            std::thread::sleep(*delay);
+        }
+    }
+    let audit = last.expect("at least one poll ran");
+    panic!(
+        "new transient request state directories remain after the standby refill's grace \
+         period: {:?} (registered standbys: {:?}, preloaded children: {:?})",
+        audit.unregistered, audit.registered_standbys, audit.preloaded_children
     );
 }
 

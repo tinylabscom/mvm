@@ -104,6 +104,7 @@ pub mod host_time;
 pub mod icmp_client;
 pub mod icmp_mediator;
 pub mod integrations;
+pub mod late_volumes;
 pub mod lifecycle_hooks;
 /// Guest-side network defense. The `mvm-guest-netinit`
 /// binary calls into this module at boot to install kernel blackhole

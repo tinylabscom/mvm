@@ -1591,7 +1591,12 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // refusal and successful verification. Revocation import also requires
 // externally published signed files, so its examples are parse-tier while
 // core tests exercise verification and rollback refusal.
-const PARSE_TIER_PIN: usize = 84;
+// `env verify-runtime` authenticates a signed guest-runtime release archive
+// and the selected runtime bytes against its declaration; the tree has no
+// signed runtime-archive fixture to execute that against, so the documented
+// example is parse-tier while the verifier's positive and refusal paths are
+// covered by its unit tests.
+const PARSE_TIER_PIN: usize = 85;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

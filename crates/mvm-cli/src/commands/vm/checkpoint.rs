@@ -40,7 +40,7 @@ mod revert;
 mod timeline;
 mod vm_state;
 pub(in crate::commands) use fork_vm_full::{ForkVmFullArmParams, fork_vm_full_arm};
-pub(in crate::commands) use lineage::SignedChainAnchor;
+pub(in crate::commands) use lineage::{ClaimChainAnchor, SignedChainAnchor};
 pub(in crate::commands) use revert::{
     AdvanceArgs, RevertArgs, RevertImageSource, RevertOutcome, RevertRunImage, run_advance,
     run_revert, run_rewind,
@@ -386,6 +386,8 @@ fn capture_vm_full_for_running_vm(
         vm_name: args.name.to_string(),
         supervisor_config_digest: supervisor_config_digest(args.state_dir),
         runtime_overlay_version,
+        runtime_launch_binding: mvm_runtime::base::runtime_meta::read(args.name)?
+            .and_then(|meta| meta.runtime_launch_binding),
         // Backends that drive their VMM through a supervisor config (HVF) carry
         // it into the checkpoint: a restore has to rebuild the launch shape the
         // capture froze, and every stop reaps the live copy. Firecracker returns
@@ -1112,6 +1114,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         kernel_path: Some(std::path::Path::new(&vmlinux_path)),
         precomputed_image_sha256: None,
         boot_artifact_identity: None,
+        runtime_config: Some(&start_config),
         cpus,
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -2083,7 +2086,9 @@ mod tests {
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -2113,7 +2118,9 @@ mod tests {
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_overlay_version: None,
+            runtime_launch_binding: None,
             observability_target: None,
+            restored_device_anchors: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();

@@ -199,6 +199,11 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// Oldest guest-agent control protocol this host can speak.
 pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 2;
 
+/// Exact source defining this build's protocol constants. Runtime producers
+/// compare a selected checkout against these bytes before declaring its ABI.
+/// Owned here so packaged consumers never read another crate's source tree.
+pub const COMPILED_PROTOCOL_SOURCE: &[u8] = include_bytes!("mod.rs");
+
 /// Maximum response frame size (256 KiB).
 pub const MAX_FRAME_SIZE: usize = 256 * 1024;
 

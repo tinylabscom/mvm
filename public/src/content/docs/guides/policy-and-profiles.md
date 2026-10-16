@@ -368,16 +368,21 @@ under the same rules as every non-user layer — denies stick, resource
 bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
 carries are stripped with notes, never honoured.
 
-Legacy pack trust is the default: with no publisher policy file, packs
-signed by the old `mvm-templates` or renamed `mvm-packs` publish workflow
-verify only in `agent/` and `runtime/`. The former identity expires from
-built-in trust at 2026-11-06 00:00 UTC; `mvm/` has no built-in trust until
-revocation enforcement exists. To make your own trust decision — pin other
+With no publisher policy file, the exact current `mvm-packs` publish workflow
+identity is trusted for `agent/` and `runtime/`. The former `mvm-templates`
+identity is accepted only for the nine exact historical versioned manifest
+reference/byte-digest pairs [listed in pack authoring](/guides/pack-authoring/#decide-who-may-publish),
+and only before 2026-11-06 00:00 UTC. Real Sigstore verification must identify
+the signer before that exception is checked. The reserved `mvm/` namespace
+trusts only the exact current workflow identity, never a wildcard; official
+packs also require the independently signed fresh MVM revocation feed.
+To make your own trust decision — pin other
 publishers, or refuse packs outright — write
 `$MVM_HOME/registry/publishers.toml`; it
 replaces the default wholesale, and a malformed file fails closed rather
-than silently widening trust. One publisher may use the `*` namespace to
-accept a signing identity for every namespace, and an exact
+than silently widening trust. The built-in historical digest exception and
+cutoff do not constrain explicit operator policy. One publisher may use the
+`*` namespace to accept a signing identity for non-reserved namespaces, and an exact
 `namespace = ...` entry always wins over the wildcard.
 
 The repository rename changed its workflow identity. Packs signed under the

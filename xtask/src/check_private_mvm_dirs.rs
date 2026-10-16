@@ -119,7 +119,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-fn rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
+pub(crate) fn rust_files(root: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {

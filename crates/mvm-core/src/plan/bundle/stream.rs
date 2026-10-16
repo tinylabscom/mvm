@@ -268,6 +268,19 @@ pub struct VerifiedBundleFile {
     pub bundle_sha256: String,
     pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
     pub boot_assets: Option<super::VerifiedBootAssets>,
+    manifest_signature: [u8; 64],
+}
+
+impl VerifiedBundleFile {
+    /// The original archive, signature and publisher identity for independent
+    /// plan admission. This is a pin, not permission to skip re-verification.
+    pub fn plan_artifact(&self) -> super::PlanArtifact {
+        super::PlanArtifact::new(
+            self.bundle_sha256.clone(),
+            &self.manifest_signature,
+            self.key_id.clone(),
+        )
+    }
 }
 
 fn open_archive(path: &Path) -> Result<File, BundleVerifyError> {
@@ -300,7 +313,10 @@ pub fn verify_bundle_file(
     path: &Path,
     trust_store: &dyn TrustStore,
 ) -> Result<VerifiedBundleFile, BundleVerifyError> {
-    let (manifest, key_id, _, _) = verify_head(path, trust_store)?;
+    let (manifest, key_id, _, signature) = verify_head(path, trust_store)?;
+    let manifest_signature = signature.try_into().map_err(|_| {
+        BundleVerifyError::ManifestParse("verified manifest signature has invalid length".into())
+    })?;
     let capture = image_set_manifest_paths(&manifest);
     let captured = stream_artifacts(open_archive(path)?, &manifest, |artifact| {
         if capture.contains(&artifact.path) {
@@ -317,6 +333,7 @@ pub fn verify_bundle_file(
         key_id,
         embedded_image_sets,
         boot_assets,
+        manifest_signature,
     })
 }
 

@@ -64,6 +64,7 @@ mod check_no_vz;
 mod check_one_guest_protocol;
 mod check_per_vm_host_binaries_sync;
 mod check_plan_names;
+mod check_private_diagnostic_files;
 mod check_private_mvm_dirs;
 mod check_public_function_names;
 mod check_require_grant_token_allowlist;
@@ -474,6 +475,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_vcpu_ceilings::run(&workspace)
         }
+        Some("check-private-diagnostic-files") => {
+            let workspace = workspace_root();
+            check_private_diagnostic_files::run(&workspace)
+        }
         Some("check-private-mvm-dirs") => {
             let workspace = workspace_root();
             check_private_mvm_dirs::run(&workspace)
@@ -689,7 +694,7 @@ fn main() -> Result<()> {
                 "  check-nextest-groups                   Verify every cargo-nextest test-group override still matches at least one test"
             );
             eprintln!(
-                "  check-conformance                      Verify model/*.toml is the single source and CONFORMANCE.md is up to date"
+                "  check-conformance                      Verify model/*.toml is the single source and docs/CONFORMANCE.md is up to date"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"

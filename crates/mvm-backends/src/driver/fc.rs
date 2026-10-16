@@ -29,8 +29,8 @@ use mvm_core::vm_backend::{
 use mvm_net::channel::GuestService;
 
 use crate::fc::{
-    FcCapabilities, FirecrackerGuard, api_put_socket, fc_pid_path, firecracker_vsock_uds_path,
-    read_firecracker_pid, start_vm_firecracker_bounded,
+    FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,
+    firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
@@ -118,19 +118,30 @@ pub const GUEST_CONSOLE_VERBOSE_ENV: &str = "MVM_GUEST_CONSOLE_VERBOSE";
 /// nobody is reading. The other backends do not share the cost: libkrun and the
 /// mock boot `console=hvc0`, a virtio-console whose output rides a ring.
 ///
-/// `quiet` raises the console loglevel so `KERN_INFO` chatter stops crossing
-/// the port, and `loglevel=3` (parsed after it, so it wins) holds back
-/// `KERN_ERR` too for the rest of kernel boot. On a healthy boot those errors
-/// are the same fifteen lines every time, about 25 ms of VM exits: Firecracker
-/// describes its virtio-mmio devices in ACPI and also passes them as
-/// `virtio_mmio.device=`, so each one registers twice and the second
-/// registration fails with `-EBUSY`, and there is no PCI config space to find.
-/// The guest agent, as PID 1, raises the level back to the `quiet` value as
-/// soon as it has `/proc` (`mvm_agentd::console_loglevel`), so an error raised
-/// once the guest is running — the OOM killer's report, which diagnostics scan
-/// `console.log` for — still reaches the console. Early-boot errors stay in
-/// the kernel ring buffer (`dmesg`). The agent's own messages are userspace
-/// writes rather than printk and are unaffected either way.
+/// `quiet` raises the console loglevel to 4 (`KERN_WARNING`), so only
+/// `KERN_ERR` and above cross the serial port. The boot args also carry
+/// `pci=off`, which tells the kernel not to probe for a PCI bus Firecracker
+/// does not provide — without it the kernel spent cycles probing for PCI
+/// config space and printed `KERN_ERR` lines when it found none.
+///
+/// `loglevel=3` (parsed after `quiet`, so it wins) further holds back
+/// `KERN_ERR` during early boot. On x86 Firecracker describes its
+/// virtio-mmio devices in ACPI *and* appends `virtio_mmio.device=`
+/// parameters to the kernel command line. When the workload kernel has
+/// both `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES` and ACPI enabled, every
+/// device is registered twice and the second registration fails with
+/// `-EBUSY` at `KERN_ERR` — about 25 ms of serial-port VM exits on a
+/// healthy boot. The `loglevel=3` suppresses those until Firecracker
+/// stops passing cmdline devices where ACPI tables describe the same
+/// hardware.
+///
+/// The guest agent, as PID 1, raises the level back to the `quiet` value
+/// as soon as it has `/proc` (`mvm_agentd::console_loglevel`), so an
+/// error raised once the guest is running — the OOM killer's report,
+/// which diagnostics scan `console.log` for — still reaches the
+/// console. Early-boot errors stay in the kernel ring buffer (`dmesg`).
+/// The agent's own messages are userspace writes rather than printk and
+/// are unaffected either way.
 ///
 /// The escape hatch matters: kernel boot output is how a hung guest gets
 /// diagnosed. [`GUEST_CONSOLE_VERBOSE_ENV`] restores it in full.
@@ -148,10 +159,13 @@ fn verbosity_token_for(requested: Option<&str>) -> &'static str {
 }
 
 fn fc_base_bootargs(has_disk: bool) -> String {
-    // Serial console + reboot/panic behavior + stable interface naming. The NIC
-    // fields the raw Firecracker TAP path appends here are deliberately absent.
+    // Serial console + reboot/panic behavior + stable interface naming + no PCI
+    // probe. The NIC fields the raw Firecracker TAP path appends here are
+    // deliberately absent. `pci=off` tells the kernel not to look for a PCI bus
+    // Firecracker does not provide; without it the probe emits KERN_ERR lines
+    // about missing PCI config space that cost serial-port VM exits.
     let console = format!(
-        "console=ttyS0{} reboot=k panic=1 net.ifnames=0",
+        "console=ttyS0{} reboot=k panic=1 pci=off net.ifnames=0",
         fc_console_verbosity()
     );
     let console = console.as_str();
@@ -910,6 +924,10 @@ impl VmmDriver for FcDriver {
         true
     }
 
+    fn late_volume_slots(&self) -> u8 {
+        mvm_agentd::late_volumes::MAX_SLOTS
+    }
+
     fn preload_standby_child(
         &self,
         req: &PreloadChildRequest<'_>,
@@ -927,8 +945,26 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             )));
         }
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|error| preload_spawn_error("create late-volume placeholders", error))?;
         crate::fc::FcForkRestorer
-            .restore_fork_paused(req.child_vm_name, req.child_dir)
+            .restore_fork_paused(
+                req.child_vm_name,
+                req.child_dir,
+                &crate::fc::ForkRuntimeEvidence {
+                    observation_sha256: req.runtime_artifacts_sha256.ok_or_else(|| {
+                        StandbyError::SpawnFailed(
+                            "Firecracker preload requires authenticated runtime evidence".into(),
+                        )
+                    })?,
+                    anchors_sha256: req.device_anchors_sha256.ok_or_else(|| {
+                        StandbyError::SpawnFailed(
+                            "Firecracker preload requires authenticated device anchors".into(),
+                        )
+                    })?,
+                    reseeded_identity_sha256: None,
+                },
+            )
             .map_err(|error| preload_spawn_error("load paused child", error))?;
         let pid = read_firecracker_pid(&req.child_dir.to_string_lossy())
             .map_err(|e| StandbyError::SpawnFailed(format!("read paused child pid: {e}")))?;
@@ -964,8 +1000,14 @@ impl VmmDriver for FcDriver {
             ))
         })?;
         let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
-        <crate::fc::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::resume(&io)
-            .map_err(|e| StandbyError::ClaimFailed(format!("resume preloaded child: {e}")))
+        crate::fc::host::resume_preloaded_fork_child(
+            &io,
+            req.child_dir,
+            req.runtime_artifacts_sha256,
+            req.device_anchors_sha256,
+            req.late_volumes,
+        )
+        .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))
     }
 
     fn fork_standby_child(
@@ -1017,8 +1059,33 @@ impl VmmDriver for FcDriver {
         // device-model guard between load and resume refuses any snapshot
         // carrying a network interface, so a restored child cannot reintroduce a
         // path off the box that bypasses vsock.
+        mvm_vmm::host::late_volumes::ensure_placeholders(req.child_dir, self.late_volume_slots())
+            .map_err(|e| {
+            StandbyError::ClaimFailed(format!(
+                "fork child '{}': creating late-volume placeholders: {e:#}",
+                req.child_vm_name
+            ))
+        })?;
         crate::fc::FcForkRestorer
-            .restore_fork(req.child_vm_name, req.child_dir, req.cpu_grant)
+            .restore_fork_attaching(
+                req.child_vm_name,
+                req.child_dir,
+                req.cpu_grant,
+                req.late_volumes,
+                &crate::fc::ForkRuntimeEvidence {
+                    observation_sha256: req.runtime_artifacts_sha256.ok_or_else(|| {
+                        StandbyError::ClaimFailed(
+                            "Firecracker restore requires authenticated runtime evidence".into(),
+                        )
+                    })?,
+                    anchors_sha256: req.device_anchors_sha256.ok_or_else(|| {
+                        StandbyError::ClaimFailed(
+                            "Firecracker restore requires authenticated device anchors".into(),
+                        )
+                    })?,
+                    reseeded_identity_sha256: None,
+                },
+            )
             .map_err(fork_restore_error)?;
         Ok(())
     }
@@ -1079,29 +1146,39 @@ impl VmmDriver for FcDriver {
         // Spawn the Firecracker daemon (writes fc.pid, waits for its API socket).
         let socket = crate::fc::fc_api_socket_path(&abs_dir);
         let mut firecracker_guard = FirecrackerGuard::new(&abs_dir);
-        start_vm_firecracker_bounded(
-            &abs_dir,
-            &socket,
-            &spec.name,
-            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
-                .with_cpu_grant(spec.cpu_grant),
-        )?;
+        // A workload whose scope limits an idle process already carries takes
+        // that process instead of starting one; anything else starts its own.
+        let idle_shape = crate::fc::idle_pool::IdleShape::for_launch(spec)
+            .filter(|_| crate::fc::idle_pool::enabled());
+        let claimed = idle_shape.is_some_and(|shape| {
+            crate::fc::idle_pool::claim(shape, &state_dir, std::path::Path::new(&socket))
+        });
+        if !claimed {
+            start_vm_firecracker_bounded(
+                &abs_dir,
+                &socket,
+                &spec.name,
+                &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                    .with_cpu_grant(spec.cpu_grant),
+            )?;
+        }
         let spawned_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
             ms = boot_started.elapsed().as_secs_f64() * 1000.0,
+            claimed,
             "fc boot: process spawn + API socket"
         );
 
-        // Take ownership of the API socket so the config sequence below can
-        // speak to it in-process. Firecracker was launched through `sudo` and
-        // created the socket as root; without this every call would need its
-        // own `sudo curl`.
-        crate::fc::adopt_api_socket(&socket)
-            .context("adopting the Firecracker API socket for the invoking user")?;
+        // The launcher handed the API socket to the invoking user, so the
+        // config sequence below speaks to it in-process. Firecracker was
+        // launched through `sudo` and created the socket as root; without that
+        // hand-off every call would need its own `sudo curl`.
 
         // Drive the NIC-less API config sequence, asking only for what the
-        // Firecracker behind this socket supports.
+        // Firecracker behind this socket supports. All PUTs share one
+        // connection: Firecracker answers keep-alive, so reusing it saves
+        // ~10 connect round trips.
         let caps = running_fc_capabilities(&socket);
         let vsock_uds = firecracker_vsock_uds_path(&abs_dir);
         let puts = fc_config_api_puts(
@@ -1111,8 +1188,10 @@ impl VmmDriver for FcDriver {
             &abs_dir,
             caps,
         );
+        let mut session =
+            api_session(&socket).context("opening Firecracker API session for boot config")?;
         for put in &puts {
-            api_put_socket(&socket, &put.path, &put.body)
+            api_put_session(&mut session, &put.path, &put.body)
                 .with_context(|| format!("Firecracker API PUT {}", put.path))?;
         }
         crate::fc::secure_vsock_socket_for_caller(&vsock_uds)
@@ -1132,9 +1211,14 @@ impl VmmDriver for FcDriver {
             "fc boot: API config sequence"
         );
 
-        // Boot the configured instance.
-        api_put_socket(&socket, "/actions", r#"{"action_type": "InstanceStart"}"#)
-            .context("Firecracker API PUT /actions InstanceStart")?;
+        // Boot the configured instance (same session).
+        api_put_session(
+            &mut session,
+            "/actions",
+            r#"{"action_type": "InstanceStart"}"#,
+        )
+        .context("Firecracker API PUT /actions InstanceStart")?;
+        drop(session);
         let started_at = Instant::now();
         tracing::debug!(
             vm = %spec.name,
@@ -1201,6 +1285,11 @@ impl VmmDriver for FcDriver {
 
         trace.mark("guest_boot");
         trace.write_driver_to(&state_dir);
+        // The guest is up; prepare the next launch's process while this one
+        // runs its workload.
+        if let Some(shape) = idle_shape {
+            crate::fc::idle_pool::refill_in_background(shape);
+        }
 
         let vm = Box::new(FcRunningVm {
             id: VmId(spec.name.clone()),
@@ -1662,7 +1751,7 @@ mod tests {
         let verity = d.workload_base_bootargs(false);
         assert_eq!(
             verity,
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"
         );
         assert!(!verity.contains("root="), "got: {verity}");
 
@@ -1898,7 +1987,7 @@ mod tests {
         );
         assert!(
             boot.contains(
-                r#""boot_args": "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0""#
+                r#""boot_args": "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0""#
             ),
             "{boot}"
         );
@@ -2548,11 +2637,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-1",
             child_dir: &missing,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2574,11 +2666,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-2",
             child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2610,11 +2705,14 @@ mod tests {
         let req = ChildForkRequest {
             child_vm_name: "child-vm-3",
             child_dir: &child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
             parent_vm_name: None,
             genid: sample_generation_token(),
             channels: &channels,
             cpu_grant: None,
             admitted_plan: None,
+            late_volumes: &[],
         };
 
         // The restore has no Firecracker to talk to and no device anchors to
@@ -2748,14 +2846,14 @@ mod console_verbosity_tests {
     fn quiet_is_additive_and_leaves_the_boot_shape_tokens_alone() {
         assert_eq!(
             fc_base_bootargs(true),
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0 rootwait init=/init"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0 rootwait init=/init"
         );
         // The other shape is the verity/initramfs boot, where the initramfs
         // PID 1 owns root/init selection. The virtiofs-root shape that used to
         // be here is gone.
         assert_eq!(
             fc_base_bootargs(false),
-            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 net.ifnames=0"
+            "console=ttyS0 quiet loglevel=3 reboot=k panic=1 pci=off net.ifnames=0"
         );
     }
 
@@ -2771,6 +2869,19 @@ mod console_verbosity_tests {
         // The guest agent restores exactly the level `quiet` selects, so the
         // two halves of this have to agree on it.
         assert_eq!(mvm_agentd::console_loglevel::QUIET_CONSOLE_LOGLEVEL, 4);
+    }
+
+    /// Firecracker has no PCI bus; probing for one emits KERN_ERR lines about
+    /// missing config space and wastes serial-port VM exits.
+    #[test]
+    fn pci_probe_is_disabled() {
+        for has_disk in [false, true] {
+            let args = fc_base_bootargs(has_disk);
+            assert!(
+                args.contains("pci=off"),
+                "boot shape (has_disk={has_disk}) lost pci=off: {args}"
+            );
+        }
     }
 
     /// A hung guest is diagnosed from kernel boot output, so the suppression

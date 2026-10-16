@@ -3,13 +3,13 @@ set working-directory := "../.."
 # ── Model / Conformance gates ────────────────────────────────────────────
 # R1: the model is the single source.
 
-# Verify model/*.toml, the generated CONFORMANCE.md, and the honesty/deferral gates
+# Verify model/*.toml, the generated docs/CONFORMANCE.md, and the honesty/deferral gates
 model:
     cargo run -p xtask -- check-conformance
     cargo run -p xtask -- check-honesty
     cargo run -p xtask -- check-deferrals
 
-# Regenerate everything the model owns: CONFORMANCE.md.
+# Regenerate everything the model owns: docs/CONFORMANCE.md.
 model-write:
     cargo run -p xtask -- check-conformance --write
 

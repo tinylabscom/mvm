@@ -90,6 +90,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+mvm-runtime = { workspace = true, features = ["test-support"] }
 # Secret-command tests read back a stored value through SecretStore::get.
 secrecy.workspace = true
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a

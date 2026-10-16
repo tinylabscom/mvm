@@ -20,7 +20,7 @@ on:
 permissions:
   contents: write
   id-token: write        # Required for cosign keyless signing via OIDC
-  actions: write         # Required to dispatch publish-crates workflow
+  actions: write         # Required for post-promotion workflow dispatch
   attestations: write    # Required to record build provenance for the release binaries
 
 env:
@@ -729,21 +729,6 @@ jobs:
             echo "no dry-run draft ${tag} to delete"
           fi
 
-      # The "release: published" event fired by `gh release create` runs under
-      # GITHUB_TOKEN, which by design does not trigger downstream workflows.
-      # workflow_dispatch is exempt from that rule, so chain publish-crates
-      # explicitly here. This keeps crates.io in sync with GitHub releases.
-      - name: Trigger crates.io publish workflow
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          gh workflow run publish-crates.yml \
-            --ref "${TAG_NAME}" \
-            -f tag="${TAG_NAME}" \
-            -f dry_run=false
-
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle
   # + an entry in the combined checksums manifest, and that the SBOM is signed.
@@ -824,6 +809,54 @@ jobs:
     with:
       tag: ${{ github.ref_name }}
 
+  # This report witnesses the current signed image pin with the released CLI.
+  # Staged schema-3 image candidates are validated separately with that same CLI;
+  # requiring one here would introduce a circular rollout dependency.
+  # ARM Linux boot remains unverified: there is no ARM Linux KVM runner.
+  published-installed-boot:
+    needs: [verify-release, first-run-smoke]
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v3
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: installed-boot-lane-*-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/boot-lanes
+      - name: Reauthenticate and aggregate both installed boot lanes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 scripts/published-installed-boot.py aggregate \
+            --tag "$TAG_NAME" --lanes "${RUNNER_TEMP}/boot-lanes" \
+            --assets "${RUNNER_TEMP}/boot-assets" \
+            --out "${RUNNER_TEMP}/published-installed-boot/installed-boot.json"
+      - name: Attest the installed boot report
+        id: boot-attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ runner.temp }}/published-installed-boot/installed-boot.json
+      - name: Keep the offline attestation bundle beside the report
+        env:
+          BUNDLE: ${{ steps.boot-attestation.outputs.bundle-path }}
+        run: |
+          test -s "$BUNDLE"
+          cp "$BUNDLE" "${RUNNER_TEMP}/published-installed-boot/installed-boot.json.bundle"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: published-installed-boot-v1
+          overwrite: true
+          path: ${{ runner.temp }}/published-installed-boot
+          if-no-files-found: error
+          retention-days: 90
+
   published-package-smoke:
     needs: [verify-release]
     if: ${{ github.event_name == 'push' }}
@@ -846,8 +879,8 @@ jobs:
   # prerelease. A red smoke leaves the tag staged; fix forward with a new tag.
   promote-release:
     name: Promote the release once a fresh install boots
-    needs: [first-run-smoke, published-package-smoke, recipe-install-smoke]
-    if: ${{ !cancelled() && github.event_name == 'push' && needs.first-run-smoke.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
+    needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
