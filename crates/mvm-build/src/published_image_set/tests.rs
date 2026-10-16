@@ -7,6 +7,49 @@ use mvm_core::util::test_env::TestEnv;
 const ARCH: GuestArch = GuestArch::Aarch64;
 const MEMBER: &str = "stage0-vmlinux-aarch64";
 
+#[test]
+fn cached_compatibility_binding_accepts_matching_authenticated_contract_shape() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let actual = expected.clone();
+
+    verify_cached_compatibility_binding(&expected, &actual).unwrap();
+}
+
+#[test]
+fn cached_compatibility_binding_rejects_mismatching_base_contract() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let mut actual = expected.clone();
+    actual.base_image_contract = None;
+
+    let error = verify_cached_compatibility_binding(&expected, &actual).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "cached authenticated image-set compatibility does not match images.lock"
+    );
+}
+
+#[test]
+fn cached_compatibility_binding_rejects_mismatching_builder_boot_abi() {
+    let expected = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .into_manifest()
+        .compatibility;
+    let mut actual = expected.clone();
+    actual.builder_boot_abi = None;
+
+    let error = verify_cached_compatibility_binding(&expected, &actual).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "cached authenticated image-set compatibility does not match images.lock"
+    );
+}
+
 fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
     use mvm_fs::ext4::{Node, Owner};
     let mut nodes = ["/etc", "/etc/mvm"]

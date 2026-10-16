@@ -553,13 +553,7 @@ pub fn verify_cached_default_workload(
         &host,
         None,
     )?;
-    if !root
-        .manifest()
-        .compatibility
-        .same_contract(&train.compatibility)
-    {
-        bail!("cached authenticated image-set compatibility does not match images.lock");
-    }
+    verify_cached_compatibility_binding(&train.compatibility, &root.manifest().compatibility)?;
     verify_installed_workload_files(
         root.manifest(),
         directory,
@@ -567,6 +561,16 @@ pub fn verify_cached_default_workload(
         WorkloadImageProfile::DefaultTenant,
         build_mode,
     )
+}
+
+fn verify_cached_compatibility_binding(
+    expected: &mvm_core::image_set::ImageSetCompatibility,
+    actual: &mvm_core::image_set::ImageSetCompatibility,
+) -> Result<()> {
+    if !actual.same_contract(expected) {
+        bail!("cached authenticated image-set compatibility does not match images.lock");
+    }
+    Ok(())
 }
 
 fn installed_workload_artifact_name(
