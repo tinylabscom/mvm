@@ -393,7 +393,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
     ) -> Result<Box<dyn RunningVm>> {
         anyhow::ensure!(
-            inputs.config.canonical_kernel.is_none() || kernel.is_some(),
+            (inputs.config.canonical_kernel.is_none()
+                && inputs.config.kernel_read_sha256.is_none())
+                || kernel.is_some(),
             "canonical kernel launch has no actual final-config custody guard"
         );
         if let Some(kernel) = kernel {

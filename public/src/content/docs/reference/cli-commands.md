@@ -566,6 +566,7 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl build guest-bins` | From a source checkout, build (or reuse from the guest-build cache) every guest artifact mvm owns, for `aarch64` and `x86_64`, and write `mvm-guest-bins-v<version>.tar.gz` and its `.sha256` into the current directory. The archive holds, per architecture: `<arch>/bin/` — `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint` and `mvm-setpriv` as static musl executables (only `mvm-egress-client` and `mvm-addon-dns` are built with `mvm-agentd`'s `addons` feature); `<arch>/initramfs/mvm-guest-agent` — the size-tuned static agent the universal initramfs runs as `/init`; and `<arch>/lib/glibc/` and `<arch>/lib/musl/` — `libmvm_host_services.so`, `libcuda.so.1`, `libcudart.so` and `libnvidia-ml.so.1`, the glibc objects linked against glibc 2.34. `sdk-py/mvm/` carries the in-guest Python SDK once for both architectures. Every executable is checked to be a static ELF for its architecture, and every shared object to be one for its architecture that needs its libc and nothing outside that libc's base libraries, before it is packaged. `manifest.json` records each member's sha256, the workspace version, the producing commit (`source.worktree` is `dirty`, with a fingerprint of the changes, when the tree did not match it), and the guest-source and host-services cdylib source fingerprints; the written archive is re-verified against it before the command reports success. Cross-compiling the glibc objects needs the pinned toolchain's `*-unknown-linux-gnu` targets, which `just payload::toolchain` installs |
 | `mvmctl build guest-bins --out <dir>` | Write the archive and its checksum into `<dir>` (created if missing) |
 | `mvmctl build guest-bins --arch x86_64` | Build only the named architecture; repeat `--arch` for more than one |
+| `mvmctl build guest-bins --check-release-archive <file>` | Read and validate an existing complete archive against this CLI's compiled version using the canonical archive and runtime validators, and print its manifest as JSON. Does not build, fetch, install or boot anything and does not require a source checkout. Refuses `--out` and `--arch`; validates bytes/inventory, not a publisher signature or native execution |
 
 Guest-bins manifest schema 2 also records an `assemblies` declaration per guest
 architecture: assembly format 1, the guest control protocol and its minimum
@@ -575,6 +576,12 @@ computes these from the exact captured archive members before signing; no
 cache fingerprint authenticates them. A producer whose compiled protocol
 source differs from the selected checkout refuses the build: rebuild `mvmctl`
 from that checkout first.
+
+When both guest architectures are selected, `build guest-bins` also runs the
+canonical release-runtime inventory validator before reporting success. A wrong
+version, incomplete required-member inventory or invalid boot assembly refuses
+the build. An explicit single-architecture contributor build remains partial
+and is not a publishable release runtime.
 
 Release runtime verification requires these declarations for both architectures
 and rejects unsupported schemas or assembly formats. Source development
@@ -2101,6 +2108,29 @@ The disk-input staging filter must preserve every locked file and mode or the
 build is refused. Locked builds do not reuse a resident builder's unrelated
 `/work` or the contributor-source cache. Ordinary contributor builds retain their
 automatic source overrides.
+
+Portable pack production requires the CLI-version-matched signed release runtime
+archive, checksum, and both original signature bundles, plus a current signed
+Linux image-set revocation feed already applied to the producer. A locally built
+Source runtime is not a substitute. Production captures one owned closure before
+builder effects and uses its same verified runtime/initramfs for health and
+export; it refuses a built kernel that differs from the canonical Linux selection.
+The archive retains the original Linux publisher and feed proofs. Consumer
+verification does not build, download, or seed a missing runtime. The canonical
+consumer launch refusal described above remains in force until that launch lane
+is enabled through its separate integration gates. Re-exporting an installed
+bundle with protected boot members is refused rather than silently dropping them.
+Producer health currently supports only HVF's verified kernel descriptor route.
+Other health backends are refused before runtime acquisition or builder effects;
+Linux producer descriptor support remains required for the release's Linux
+positive gates. A caller-provided kernel continuity digest is not admission or
+publisher authority.
+After a producer health attempt, its private build/boot input directories are
+retained on success, failure, and unwind: the health API's workload status and
+stop acknowledgment are not independent evidence that no native reader remains.
+Diagnostics name the retained paths. Remove them only after independently
+confirming the relevant VM has exited; this retention is not a health or cleanup
+receipt.
 
 `pack build --input-observation PATH` explicitly opts into bounded diagnostic
 evidence about the frozen Nix input graph. The builder captures raw flake

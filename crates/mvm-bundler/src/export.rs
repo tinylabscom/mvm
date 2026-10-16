@@ -22,6 +22,13 @@ const ROOTFS_NAME: &str = "rootfs.ext4";
 const INITRD_NAME: &str = "initrd";
 const VERITY_NAME: &str = "rootfs.verity";
 const BOOT_MANIFEST_NAME: &str = "boot-image-set.json";
+const LINUX_SIGNATURE_NAME: &str = "boot-image-set.json.bundle";
+const REVOCATIONS_NAME: &str = "image-set-revocations.json";
+const REVOCATIONS_SIGNATURE_NAME: &str = "image-set-revocations.json.bundle";
+
+#[cfg(test)]
+#[path = "export/canonical_tests.rs"]
+mod canonical_tests;
 
 /// A bundle that was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +57,24 @@ pub fn export_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<ExportedBundle> {
+    export_bundle_at(inputs, signer, Utc::now())
+}
+
+fn export_bundle_at(
+    inputs: &BundleExportInputs<'_>,
+    signer: &dyn BundleSigner,
+    now: chrono::DateTime<Utc>,
+) -> Result<ExportedBundle> {
     refuse_summary_over_archive(inputs)?;
+    anyhow::ensure!(
+        inputs.boot_assets.is_none() || inputs.cli_boot_assets.is_none(),
+        "cannot mix CLI and legacy boot assets"
+    );
+    anyhow::ensure!(
+        inputs.canonical_linux_proof.is_none()
+            || (inputs.cli_boot_assets.is_some() && inputs.boot_assets.is_none()),
+        "canonical Linux proof requires one selected CLI boot closure"
+    );
 
     let mut contents = BundleContents::default();
     contents.push_file(KERNEL_NAME, ArtifactRole::Kernel, "kernel", inputs.vmlinux)?;
@@ -73,6 +97,13 @@ pub fn export_bundle_with_signer(
             "cannot mix CLI and legacy boot assets"
         );
         contents.push_cli_boot_assets(boot, inputs.arch_label)?;
+    }
+    if let Some(proof) = &inputs.canonical_linux_proof {
+        let boot = inputs
+            .cli_boot_assets
+            .as_ref()
+            .context("canonical Linux proof requires the selected CLI boot closure")?;
+        contents.push_canonical_linux_proof(proof, boot, now)?;
     }
 
     let key_id = signer.key_id();
@@ -141,6 +172,49 @@ struct BundleContents {
 }
 
 impl BundleContents {
+    fn push_canonical_linux_proof(
+        &mut self,
+        proof: &crate::CanonicalLinuxProofInputs<'_>,
+        boot: &crate::CliBootAssetsInputs<'_>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        use mvm_core::image_set::{ImageSetRequirement, ImageSetVerification, image_train_lock};
+        anyhow::ensure!(
+            proof.root.manifest_bytes() == boot.manifest_bytes
+                && proof.root.root().manifest_sha256() == boot.manifest_sha256,
+            "canonical publisher proof differs from the selected Linux boot manifest"
+        );
+        let feed = mvm_core::image_set_revocation::verify_image_set_revocations(
+            proof.revocations.document(),
+            proof.revocations.signature_bundle(),
+            now,
+            None,
+        )?;
+        let requirement = ImageSetRequirement::current_train();
+        let request = ImageSetVerification::new(
+            proof.root.manifest_bytes(),
+            proof.root.signature_bundle(),
+            &image_train_lock().image_set,
+            Path::new(""),
+        )
+        .require(&requirement)
+        .with_revocations(&feed);
+        mvm_core::image_set::verify_image_set_root(&request)?;
+        // The CLI closure check above already binds the actual kernel inventory
+        // to this SAME Linux manifest. Preserve originals, never reserialize.
+        for (name, bytes) in [
+            (LINUX_SIGNATURE_NAME, proof.root.signature_bundle()),
+            (REVOCATIONS_NAME, proof.revocations.document()),
+            (
+                REVOCATIONS_SIGNATURE_NAME,
+                proof.revocations.signature_bundle(),
+            ),
+        ] {
+            self.push(name, ArtifactRole::Other, bytes.to_vec())?;
+        }
+        Ok(())
+    }
+
     fn push_boot_assets(&mut self, boot: &crate::BootAssetsInputs<'_>, arch: &str) -> Result<()> {
         use mvm_core::arch::GuestArch;
         use mvm_core::image_set::ImageSetManifest;
@@ -379,6 +453,16 @@ fn declarations_for(
     if let Some(boot) = &inputs.cli_boot_assets {
         members.push(BundleMember::EmbeddedCliBootAssets(boot.runtime.clone()));
     }
+    if inputs.canonical_linux_proof.is_some() {
+        members.push(BundleMember::CanonicalLinuxProof(
+            mvm_core::plan::bundle::CanonicalLinuxProof {
+                manifest_artifact: BOOT_MANIFEST_NAME.into(),
+                signature_bundle_artifact: LINUX_SIGNATURE_NAME.into(),
+                revocation_document_artifact: REVOCATIONS_NAME.into(),
+                revocation_signature_bundle_artifact: REVOCATIONS_SIGNATURE_NAME.into(),
+            },
+        ));
+    }
     if inputs.boot_assets.is_some() {
         members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
@@ -410,7 +494,8 @@ fn declarations_for(
 /// The lowest schema that carries every member this export seals, so a
 /// bundle stays readable by the oldest reader that understands it: 3 for
 /// plain declarations, 4 for historical boot assets, 5 for an environment
-/// descriptor, and 6 for a portable CLI-runtime closure.
+/// descriptor, 6 for a portable CLI-runtime closure, and 7 for canonical
+/// Linux publisher/revocation evidence.
 fn schema_for(members: &[BundleMember]) -> u32 {
     members
         .iter()

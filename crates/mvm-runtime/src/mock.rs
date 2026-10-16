@@ -497,6 +497,7 @@ mod tests {
             name: name.to_string(),
             template_id: None,
             kernel_path: None,
+            kernel_read_sha256: None,
             initrd_path: None,
             rootfs_path: "/tmp/stub.ext4".to_string(),
             verity_path: None,

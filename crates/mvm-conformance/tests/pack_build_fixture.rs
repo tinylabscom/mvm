@@ -2,6 +2,22 @@
 mod fixture;
 
 #[test]
+fn candidate_prefix_is_used_only_for_live_pack_production() {
+    for (command, live, expected) in [
+        ("pack build --out app.mvmpkg", true, true),
+        ("pack build --out app.mvmpkg", false, false),
+        ("pack pull acme/hello", true, false),
+        ("machine run --manifest app.mvmpkg", true, false),
+        ("machine check-artifact app.mvmpkg", true, false),
+        ("pack compile", true, false),
+    ] {
+        let arguments = mvm_conformance::doc_examples::tokenize(command);
+        let selected = fixture::producer_binary(&arguments, live, Some("/producer/mvmctl".into()));
+        assert_eq!(selected.is_some(), expected, "{command}");
+    }
+}
+
+#[test]
 fn live_pack_fixture_uses_a_separate_source_tree_and_a_successful_entrypoint() {
     let dir = tempfile::tempdir().unwrap();
     fixture::stage(dir.path());

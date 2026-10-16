@@ -44,6 +44,35 @@ impl KernelBoundLaunch {
         );
         #[cfg(unix)]
         let mut kernel = None;
+        if let Some(digest) = &config.kernel_read_sha256 {
+            ensure!(
+                config.canonical_kernel.is_none(),
+                "cannot mix producer byte continuity and canonical bundle custody"
+            );
+            ensure!(
+                cfg!(unix) && backend == BackendKind::Hvf,
+                "this backend does not support producer kernel descriptor custody"
+            );
+            #[cfg(unix)]
+            {
+                // This is a data-continuity constraint, NOT an admission
+                // capability. The same actual caller registration is still
+                // consumed by the native supervisor for descriptor startup.
+                let source = Path::new(
+                    config
+                        .kernel_path
+                        .as_deref()
+                        .context("producer kernel missing")?,
+                );
+                kernel = Some(mvm_vmm::host::restore_image::VerifiedRestoreFile::prepare(
+                    source,
+                    record
+                        .parent()
+                        .context("kernel lifecycle directory missing")?,
+                    digest,
+                )?);
+            }
+        }
         if let Some(owner) = &config.canonical_kernel {
             // Other backends retain their existing explicit refusal until
             // they provide equally instance-bound lifetime evidence.
@@ -113,6 +142,19 @@ impl KernelBoundLaunch {
     /// Validate the physical recipe passed to the driver, not a reconstructed
     /// client path or an author-supplied digest.
     pub(crate) fn before_boot(&self, spec: &VmmSpec) -> Result<()> {
+        if self.config.kernel_read_sha256.is_some() {
+            ensure!(
+                spec.name == self.config.name
+                    && spec.kernel
+                        == KernelImage::Path(PathBuf::from(
+                            self.config
+                                .kernel_path
+                                .as_deref()
+                                .context("producer kernel missing")?,
+                        )),
+                "physical VMM recipe substituted the producer kernel or VM"
+            );
+        }
         if let Some(owner) = &self.config.canonical_kernel {
             owner.verify_config(
                 &self.config,
@@ -280,6 +322,62 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn producer_kernel_descriptor_survives_replacement_after_final_check() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let source = home.path().join("slot-kernel");
+        let original = b"producer kernel continuity fixture, not a bootable image";
+        std::fs::write(&source, original).unwrap();
+        let config = VmStartConfig {
+            name: "producer-descriptor-unit".into(),
+            kernel_path: Some(source.to_str().unwrap().into()),
+            kernel_read_sha256: Some(mvm_core::plan::bundle::sha256_hex(original)),
+            ..Default::default()
+        };
+        let lease = RuntimeLifecycleLease::acquire(&config.name).unwrap();
+        assert!(KernelBoundLaunch::bind(config.clone(), BackendKind::Qemu, &lease).is_err());
+        let mut wrong = config.clone();
+        wrong.kernel_read_sha256 = Some("0".repeat(64));
+        assert!(KernelBoundLaunch::bind(wrong, BackendKind::Hvf, &lease).is_err());
+        let bound = KernelBoundLaunch::bind(config, BackendKind::Hvf, &lease).unwrap();
+        let mut spec = VmmSpec {
+            name: bound.config().name.clone(),
+            kernel: KernelImage::Path(source.clone()),
+            initramfs: None,
+            cmdline: String::new(),
+            vcpus: 1,
+            cpu_grant: None,
+            memory_mib: 512,
+            mem_initial_mib: None,
+            blocks: vec![],
+            vsock: vec![],
+            console: mvm_vmm::driver::spec::ConsoleCapture {
+                log_path: home.path().join("unused.log"),
+            },
+            shares: vec![],
+            trusted_builder: false,
+            builder_egress_endpoint: None,
+            plan_binding: None,
+        };
+        bound.before_boot(&spec).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, b"replacement AFTER final verification").unwrap();
+        // The same held object goes to boot_verified_kernel, whose actual
+        // inherited-FD loader has its own mapping regression. No VM here.
+        let held = bound.kernel.as_ref().unwrap();
+        let mut bytes = vec![0; original.len()];
+        std::os::unix::fs::FileExt::read_exact_at(held.file(), &mut bytes, 0).unwrap();
+        assert_eq!(bytes, original);
+        spec.kernel = KernelImage::Path(home.path().join("other"));
+        assert!(bound.before_boot(&spec).is_err());
+        assert!(
+            !has_retained_kernel(&lease).unwrap(),
+            "a continuity digest must not mint canonical bundle authority"
+        );
+    }
 
     #[test]
     fn pending_or_corrupt_lifetime_blocks_reuse_without_deleting_evidence() {

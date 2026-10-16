@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-REPOSITORY = "tinylabscom/mvm"
+from runtime_release_proof import REPOSITORY, checksum_record, verify_blob
 
 
 def fetch_json(url):
@@ -53,17 +53,6 @@ def validate_metadata(root, event, tag, dry_run):
     return release
 
 
-def checksum_record(text, filename):
-    matches = []
-    for line in text.splitlines():
-        match = re.fullmatch(r"([0-9a-f]{64}) [ *](.+)", line)
-        if match and match[2] == filename:
-            matches.append(match[1])
-    if len(matches) != 1:
-        raise ValueError(f"expected exactly one checksum record for {filename}")
-    return matches[0]
-
-
 def verify_runtime(version, directory):
     tag = f"v{version}"
     archive = f"mvm-guest-bins-{tag}.tar.gz"
@@ -75,13 +64,7 @@ def verify_runtime(version, directory):
             with urllib.request.urlopen(url, timeout=120) as response:
                 with (directory / filename).open("wb") as output:
                     shutil.copyfileobj(response, output)
-        subprocess.run([
-            "cosign", "verify-blob", "--bundle", str(directory / (asset + ".bundle")),
-            "--certificate-identity",
-            f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@refs/tags/{tag}",
-            "--certificate-oidc-issuer", "https://token.actions.githubusercontent.com",
-            str(directory / asset),
-        ], check=True)
+        verify_blob(version, directory, asset)
     with (directory / archive).open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     for record in (archive + ".sha256", manifest):

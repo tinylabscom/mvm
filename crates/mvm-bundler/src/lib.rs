@@ -38,5 +38,8 @@ mod signer;
 
 pub use debug::{DebugFormat, DebugOutput};
 pub use export::{ExportedBundle, export_bundle_with_signer, guest_sidecar_path};
-pub use inputs::{BootAssetsInputs, BundleExportInputs, CliBootAssetsInputs, PostureInputs};
+pub use inputs::{
+    BootAssetsInputs, BundleExportInputs, CanonicalLinuxProofInputs, CliBootAssetsInputs,
+    PostureInputs,
+};
 pub use signer::BundleSigner;

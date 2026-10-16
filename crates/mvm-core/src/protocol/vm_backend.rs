@@ -103,6 +103,11 @@ pub struct VmStartConfig {
     pub rootfs_path: String,
     /// Absolute path to the kernel image (Firecracker needs this; others may ignore).
     pub kernel_path: Option<String>,
+    /// Optional byte-continuity constraint for a producer health launch.
+    /// NOT publisher or plan authority: normal admission remains mandatory.
+    /// A supporting backend must consume a private verified descriptor, never
+    /// reopen the path after checking this digest; unsupported backends refuse.
+    pub kernel_read_sha256: Option<String>,
     /// In-process canonical data custody. Cloning keeps the SAME owner;
     /// deserialized paths, hashes or caller-authored metadata cannot supply it.
     pub canonical_kernel: Option<std::sync::Arc<crate::canonical_linux::PreparedCanonicalLinux>>,
