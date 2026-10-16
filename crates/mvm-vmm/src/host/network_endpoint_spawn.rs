@@ -22,10 +22,18 @@ use zeroize::Zeroizing;
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
+mod owned;
+use owned::endpoint_command;
+pub use owned::{OwnedEndpoint, OwnedEndpointSpawnError, spawn_network_endpoint_owned};
 mod endpoint_identity;
 mod stderr_log;
 pub use endpoint_identity::EndpointPid;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
+mod collector;
+pub use collector::{
+    TELEMETRY_COLLECTOR_PID_FILE, reap_telemetry_collector, spawn_telemetry_collector,
+};
+use collector::{provision_collector, telemetry_section};
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
@@ -1083,19 +1091,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     if params.telemetry {
         // The embedded collector's inputs, derived here so the spawner's one
         // provisioning decision fans out to every path the endpoint needs.
-        cfg["telemetry"] = serde_json::json!({
-            "state_dir": params.state_dir,
-            "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
-                params.state_dir,
-                mvm_core::protocol::telemetry::TELEMETRY_PORT,
-            ),
-            "signer_sock": params.state_dir.join(
-                super::broker_services_spawn::AUDIT_SIGNER_SOCK,
-            ),
-            "host_anchor_path": mvm_core::config::mvm_keys_dir()
-                .join(super::broker_services_spawn::HOST_SIGNER_PUB),
-            "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
-        });
+        cfg["telemetry"] = telemetry_section(params.tenant, params.state_dir);
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1201,7 +1197,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     }
     clear_stale_socket(&connector_socket_path(params.state_dir));
     params.session_marker = Some(session_marker);
-    let cfg = build_endpoint_config_json(&params);
+    let mut cfg = build_endpoint_config_json(&params);
+    if params.telemetry {
+        provision_collector(&mut cfg["telemetry"], params.tenant, params.state_dir)?;
+    }
     let SubstitutionSpawnParams {
         telemetry: _,
         vm_name,
@@ -1217,11 +1216,12 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     let stderr_log = endpoint_stderr_log_path(state_dir);
     let log_file = open_endpoint_stderr_log(state_dir)?;
 
-    let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
-    select_lifetime(&mut cmd, lifetime, state_dir);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(log_file);
+    let mut cmd = endpoint_command(
+        mvm_core::env_hygiene::helper_command(&bin),
+        lifetime,
+        state_dir,
+        log_file,
+    );
     // Detach into its own session so it survives this `mvmctl` process.
     unsafe {
         use std::os::unix::process::CommandExt;
@@ -1277,6 +1277,8 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     // the input gate.
     let env_json = serde_json::to_vec(&handshake.env)
         .map_err(|e| anyhow!("serialize substitution env for {}: {e}", env_path.display()))?;
+    // The launch env is configuration: owner-only, and a link at the path is
+    // replaced rather than written through.
     mvm_core::atomic_io::write_private_ephemeral(&env_path, &env_json)
         .map_err(|e| anyhow!("write {}: {e}", env_path.display()))?;
     record_secret_fingerprints(vm_name, handshake.input_fingerprints);
@@ -1465,6 +1467,7 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
     forget_secret_fingerprints(vm_name);
+    reap_telemetry_collector(state_dir);
     // A later boot under the same name must not inherit this endpoint's guest
     // telemetry assertion.
     let _ = super::telemetry_provisioning::record_boot_provisioning(state_dir, false);
@@ -2357,7 +2360,6 @@ mod tests {
     #[test]
     fn a_socket_nothing_serves_is_cleared_and_a_served_one_is_kept() {
         use std::os::unix::fs::FileTypeExt;
-        use wait_timeout::ChildExt;
 
         let dir = tempfile::tempdir().unwrap();
         let stale = dir.path().join("stale.sock");
@@ -2374,7 +2376,10 @@ mod tests {
             .env("MVM_TEST_STALE_SOCKET_PATH", &stale)
             .spawn()
             .unwrap();
-        let waited = child.wait_timeout(Duration::from_secs(10));
+        let waited = crate::host::process_exit::wait_for_test_child(
+            &mut child,
+            std::time::Instant::now() + Duration::from_secs(10),
+        );
         if !matches!(waited, Ok(Some(_))) {
             let _ = child.kill();
             child

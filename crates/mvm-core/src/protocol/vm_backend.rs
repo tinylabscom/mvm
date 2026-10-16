@@ -18,6 +18,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
 
+pub mod caller_registration;
+
 pub use mvm_contract::protocol::capability_negotiation::{CapabilityAlternative, CapabilityGap};
 pub use mvm_contract::protocol::resource_controls::{
     CpuControl, EnforcedGrants, EnforcedTier, ResourceControls, WallClockControl,
@@ -211,13 +213,17 @@ pub struct VmStartConfig {
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
     /// `String` so this wire type stays a serde seam with no typed
-    /// coupling to `mvm_core::plan`. **The supervisor
-    /// re-verifies the signature** before trusting any decoded field;
-    /// the host is in the TCB but the supervisor still runs Ed25519
-    /// verification. **Do not log this value** — the envelope may carry
+    /// coupling to `mvm_core::plan`. Legacy supervisor paths trust the
+    /// authorized launcher; decoding this envelope is not signature verification.
+    /// Opted-in caller registration separately re-verifies it against the
+    /// canonical local host public key before installation.
+    /// **Do not log this value** — the envelope may carry
     /// secret bindings, env vars, or policy refs that resolve to
     /// credentials.
     pub plan_json: Option<String>,
+    /// Optional caller registration from the trusted entrypoint admission path.
+    /// This is not producer readiness and is not accepted by warm launches.
+    pub caller_registration: Option<caller_registration::CallerRegistration>,
     /// JSON-encoded `PlanArtifact` (bundle pin)
     /// when `admitted.plan.bundle.is_some()`. `None` when the plan
     /// has no `.mvmpkg` pin (the common case). Same "do not log"
@@ -261,6 +267,27 @@ pub struct VmStartConfig {
     /// Optional host GPU ordinal pinned to this VM. The endpoint exposes the
     /// selected host device as guest ordinal zero and hides every other GPU.
     pub gpu_device: Option<u32>,
+    /// The admission's audit sync, when it is still in flight.
+    ///
+    /// `None` means the admission was durable before this config was built,
+    /// which is what every launch that does not opt in still does. When it is
+    /// set, the VMM may start before the sync finishes, but nothing the plan
+    /// authorizes may run until [`AdmissionDurability::wait`] succeeds: the
+    /// workload runner waits for it immediately before activation, and a
+    /// boot path that has no activation step waits for it before it boots.
+    ///
+    /// [`AdmissionDurability::wait`]: crate::admission_durability::AdmissionDurability::wait
+    pub admission_durability: Option<crate::admission_durability::AdmissionDurability>,
+}
+
+impl VmStartConfig {
+    /// Wait for the admission's audit sync when it is still in flight; see
+    /// [`Self::admission_durability`]. Waiting again once the sync has
+    /// finished costs nothing, so every path that is about to let the
+    /// workload run waits, whether or not an earlier step already did.
+    pub fn wait_for_admission_durability(&self) -> Result<()> {
+        crate::admission_durability::wait_for(self.admission_durability.as_ref())
+    }
 }
 
 /// Envelope carried in the `mvm.verb_grant=<base64(JSON)>` kernel-cmdline token.

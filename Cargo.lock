@@ -3121,6 +3121,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
+ "tracing",
 ]
 
 [[package]]
@@ -3188,6 +3189,20 @@ dependencies = [
  "x25519-dalek",
  "x509-parser",
  "zeroize",
+]
+
+[[package]]
+name = "mvm-fc-lifecycle"
+version = "0.24.0"
+dependencies = [
+ "hex",
+ "libc",
+ "mvm-vmm",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -3290,6 +3305,7 @@ dependencies = [
  "aya",
  "base64 0.22.1",
  "chrono",
+ "core-foundation 0.10.1",
  "ctor",
  "ed25519-dalek",
  "etherparse",
@@ -3299,6 +3315,7 @@ dependencies = [
  "hmac",
  "httparse",
  "ipnet",
+ "keyring",
  "landlock",
  "leakguard",
  "libc",
@@ -3321,6 +3338,7 @@ dependencies = [
  "rustls",
  "seccompiler",
  "secrecy",
+ "security-framework",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -3333,6 +3351,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xtask",
  "zeroize",
 ]
@@ -3481,8 +3500,6 @@ dependencies = [
  "toml 0.8.23",
  "tree-sitter",
  "tree-sitter-nix",
- "tree-sitter-python",
- "tree-sitter-typescript",
 ]
 
 [[package]]
@@ -3511,6 +3528,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
+ "socket2",
  "tempfile",
  "tracing",
  "virtio-queue",
@@ -3546,7 +3564,6 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
- "serde_yaml",
  "sha2 0.11.0",
  "tar",
  "tempfile",
@@ -4259,9 +4276,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.16"
+version = "0.11.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
+checksum = "0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -4947,19 +4964,6 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
-]
-
-[[package]]
-name = "serde_yaml"
-version = "0.9.34+deprecated"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
 ]
 
 [[package]]
@@ -6101,12 +6105,6 @@ dependencies = [
  "crypto-common 0.2.2",
  "ctutils",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"

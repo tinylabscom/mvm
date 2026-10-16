@@ -109,6 +109,12 @@ pub fn factory_parent_config(
     launch: &VmStartConfig,
     spec: &StandbySpec,
 ) -> std::result::Result<VmStartConfig, StandbyError> {
+    if launch.caller_registration.is_some() {
+        return Err(StandbyError::SpawnFailed(
+            "caller registration requires cold launch; prepared caller standbys are unavailable"
+                .into(),
+        ));
+    }
     let image = spec.image_path.as_deref().ok_or_else(|| {
         StandbyError::SpawnFailed(format!("standby '{}' has no rootfs image to boot", spec.id))
     })?;
@@ -146,10 +152,14 @@ pub fn factory_parent_config(
         runner_dir: _,
         tenant_id: _,
         plan_json: _,
+        caller_registration: _,
         bundle_json: _,
         warm_pool_size: _,
         network_policy: _,
         dev_console: _,
+        // A parent is admitted under no plan, so no admission of the launch's
+        // has anything to say about when it may be activated.
+        admission_durability: _,
         // ── The guest's boot shape: carried verbatim, because a child inherits
         // all of it from the parent's restored memory. `gpu` rides here for
         // the same reason: the GPU channel is part of the device model a
@@ -223,10 +233,12 @@ pub fn factory_parent_config(
         runner_dir: None,
         tenant_id: None,
         plan_json: None,
+        caller_registration: None,
         bundle_json: None,
         warm_pool_size: 0,
         network_policy: parent_egress_enablement(spec.vsock_egress),
         dev_console: false,
+        admission_durability: None,
     };
 
     ensure_parent_can_reach_an_agent(&spec.id, &parent)?;
@@ -269,6 +281,34 @@ pub fn factory_parent_spec(
     base_bootargs: impl Fn(bool) -> String,
 ) -> VmmSpec {
     factory_parent_spec_inner(config, state_dir, base_bootargs, false)
+}
+
+/// [`factory_parent_spec`] plus `slots` read-only late-volume slots.
+///
+/// The slots go after every block the launch shape carries, so a child whose
+/// launch adds volumes finds each one at the device node the parent booted a
+/// placeholder in, and the cmdline declares the count so the guest starts the
+/// one helper that can mount them after restore. A parent with no slots is
+/// exactly the plain factory spec.
+pub(crate) fn slotted_factory_parent_spec(
+    config: &VmStartConfig,
+    state_dir: &Path,
+    base_bootargs: impl Fn(bool) -> String,
+    slots: u8,
+) -> VmmSpec {
+    let mut spec = factory_parent_spec(config, state_dir, base_bootargs);
+    if slots > 0 {
+        spec.blocks
+            .extend(mvm_vmm::host::late_volumes::parent_slot_blocks(
+                config, state_dir, slots,
+            ));
+        spec.cmdline = format!(
+            "{} {}",
+            spec.cmdline,
+            mvm_agentd::late_volumes::slots_token(slots)
+        );
+    }
+    spec
 }
 
 /// Build the factory parent shape for the native HVF live handoff. The stable

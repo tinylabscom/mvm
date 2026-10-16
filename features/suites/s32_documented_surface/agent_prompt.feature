@@ -12,6 +12,11 @@ Feature: A machine's resident agent takes prompts, and a fork replays them
   answers its next prompt as turn three, while a fork that received nothing,
   or received it onto the wrong state, answers with some other turn.
 
+  A prompt to a replayed fork is recorded and step-checkpointed under the
+  fork's own session, exactly as one to a booted machine is, so the fork's
+  session replays onto a second fork, which answers its next prompt as turn
+  four.
+
   @live @snapshot
   Scenario: recorded prompts replay onto a fork of the session's base
     Given the prompt agent machine is running
@@ -26,7 +31,14 @@ Feature: A machine's resident agent takes prompts, and a fork replays them
     When I run mvmctl against the prompt agent with "agent-session replay bdd-prompt --as bdd-prompt-replay"
     Then the command exits with code 0
     And the prompt agent reports "replayed 2 prompt(s)"
-    When I run mvmctl against the prompt agent with "machine prompt bdd-prompt-replay third --no-step-checkpoint"
+    When I run mvmctl against the prompt agent with "machine prompt bdd-prompt-replay third"
     Then the command exits with code 0
     And the output contains "turn 3: third"
+    And the prompt agent does not report "step checkpoint failed"
+    When I run mvmctl against the prompt agent with "agent-session replay bdd-prompt-replay --as bdd-prompt-replay-2"
+    Then the command exits with code 0
+    And the prompt agent reports "replayed 1 prompt(s)"
+    When I run mvmctl against the prompt agent with "machine prompt bdd-prompt-replay-2 fourth --no-step-checkpoint"
+    Then the command exits with code 0
+    And the output contains "turn 4: fourth"
     Then the prompt agent machines are removed

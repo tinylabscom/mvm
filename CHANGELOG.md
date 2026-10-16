@@ -4,6 +4,12 @@ All notable changes to mvm are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **fs**: Hold a runtime overlay to the guest paths its own version promises, so a signed bundle pinned to the published image set's overlay boots again instead of being refused for the declared-command shims it predates
+- **bdd**: Accept the standby an unnamed run leaves behind, and the child preloaded for it, in the live warm-claim leak check, waiting a bounded time for the detached refill to register them
+- **bdd**: Expect the proxy-era denial from the entrypoint-denial example: the host names the blocked destination and curl exits 22
+- **sdk**: Pin the SDK release manifest's runtime to the 0.24.0 workspace it is compiled against
+
 ## [0.24.0] — 2026-10-12
 
 v0.23.0 was tagged but never published: its release run did not pass the live gates. v0.23.1 was prepared but never tagged. This is the first release since v0.22.0, so it also ships everything listed under 0.23.0 below.

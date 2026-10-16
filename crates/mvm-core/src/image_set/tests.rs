@@ -500,6 +500,36 @@ fn linux_direct_backend_support_is_explicit_and_non_linux_tiers_refuse() {
     assert!(BackendImageSupport::for_backend(BackendKind::AppleContainer).is_none());
 }
 
+#[test]
+fn qemu_declares_raw_and_elf_kernel_formats() {
+    use crate::kernel_format::KernelFormat;
+    use crate::vm_backend::BackendKind;
+
+    let qemu = BackendImageSupport::for_backend(BackendKind::Qemu).expect("qemu is Linux-direct");
+    let fc = BackendImageSupport::for_backend(BackendKind::Firecracker)
+        .expect("firecracker is Linux-direct");
+
+    // QEMU accepts ELF (with PVH), bzImage (Raw), and arm64 Image.
+    assert!(
+        qemu.artifact_formats
+            .contains(&ArtifactFormat::Kernel(KernelFormat::Elf))
+    );
+    assert!(
+        qemu.artifact_formats
+            .contains(&ArtifactFormat::Kernel(KernelFormat::Raw))
+    );
+    assert!(
+        qemu.artifact_formats
+            .contains(&ArtifactFormat::Kernel(KernelFormat::Image))
+    );
+
+    // Firecracker does NOT accept bzImage (Raw); QEMU does.
+    assert!(
+        !fc.artifact_formats
+            .contains(&ArtifactFormat::Kernel(KernelFormat::Raw))
+    );
+}
+
 fn host() -> HostProtocolSupport {
     HostProtocolSupport {
         base_image_contract: BaseImageContractRange::SUPPORTED,

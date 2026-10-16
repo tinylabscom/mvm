@@ -260,8 +260,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_distribution_signature_is_never_replaced_to_repair_an_entitlement() {
-        use wait_timeout::ChildExt;
-
         // Keep the stub-only PATH out of the process running concurrent tests.
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -273,7 +271,10 @@ mod tests {
             .env("MVM_TEST_CODESIGN_DISTRIBUTION_FIXTURE", "1")
             .spawn()
             .unwrap();
-        let waited = child.wait_timeout(std::time::Duration::from_secs(10));
+        let waited = crate::host::process_exit::wait_for_test_child(
+            &mut child,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        );
         if !matches!(waited, Ok(Some(_))) {
             let _ = child.kill();
             child

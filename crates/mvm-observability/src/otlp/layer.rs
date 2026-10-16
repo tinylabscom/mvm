@@ -9,7 +9,9 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::{LookupSpan, SpanRef};
 
 use super::export::SpanQueue;
-use super::record::{AttrValue, EventRecord, FieldVisitor, SpanRecord, set_attribute};
+use super::record::{
+    AttrValue, EventRecord, FieldVisitor, SpanRecord, bounded_string, set_attribute,
+};
 
 /// Events buffered per open span. Beyond this they are shed and counted, so
 /// a long-lived span under an event flood holds bounded memory. 128 follows
@@ -107,11 +109,14 @@ fn event_record(event: &Event<'_>) -> EventRecord {
         "level",
         AttrValue::Str(metadata.level().to_string()),
     );
+    FieldVisitor::note_dropped(visitor.dropped_attributes, &mut visitor.attributes);
     EventRecord {
         time: SystemTime::now(),
-        name: visitor
-            .message
-            .unwrap_or_else(|| metadata.name().to_string()),
+        name: bounded_string(
+            visitor
+                .message
+                .unwrap_or_else(|| metadata.name().to_string()),
+        ),
         attributes: visitor.attributes,
     }
 }
@@ -177,6 +182,7 @@ where
         if let Some(message) = data.visitor.message {
             set_attribute(&mut attributes, "message", AttrValue::Str(message));
         }
+        FieldVisitor::note_dropped(data.visitor.dropped_attributes, &mut attributes);
         if data.dropped_events > 0 {
             let shed = i64::try_from(data.dropped_events).unwrap_or(i64::MAX);
             set_attribute(&mut attributes, DROPPED_EVENTS_ATTR, AttrValue::Int(shed));
@@ -342,6 +348,23 @@ mod tests {
     /// The flipped capture-gap regression: an event outside any span becomes
     /// a standalone event record on the bounded queue, or a counted loss when
     /// the queue is full — never a silent drop.
+    #[test]
+    fn a_span_attribute_value_is_bounded_in_size() {
+        let spans = capture(|| {
+            let span = tracing::info_span!("wide", huge = tracing::field::Empty);
+            let _entered = span.enter();
+            let long = "x".repeat(super::super::record::MAX_ATTR_VALUE_BYTES * 2);
+            span.record("huge", long.as_str());
+        });
+        let wide = named(&spans, "wide");
+        match attribute(wide, "huge") {
+            Some(AttrValue::Str(v)) => {
+                assert_eq!(v.len(), super::super::record::MAX_ATTR_VALUE_BYTES);
+            }
+            other => panic!("expected a bounded string, got {other:?}"),
+        }
+    }
+
     #[test]
     fn an_event_outside_any_span_is_captured_as_a_standalone_record() {
         let (queue, rx) = span_queue(64);

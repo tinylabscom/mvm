@@ -98,6 +98,12 @@ fn start_vm_firecracker_inner(abs_dir: &str, abs_socket: &str, scope: &str) -> R
     super::idle_pool::forget_claim_origin(std::path::Path::new(abs_dir));
     run_in_vm_visible(&firecracker_launch_script(abs_dir, abs_socket, scope))?;
     await_started_firecracker(abs_dir, abs_socket, scope)?;
+    // Every launch, not only a cold boot: the snapshot-restore path starts its
+    // own fresh VMM through this same function and then speaks to the socket
+    // in-process, and a root-created socket it had not been handed refused the
+    // non-root claimer with EACCES.
+    adopt_api_socket(abs_socket)
+        .context("adopting the Firecracker API socket for the invoking user")?;
     ui::info("Firecracker started.");
     Ok(())
 }
@@ -151,6 +157,12 @@ fn await_started_firecracker(abs_dir: &str, abs_socket: &str, scope: &str) -> Re
 }
 
 /// Where the launch script sends Firecracker's stderr, relative to the VM dir.
+///
+/// It and `console.log` carry guest and VMM diagnostics, so the script
+/// replaces both with fresh 0600 files before Firecracker's redirections open
+/// them: a link left at either path is removed rather than written through, and
+/// neither file is ever created under the caller's umask. The umask is set in a
+/// subshell so Firecracker's own sockets keep the modes it chooses.
 const FIRECRACKER_STDERR_LOG: &str = "firecracker.log";
 
 /// How much of that log a startup failure quotes. Firecracker reports a
@@ -315,7 +327,7 @@ fn launch_script(
         mkdir -p {q_dir} {q_socket_dir}
         {sudo}rm -f {q_socket}
         {vsock_cleanup}
-        touch {q_dir}/console.log {q_dir}/firecracker.log
+        (umask 077 && rm -f {q_dir}/console.log {q_dir}/firecracker.log && touch {q_dir}/console.log {q_dir}/firecracker.log)
         {scope}{sudo}setsid nohup sh -c {payload} \
             </dev/null >{q_dir}/console.log 2>{q_dir}/firecracker.log &
         {record_launcher}
@@ -376,6 +388,27 @@ pub fn api_put_socket(socket: &str, path: &str, data: &str) -> Result<()> {
     fc_api_call("PUT", socket, path, Some(data))
 }
 
+/// Open a keep-alive session to the Firecracker API socket, reusing one
+/// connection across multiple calls. The boot config sequence sends ~11 PUTs;
+/// pipelining them through one connection saves 10 connect round trips.
+pub fn api_session(socket: &str) -> Result<crate::fc::fc_api::FcSession> {
+    crate::fc::fc_api::FcSession::connect(std::path::Path::new(socket))
+}
+
+/// Send an API PUT through an open session, with the same path validation as
+/// [`api_put_socket`].
+#[instrument(skip_all, fields(path))]
+pub fn api_put_session(
+    session: &mut crate::fc::fc_api::FcSession,
+    path: &str,
+    data: &str,
+) -> Result<()> {
+    if !path.starts_with('/') || path.contains(['\r', '\n']) {
+        anyhow::bail!("refusing malformed Firecracker API path {path:?}");
+    }
+    session.call("PUT", path, Some(data)).map(|_body| ())
+}
+
 /// Hand the Firecracker-created vsock multiplexer socket to the mvmctl user.
 ///
 /// Firecracker runs as root and consequently creates this socket as root. Only
@@ -427,12 +460,29 @@ fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Re
     crate::fc::fc_api::call(std::path::Path::new(socket), method, path, data).map(|_body| ())
 }
 
+/// Hand a restored Firecracker's vsock socket to the invoking user.
+///
+/// A snapshot load creates the restored device model, and the VMM binds the
+/// vsock socket the snapshot (or a fork's override) names right then — as root
+/// when it was launched through `sudo`. The claim that follows dials that
+/// socket as the invoking user, so a restore gives it the same hand-off a cold
+/// boot gives its vsock socket after `PUT /vsock`. A load that restored no
+/// vsock device bound nothing, and there is nothing to hand over.
+pub fn secure_restored_vsock_socket(vsock: &std::path::Path) -> Result<()> {
+    if !is_unix_socket(vsock) {
+        return Ok(());
+    }
+    secure_vsock_socket_for_caller(&vsock.to_string_lossy())
+}
+
 /// Hand the Firecracker-created API socket to the invoking user.
 ///
 /// Firecracker is launched through `sudo`, so it creates its API socket as
 /// root and nothing but root can dial it — which is why every API call used to
 /// be a `sudo curl`. Transferring ownership once, at mode 0600, lets the rest
-/// of the boot speak to the socket in-process.
+/// of the boot speak to the socket in-process. [`start_vm_firecracker_inner`]
+/// does this for every VMM it starts, so the cold boot and the snapshot
+/// restore cannot drift apart on it.
 ///
 /// Privilege justification: `chown` is privileged and must be done once, by the
 /// same `sudo` session that launched Firecracker. After this hand-off the rest
@@ -483,8 +533,12 @@ mod tests {
             idle.contains("umask 077"),
             "root keeps its records owner-only"
         );
+        // Every launch line creates its log files owner-only; only root's
+        // payload also narrows the identity record it writes under sudo.
         let as_user = launch_script("/p/i", "/p/i/fc.socket", "", 1000, Some("/p/i/id"));
-        assert!(!as_user.contains("umask"), "{as_user}");
+        assert!(idle.contains("'umask 077; s=$("), "{idle}");
+        assert!(!as_user.contains("'umask 077; s=$("), "{as_user}");
+        assert!(as_user.contains("(umask 077 && rm -f"), "{as_user}");
         let vm = firecracker_launch_script_as("/tmp/vm", "/tmp/vm/fc.socket", "", 0);
         assert!(!vm.contains("/proc/$$/stat"), "{vm}");
         assert!(
@@ -569,6 +623,70 @@ mod tests {
         ensure_api_socket_fits("/srv/vms/w/fc.socket").expect("a short path fits");
     }
 
+    /// Runs the real script with a stand-in for Firecracker. The launch's
+    /// redirections run in the background, so the assertions read what the
+    /// foreground creation guaranteed before any of them could open a file.
+    #[test]
+    fn the_launch_script_creates_private_logs_and_never_writes_through_a_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let vm = root.path().join("vm");
+        std::fs::create_dir(&vm).unwrap();
+        let victim = root.path().join("victim");
+        std::fs::write(&victim, b"untouched").unwrap();
+        let victim_mode = std::fs::metadata(&victim).unwrap().permissions().mode();
+        std::os::unix::fs::symlink(&victim, vm.join("console.log")).unwrap();
+        std::fs::write(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            b"SYNTHETIC_MARKER from a prior run",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            vm.join(FIRECRACKER_STDERR_LOG),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+
+        let script = firecracker_launch_script_as(
+            vm.to_str().unwrap(),
+            vm.join("fc.socket").to_str().unwrap(),
+            "",
+            0,
+        );
+        let stubs = root.path().join("bin");
+        std::fs::create_dir(&stubs).unwrap();
+        std::fs::write(stubs.join("firecracker"), b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(
+            stubs.join("firecracker"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", format!("{}:/usr/bin:/bin", stubs.display()))
+            .status()
+            .expect("run launch script");
+        assert!(status.success());
+
+        for name in ["console.log", FIRECRACKER_STDERR_LOG] {
+            let meta = std::fs::symlink_metadata(vm.join(name)).unwrap();
+            assert!(meta.file_type().is_file(), "{name} is a fresh regular file");
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600, "{name}");
+            let body = std::fs::read(vm.join(name)).unwrap();
+            assert!(
+                !body.windows(16).any(|w| w == b"SYNTHETIC_MARKER"),
+                "{name} kept a prior run's payload"
+            );
+        }
+        assert_eq!(std::fs::read(&victim).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().permissions().mode(),
+            victim_mode
+        );
+    }
+
     #[test]
     fn the_launch_script_creates_a_relocated_socket_directory() {
         let script = firecracker_launch_script_as(
@@ -642,6 +760,69 @@ mod tests {
         assert!(scripts[0].contains("chmod 0600"));
         assert!(scripts[0].contains("'/tmp/vm with quote'\\''/runtime/v.sock'"));
         assert!(!scripts[0].contains("chmod 0666"));
+    }
+
+    /// A restore whose snapshot carried no vsock device bound no socket, so
+    /// there is nothing to hand to the invoking user and no shell to run.
+    #[test]
+    fn a_restore_that_bound_no_vsock_socket_hands_nothing_over() {
+        use mvm_vmm::host::shell::mock as shell_mock;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&dir.path().join("runtime/v.sock"))
+            .expect("a missing vsock socket is not an error");
+        assert!(scripts.lock().expect("scripts lock").is_empty());
+    }
+
+    /// A restore that did bind the vsock socket hands it over exactly as a cold
+    /// boot does: `chown` through sudo for a non-root caller, a bare 0600 for
+    /// root.
+    #[test]
+    fn a_restored_vsock_socket_is_handed_to_the_invoking_user() {
+        use mvm_vmm::host::shell::mock as shell_mock;
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::{Arc, Mutex};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("v.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket");
+        let scripts = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&scripts);
+        let _guard = shell_mock::install_handler(move |script| {
+            captured
+                .lock()
+                .expect("scripts lock")
+                .push(script.to_string());
+            shell_mock::MockResponse::empty()
+        });
+
+        secure_restored_vsock_socket(&socket).expect("hand over the bound socket");
+
+        let scripts = scripts.lock().expect("scripts lock");
+        if effective_user_id() == 0 {
+            assert!(scripts.is_empty());
+            let mode = std::fs::metadata(&socket)
+                .expect("socket metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        } else {
+            assert_eq!(scripts.len(), 1, "{scripts:?}");
+            assert!(scripts[0].contains("sudo chown"), "{}", scripts[0]);
+            assert!(scripts[0].contains("v.sock"), "{}", scripts[0]);
+        }
     }
 
     #[test]

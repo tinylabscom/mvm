@@ -89,6 +89,26 @@ pub(super) fn require_admitted_seccomp_tier(
     )))
 }
 
+/// Refuse a child that did not mount every late volume its claim attached.
+/// An agent too old to take them refuses the request outright; one that took
+/// them must report exactly the count it was handed.
+pub(super) fn require_late_volumes_mounted(
+    child_vm_name: &str,
+    requested: usize,
+    outcome: &PostRestoreOutcome,
+) -> std::result::Result<(), StandbyError> {
+    if requested == 0 || outcome.volumes_mounted == Some(requested as u32) {
+        return Ok(());
+    }
+    let mounted = outcome
+        .volumes_mounted
+        .map_or_else(|| "none".to_string(), |count| count.to_string());
+    Err(StandbyError::ClaimFailed(format!(
+        "forked child '{child_vm_name}' mounted {mounted} of the {requested} read-only volumes \
+         its claim attached; refusing a child whose workload would start without them"
+    )))
+}
+
 /// Map a fail-closed [`ClaimRefusal`] onto the transport-agnostic
 /// [`StandbyError`] the claim seam returns. The refusal reasons stay distinct in
 /// the message so a caller can tell an un-audited parent from a plan mismatch.
@@ -128,6 +148,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier: None,
+            volumes_mounted: None,
         };
         assert!(require_fresh_child_identity("vm-a", &proven).is_ok());
 
@@ -169,6 +190,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier,
+            volumes_mounted: None,
         };
         assert!(
             require_admitted_seccomp_tier(
@@ -212,6 +234,7 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: Some(shortfall),
                 seccomp_tier: None,
+                volumes_mounted: None,
             };
             let err = require_fresh_child_identity("vm-a", &outcome)
                 .expect_err("an unreseeded child must be refused");

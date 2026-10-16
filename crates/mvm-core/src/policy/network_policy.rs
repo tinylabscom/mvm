@@ -16,6 +16,18 @@ pub use mvm_contract::policy::network_policy::{
 
 const SSH_BANNER_HEX_PREFIX: &str = "|5353482d|";
 
+/// Lowercase-hex SHA-256 of a resolved policy's canonical serialization.
+///
+/// Admission records this digest as the plan's network-policy asset identity,
+/// and a warm claim compares the policy it is about to install in a child's
+/// endpoint against it. One function so the two can never hash different
+/// bytes for the same policy.
+pub fn content_sha256(policy: &NetworkPolicy) -> String {
+    use sha2::Digest as _;
+    let bytes = serde_json::to_vec(policy).expect("a network policy always serializes");
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
 /// Generate the iptables shell script fragment for `policy`.
 /// Returns `None` if unrestricted (no rules needed).
 ///

@@ -528,12 +528,14 @@ mod tests {
             runner_dir: None,
             tenant_id: None,
             plan_json: None,
+            caller_registration: None,
             bundle_json: None,
             warm_pool_size: 0,
             network_policy: Default::default(),
             dev_console: false,
             gpu: false,
             gpu_device: None,
+            admission_durability: None,
         }
     }
 

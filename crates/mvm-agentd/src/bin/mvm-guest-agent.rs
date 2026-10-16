@@ -118,10 +118,10 @@ use crate::state::{ActivationState, AgentBootState, AgentState, IntegrationState
 use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
-    handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
-    handle_display_input, handle_drive_file, handle_drive_open, handle_entrypoint_status,
-    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
-    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    PostRestoreInputs, handle_cancel_extension, handle_checkpoint_integrations,
+    handle_close_stream_input, handle_display_input, handle_drive_file, handle_drive_open,
+    handle_entrypoint_status, handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move,
+    handle_fs_read, handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
     handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
     handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
     handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
@@ -491,13 +491,17 @@ fn handle_client(
                 host_epoch_secs,
                 grant_envelope,
                 seccomp_tier,
+                volumes,
             } => handle_post_restore(
                 &mut ctx,
-                token,
-                hostname.as_deref(),
-                host_epoch_secs,
-                grant_envelope,
-                seccomp_tier,
+                PostRestoreInputs {
+                    token,
+                    hostname,
+                    host_epoch_secs,
+                    grant_envelope,
+                    seccomp_tier,
+                    volumes,
+                },
             ),
 
             GuestRequest::Exec {
@@ -777,6 +781,12 @@ fn serve_until_activated(listener: &AgentListener, server: &GuestServer) -> bool
 fn main() {
     // The reseed helper is this binary started with one argument; it must not
     // parse agent configuration or touch any agent state.
+    // So is the late-volume helper, which serves one request and exits.
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(mvm_agentd::late_volumes::HELPER_ARG))
+    {
+        std::process::exit(mvm_agentd::late_volumes::run_helper());
+    }
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(mvm_agentd::crng_reseed::HELPER_ARG))
     {

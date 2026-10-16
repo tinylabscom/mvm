@@ -142,6 +142,9 @@ pub struct PostRestoreOutcome {
     /// `None` when the request named no tier, or when the guest refused the
     /// one it was handed.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// How many late volumes the guest reports mounting. `None` when the
+    /// request named none, or when the guest refused them.
+    pub volumes_mounted: Option<u32>,
 }
 
 /// Turn the guest's answer into an outcome. Split out so the mapping — which
@@ -155,6 +158,7 @@ fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<P
             clock_resynced,
             reseed_shortfall,
             seccomp_tier,
+            volumes_mounted,
         } => Ok(PostRestoreOutcome {
             acknowledged: success,
             detail,
@@ -162,6 +166,7 @@ fn outcome_from_response(response: mvm_agentd::vsock::GuestResponse) -> Result<P
             clock_resynced,
             reseed_shortfall,
             seccomp_tier,
+            volumes_mounted,
         }),
         other => bail!("unexpected response to PostRestore: {other:?}"),
     }
@@ -270,6 +275,9 @@ pub struct ChildIdentity {
     /// parent boots with no plan and holds no tier, so the child's has to
     /// arrive here.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Read-only volumes the claim attached to the parent's late-volume
+    /// slots, for the guest to mount before it acknowledges.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 impl ChildIdentity {
@@ -278,6 +286,7 @@ impl ChildIdentity {
     pub fn signal(self) -> VsockPostRestoreSignal {
         VsockPostRestoreSignal::for_resumed_child(self.token, self.grant_envelope)
             .with_seccomp_tier(self.seccomp_tier)
+            .with_volumes(self.volumes)
     }
 }
 
@@ -301,6 +310,8 @@ pub struct VsockPostRestoreSignal {
     /// acknowledges. Set for a child restored out of a standby parent, which
     /// booted with no plan and so holds no tier of its own.
     pub seccomp_tier: Option<mvm_core::crypto::seccomp::SeccompTier>,
+    /// Late volumes the restored guest must mount before it acknowledges.
+    pub volumes: Vec<mvm_agentd::vsock::VolumeConfig>,
 }
 
 impl VsockPostRestoreSignal {
@@ -322,7 +333,15 @@ impl VsockPostRestoreSignal {
             hostname: None,
             grant_envelope,
             seccomp_tier: None,
+            volumes: Vec::new(),
         }
+    }
+
+    /// Hand the restored guest the late volumes its claim attached.
+    #[must_use]
+    pub fn with_volumes(mut self, volumes: Vec<mvm_agentd::vsock::VolumeConfig>) -> Self {
+        self.volumes = volumes;
+        self
     }
 
     /// Hand the restored guest the seccomp tier its claiming plan admits.
@@ -342,6 +361,7 @@ impl VsockPostRestoreSignal {
             host_epoch_secs: Some(host_epoch_secs),
             grant_envelope: self.grant_envelope.clone(),
             seccomp_tier: self.seccomp_tier,
+            volumes: self.volumes.clone(),
         }
     }
 }
@@ -471,6 +491,7 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             }),
         };
         let outcome = signal_post_restore("vm-1", &signal, Duration::from_millis(500))
@@ -497,6 +518,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: Some(mvm_agentd::vsock::ReseedShortfall::HelperMissing),
             seccomp_tier: None,
+            volumes_mounted: None,
         };
         let signal = MockSignalCount {
             calls: std::cell::RefCell::new(0),
@@ -536,6 +558,7 @@ mod tests {
                 clock_resynced: true,
                 reseed_shortfall: None,
                 seccomp_tier: None,
+                volumes_mounted: None,
             }),
         };
         let err = signal_post_restore("vm-1", &signal, Duration::from_millis(30)).unwrap_err();
@@ -645,6 +668,7 @@ mod tests {
             clock_resynced: true,
             reseed_shortfall: None,
             seccomp_tier: Some(SeccompTier::Standard),
+            volumes_mounted: None,
         })
         .unwrap();
         assert_eq!(outcome.seccomp_tier, Some(SeccompTier::Standard));
@@ -689,6 +713,7 @@ mod tests {
             hostname: Some("child-final".to_string()),
             grant_envelope: Some(envelope),
             seccomp_tier: None,
+            volumes: Vec::new(),
         };
 
         let mvm_agentd::vsock::GuestRequest::PostRestore {

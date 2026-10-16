@@ -62,6 +62,9 @@ fn telemetry_asserted(cmdline: &str) -> bool {
 /// diagnostics rather than stdio floods.
 const CAPTURE_RECORDS: usize = 128;
 
+/// Slots in each workload stdio stream's own capture queue (512 KiB each).
+const STDIO_QUEUE_RECORDS: usize = 16;
+
 /// The process capture state, present only on telemetry-asserted boots.
 static CAPTURE: OnceLock<Arc<CaptureState>> = OnceLock::new();
 
@@ -157,10 +160,22 @@ pub(crate) fn init_telemetry() {
         eprintln!("mvm-guest-agent: telemetry capture state construction failed");
         return;
     };
+    // Workload stdout and stderr each get a queue of their own: a workload
+    // flooding one of them sheds (counted and summarized) from its own slots
+    // and cannot crowd out the agent's diagnostics or the other stream.
+    let mut state = state;
+    for producer in [ProducerId::Stdout, ProducerId::Stderr] {
+        match Outbox::new(STDIO_QUEUE_RECORDS, STDIO_QUEUE_RECORDS * MAX_RECORD_BYTES) {
+            Ok(queue) => state = state.with_queue_for(producer, Arc::new(queue)),
+            Err(_) => eprintln!("mvm-guest-agent: stdio capture queue construction failed"),
+        }
+    }
     let state = Arc::new(state);
     if CAPTURE.set(Arc::clone(&state)).is_err() {
         return;
     }
+    // Workload stdout/stderr the output pump reads joins capture too.
+    mvm_agentd::telemetry_capture::install_stdio_tap(Arc::clone(&state));
     // Diagnostics emitted from here on are captured; the tracing-core-only
     // subscriber keeps the sealed closure unchanged. An install failure
     // (another global subscriber — impossible in this bin) leaves the agent
