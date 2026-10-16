@@ -801,6 +801,7 @@ pub(in crate::commands) fn run_secure_started(
         let substrate = crate::exec::SessionAuditSubstrate {
             tenant_id: c.admitted.plan().tenant.0.clone(),
             plan_json,
+            built_pack_check: c.admitted.built_pack_boot_check()?,
             caller_registration: None,
             bundle_json,
             config_files: start_config.config_files,
@@ -1074,6 +1075,12 @@ fn build_exec_request(
             .context("resolving --runtime-pack image source")?
     } else if let Some(source) = source_override {
         source
+    } else if let Some(pin) = args
+        .registry_pack_image
+        .as_ref()
+        .filter(|_| manifest_arg.is_none() && image_ref.is_none())
+    {
+        crate::exec::ImageSource::RegistryPack { pin: pin.clone() }
     } else {
         match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),

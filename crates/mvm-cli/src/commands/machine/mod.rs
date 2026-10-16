@@ -522,10 +522,11 @@ impl MachineRunArgs {
             && self.run.flake.is_none()
             && self.run.deployment.is_none()
             && !self.run.runtime_pack
+            && self.run.registry_pack_image.is_none()
         {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, or \
-                 `--runtime-pack` to boot a new machine"
+                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, `--deployment <dir>`, \
+                 `--runtime-pack`, or an image-bearing `--policy` pack to boot a new machine"
             );
         }
         Ok(())
@@ -649,6 +650,9 @@ fn machine_run_spec(
     } else if args.run.runtime_pack {
         // The verified runtime pack is its own source; recorded via
         // `runtime_pack: true` below, not `image`/`manifest`.
+        (None, None, None)
+    } else if args.run.registry_pack_image.is_some() {
+        // Persist only the built image's exact pin, never a host payload path.
         (None, None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.

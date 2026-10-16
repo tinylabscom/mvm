@@ -249,6 +249,7 @@ impl EntrypointAdmission {
                 plan_json,
                 caller_registration,
                 bundle_json,
+                built_pack_check: ctx.admitted.built_pack_boot_check()?,
                 config_files: start_config.config_files,
                 read_only_materialized_images: ctx
                     .admitted

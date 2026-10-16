@@ -99,6 +99,15 @@ jobs:
           cargo package "${args[@]}"
           ls -la target/package/*.crate
 
+  rust-registry-smoke:
+    needs: [publish]
+    if: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) == 'false' && needs.publish.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rust-registry-smoke.yml
+    with:
+      tag: ${{ inputs.tag }}
+
   publish:
     needs: [bdd, package]
     if: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) == 'false' }}

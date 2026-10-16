@@ -161,6 +161,7 @@ pub fn export_builder_result(
             provenance: Some(request.provenance(verified.build())),
             environment: None,
             boot_assets: None,
+            cli_boot_assets: None,
             out: &request.bundle_out,
             debug_out: request.debug_out.clone(),
         },

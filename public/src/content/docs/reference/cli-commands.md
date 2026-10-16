@@ -1406,10 +1406,13 @@ mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
 ```
 
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
-metadata, universal initramfs, and runtime overlay. Runtime members are acquired
-from the existing authenticated image-set pin; the original image-set manifest
-is carried unchanged. Materialization finishes before the CLI loads its host
-signing key. The builder never receives the publisher key.
+metadata, universal initramfs, runtime overlay and its verity tree. The kernel
+comes from the authenticated Linux image-set pin; the original image-set
+manifest is carried unchanged. Runtime assets come from the matching signed CLI
+release, with the original archive, checksum and both signature bundles retained
+inside the package. Source-built runtime bytes cannot substitute for these
+release proofs. Materialization finishes before the CLI loads its host signing
+key. The builder never receives the publisher key.
 
 `--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
 Packaging currently requires the selected architecture to match the host;
@@ -1432,11 +1435,19 @@ never falls back to an untrusted builder or replaces that seal through one.
 `--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
 not currently supported by that shared exporter.
 
-Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
-They retain the original image-set identity while carrying only the selected
-architecture's runtime archives, not the full builder/base-image release set.
-Older readers refuse these packages. Existing schema 3 packages and full
-embedded image sets retain their existing semantics.
+New portable OCI packages use bundle schema 6's explicit CLI-runtime declaration.
+The consumer verifies the package signature and inventory, then independently
+authenticates the retained CLI-runtime release and checks the prepared overlay,
+verity tree and initramfs against its assembly declaration. Consumer launch does
+not build, assemble, download or use a producer runtime cache. Readers supporting
+only schema 5 or earlier refuse these packages. Existing bundles retain their
+existing semantics; CLI and historical boot-asset declarations cannot be mixed.
+
+The package publisher binds the selected kernel bytes to the embedded Linux
+manifest. This structural binding is not independent Linux-publisher signature
+or current-revocation evidence; applications requiring that stronger authority
+must satisfy their separate admission requirements. A successful archive check
+alone is not a launch-readiness or protected-observer acceptance result.
 
 Bundles carrying their own boot assets use the cold-boot path. The current
 warm-pool preparation command cannot prepare a parent from an archive's pinned
@@ -2057,8 +2068,23 @@ signature and provenance, then publishes the complete payload atomically.
 Installed-pack verification and admission repeat these checks. Registry mirrors
 do not redirect image release origins, and private image releases are unsupported.
 Currently, `pull` refuses built-image packs before downloading payload assets
-because no compatible released image verifier is trusted. Built-image boot
-remains explicitly unsupported. See
+because no compatible released image verifier is trusted. The built-image launch
+path also refuses until that prerequisite and an authenticated CLI runtime release
+are prepared; a source runtime or legacy bundle is not a substitute.
+
+A selected built image carries its exact pack pin, not a saved host payload path.
+Each transient or persistent start reopens the installed descriptor, publisher
+policy, applied image-set revocations and retained base proof. Final image and
+runtime bytes are checked against the admitted plan immediately before backend
+handoff, and the normal runtime lifecycle retains authenticated material for the
+VM and persistent reopen. Built images require a `standard` or `restrictive`
+profile and cold residency; warm-pool and snapshot claims are not enabled for this
+source. SDK sidecar attachments are refused until their selected bytes have a
+release-backed assembly contract. Source packs keep their separate manifest path;
+the persisted slot must match their signed source descriptor.
+
+These gates do not establish a published built-pack or released-client boot
+witness. See
 [pack authoring](/guides/pack-authoring/#built-image-release-assets) for resource
 limits and the split registry/release inventory.
 
@@ -2134,6 +2160,32 @@ under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
 `builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
 selects a workload pack. Other targets are rejected. This command migration
 does not change pack trust or establish any pack as official.
+
+#### Install a signed local candidate
+
+`mvmctl pack registry install-local ns/name@version --manifest-sha256 SHA256
+--manifest PATH --bundle PATH --files DIRECTORY` acquires an already-produced
+candidate without registry lookup, dependency downloads, or runtime launch.
+The exact version and SHA-256 of the signed manifest bytes are required.
+`--manifest` and `--bundle` must each be single-link regular files no larger
+than 1 MiB; paths are limited to 4096 bytes and 64 components. Symlinks,
+hardlinks, special files, and parent traversal are refused.
+
+`--files` is the ready root containing exactly the signed inventory: ordinary
+manifest files plus every built-image descriptor asset at its original name,
+without an additional release-directory prefix. The shared Core limits remain
+4096 payload files and 32 GiB total (with tighter built-asset limits). Metadata,
+publisher trust, revocations, and the compiled built-image verifier pin are
+checked before large payload copying. The private snapshot is checked before
+installation. Dependencies must already be trusted, installed, and locked
+locally; cycles and graphs exceeding 128 packs are refused.
+
+Local acquisition never replaces a conflicting pin or repairs an invalid
+existing cache entry. Registry pin writers serialize installation and pin
+updates, and cache publication is atomic and no-clobber. There is no unsigned
+flag, alternate trust policy, or network fallback. A built candidate still
+requires the independently signed fresh revocation feed and the released
+verifier pin accepted by Core; local transport does not supply those proofs.
 
 ### Bundles in image registries
 

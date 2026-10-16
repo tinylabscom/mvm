@@ -206,6 +206,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             provenance,
             environment,
             boot_assets: None,
+            cli_boot_assets: None,
             out: &args.out,
             debug_out: None,
         },

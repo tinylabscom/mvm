@@ -487,6 +487,119 @@ fn fetch_dev_workload_installs_the_pair_build_layout() {
     );
 }
 
+#[test]
+fn dev_root_selection_uses_format_without_a_legacy_filename_escape() {
+    use mvm_core::image_set::ArtifactFormat;
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let role = ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant);
+    let target = MemberTarget::Arch(ARCH);
+    let root = contract_root(Some(b"1\n"), None);
+    let fixture = ImageSetFixture::complete()
+        .with_base_image_contract(Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER))
+        .publish_dev(
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            target,
+            "dev-kernel",
+            b"kernel".to_vec(),
+        )
+        .publish_dev(role, target, "not-a-root.ext4", b"decoy".to_vec())
+        .publish_dev_extra(role, target, "root-payload", root.clone())
+        .publish_dev_extra(role, target, "meta.json", b"{}".to_vec())
+        .with_artifact_format("not-a-root.ext4", ArtifactFormat::Text)
+        .with_artifact_format("root-payload", ArtifactFormat::Ext4)
+        .with_artifact_format("meta.json", ArtifactFormat::Json);
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    set.fetch_dev_workload(ARCH, out.path()).unwrap();
+    assert_eq!(std::fs::read(out.path().join("rootfs.ext4")).unwrap(), root);
+    assert_eq!(
+        std::fs::read(out.path().join("mvm-meta.json")).unwrap(),
+        b"{}"
+    );
+}
+
+#[test]
+fn installed_workload_requires_each_half_of_the_selected_pair() {
+    use mvm_core::image_set::ArtifactFormat;
+    let profile = WorkloadImageProfile::DefaultTenant;
+    let target = MemberTarget::Arch(ARCH);
+    for missing_role in [
+        ImageSetRole::WorkloadKernel(profile),
+        ImageSetRole::WorkloadRootfs(profile),
+    ] {
+        let manifest = ImageSetFixture::complete()
+            .publish(
+                ImageSetRole::WorkloadKernel(profile),
+                target,
+                "kernel",
+                b"kernel".to_vec(),
+            )
+            .publish(
+                ImageSetRole::WorkloadRootfs(profile),
+                target,
+                "root.ext4",
+                b"root".to_vec(),
+            )
+            .with_artifact_format(
+                "kernel",
+                ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+            )
+            .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
+            .without_member(missing_role, target)
+            .into_manifest();
+        let out = tempfile::tempdir().unwrap();
+        std::fs::write(out.path().join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(out.path().join("rootfs.ext4"), b"root").unwrap();
+        let error = verify_installed_workload_files(&manifest, out.path(), ARCH, profile, None)
+            .expect_err("one authenticated member is not a complete workload");
+        assert!(error.to_string().contains("no complete"), "{error:#}");
+    }
+}
+
+#[test]
+fn installed_workload_refuses_a_symlink_even_when_its_size_and_target_digest_match() {
+    use mvm_core::image_set::ArtifactFormat;
+    let profile = WorkloadImageProfile::DefaultTenant;
+    let target = MemberTarget::Arch(ARCH);
+    let manifest = ImageSetFixture::complete()
+        .publish(
+            ImageSetRole::WorkloadKernel(profile),
+            target,
+            "kernel",
+            b"kernel".to_vec(),
+        )
+        .publish(
+            ImageSetRole::WorkloadRootfs(profile),
+            target,
+            "root.ext4",
+            b"root".to_vec(),
+        )
+        .with_artifact_format(
+            "kernel",
+            ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+        )
+        .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
+        .into_manifest();
+    let out = tempfile::tempdir().unwrap();
+    std::fs::write(out.path().join("target"), b"kernel").unwrap();
+    std::os::unix::fs::symlink("target", out.path().join("vmlinux")).unwrap();
+    std::fs::write(out.path().join("rootfs.ext4"), b"root").unwrap();
+    assert_eq!(
+        std::fs::symlink_metadata(out.path().join("vmlinux"))
+            .unwrap()
+            .len(),
+        6,
+        "the symlink length deliberately equals the declared kernel size"
+    );
+    let error = verify_installed_workload_files(&manifest, out.path(), ARCH, profile, None)
+        .expect_err("matching target bytes cannot turn a symlink into a regular file");
+    assert!(
+        error.to_string().contains("not the declared regular file"),
+        "{error:#}"
+    );
+}
+
 /// A set without dev members refuses the dev fetch with NoMember, so the
 /// caller falls back to a pair build.
 #[test]

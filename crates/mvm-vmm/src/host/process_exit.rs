@@ -272,6 +272,19 @@ pub fn collect_after_exit_event<T, E>(
     }
 }
 
+/// Wait for a test-owned child without installing process-global signal handlers.
+#[cfg(test)]
+pub(crate) fn wait_for_test_child(
+    child: &mut std::process::Child,
+    deadline: Instant,
+) -> anyhow::Result<Option<std::process::ExitStatus>> {
+    let observer = ProcessExitObserver::arm(libc::pid_t::try_from(child.id())?)?;
+    match observer.wait_event(deadline)? {
+        ProcessExitWait::Exited => Ok(collect_after_exit_event(deadline, || child.try_wait())?),
+        ProcessExitWait::TimedOut => Ok(None),
+    }
+}
+
 /// Wait for a process-exit event, falling back to bounded adaptive polling when
 /// the platform observer is unavailable or cannot verify the event.
 ///
@@ -542,6 +555,43 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
+    fn test_child_wait_preserves_exit_status_and_custody() {
+        for code in [0, 37] {
+            require_owned_child_custody().expect("default child custody");
+            let mut child = Command::new("/bin/sh")
+                .env_clear()
+                .args(["-c", "exit \"$1\"", "test-child", &code.to_string()])
+                .spawn()
+                .expect("spawn child");
+            let waited = wait_for_test_child(&mut child, Instant::now() + Duration::from_secs(2));
+            if !matches!(waited, Ok(Some(_))) {
+                let _ = child.kill();
+                child.wait().expect("reap failed fixture");
+            }
+            assert_eq!(waited.unwrap().unwrap().code(), Some(code));
+            require_owned_child_custody().expect("waiting must preserve child custody");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn test_child_wait_timeout_retains_child_and_custody() {
+        require_owned_child_custody().expect("default child custody");
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn long-lived fixture");
+        let waited = wait_for_test_child(&mut child, Instant::now());
+        let still_live = child.try_wait().expect("probe owned child").is_none();
+        child.kill().expect("terminate owned fixture");
+        child.wait().expect("reap owned fixture");
+        assert!(waited.unwrap().is_none());
+        assert!(still_live);
+        require_owned_child_custody().expect("timing out must preserve child custody");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
     fn event_only_preserves_zero_and_nonzero_owned_child_status() {
         for code in [0, 37] {
             let mut child = Command::new("/bin/sh")
@@ -571,7 +621,9 @@ mod tests {
         let first_event = first.wait_event(Instant::now() + Duration::from_secs(2));
         let second = ProcessExitObserver::arm(pid).expect("arm exited, unreaped child");
         let second_event = second.wait_event(Instant::now() + Duration::from_secs(2));
-        let status = child.wait().expect("registration must not reap");
+        let status = wait_for_test_child(&mut child, Instant::now() + Duration::from_secs(2))
+            .expect("wait for already-exited child")
+            .expect("registration must not reap");
         assert!(matches!(first_event, Ok(ProcessExitWait::Exited)));
         assert!(matches!(second_event, Ok(ProcessExitWait::Exited)));
         assert_eq!(status.code(), Some(23));

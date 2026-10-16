@@ -353,7 +353,13 @@ jobs:
                      .githooks/pre-commit.test.sh
 
       - name: Release-asset verifier gate tests
-        run: bash nix/packaging/release/verify-release-assets.test.sh
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          bash nix/packaging/release/verify-release-assets.test.sh
+          python3 nix/packaging/release/verify-release-assets.auth.test.py
+          python3 scripts/test_rust_registry_smoke.py
+          python3 scripts/test-sdk-release-preflight.py
 
       - name: Disposable GCP KVM controller tests
         run: |

@@ -9,6 +9,7 @@ use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
 
+mod install_local;
 mod ls;
 mod revocations;
 mod rm;
@@ -22,6 +23,8 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum RegistryAction {
+    /// Install an explicitly pinned signed local candidate without fetching
+    InstallLocal(install_local::Args),
     /// List pinned registry packs and whether each is installed
     Ls(LsArgs),
     /// Remove a registry pack's cache entry and lock pin
@@ -55,6 +58,7 @@ pub(in crate::commands) struct UpdateArgs {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.action {
+        RegistryAction::InstallLocal(action) => install_local::run(action),
         RegistryAction::Ls(action) => ls::run(action),
         RegistryAction::Rm(action) => rm::run(action),
         RegistryAction::Update(action) => update::run(action),

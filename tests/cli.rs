@@ -2216,6 +2216,7 @@ fn pack_registry_verbs_parse_and_show_help() {
         vec!["pack", "registry", "ls", "--help"],
         vec!["pack", "registry", "rm", "--help"],
         vec!["pack", "registry", "update", "--help"],
+        vec!["pack", "registry", "install-local", "--help"],
         vec!["pack", "registry", "revocations", "update", "--help"],
     ] {
         let out = mvmctl_isolated(std::path::Path::new("/tmp"))
@@ -2234,6 +2235,41 @@ fn pack_registry_verbs_parse_and_show_help() {
         .expect("revocation help");
     let help = String::from_utf8(out.stdout).expect("UTF-8 help");
     assert!(help.contains("--official"));
+}
+
+#[test]
+fn pack_registry_install_local_requires_explicit_pin_and_paths() {
+    let home = tempfile::tempdir().unwrap();
+    let help = mvmctl_isolated(home.path())
+        .args(["pack", "registry", "install-local", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    for flag in ["--manifest-sha256", "--manifest", "--bundle", "--files"] {
+        assert!(help.contains(flag), "{help}");
+    }
+    for argv in [
+        vec!["pack", "registry", "install-local", "runtime/python@1.1.0"],
+        vec![
+            "pack",
+            "registry",
+            "install-local",
+            "runtime/python",
+            "--manifest-sha256",
+            "bad",
+            "--manifest",
+            "missing",
+            "--bundle",
+            "missing",
+            "--files",
+            "missing",
+        ],
+    ] {
+        let out = mvmctl_isolated(home.path()).args(argv).output().unwrap();
+        assert!(!out.status.success());
+        assert!(!home.path().join("registry/packs.lock.toml").exists());
+    }
 }
 
 #[test]

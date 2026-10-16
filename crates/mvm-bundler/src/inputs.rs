@@ -19,6 +19,16 @@ pub struct BootAssetsInputs<'a> {
     pub initramfs: &'a Path,
 }
 
+/// Durable release proofs and prepared bytes for a schema-6 portable bundle.
+/// The caller authenticates the release and verifies the assembly first.
+#[derive(Debug, Clone)]
+pub struct CliBootAssetsInputs<'a> {
+    pub manifest_bytes: &'a [u8],
+    pub manifest_sha256: &'a mvm_core::packs::Sha256Hex,
+    pub runtime: &'a mvm_core::plan::bundle::EmbeddedCliBootAssets,
+    pub artifacts: &'a [(&'a str, &'a Path)],
+}
+
 /// Everything one export reads.
 ///
 /// The verity pair is taken as the caller found it rather than as one value:
@@ -27,6 +37,7 @@ pub struct BootAssetsInputs<'a> {
 #[derive(Debug, Clone)]
 pub struct BundleExportInputs<'a> {
     pub boot_assets: Option<BootAssetsInputs<'a>>,
+    pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -73,6 +84,7 @@ impl<'a> BundleExportInputs<'a> {
     pub fn new(vmlinux: &'a str, rootfs: &'a str, arch_label: &'a str, out: &'a Path) -> Self {
         Self {
             boot_assets: None,
+            cli_boot_assets: None,
             vmlinux,
             initrd: None,
             rootfs,
