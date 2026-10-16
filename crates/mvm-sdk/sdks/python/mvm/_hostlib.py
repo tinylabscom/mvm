@@ -27,6 +27,7 @@ import os
 import shutil
 import sys
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable, List, Literal, Optional, Tuple
 
 from mvm._env.vars import MVM_HOSTLIB_PATH_ENV
@@ -35,6 +36,7 @@ from mvm._errors.types import (
     STATUS_OK as _OK,
     HostLibraryAbiError,
     HostLibraryError,
+    HostLibraryInternalError,
     MvmTransportError,
 )
 from mvm._hostabi.methods import ABI_MAJOR, ABI_MINOR
@@ -42,6 +44,22 @@ from mvm._hostabi.methods import ABI_MAJOR, ABI_MINOR
 #: Environment variable naming the library file. The name is owned by the
 #: Rust registry, so the CLI that sets it and the SDKs that read it agree.
 LIB_PATH_ENV = MVM_HOSTLIB_PATH_ENV
+
+@dataclass(frozen=True, kw_only=True)
+class RecoveryRequiredDetails:
+    """Validated recovery metadata, not a recovery operation or authority."""
+
+    machine_id: str
+    plan_id: str
+    reason: str
+
+
+def _protocol_error(status: int) -> HostLibraryError:
+    error = HostLibraryInternalError("malformed host library error response")
+    error.code = "INTERNAL"
+    error.retryable = False
+    error.status = status
+    return error
 
 #: Where a package that bundles the library keeps it, beside this module.
 PACKAGED_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_native")
@@ -247,13 +265,39 @@ def call(
     fn = invoke if invoke is not None else _invoke
     request_json = b"" if request is None else json.dumps(request, separators=(",", ":")).encode()
     status, body = fn(method, request_json)
-    parsed = json.loads(body) if body else None
     if status == _OK:
-        return parsed
+        return json.loads(body) if body else None
+    invalid_json = False
+    try:
+        parsed = json.loads(body) if body else None
+    except (ValueError, TypeError):
+        parsed = None
+        invalid_json = True
+    # Raise outside the parser's except block so no raw JSON exception/doc is
+    # retained as the context of a safe protocol error.
+    if invalid_json:
+        raise _protocol_error(status)
     fields = parsed if isinstance(parsed, dict) else {}
+    code = fields.get("code")
+    recovery_details = None
+    if status == 12 or code == "RECOVERY_REQUIRED":
+        details = fields.get("details")
+        if (
+            status != 12
+            or code != "RECOVERY_REQUIRED"
+            or fields.get("retryable") is not False
+            or not isinstance(fields.get("message"), str)
+            or not isinstance(details, dict)
+            or set(details) != {"machine_id", "plan_id", "reason"}
+            or not all(isinstance(details[key], str) for key in details)
+        ):
+            raise _protocol_error(status)
+        recovery_details = RecoveryRequiredDetails(**details)
     message = fields.get("message") or f"host library call `{method}` failed (status {status})"
-    exc = CODE_ERRORS.get(fields.get("code"), HostLibraryError)(message)
-    exc.code = fields.get("code")
+    exc = CODE_ERRORS.get(code if isinstance(code, str) else None, HostLibraryError)(message)
+    exc.code = code
     exc.retryable = bool(fields.get("retryable", False))
     exc.status = status
+    if recovery_details is not None:
+        exc.details = recovery_details
     raise exc

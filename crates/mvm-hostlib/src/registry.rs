@@ -50,7 +50,8 @@ use crate::stream::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Classification {
-    /// Safe to offer on a production-admitted machine.
+    /// Safe to offer on a production-admitted machine, or host-local data/admin
+    /// operations independent of guest tier. Not authentication or a role grant.
     ProdSafe,
     /// Development-only guest-agent verb.
     DevOnly,
@@ -201,6 +202,46 @@ fn manifest_info() -> SchemaAndDefs {
 
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
+    MethodDef {
+        name: crate::attestation::EXPORT,
+        key: "attestation_export",
+        summary: "Export a host-signed v0 identity report, not measured-boot evidence.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::attestation::AttestationEmpty>,
+        reply: schema_of::<crate::attestation::AttestationReportData>,
+    },
+    MethodDef {
+        name: crate::attestation::VERIFY,
+        key: "attestation_verify",
+        summary: "Verify a bounded report file under explicitly selected trust.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::attestation::AttestationVerifyRequest>,
+        reply: schema_of::<crate::attestation::AttestationVerificationData>,
+    },
+    MethodDef {
+        name: crate::attestation::STATUS,
+        key: "attestation_status",
+        summary: "Inspect public identity metadata, initializing identity if needed.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::attestation::AttestationEmpty>,
+        reply: schema_of::<crate::attestation::AttestationStatusData>,
+    },
+    MethodDef {
+        name: crate::image_admin::UPDATE,
+        key: "image_revocations_update",
+        summary: "Apply bounded signed revocation files through the canonical store.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::image_admin::UpdateRequest>,
+        reply: schema_of::<crate::image_admin::CheckpointReport>,
+    },
+    MethodDef {
+        name: crate::image_admin::STATUS,
+        key: "image_revocations_status",
+        summary: "Reauthenticate the applied image-set revocation list.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<crate::image_admin::Empty>,
+        reply: schema_of::<crate::image_admin::StatusReport>,
+    },
     MethodDef {
         name: MANIFEST_INFO,
         key: "manifest_info",
@@ -688,6 +729,8 @@ mod tests {
             .chain(crate::guest::METHODS.iter())
             .chain(crate::launch::METHODS.iter())
             .chain(crate::manifest::METHODS.iter())
+            .chain(crate::attestation::METHODS.iter())
+            .chain(crate::image_admin::METHODS.iter())
             .chain(crate::entrypoint::METHODS.iter())
             .chain(crate::stream::METHODS.iter())
             .chain(crate::stream::LOG_METHODS.iter())

@@ -341,6 +341,11 @@ const HOST_LIBRARY: &[SdkErrorType] = &[
         "A fault inside the host library itself.",
         mvm_core::error_codes::INTERNAL,
     ),
+    host_library_error(
+        "MachineRecoveryRequiredError",
+        "The machine requires explicit recovery; details carry machine_id, plan_id and reason. Not retryable.",
+        mvm_core::error_codes::RECOVERY_REQUIRED,
+    ),
 ];
 
 const fn host_library_base() -> SdkErrorType {
@@ -442,6 +447,7 @@ mod tests {
             c::CONFLICT,
             c::REJECTED,
             c::UNAVAILABLE,
+            c::RECOVERY_REQUIRED,
             c::INVALID_INPUT,
             c::ABI_NOT_NEGOTIATED,
             c::EMBEDDER,

@@ -39,6 +39,7 @@ import {
   CODE_ERRORS,
   HostLibraryAbiError,
   HostLibraryError,
+  HostLibraryInternalError,
   MvmTransportError,
   STATUS_OK as OK,
 } from "./_errors/types.js";
@@ -189,6 +190,22 @@ export interface HostLibraryFailure extends Error {
   code?: string;
   retryable?: boolean;
   status?: number;
+  readonly details?: RecoveryRequiredDetails;
+}
+
+/** Validated metadata, not a recovery operation or authority. */
+export interface RecoveryRequiredDetails {
+  readonly machine_id: string;
+  readonly plan_id: string;
+  readonly reason: string;
+}
+
+function protocolError(status: number): HostLibraryFailure {
+  const error = new HostLibraryInternalError("malformed host library error response") as HostLibraryFailure;
+  error.code = "INTERNAL";
+  error.retryable = false;
+  error.status = status;
+  return error;
 }
 
 /** The C-call seam: `(method, requestJson) -> [status, body]`. */
@@ -389,11 +406,39 @@ export function call(method: string, request?: unknown, opts: CallOptions = {}):
       ? Buffer.alloc(0)
       : Buffer.from(JSON.stringify(request), "utf8");
   const [status, body] = invoke(method, requestJson);
-  const parsed: unknown = body.length > 0 ? JSON.parse(body.toString("utf8")) : null;
   if (status === OK) {
-    return parsed;
+    return body.length > 0 ? JSON.parse(body.toString("utf8")) : null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = body.length > 0 ? JSON.parse(body.toString("utf8")) : null;
+  } catch {
+    throw protocolError(status);
   }
   const fields = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  let recoveryDetails: Readonly<RecoveryRequiredDetails> | undefined;
+  if (status === 12 || fields.code === "RECOVERY_REQUIRED") {
+    const details = fields.details;
+    if (
+      status !== 12 || fields.code !== "RECOVERY_REQUIRED" || fields.retryable !== false ||
+      typeof fields.message !== "string" || details === null ||
+      typeof details !== "object" || Array.isArray(details)
+    ) {
+      throw protocolError(status);
+    }
+    const value = details as Record<string, unknown>;
+    const keys = Object.keys(value).sort();
+    if (
+      keys.join(",") !== "machine_id,plan_id,reason" ||
+      typeof value.machine_id !== "string" || typeof value.plan_id !== "string" ||
+      typeof value.reason !== "string"
+    ) {
+      throw protocolError(status);
+    }
+    recoveryDetails = Object.freeze({
+      machine_id: value.machine_id, plan_id: value.plan_id, reason: value.reason,
+    });
+  }
   const message =
     typeof fields.message === "string"
       ? fields.message
@@ -403,5 +448,8 @@ export function call(method: string, request?: unknown, opts: CallOptions = {}):
   err.code = typeof fields.code === "string" ? fields.code : undefined;
   err.retryable = fields.retryable === true;
   err.status = status;
+  if (recoveryDetails !== undefined) {
+    Object.defineProperty(err, "details", { value: recoveryDetails, enumerable: true });
+  }
   throw err;
 }

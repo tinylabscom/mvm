@@ -20,6 +20,8 @@ pub const CONFLICT: &str = "CONFLICT";
 pub const REJECTED: &str = "REJECTED";
 /// The backend cannot answer right now. The only retryable code.
 pub const UNAVAILABLE: &str = "UNAVAILABLE";
+/// The machine needs explicit recovery rather than retrying the request.
+pub const RECOVERY_REQUIRED: &str = "RECOVERY_REQUIRED";
 
 /// A host-library call whose method is unknown or whose request did not
 /// parse.

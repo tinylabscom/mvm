@@ -31,11 +31,20 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.5.
+   fields. The ABI is 1.8.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
-   reports.
+   reports. Status 12 is `RECOVERY_REQUIRED`, with `retryable: false` and
+   required `details` containing only `machine_id`, `plan_id`, and `reason`
+   strings from the typed error. Existing variants omit `details`.
+
+The same-major negotiation accepts a requested minor no newer than the library.
+Negotiation is process-global; the last requesting binding never changes an
+operation's status. Older bindings may expose status 12 as a generic failure
+without typed details, but do not retry it. New bindings validate and expose
+immutable typed recovery details. Those values are metadata, not ownership,
+callbacks, or a recovery operation.
 
 The method registry (`src/registry.rs`) is the source of truth: `cargo xtask
 gen-stubs` renders it into `schema/host-abi-v0.json` and
@@ -52,6 +61,27 @@ classes and method tables for both SDKs.
 | Streams (DevOnly) | `guest.proc.stream.{open,next,close}` | `mvm_client::guest::wait_process`, on a reader thread |
 | Log streams | `machine.logs.stream.{open,next,close}` | `mvm_core::stream_client::open_vm_output` (what `mvmctl machine logs --follow` reads), on a reader thread |
 | Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
+| Host identity | `attestation.export`, `attestation.verify`, `attestation.status` | bounded `mvm_client::attestation` facade, without machine services |
+| Image revocations | `image_revocations.update`, `image_revocations.status` | canonical signed revocation store through `mvm_client::image_admin::revocations` |
+
+These five host-local methods are `ProdSafe` data/admin operations under the
+registry's guest-tier classification, not authentication or a role grant. They
+run after ABI negotiation and before machine service construction. Empty
+operations require literal `{}`. Verification requires explicit
+`{"kind":"self_identity"}` or
+`{"kind":"public_key_file","path":"/trusted/host.pub"}` trust;
+embedded keys, inline key bytes, issuer, storage-root and policy overrides are
+not accepted. New host-local requests reject duplicate or unknown fields and
+return generic parse diagnostics rather than echoing payload bytes.
+
+Export/status and self-identity verification may initialize the local identity.
+The v0 report has a zero boot measurement and no hardware measurement: a valid
+signature is not measured-boot or native readiness evidence. Report envelope
+bytes are JSON integer arrays (0–255), not base64. Status paths describe storage,
+not keys or capabilities. Revocation update/status may initialize the private
+store directory and lock even on refusal or missing state. That infrastructure
+creation is not an applied feed/checkpoint advance. No acquisition, recovery,
+audit-prune, or transcript-export route is added.
 
 `machine.pause`, `machine.resume` and `machine.set_ttl` are recorded in the
 local audit log by `LocalBackend` itself (`WorkloadSleep`, `WorkloadWake`,

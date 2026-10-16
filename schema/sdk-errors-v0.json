@@ -457,6 +457,21 @@
         "python",
         "typescript"
       ]
+    },
+    {
+      "base_python": "HostLibraryError",
+      "base_typescript": "HostLibraryError",
+      "code": "RECOVERY_REQUIRED",
+      "doc": "The machine requires explicit recovery; details carry machine_id, plan_id and reason. Not retryable.",
+      "fields": [],
+      "message_format": null,
+      "name": "MachineRecoveryRequiredError",
+      "status": null,
+      "surfaces": [
+        "rust",
+        "python",
+        "typescript"
+      ]
     }
   ],
   "status_ok": 0,

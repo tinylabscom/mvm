@@ -146,6 +146,12 @@ class HostLibraryInternalError(HostLibraryError):
     """A fault inside the host library itself."""
 
 
+class MachineRecoveryRequiredError(HostLibraryError):
+    """The machine requires explicit recovery; details carry
+    machine_id, plan_id and reason. Not retryable.
+    """
+
+
 #: The success status; any other value is a failure.
 STATUS_OK = 0
 
@@ -176,6 +182,7 @@ CODE_ERRORS = {
     "ABI_NOT_NEGOTIATED": HostLibraryAbiError,
     "EMBEDDER": HostLibraryEmbedderError,
     "INTERNAL": HostLibraryInternalError,
+    "RECOVERY_REQUIRED": MachineRecoveryRequiredError,
 }
 
 __all__ = [
@@ -208,6 +215,7 @@ __all__ = [
     "HostLibraryAbiError",
     "HostLibraryEmbedderError",
     "HostLibraryInternalError",
+    "MachineRecoveryRequiredError",
     "STATUS_OK",
     "STATUS_ERRORS",
     "CODE_ERRORS",

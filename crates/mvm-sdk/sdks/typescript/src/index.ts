@@ -90,12 +90,13 @@ export {
   MachineBackendError,
   MachineConflictError,
   MachineNotFoundError,
+  MachineRecoveryRequiredError,
   MachineRejectedError,
   MachineSpecError,
   MachineUnauthorizedError,
   MachineUnavailableError,
 } from "./_errors/types.js";
-export type { HostLibraryFailure } from "./_hostlib.js";
+export type { HostLibraryFailure, RecoveryRequiredDetails } from "./_hostlib.js";
 export { setApprovalCallback } from "./_hostlib.js";
 export type {
   ApprovalCallback,
@@ -180,6 +181,8 @@ export type { BrowserSandboxOptions } from "./_helpers.js";
 
 // Host-side built-manifest inspection; the host library loads only on use.
 export * as manifest from "./manifest.js";
+export * as attestation from "./attestation.js";
+export * as imageRevocations from "./image_revocations.js";
 
 // PackSpec authoring: data only, no host library, no build.
 export * as packs from "./packs.js";

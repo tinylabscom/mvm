@@ -29,6 +29,76 @@ def test_the_file_name_follows_the_platform():
     assert _hostlib.library_file_name("darwin") == "libmvm_hostlib.dylib"
     assert _hostlib.library_file_name("linux") == "libmvm_hostlib.so"
 
+def test_recovery_details_use_the_generated_error_and_immutable_typed_value():
+    from dataclasses import FrozenInstanceError
+
+    fields = {"machine_id": "machine", "plan_id": "plan", "reason": "recover"}
+    body = json.dumps({"code": "RECOVERY_REQUIRED", "message": "context",
+                       "retryable": False, "details": fields}).encode()
+    with pytest.raises(mvm.MachineRecoveryRequiredError) as caught:
+        _hostlib.call("machine.inspect", {}, invoke=lambda *_: (12, body))
+    error = caught.value
+    assert str(error) == "context"
+    assert error.retryable is False
+    assert error.details == mvm.RecoveryRequiredDetails(**fields)
+    with pytest.raises(FrozenInstanceError):
+        error.details.machine_id = "replacement"
+
+
+@pytest.mark.parametrize("details", [
+    None, [], "private-marker", {}, {"machine_id": "m"},
+    {"machine_id": "m", "plan_id": "p", "reason": 7},
+    {"machine_id": "m", "plan_id": "p", "reason": "r", "extra": "private-marker"},
+])
+def test_malformed_recovery_details_are_nonretryable_without_payload_echo(details):
+    body = json.dumps({"code": "RECOVERY_REQUIRED", "message": "private-marker",
+                       "retryable": False, "details": details}).encode()
+    with pytest.raises(HostLibraryError) as caught:
+        _hostlib.call("machine.inspect", {}, invoke=lambda *_: (12, body))
+    error = caught.value
+    assert error.retryable is False
+    assert not isinstance(error, mvm.MachineRecoveryRequiredError)
+    assert not hasattr(error, "details")
+    assert "private-marker" not in str(error)
+    assert "private-marker" not in repr(error)
+    assert error.__cause__ is None and error.__context__ is None
+
+
+@pytest.mark.parametrize("status,code,retryable", [
+    (12, "UNAVAILABLE", True), (7, "RECOVERY_REQUIRED", False),
+    (12, "RECOVERY_REQUIRED", True), (12, "RECOVERY_REQUIRED", "false"),
+    (12, "RECOVERY_REQUIRED", None),
+])
+def test_recovery_status_code_and_retryability_must_agree(status, code, retryable):
+    body = json.dumps({"code": code, "message": "private-marker", "retryable": retryable,
+                       "details": {"machine_id": "m", "plan_id": "p", "reason": "r"}}).encode()
+    with pytest.raises(HostLibraryError) as caught:
+        _hostlib.call("machine.inspect", {}, invoke=lambda *_: (status, body))
+    assert caught.value.retryable is False
+    assert not hasattr(caught.value, "details")
+    assert "private-marker" not in str(caught.value)
+
+
+def test_malformed_error_json_does_not_retain_a_decoder_source():
+    with pytest.raises(HostLibraryError) as caught:
+        _hostlib.call("machine.inspect", {}, invoke=lambda *_: (12, b"private-marker"))
+    assert caught.value.retryable is False
+    assert caught.value.__context__ is None
+    assert "private-marker" not in str(caught.value)
+
+
+def test_old_unknown_code_rule_drops_details_but_does_not_retry():
+    # The pre-addition decoder's generic fallback has no typed details projection.
+    fields = {"code": "RECOVERY_REQUIRED", "message": "recover", "retryable": False,
+              "details": {"machine_id": "m", "plan_id": "p", "reason": "r"}}
+    old_codes = {code: cls for code, cls in _hostlib.CODE_ERRORS.items()
+                 if code != "RECOVERY_REQUIRED"}
+    error = old_codes.get(fields["code"], HostLibraryError)(fields["message"])
+    error.retryable = bool(fields.get("retryable", False))
+    assert type(error) is HostLibraryError
+    assert error.retryable is False
+    assert not hasattr(error, "details")
+
 
 def test_an_explicit_path_is_the_only_candidate():
     paths = _hostlib.candidate_paths(
