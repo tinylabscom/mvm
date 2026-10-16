@@ -103,6 +103,9 @@ pub struct VmStartConfig {
     pub rootfs_path: String,
     /// Absolute path to the kernel image (Firecracker needs this; others may ignore).
     pub kernel_path: Option<String>,
+    /// In-process canonical data custody. Cloning keeps the SAME owner;
+    /// deserialized paths, hashes or caller-authored metadata cannot supply it.
+    pub canonical_kernel: Option<std::sync::Arc<crate::canonical_linux::PreparedCanonicalLinux>>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
     /// Untrusted pinned bundle inputs for a baked runtime and per-image initrd.

@@ -40,8 +40,11 @@ use crate::plan::bundle::{KeyId, key_id_from_identity};
 
 #[path = "root_cache.rs"]
 mod root_cache;
+#[cfg(all(test, feature = "manifest-verify"))]
+pub(crate) use root_cache::published_root;
 pub use root_cache::{
-    cache_image_set_root, image_set_root_proof_cache, read_cached_image_set_root,
+    RetainedImageSetRootProof, cache_image_set_root, image_set_root_proof_cache,
+    read_cached_image_set_root, read_cached_image_set_root_proof,
 };
 
 /// One image set to verify, and the optional policy inputs that add checks.

@@ -77,10 +77,10 @@ use thiserror::Error;
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BOOT_ASSETS_MEMBER_MIN_SCHEMA, BUNDLE_MEMBERS_MIN_SCHEMA,
     BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember, BundleResources,
-    BundleSecurityPosture, CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA, ENVIRONMENT_MEMBER_MIN_SCHEMA,
-    EmbeddedCliBootAssets, KeyId, MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES,
-    MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact, SIGNATURE_FILENAME, VerityInfo,
-    signature_from_base64, signature_to_base64,
+    BundleSecurityPosture, CANONICAL_LINUX_PROOF_MIN_SCHEMA, CLI_BOOT_ASSETS_MEMBER_MIN_SCHEMA,
+    CanonicalLinuxProof, ENVIRONMENT_MEMBER_MIN_SCHEMA, EmbeddedCliBootAssets, KeyId,
+    MANIFEST_FILENAME, MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES,
+    PlanArtifact, SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
 };
 pub use mvm_contract::plan::environment::{
     ApplicationService, ENVIRONMENT_DESCRIPTOR_VERSION, EnvironmentCapability,
@@ -107,8 +107,8 @@ pub use declarations::{
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
 pub use stream::{
-    BundlePayload, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile, verify_bundle_file,
-    write_bundle_to,
+    BundlePayload, CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile,
+    capture_canonical_linux_inputs, verify_bundle_file, write_bundle_to,
 };
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
 
@@ -636,6 +636,54 @@ pub fn verify_plan_bundle(
     resolver: &dyn BundleResolver,
     trust: &dyn TrustStore,
 ) -> Result<VerifiedBundle, PlanBundleError> {
+    verify_plan_bundle_checked(pin, resolver, trust, |verified| {
+        if verified
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+        {
+            return Err(PlanBundleError::CanonicalKernelCustodyRequired);
+        }
+        Ok(())
+    })
+}
+
+/// The canonical lane additionally requires the SAME in-process owner and
+/// actual launch selection. There is no path/hash/JSON fallback.
+pub fn verify_canonical_plan_bundle(
+    pin: &PlanArtifact,
+    resolver: &dyn BundleResolver,
+    trust: &dyn TrustStore,
+    owner: &std::sync::Arc<crate::canonical_linux::PreparedCanonicalLinux>,
+    config: &crate::vm_backend::VmStartConfig,
+    backend: crate::vm_backend::BackendKind,
+    host: &crate::image_set::HostProtocolSupport,
+) -> Result<VerifiedBundle, PlanBundleError> {
+    verify_plan_bundle_checked(pin, resolver, trust, |verified| {
+        if !verified
+            .manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
+            || owner.pin() != pin
+        {
+            return Err(PlanBundleError::CanonicalKernelBinding(
+                "owner does not bind this canonical bundle".into(),
+            ));
+        }
+        owner
+            .verify_config(config, backend, host)
+            .map_err(|error| PlanBundleError::CanonicalKernelBinding(error.to_string()))
+    })
+}
+
+fn verify_plan_bundle_checked(
+    pin: &PlanArtifact,
+    resolver: &dyn BundleResolver,
+    trust: &dyn TrustStore,
+    admit_kernel: impl FnOnce(&VerifiedBundle) -> Result<(), PlanBundleError>,
+) -> Result<VerifiedBundle, PlanBundleError> {
     let archive = resolver
         .resolve(&pin.bundle_sha256)
         .map_err(PlanBundleError::Resolve)?;
@@ -677,6 +725,8 @@ pub fn verify_plan_bundle(
         return Err(PlanBundleError::SignatureMismatch);
     }
 
+    admit_kernel(&verified)?;
+
     Ok(verified)
 }
 
@@ -686,6 +736,13 @@ pub fn verify_plan_bundle(
 /// found but the pin says they shouldn't be these."
 #[derive(Debug, Error)]
 pub enum PlanBundleError {
+    #[error("canonical kernel binding refused: {0}")]
+    CanonicalKernelBinding(String),
+    #[error(
+        "canonical Linux proof requires retained backend kernel custody; this admission path does not yet support it"
+    )]
+    CanonicalKernelCustodyRequired,
+
     #[error("could not resolve pinned bundle: {0}")]
     Resolve(#[source] BundleResolveError),
 
@@ -992,6 +1049,23 @@ pub fn read_and_verify_bundle(
 /// it: the schema sniff, the key lookup, the signature, the full parse, and
 /// the declaration checks. Everything [`read_and_verify_bundle`] establishes
 /// about the manifest, without looking at a single artifact byte.
+fn check_schema_cap(manifest_bytes: &[u8], supported: u32) -> Result<(), BundleVerifyError> {
+    #[derive(Deserialize)]
+    struct SchemaProbe {
+        schema_version: u32,
+    }
+    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
+        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
+    })?;
+    if probe.schema_version > supported {
+        return Err(BundleVerifyError::UnsupportedSchema {
+            found: probe.schema_version,
+            supported,
+        });
+    }
+    Ok(())
+}
+
 fn verify_signed_manifest(
     manifest_bytes: &[u8],
     sig_bytes: &[u8],
@@ -1004,19 +1078,7 @@ fn verify_signed_manifest(
     // should refuse with UnsupportedSchema, not parse-fail with a
     // misleading deny_unknown_fields error. The signature check
     // still happens before we expose any parsed plan-level fields.
-    #[derive(Deserialize)]
-    struct SchemaProbe {
-        schema_version: u32,
-    }
-    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
-        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
-    })?;
-    if probe.schema_version > BUNDLE_SCHEMA_VERSION {
-        return Err(BundleVerifyError::UnsupportedSchema {
-            found: probe.schema_version,
-            supported: BUNDLE_SCHEMA_VERSION,
-        });
-    }
+    check_schema_cap(manifest_bytes, BUNDLE_SCHEMA_VERSION)?;
 
     // ----- Step 2: pull key_id (still pre-signature) -----
     #[derive(Deserialize)]
@@ -1100,6 +1162,7 @@ fn verify_embedded_image_sets(
             BundleMember::KernelCmdline { .. }
             | BundleMember::EmbeddedBootAssets { .. }
             | BundleMember::EmbeddedCliBootAssets(_)
+            | BundleMember::CanonicalLinuxProof(_)
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)
             | BundleMember::Environment(_) => None,
@@ -1128,6 +1191,7 @@ fn verify_boot_assets(
                 Some((&runtime.manifest_artifact, Some(runtime)))
             }
             BundleMember::EmbeddedImageSet { .. }
+            | BundleMember::CanonicalLinuxProof(_)
             | BundleMember::KernelCmdline { .. }
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_)
@@ -1600,6 +1664,19 @@ mod tests {
             read_and_verify_bundle(&archive, &trust(&sk)),
             Err(BundleVerifyError::MembersRequireSchemaV3 { found: 2 })
         ));
+    }
+
+    #[test]
+    fn schema_six_reader_refuses_canonical_seven_before_parsing_its_member() {
+        let bytes = br#"{"schema_version":7,"members":[{"class":"canonical_linux_proof"}]}"#;
+        assert!(matches!(
+            check_schema_cap(bytes, 6),
+            Err(BundleVerifyError::UnsupportedSchema {
+                found: 7,
+                supported: 6
+            })
+        ));
+        assert!(check_schema_cap(br#"{"schema_version":6}"#, 6).is_ok());
     }
 
     fn boot_bundle(

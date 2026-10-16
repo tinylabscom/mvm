@@ -774,9 +774,90 @@ pub(in crate::commands) fn build_flake_to_slot(
     flake_ref: &str,
     profile: Option<&str>,
 ) -> Result<String> {
+    let (slot, _) = build_flake_slot(flake_ref, profile, None)?;
+    Ok(slot)
+}
+
+/// Build ownership keeps a private source identity and slot alive through all
+/// consumers. The slot record is removed before its source snapshot disappears.
+pub(in crate::commands) struct FrozenFlakeSlot {
+    inputs: mvm_build::pipeline::frozen::FrozenInputs,
+    slot_hash: String,
+    revision_hash: String,
+}
+
+impl FrozenFlakeSlot {
+    fn own(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
+        inputs.verify()?;
+        let flake_ref = inputs
+            .path()
+            .to_str()
+            .context("frozen input path is not UTF-8")?;
+        let resolved = resolve_flake_ref(flake_ref)?;
+        let persisted = flake_slot_manifest(&resolved, None, "private");
+        Ok(Self {
+            slot_hash: persisted.manifest_hash,
+            revision_hash: String::new(),
+            inputs,
+        })
+    }
+
+    pub fn build(inputs: mvm_build::pipeline::frozen::FrozenInputs) -> Result<Self> {
+        let mut owned = Self::own(inputs)?;
+        let flake_ref = owned
+            .inputs
+            .path()
+            .to_str()
+            .context("frozen input path is not UTF-8")?;
+        let (slot, revision) = build_flake_slot(flake_ref, None, Some(&owned.inputs))?;
+        if slot != owned.slot_hash {
+            anyhow::bail!("frozen flake slot identity changed during build");
+        }
+        owned.revision_hash = revision;
+        owned.verify_revision()?;
+        Ok(owned)
+    }
+
+    pub fn verify_revision(&self) -> Result<()> {
+        let current =
+            std::fs::canonicalize(mvm_core::manifest::slot_current_symlink(&self.slot_hash))?;
+        let expected = std::fs::canonicalize(mvm_core::manifest::slot_revision_dir(
+            &self.slot_hash,
+            &self.revision_hash,
+        ))?;
+        if current != expected {
+            anyhow::bail!("private frozen slot no longer selects the returned build revision");
+        }
+        Ok(())
+    }
+
+    pub fn slot_hash(&self) -> &str {
+        &self.slot_hash
+    }
+}
+
+impl Drop for FrozenFlakeSlot {
+    fn drop(&mut self) {
+        let path = mvm_core::manifest::slot_dir(&self.slot_hash);
+        if let Err(error) = std::fs::remove_dir_all(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%error, %path, "removing private frozen build slot failed");
+        }
+    }
+}
+
+fn build_flake_slot(
+    flake_ref: &str,
+    profile: Option<&str>,
+    frozen: Option<&mvm_build::pipeline::frozen::FrozenInputs>,
+) -> Result<(String, String)> {
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
+    if let Some(inputs) = frozen {
+        inputs.verify()?;
+    }
     prepare_builder_vm_image_for_build()
         .context("ensuring the builder VM image before the flake build")?;
 
@@ -801,16 +882,21 @@ pub(in crate::commands) fn build_flake_to_slot(
     let persisted = flake_slot_manifest(&resolved, profile, &backend);
 
     let slot_hash = persisted.manifest_hash.clone();
-    let revision = tmpl::template_build_from_manifest(&persisted, false, false, mode)
-        .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
+    let revision = match frozen {
+        Some(inputs) => tmpl::build_frozen_manifest(&persisted, inputs, mode),
+        None => tmpl::template_build_from_manifest(&persisted, false, false, mode),
+    }
+    .with_context(|| format!("building flake {resolved:?} into slot {slot_hash}"))?;
 
     audit_build_ok("flake-slot", &resolved, &slot_hash, &revision.revision_hash);
 
     // Record the compiled image as an audited version-lineage node (same
     // fail-closed posture as the manifest build path).
-    super::image_lineage::record_flake_build_node(&persisted, &revision)?;
+    if frozen.is_none() {
+        super::image_lineage::record_flake_build_node(&persisted, &revision)?;
+    }
 
-    Ok(slot_hash)
+    Ok((slot_hash, revision.revision_hash))
 }
 
 fn flake_slot_manifest(
@@ -837,6 +923,60 @@ fn volume_lockfile_sha256(volume_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_native_private_slots_keep_identity_and_refuse_retargeting() {
+        use mvm_build::pipeline::frozen::{FrozenInputs, tree_digest};
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let source = tempfile::tempdir().unwrap();
+        let mut slots = Vec::new();
+        for pin in ["rev-a", "rev-b"] {
+            std::fs::write(
+                source.path().join("flake.nix"),
+                format!("github:tinylabscom/mvm/{pin}"),
+            )
+            .unwrap();
+            std::fs::write(source.path().join("workload.json"), "same-workload").unwrap();
+            let inputs =
+                FrozenInputs::stage(source.path(), &tree_digest(source.path()).unwrap()).unwrap();
+            let mut owned = FrozenFlakeSlot::own(inputs).unwrap();
+            owned.revision_hash = pin.to_string();
+            let revision = mvm_core::manifest::slot_revision_dir(&owned.slot_hash, pin);
+            std::fs::create_dir_all(&revision).unwrap();
+            std::os::unix::fs::symlink(
+                &revision,
+                mvm_core::manifest::slot_current_symlink(&owned.slot_hash),
+            )
+            .unwrap();
+            owned.verify_revision().unwrap();
+            slots.push(owned);
+        }
+        assert_ne!(slots[0].slot_hash, slots[1].slot_hash);
+        assert_ne!(slots[0].inputs.path(), slots[1].inputs.path());
+        let first = slots[0].inputs.path().to_path_buf();
+        let current = mvm_core::manifest::slot_current_symlink(&slots[1].slot_hash);
+        std::fs::remove_file(&current).unwrap();
+        std::os::unix::fs::symlink(
+            mvm_core::manifest::slot_revision_dir(&slots[0].slot_hash, "rev-a"),
+            &current,
+        )
+        .unwrap();
+        assert!(slots[1].verify_revision().is_err());
+        slots[0].verify_revision().unwrap();
+        let slot_dirs: Vec<_> = slots
+            .iter()
+            .map(|slot| mvm_core::manifest::slot_dir(&slot.slot_hash))
+            .collect();
+        drop(slots);
+        assert!(!first.exists());
+        assert!(
+            slot_dirs
+                .iter()
+                .all(|path| !std::path::Path::new(path).exists())
+        );
+    }
 
     #[test]
     fn flake_slot_manifest_hashes_synthetic_identity_without_canonicalizing() {

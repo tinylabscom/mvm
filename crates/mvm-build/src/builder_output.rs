@@ -550,8 +550,13 @@ mod tests {
     const SEALED_SIDECAR: &[u8] = br#"{"overlayAware":true,"runtimeLean":true,"sealed":true}"#;
 
     /// Sixteen 4 KiB blocks of distinct bytes: enough for a two-block tree.
+    /// Patterned bytes under an ext4 superblock declaring 4 KiB blocks, the
+    /// geometry the seal reads from the image.
     fn image_bytes() -> Vec<u8> {
-        (0..16 * 4096).map(|i| (i % 251) as u8).collect()
+        let mut image: Vec<u8> = (0..16 * 4096).map(|i| (i % 251) as u8).collect();
+        image[1024 + 24..1024 + 28].copy_from_slice(&2u32.to_le_bytes());
+        image[1024 + 56..1024 + 58].copy_from_slice(&0xEF53u16.to_le_bytes());
+        image
     }
 
     /// The root hash dm-verity would compute over `image` at boot.

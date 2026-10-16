@@ -135,14 +135,82 @@ fn template_provenance(flake_ref: &str, is_installed_bundle: bool) -> Option<Bui
     })
 }
 
+/// What one export of a built template records beyond its artifacts.
+pub(in crate::commands) struct TemplateExport {
+    /// Where the archive is written.
+    pub out: PathBuf,
+    /// Human-readable workload label.
+    pub label: Option<String>,
+    /// The kernel command line the workload was built and tested with.
+    pub cmdline: Option<String>,
+    /// The ceilings the publisher places on any launch.
+    pub posture: Option<PostureInputs>,
+    /// Sizing to record instead of the template's own.
+    pub resources: Option<BundleResources>,
+    /// Provenance to record instead of the template's flake reference. The
+    /// exporter still replaces its artifact digests with the sealed bytes'.
+    pub provenance: Option<BuildProvenance>,
+    /// The signed environment descriptor to seal beside the artifacts.
+    pub environment: Option<EnvironmentDescriptor>,
+}
+
+impl TemplateExport {
+    pub(in crate::commands) fn new(out: PathBuf) -> Self {
+        Self {
+            out,
+            label: None,
+            cmdline: None,
+            posture: None,
+            resources: None,
+            provenance: None,
+            environment: None,
+        }
+    }
+}
+
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+    let cmdline = args
+        .cmdline
+        .as_deref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading kernel command line at {}", path.display()))
+        })
+        .transpose()?;
+    let environment = args
+        .environment
+        .as_deref()
+        .map(read_environment)
+        .transpose()?;
+    let exported = export_template(
+        &args.template,
+        TemplateExport {
+            label: args.label.clone(),
+            cmdline,
+            posture: args.posture_inputs(),
+            environment,
+            ..TemplateExport::new(args.out.clone())
+        },
+    )?;
+    println!(
+        "Exported bundle to {} ({} bytes, key_id={})",
+        exported.path.display(),
+        exported.size_bytes,
+        exported.key_id.0,
+    );
+    Ok(())
+}
+
+/// Seal a built template (or an installed bundle) into a signed archive under
+/// the host signer.
+pub(in crate::commands) fn export_template(
+    template: &str,
+    export: TemplateExport,
+) -> Result<mvm_client::bundle::ExportedBundle> {
     // ---- 1. Resolve the template's artifact paths ----
-    let (spec, vmlinux, initrd, rootfs, _rev) = tmpl::template_artifacts_dispatched(&args.template)
+    let (spec, vmlinux, initrd, rootfs, _rev) = tmpl::template_artifacts_dispatched(template)
         .with_context(|| {
-            format!(
-                "loading template {:?} — does it exist? Try `mvmctl manifest ls`",
-                args.template
-            )
+            format!("loading template {template:?} — does it exist? Try `mvmctl manifest ls`")
         })?;
 
     // Carry a re-exported bundle's own architecture through rather than
@@ -152,8 +220,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // while still containing an aarch64 rootfs — and the label is what the
     // boot-time gate trusts. A slot built here has no manifest, so it takes
     // the host arch, which is correct for that case.
-    let installed_arch = tmpl::installed_bundle_arch_for_export(&args.template);
-    let provenance = template_provenance(&spec.flake_ref, installed_arch.is_some());
+    let installed_arch = tmpl::installed_bundle_arch_for_export(template);
+    let provenance = export
+        .provenance
+        .or_else(|| template_provenance(&spec.flake_ref, installed_arch.is_some()));
     let source_arch =
         installed_arch.unwrap_or_else(|| mvm_core::arch::GuestArch::host().to_string());
 
@@ -168,23 +238,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         None => None,
     };
 
-    let cmdline = args
-        .cmdline
-        .as_deref()
-        .map(|path| {
-            std::fs::read_to_string(path)
-                .with_context(|| format!("reading kernel command line at {}", path.display()))
-        })
-        .transpose()?;
-    let environment = args
-        .environment
-        .as_deref()
-        .map(read_environment)
-        .transpose()?;
-
     // ---- 2. Seal, sign under the host key, and write the archive ----
     let signer = HostBundleSigner::load()?;
-    let exported = export_bundle_with_signer(
+    export_bundle_with_signer(
         &BundleExportInputs {
             vmlinux: &vmlinux,
             initrd: initrd.as_deref(),
@@ -195,32 +251,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // The template's declared resources travel with the bundle so a
             // launch on another host starts from them without rediscovering
             // them. `--cpus` / `--memory` still override at launch time.
-            resources: Some(BundleResources {
+            resources: Some(export.resources.unwrap_or(BundleResources {
                 vcpus: u32::from(spec.vcpus),
                 mem_mib: spec.mem_mib,
-            }),
+            })),
             arch_label: &source_arch,
-            label: args.label.clone(),
-            cmdline: cmdline.as_deref(),
-            posture: args.posture_inputs(),
+            label: export.label,
+            cmdline: export.cmdline.as_deref(),
+            posture: export.posture,
             provenance,
-            environment,
+            environment: export.environment,
             boot_assets: None,
             cli_boot_assets: None,
-            out: &args.out,
+            out: &export.out,
             debug_out: None,
         },
         &signer,
-    )?;
-
-    println!(
-        "Exported bundle to {} ({} bytes, key_id={})",
-        exported.path.display(),
-        exported.size_bytes,
-        exported.key_id.0,
-    );
-
-    Ok(())
+    )
 }
 
 #[cfg(test)]

@@ -439,6 +439,11 @@ path = "ops metrics"
 tier = "exec"
 
 [[command]]
+path = "pack build"
+tier = "live"
+reason = "builds the frozen flake in the builder VM, health-boots its entrypoint, and signs the result; the live pack scenario installs the resulting archive in a fresh trusting home"
+
+[[command]]
 path = "pack download"
 tier = "parse"
 reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"

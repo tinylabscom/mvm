@@ -100,3 +100,67 @@ mod tests {
         assert!(rendered.contains("<redacted>"), "{rendered}");
     }
 }
+
+/// SHA-256 of each artifact a template slot's current revision points at, by
+/// the role a bundle sealed from it records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateArtifactDigests {
+    pub kernel: String,
+    pub initrd: Option<String>,
+    pub rootfs: String,
+    /// The dm-verity hash tree beside the rootfs, when the slot has one.
+    pub verity: Option<String>,
+}
+
+/// Hash the artifacts `template` (a slot or an installed bundle) resolves to,
+/// as they are on disk now.
+pub fn template_artifact_digests(template: &str) -> Result<TemplateArtifactDigests> {
+    let (_, vmlinux, initrd, rootfs, _) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(template)
+            .with_context(|| format!("resolving the artifacts of {template}"))?;
+    let (verity, _) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
+    let digest = |path: &str| {
+        mvm_core::crypto::image_verify::sha256_file(Path::new(path))
+            .with_context(|| format!("hashing {path}"))
+    };
+    Ok(TemplateArtifactDigests {
+        kernel: digest(&vmlinux)?,
+        initrd: initrd.as_deref().map(digest).transpose()?,
+        rootfs: digest(&rootfs)?,
+        verity: verity.as_deref().map(digest).transpose()?,
+    })
+}
+
+/// Give the rootfs of `template`'s current revision the dm-verity pair its
+/// guest sidecar asks for, computed here over the installed bytes with the
+/// same writer every sealed image uses. Returns the root hash, or `None` when
+/// the sidecar does not declare the image sealed.
+///
+/// A template slot keeps only the rootfs a build produced, so an image that is
+/// to be exported as sealed is sealed here, over exactly the bytes the export
+/// will read.
+pub fn seal_template_rootfs(template: &str) -> Result<Option<String>> {
+    let (_, _, _, rootfs, _) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(template)
+            .with_context(|| format!("resolving the artifacts of {template}"))?;
+    let dir = Path::new(&rootfs)
+        .parent()
+        .with_context(|| format!("rootfs {rootfs} has no parent directory"))?;
+    mvm_build::builder_output::seal_declared_rootfs(dir)
+        .map_err(|e| anyhow::anyhow!("sealing the rootfs of {template}: {e}"))
+}
+
+/// The argv the image of `template`'s current revision runs, as its guest
+/// sidecar records it: the same resolution launch admission measures a
+/// bundle's signed environment against.
+pub fn template_entrypoint(template: &str) -> Result<Vec<String>> {
+    let (_, _, _, rootfs, _) =
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(template)
+            .with_context(|| format!("resolving the artifacts of {template}"))?;
+    match crate::admission::entrypoint_resolve::resolve_for_rootfs(Path::new(&rootfs)) {
+        crate::admission::entrypoint_resolve::ResolvedEntrypoint::Known { argv, .. } => Ok(argv),
+        unresolved => {
+            anyhow::bail!("the image of {template} records no entrypoint: {unresolved:?}")
+        }
+    }
+}

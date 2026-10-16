@@ -90,6 +90,7 @@ use sha2::{Digest, Sha256};
 
 mod assurance_runtime;
 mod bundle_environment;
+mod canonical_kernel;
 mod display_grants;
 mod final_gates;
 mod host_trust;
@@ -153,6 +154,7 @@ pub struct AdmittedPlan {
     signed: SignedExecutionPlan,
     extensions: Vec<AdmittedExtension>,
     assurance_runtime: Option<AssuranceRuntimeBinding>,
+    canonical_kernel: Option<std::sync::Arc<canonical_kernel::AdmittedKernel>>,
     backend: Option<BackendKind>,
 }
 
@@ -219,6 +221,7 @@ impl AdmittedPlan {
             signed,
             extensions: Vec::new(),
             assurance_runtime: None,
+            canonical_kernel: None,
             backend: None,
         }
     }
@@ -387,7 +390,7 @@ pub fn admit_plan_for_run(
         signer_id,
         extensions,
         assurance_runtime,
-        backend: posture.backend,
+        posture,
         clock,
         ledger,
         bundle_ctx,
@@ -451,7 +454,7 @@ pub fn admit_signed_plan_for_run(
         signer_id,
         extensions,
         assurance_runtime,
-        backend: posture.backend,
+        posture,
         clock,
         ledger,
         bundle_ctx,
@@ -476,7 +479,7 @@ struct VerifiedAdmission<'a> {
     /// Re-verified extension artifacts, empty when the plan binds none.
     extensions: Vec<AdmittedExtension>,
     assurance_runtime: Option<AssuranceRuntimeBinding>,
-    backend: Option<BackendKind>,
+    posture: RunPosture<'a>,
     clock: &'a dyn Clock,
     ledger: &'a InMemoryNonceLedger,
     bundle_ctx: Option<&'a BundleAdmissionContext<'a>>,
@@ -496,11 +499,12 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         signer_id,
         extensions,
         assurance_runtime,
-        backend,
         clock,
         ledger,
         bundle_ctx,
+        posture,
     } = parts;
+    let backend = posture.backend;
 
     // The plan_id is the content-address of the plan body — recompute it and
     // refuse a plan whose stored id doesn't match, so a run is only ever
@@ -530,6 +534,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
     // plan is operator misconfiguration (the driver wasn't wired
     // with a resolver/trust store), so we refuse rather than skip
     // silently.
+    let canonical_kernel = canonical_kernel::AdmittedKernel::capture(posture, &verified)?;
     if let Some(pin) = verified.bundle.as_ref() {
         let ctx = bundle_ctx.ok_or_else(|| {
             anyhow::anyhow!(
@@ -537,8 +542,26 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
                 bundle = pin.bundle_sha256
             )
         })?;
-        let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
-            .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        let verified_bundle = if let Some(config) = posture.runtime_config {
+            if let Some(owner) = &config.canonical_kernel {
+                mvm_core::plan::bundle::verify_canonical_plan_bundle(
+                    pin,
+                    ctx.resolver,
+                    ctx.trust,
+                    owner,
+                    config,
+                    posture
+                        .backend
+                        .context("canonical kernel admission requires actual backend")?,
+                    &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                )
+            } else {
+                verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+            }
+        } else {
+            verify_plan_bundle(pin, ctx.resolver, ctx.trust)
+        }
+        .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
         bundle_environment::verify_environment(&verified, &verified_bundle.manifest)?;
         if !verified_bundle.embedded_image_sets.is_empty() {
             let image = ctx.image.ok_or_else(|| {
@@ -590,6 +613,7 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         signed,
         extensions,
         assurance_runtime,
+        canonical_kernel,
         backend,
     })
 }
@@ -1123,6 +1147,7 @@ pub fn populate_audit_substrate(
 ) -> Result<()> {
     thread_tenant_id(cfg, admitted);
     thread_cpu_grant(cfg, admitted);
+    admitted.bind_canonical_kernel(cfg)?;
 
     let plan_json = serde_json::to_string(admitted.signed())
         .context("serializing SignedExecutionPlan for VmStartConfig.plan_json")?;

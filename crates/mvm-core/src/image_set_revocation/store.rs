@@ -81,6 +81,37 @@ pub struct ImageSetRevocationStore {
     verify_signer: SignerCheck,
 }
 
+/// Original applied feed bytes authenticated together with their checkpoint.
+///
+/// This is evidence for the time passed to `capture_applied_proof`, not an evergreen
+/// freshness capability. A consumer must verify the original bytes again at
+/// its actual admission time and enforce its own persisted checkpoint.
+///
+/// ```compile_fail
+/// let _: mvm_core::image_set_revocation::RetainedImageSetRevocationProof =
+///     serde_json::from_str("{}").unwrap();
+/// ```
+#[derive(Debug)]
+pub struct RetainedImageSetRevocationProof {
+    verified: VerifiedImageSetRevocations,
+    document: Vec<u8>,
+    signature_bundle: Vec<u8>,
+}
+
+impl RetainedImageSetRevocationProof {
+    pub fn verified(&self) -> &VerifiedImageSetRevocations {
+        &self.verified
+    }
+
+    pub fn document(&self) -> &[u8] {
+        &self.document
+    }
+
+    pub fn signature_bundle(&self) -> &[u8] {
+        &self.signature_bundle
+    }
+}
+
 impl ImageSetRevocationStore {
     /// The standard location under `MVM_HOME`.
     pub fn in_mvm_home() -> Self {
@@ -123,13 +154,27 @@ impl ImageSetRevocationStore {
         &self,
         now: DateTime<Utc>,
     ) -> Result<VerifiedImageSetRevocations, ImageSetRevocationStoreError> {
+        Ok(self.capture_applied_proof(now)?.verified)
+    }
+
+    /// Retain the exact bounded store read, never a later re-read or a
+    /// reserialized document. Uses the same canonical signer, freshness and
+    /// persisted-checkpoint checks as `load`.
+    pub fn capture_applied_proof(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<RetainedImageSetRevocationProof, ImageSetRevocationStoreError> {
         self.feed.load_with(|bytes, signature, checkpoint| {
             let verified =
                 verify_image_set_revocations_with(bytes, signature, now, None, self.verify_signer)?;
             if verified.checkpoint() != checkpoint {
                 return Err(ImageSetRevocationStoreError::Corrupt);
             }
-            Ok(verified)
+            Ok(RetainedImageSetRevocationProof {
+                verified,
+                document: bytes.to_vec(),
+                signature_bundle: signature.to_vec(),
+            })
         })
     }
 

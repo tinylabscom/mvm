@@ -42,8 +42,8 @@ use crate::release_trust::{RELEASE_OIDC_ISSUER, image_set_revocation_publication
 mod store;
 
 pub use store::{
-    ImageSetRevocationStore, ImageSetRevocationStoreError, load_image_set_revocations,
-    update_image_set_revocations,
+    ImageSetRevocationStore, ImageSetRevocationStoreError, RetainedImageSetRevocationProof,
+    load_image_set_revocations, update_image_set_revocations,
 };
 
 /// Where mvm-images publishes the list and its bundle. Informational: the

@@ -115,6 +115,15 @@ pub enum BuilderJob {
         attr_path: String,
     },
 
+    /// Frozen-only diagnostic build, using a captured reference lock graph.
+    /// This is not an admission credential and is refused by resident builders.
+    FrozenFlakeDiagnostic {
+        flake_ref: String,
+        attr_path: String,
+        input_digest: String,
+        expected_mvm_revision: String,
+    },
+
     /// Application-dependency install pipeline. The builder VM reads a
     /// serialised install spec from `spec_path` (lockfile +
     /// source-root + ecosystem + gate), runs the corresponding package

@@ -39,6 +39,9 @@ pub struct ConfirmedExit {
 }
 
 impl ConfirmedExit {
+    pub fn instance(&self) -> &HvfInstance {
+        &self.instance
+    }
     /// A handle to an older generation never authorizes cleanup of a new one.
     pub fn verify_current(&self) -> Result<()> {
         ensure!(
@@ -50,6 +53,9 @@ impl ConfirmedExit {
 }
 
 impl ConnectedInstance {
+    pub fn instance(&self) -> &HvfInstance {
+        &self.instance
+    }
     pub fn connect(vm: &str) -> Result<Self> {
         let instance = wire::read_instance(vm)?;
         Self::connect_bound(instance, None)

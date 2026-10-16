@@ -100,12 +100,6 @@ pub(crate) fn render_flake_nix_at_url(
           exec ${{builtins.concatStringsSep " "
             (map shellQuote launch.entrypoint.command)}}
         '';
-      buildPreStart = pkgs: appPkg:
-        pkgs.writeShellScript "${{launch.workload_id}}-prestart" ''
-          set -eu
-          mkdir -p "$(dirname ${{launch.entrypoint.working_dir}})"
-          ln -sfn ${{appPkg}} ${{launch.entrypoint.working_dir}}
-        '';
       isFunction = launch.entrypoint.kind == "function";
       # Factories live in mvm; the generated flake never bundles a local
       # fallback. If a pinned mvm revision doesn't expose the symbol, the rendered
@@ -158,9 +152,14 @@ pub(crate) fn render_flake_nix_at_url(
           # Command workloads keep the single-file path: cmdBootScript
           # stages the source then execs the long-running command, and
           # mkGuest writes it straight to /etc/mvm/entrypoint.
+          # The command names programs from the declared packages, and the
+          # process that runs this script may hand it a PATH that does not
+          # reach them, so the script carries its own. The app tree is baked
+          # at the working directory below rather than linked at boot: a
+          # sealed rootfs is read-only.
           cmdBootScript = pkgs.writeShellScript "${{launch.workload_id}}-boot" ''
             set -eu
-            ${{buildPreStart pkgs appPkg}}
+            export PATH=${{pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}}''${{PATH:+:$PATH}}
             exec ${{buildEntrypoint pkgs}}
           '';
           mkGuestArgs =
@@ -180,6 +179,9 @@ pub(crate) fn render_flake_nix_at_url(
               packages = [ appPkg ] ++ imagePackages;
               uids.entrypoint = 0;
               entrypoint.command = [ "${{cmdBootScript}}" ];
+              extraFiles = {{
+                ${{launch.entrypoint.working_dir}} = {{ link = appPkg; }};
+              }};
             }};
         in {{
           default = mvm.lib.${{system}}.mkGuest mkGuestArgs;
@@ -339,6 +341,20 @@ mod tests {
     fn flake_has_lf_line_endings() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(!s.contains('\r'));
+    }
+
+    #[test]
+    fn a_command_workload_bakes_its_app_tree_and_carries_its_own_path() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(
+            s.contains("export PATH=${pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}"),
+            "the boot script puts the declared packages on its own PATH"
+        );
+        assert!(
+            !s.contains("-prestart"),
+            "nothing links the app tree at boot; a sealed rootfs is read-only"
+        );
+        assert!(s.contains("${launch.entrypoint.working_dir} = { link = appPkg; };"));
     }
 
     #[test]

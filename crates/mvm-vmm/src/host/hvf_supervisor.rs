@@ -164,6 +164,10 @@ pub struct HvfSupervisorConfig {
     pub vm_name: String,
     /// arm64 `Image` to boot.
     pub kernel: PathBuf,
+    /// Verified unlinked kernel descriptor supplied by the launcher. When
+    /// present the supervisor adopts it; `kernel` is diagnostic only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_fd: Option<i32>,
     /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
     /// contract: `init=/init`). Set it to boot an image whose PID 1 differs — e.g.
     /// the builder rootfs, which boots the static `/sbin/mvm-host-vm-init`. The
@@ -424,6 +428,7 @@ mod tests {
             console_capture: HvfConsoleCapture::Encrypted,
             vm_name: "fixture-vm".into(),
             kernel: "/k/Image".into(),
+            kernel_fd: None,
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
             vcpus: 1,
@@ -596,6 +601,7 @@ mod tests {
             console_capture: HvfConsoleCapture::Encrypted,
             vm_name: "fixture-vm".into(),
             kernel: "/k/Image".into(),
+            kernel_fd: None,
             cmdline: None,
             memory_mib: 0,
             vcpus: 1,

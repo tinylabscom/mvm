@@ -172,6 +172,17 @@ pub trait VmmDriver: Send + Sync {
     /// Boot the VM described by `spec`, returning a live handle.
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>>;
 
+    /// Consume the same verified, unlinked kernel descriptor, never reopen
+    /// the spec's diagnostic pathname. Unsupported drivers refuse explicitly.
+    #[cfg(unix)]
+    fn boot_verified_kernel(
+        &self,
+        _spec: &VmmSpec,
+        _kernel: &crate::host::restore_image::VerifiedRestoreFile,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::bail!("backend does not support verified kernel descriptor handoff")
+    }
+
     /// Boot the clean, pre-workload standby parent `req` describes and return
     /// its pool record. The parent runs no entrypoint and holds no secret or
     /// plan — nothing on this seam (`StandbyParentSpawn` in, `StandbyHandle`
@@ -340,11 +351,34 @@ pub trait RunningVm: Send {
     fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         self.kill().map(|_| None)
     }
+    /// Stop once and preserve any real instance-bound lifetime evidence.
+    /// An ordinary successful stop is not proof that a kernel generation can
+    /// be deleted. Backends without such evidence return `None`.
+    fn terminate_with_kernel_exit(&self) -> Result<KernelStopOutcome> {
+        Ok(KernelStopOutcome {
+            timing: self.terminate_with_timing()?,
+            #[cfg(unix)]
+            hvf_exit: None,
+        })
+    }
+    #[cfg(unix)]
+    fn authenticated_hvf_instance(
+        &self,
+    ) -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> {
+        Ok(None)
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     fn status(&self) -> Result<VmStatus>;
     /// Open a host->guest vsock connection to `guest_port`.
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>>;
+}
+
+/// In-process driver outcome, not a serialized receipt or author assertion.
+pub struct KernelStopOutcome {
+    pub timing: Option<RunningVmStopTiming>,
+    #[cfg(unix)]
+    pub hvf_exit: Option<crate::host::hvf_stop::ConfirmedExit>,
 }
 
 /// Backend-specific phases observed while terminating a running VM.

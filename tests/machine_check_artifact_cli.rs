@@ -87,6 +87,12 @@ fn check_artifact_verifies_a_signed_mvmpkg_without_booting() {
     assert_eq!(verdict["verified"], true);
     assert_eq!(verdict["artifact_count"], 1);
     assert_eq!(verdict["embedded_image_sets"], serde_json::json!([]));
+    assert_eq!(verdict.get("runnable_here"), Some(&serde_json::Value::Null));
+    assert_eq!(verdict["host_arch_compatible"], true);
+    assert_eq!(verdict["backend_compatibility_checked"], false);
+    assert!(!data.join("cache").exists());
+    assert!(!data.join("bundles").exists());
+    assert!(!data.join("vms").exists());
 }
 
 fn check_artifact_json(home: &Path, artifact: &Path, trust_dir: &Path) -> std::process::Output {
@@ -133,7 +139,9 @@ fn check_artifact_previews_a_declared_posture() {
         String::from_utf8_lossy(&check.stderr)
     );
     let verdict: serde_json::Value = serde_json::from_slice(&check.stdout).expect("JSON verdict");
-    assert_eq!(verdict["runnable_here"], true);
+    assert_eq!(verdict.get("runnable_here"), Some(&serde_json::Value::Null));
+    assert_eq!(verdict["host_arch_compatible"], true);
+    assert_eq!(verdict["backend_compatibility_checked"], false);
     assert_eq!(verdict["posture"]["profile"], "dev");
     assert_eq!(verdict["posture"]["egress"], "deny-all");
     assert_eq!(verdict["posture"]["volumes"], false);
@@ -153,4 +161,65 @@ fn check_artifact_refuses_a_path_that_is_not_a_bundle() {
         "{}",
         String::from_utf8_lossy(&check.stderr)
     );
+}
+
+#[test]
+fn check_artifact_does_not_infer_runtime_or_freshness_from_unverified_cache() {
+    for cached in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("consumer");
+        let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+        let overlay = home.join(format!(
+            "cache/runtime-overlay/0.24.0/{}/overlay.ext4",
+            mvmctl::core::arch::GuestArch::host()
+        ));
+        if cached {
+            std::fs::create_dir_all(overlay.parent().unwrap()).unwrap();
+            std::fs::write(&overlay, b"unverified runtime").unwrap();
+        }
+        #[allow(deprecated)]
+        let check = Command::cargo_bin("mvmctl")
+            .unwrap()
+            .env("HOME", &home)
+            .env("MVM_HOME", &home)
+            .args(["machine", "check-artifact"])
+            .arg(&artifact)
+            .arg("--trust-store")
+            .arg(&trust_dir)
+            .args(["--backend", "hvf", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            check.status.success(),
+            "{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let verdict: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+        assert_eq!(verdict["verified"], true);
+        assert_eq!(verdict.get("runnable_here"), Some(&serde_json::Value::Null));
+        assert_eq!(verdict["backend_compatibility_checked"], false);
+        assert!(!home.join("bundles").exists());
+        assert!(!home.join("vms").exists());
+        if cached {
+            assert_eq!(std::fs::read(&overlay).unwrap(), b"unverified runtime");
+        } else {
+            assert!(!home.join("cache").exists());
+        }
+        #[allow(deprecated)]
+        let human = Command::cargo_bin("mvmctl")
+            .unwrap()
+            .env("HOME", &home)
+            .env("MVM_HOME", &home)
+            .args(["machine", "check-artifact"])
+            .arg(&artifact)
+            .arg("--trust-store")
+            .arg(&trust_dir)
+            .output()
+            .unwrap();
+        assert!(human.status.success());
+        // The requested report must not disappear as suppressed UI chatter.
+        let text = String::from_utf8_lossy(&human.stdout);
+        assert!(text.contains("launch readiness not checked"), "{text}");
+        assert!(!text.contains("runnable on"), "{text}");
+    }
 }

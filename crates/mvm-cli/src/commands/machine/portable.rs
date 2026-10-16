@@ -1,5 +1,5 @@
-//! `machine check-artifact <app.mvmpkg>`: verify a signed bundle, confirm it
-//! can run on this host, and show what it declares about any launch of it.
+//! `machine check-artifact <app.mvmpkg>`: verify a signed bundle, confirm its
+//! host architecture compatibility, and preview its launch declarations.
 //!
 //! Read-only: no install, no extraction, no boot, no audit-chain emission.
 //! The run path (`machine run --manifest <app.mvmpkg>`) verifies the same
@@ -45,6 +45,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
     let host_arch = GuestArch::require_host(&verified.manifest.arch)
         .map_err(|error| anyhow::anyhow!("{}: not runnable here: {error}", args.path.display()))?;
 
+    let mut backend_compatibility_checked = false;
     if let Some(name) = args.backend.as_deref() {
         let support = backend_image_support(name)?;
         let host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
@@ -53,6 +54,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 .map_err(|error| {
                     anyhow::anyhow!("backend {name} refuses embedded image set: {error}")
                 })?;
+            backend_compatibility_checked = true;
         }
     }
 
@@ -63,7 +65,9 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
                 "path": args.path.display().to_string(),
                 "bundle_sha256": verified.bundle_sha256,
                 "arch": verified.manifest.arch,
-                "runnable_here": true,
+                "runnable_here": null,
+                "host_arch_compatible": true,
+                "backend_compatibility_checked": backend_compatibility_checked,
                 "artifact_count": verified.manifest.artifacts.len(),
                 "embedded_image_sets": verified.embedded_image_sets.iter().map(|set| {
                     set.manifest_sha256.as_str()
@@ -76,8 +80,10 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             }))?
         );
     } else {
-        crate::ui::success(&format!(
-            "{}: verified, runnable on {host_arch} ({} artifacts, {} embedded image set{}){}",
+        // This is the requested verification report, not opt-in UI chatter.
+        // It must remain visible without --verbose and when stdout is piped.
+        println!(
+            "{}: verified, architecture compatible with {host_arch} ({} artifacts, {} embedded image set{}); launch readiness not checked{}",
             args.path.display(),
             verified.manifest.artifacts.len(),
             verified.embedded_image_sets.len(),
@@ -86,11 +92,15 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             } else {
                 "s"
             },
-            args.backend
-                .as_deref()
-                .map(|backend| format!(", backend {backend} compatible"))
-                .unwrap_or_default(),
-        ));
+            if backend_compatibility_checked {
+                format!(
+                    ", embedded image sets compatible with backend {}",
+                    args.backend.as_deref().unwrap_or_default()
+                )
+            } else {
+                String::new()
+            },
+        );
         println!("  posture: {}", posture_line(&verified.manifest));
         if let Some(cmdline) = verified.manifest.kernel_cmdline() {
             println!("  kernel cmdline: {cmdline}");

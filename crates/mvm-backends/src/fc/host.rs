@@ -1596,6 +1596,75 @@ mod tests {
         assert!(err.to_string().contains("MVM_HOME"), "{err}");
     }
 
+    /// Answer one `GET /vm/config` on `socket` with `body`, standing in for a
+    /// running Firecracker, then close the connection.
+    fn serve_vm_config(socket: &Path, body: &'static str) -> std::thread::JoinHandle<()> {
+        use std::io::{Read, Write};
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = conn.read(&mut request);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nServer: Firecracker API\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            conn.write_all(response.as_bytes()).unwrap();
+            conn.flush().unwrap();
+        })
+    }
+
+    /// `rootfs_from_vm_config` for a VM whose Firecracker answers `GET
+    /// /vm/config` with `body`.
+    fn live_rootfs_for(vm_name: &str, body: &'static str) -> Result<PathBuf> {
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let home = socket_short_home();
+        env.isolate_mvm_home(home.path());
+        let vm_dir = super::super::resolve_running_vm_dir(vm_name).unwrap();
+        std::fs::create_dir_all(&vm_dir).unwrap();
+        let socket = PathBuf::from(super::super::fc_api_socket_path(&vm_dir));
+        let server = serve_vm_config(&socket, body);
+        let rootfs = rootfs_from_vm_config(vm_name);
+        // If the call never dialed the socket, the server is still waiting in
+        // accept. Dial it once so the thread always returns; fed a connection
+        // that asks nothing, its write fails and the join reports it.
+        let _ = std::os::unix::net::UnixStream::connect(&socket);
+        server.join().unwrap();
+        rootfs
+    }
+
+    /// The live rootfs is the drive Firecracker calls `rootfs`, whichever
+    /// position it holds in the drive list. A fork that anchored on another
+    /// drive's file would restore that disk as the child's root, so the
+    /// drive id is the only thing that may pick it. The `==` flipped to `!=`
+    /// survived because nothing served a config listing a drive before the
+    /// rootfs: under that mutant the scratch drive wins.
+    #[test]
+    fn the_live_rootfs_is_the_drive_named_rootfs_not_the_first_drive_listed() {
+        let rootfs = live_rootfs_for(
+            "live-rootfs-vm",
+            r#"{"drives":[{"drive_id":"scratch","path_on_host":"/images/scratch.ext4"},{"drive_id":"rootfs","path_on_host":"/images/root.ext4"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(rootfs, Path::new("/images/root.ext4"));
+    }
+
+    /// A config naming no `rootfs` drive is an error that says so, never
+    /// another drive's path and never an empty one.
+    #[test]
+    fn a_live_config_without_a_rootfs_drive_is_refused_by_name() {
+        let err = live_rootfs_for(
+            "no-rootfs-vm",
+            r#"{"drives":[{"drive_id":"scratch","path_on_host":"/images/scratch.ext4"}]}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no rootfs drive"), "{err:#}");
+    }
+
     /// A temporary `MVM_HOME` short enough that Firecracker's sockets stay in
     /// the state dir. The platform temp dir is not: on macOS it is deep enough
     /// that they move to the fallback namespace.

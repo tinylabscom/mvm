@@ -226,6 +226,32 @@ fixed command once the machine is up. Chromium and Chrome boot the template
 built on this host under that name; with no such template the launch is refused with `MachineSpecError`
 saying how to build one. All of them still record normally.
 
+## Workload packs
+
+`mvm.packs` writes a `mvm.pack-spec/v1` document. The builder only assembles
+and checks data: it reads no file, builds nothing and holds no key.
+
+```python
+from mvm.packs import pack
+
+(
+    pack("acme/hello", "1.0.0")
+    .target("x86_64-linux")
+    .source("app")
+    .package("busybox")
+    .copy("hello.txt", "/app/hello.txt")
+    .entrypoint("cat", "/app/hello.txt")
+    .resources(cpu_cores=1, memory_mib=256)
+    .write("pack.json")
+)
+```
+
+`mvmctl pack lock pack.json --mvm-revision <commit>` freezes it, and
+`mvmctl pack build pack.json --out hello.mvmpkg` compiles, builds, health-boots
+and signs it. The bytes are the canonical bytes every language SDK writes for
+the same spec, and a mistake raises `PackSpecError` with
+the same `code` in every language.
+
 ## Local SDK development
 
 When changing the Python SDK in this repo:

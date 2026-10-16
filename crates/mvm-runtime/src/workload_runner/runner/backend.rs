@@ -75,10 +75,10 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             if prepare_guest {
                 vm.prepare_stop()?;
             }
-            vm.terminate_with_timing()
+            vm.terminate_with_kernel_exit()
         })();
         let driver_detail = match &kill_result {
-            Ok(detail) => *detail,
+            Ok(detail) => detail.timing,
             Err(_) => None,
         };
         let driver_kill = kill_started.elapsed();
@@ -86,7 +86,18 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let console_started = Instant::now();
         self.console_streamer.stop(&id.0);
         let console_cleanup = console_started.elapsed();
-        kill_result?;
+        let stopped = kill_result?;
+        if crate::kernel_custody::has_retained_kernel(&lifecycle)? {
+            #[cfg(unix)]
+            {
+                let proof = stopped.hvf_exit.as_ref().context(
+                    "kernel generation retained: backend did not provide instance-bound exit evidence"
+                )?;
+                crate::kernel_custody::release_after_confirmed_exit(&lifecycle, proof)?;
+            }
+            #[cfg(not(unix))]
+            anyhow::bail!("kernel generation retained: lifetime release unsupported");
+        }
 
         let timing = StopTiming {
             attach,

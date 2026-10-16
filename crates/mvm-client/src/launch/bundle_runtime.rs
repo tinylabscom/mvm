@@ -50,6 +50,31 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
     let registry = BundleRegistry::default_path()?;
     let trust = FsTrustStore::default_path()?;
     let verified = verify_bundle_file(&archive, &trust).context("verifying bundle boot assets")?;
+    let canonical = verified.manifest.members.iter().any(|member| {
+        matches!(
+            member,
+            mvm_core::plan::bundle::BundleMember::CanonicalLinuxProof(_)
+        )
+    });
+    // Keep the public launch gate closed until integrated custody and abort/
+    // confirmed-exit tests have passed and this exact path is reviewed.
+    ensure!(
+        !canonical,
+        "canonical kernel backend custody is pending integrated validation"
+    );
+    let kind = BackendKind::from_label(backend).context("unknown bundle boot backend")?;
+    if let Some(owner) = &config.canonical_kernel {
+        ensure!(
+            canonical && owner.pin() == &verified.plan_artifact(),
+            "canonical owner pin differs from installed bundle"
+        );
+        owner.verify_bundle_manifest(&verified.manifest)?;
+        owner.verify_config(
+            config,
+            kind,
+            &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+        )?;
+    }
     ensure!(
         registry.archive_path(&verified.bundle_sha256) == archive,
         "installed bundle archive identity changed"
@@ -87,6 +112,18 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             &mvm_build::stage0_kernel::current_image_set_protocol_support(),
         )?;
         attach_cli_runtime(config, &installed, runtime)?;
+        if canonical && config.canonical_kernel.is_none() {
+            ensure!(
+                kind == BackendKind::Hvf,
+                "canonical kernel lifetime custody unsupported by this backend"
+            );
+            let owner = std::sync::Arc::new(super::canonical_linux::prepare_canonical_linux(
+                &archive,
+                &verified.plan_artifact(),
+                kind,
+            )?);
+            owner.bind_to_config(config)?;
+        }
         return Ok(true);
     }
     ensure!(
@@ -307,11 +344,20 @@ fn attach_workload_verity(
         .manifest
         .find_by_role(&ArtifactRole::Kernel)
         .context("bundle kernel missing")?;
-    ensure!(
-        config.kernel_path.as_deref().map(Path::new)
-            == Some(installed.root.join(&kernel.path).as_path()),
-        "boot kernel differs from bundle"
-    );
+    match &config.canonical_kernel {
+        Some(owner) => {
+            owner.verify_bundle_manifest(&installed.manifest)?;
+            ensure!(
+                config.kernel_path.as_deref() == owner.kernel_path().to_str(),
+                "boot kernel differs from the actual canonical owner"
+            );
+        }
+        None => ensure!(
+            config.kernel_path.as_deref().map(Path::new)
+                == Some(installed.root.join(&kernel.path).as_path()),
+            "boot kernel differs from bundle"
+        ),
+    }
     for artifact in [rootfs, kernel] {
         verify_installed_artifact(&installed.root, artifact)?;
     }

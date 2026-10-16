@@ -290,7 +290,7 @@ impl GuestRam {
 
     /// Replace `len` bytes at `offset` with a private COW mapping of `file`
     /// starting at `file_offset`.
-    fn map_private_fd_at(
+    pub(crate) fn map_private_fd_at(
         &mut self,
         offset: usize,
         file: &File,
@@ -304,8 +304,6 @@ impl GuestRam {
         if !file_offset.is_multiple_of(file_mapping_granule()? as u64) {
             return Err(HvfError::SnapshotState("file offset is not page-aligned"));
         }
-        let file_offset = libc::off_t::try_from(file_offset)
-            .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
         if offset
             .checked_add(mapped_len)
             .is_none_or(|end| end > self.len)
@@ -315,27 +313,77 @@ impl GuestRam {
                 available: self.len,
             }));
         }
+        let file_len_u64 =
+            u64::try_from(len).map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
+        let file_end = file_offset
+            .checked_add(file_len_u64)
+            .ok_or(HvfError::BadBoot(BootFault::Overflow))?;
+        if file
+            .metadata()
+            .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
+            .len()
+            < file_end
+        {
+            return Err(HvfError::BadBoot(BootFault::KernelRead(
+                std::io::ErrorKind::UnexpectedEof,
+            )));
+        }
+        // Never mmap a complete host page past EOF. Linux raises SIGBUS on
+        // access there even though mmap itself succeeds. Map only complete
+        // hypervisor pages, and copy the last partial page into anonymous RAM.
+        // This also gives the kernel's reserved tail real zero-filled backing
+        // on both 4 KiB Linux hosts and 16 KiB Apple-silicon hosts.
+        let file_len = len / HVF_PAGE_SIZE * HVF_PAGE_SIZE;
+        let mut tail = vec![0_u8; len - file_len];
+        std::os::unix::fs::FileExt::read_exact_at(file, &mut tail, file_offset + file_len as u64)
+            .map_err(|e| HvfError::BadBoot(BootFault::KernelRead(e.kind())))?;
+        let file_offset = libc::off_t::try_from(file_offset)
+            .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
         // SAFETY: `offset + mapped_len <= self.len` was checked above, so the
         // pointer stays inside this owned reservation.
         let dst = unsafe { self.ptr.as_ptr().add(offset) };
-        // SAFETY: `dst` is page-aligned inside this owned reservation, and
-        // `mapped_len` is page-rounded and in bounds. MAP_FIXED replaces only
-        // that subrange; the rest of guest RAM keeps its current backing. The
-        // mapping is private, so guest writes never reach the file.
+        // SAFETY: the checked, aligned range belongs entirely to this
+        // reservation. Replace it with zero-filled anonymous pages first;
+        // this resets any prior backing, including the partial file tail.
         let mapped = unsafe {
             libc::mmap(
                 dst.cast(),
                 mapped_len,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_FIXED,
-                file.as_raw_fd(),
-                file_offset,
+                libc::MAP_PRIVATE | libc::MAP_FIXED | libc::MAP_ANON,
+                -1,
+                0,
             )
         };
         if mapped == libc::MAP_FAILED || mapped != dst.cast() {
             return Err(HvfError::Alloc);
         }
-        self.file_backed.push(offset..offset + mapped_len);
+        let end = offset + mapped_len;
+        self.file_backed = self
+            .file_backed
+            .iter()
+            .flat_map(|old| [old.start..old.end.min(offset), old.start.max(end)..old.end])
+            .filter(|range| range.start < range.end)
+            .collect();
+        if file_len != 0 {
+            // SAFETY: same checked reservation and aligned file offset;
+            // file_len names only complete pages within the actual file.
+            let mapped = unsafe {
+                libc::mmap(
+                    dst.cast(),
+                    file_len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_FIXED,
+                    file.as_raw_fd(),
+                    file_offset,
+                )
+            };
+            if mapped == libc::MAP_FAILED || mapped != dst.cast() {
+                return Err(HvfError::Alloc);
+            }
+            self.file_backed.push(offset..offset + file_len);
+        }
+        self.copy_at(offset + file_len, &tail)?;
         Ok(())
     }
 }
@@ -766,6 +814,139 @@ mod tests {
     }
 
     #[test]
+    fn partial_file_pages_keep_anonymous_zero_filled_padding() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("partial-kernel");
+        for len in [
+            1,
+            4095,
+            4096,
+            4097,
+            HVF_PAGE_SIZE - 1,
+            HVF_PAGE_SIZE,
+            HVF_PAGE_SIZE + 1,
+            HVF_PAGE_SIZE + 4096,
+        ] {
+            let bytes = vec![0x5a; len];
+            std::fs::write(&path, &bytes).unwrap();
+            let mut ram = GuestRam::new(3 * HVF_PAGE_SIZE).unwrap();
+            // First install an existing file backing to exercise replacement,
+            // not only the initially anonymous reservation.
+            let previous = directory.path().join("previous");
+            std::fs::write(&previous, vec![0xa5; 2 * HVF_PAGE_SIZE]).unwrap();
+            ram.map_private_file_at(0, &previous, 2 * HVF_PAGE_SIZE)
+                .unwrap();
+            ram.map_private_file_at(0, &path, len).unwrap();
+            let actual = ram.snapshot_bytes();
+            assert_eq!(&actual[..len], bytes, "length {len}");
+            let padded = page_rounded_len(len).unwrap();
+            assert!(
+                actual[len..padded].iter().all(|byte| *byte == 0),
+                "length {len}"
+            );
+            let prefix = len / HVF_PAGE_SIZE * HVF_PAGE_SIZE;
+            let regions = ram.backing_regions(0);
+            assert!(
+                regions.iter().any(|region| {
+                    region.backing == RamBacking::Anonymous
+                        && region.span.gpa <= prefix as u64
+                        && region.span.gpa + region.span.len >= padded as u64
+                }) || prefix == padded,
+                "length {len}: {regions:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn partial_file_mapping_honours_nonzero_aligned_file_and_ram_offsets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("offset-image");
+        let mut bytes = vec![0xa5; HVF_PAGE_SIZE];
+        bytes.extend(vec![0x42; HVF_PAGE_SIZE + 4096]);
+        std::fs::write(&path, &bytes).unwrap();
+        let file = File::open(&path).unwrap();
+        let mut ram = GuestRam::new(4 * HVF_PAGE_SIZE).unwrap();
+        ram.map_private_fd_at(
+            HVF_PAGE_SIZE,
+            &file,
+            HVF_PAGE_SIZE as u64,
+            HVF_PAGE_SIZE + 4096,
+        )
+        .unwrap();
+        let actual = ram.snapshot_bytes();
+        assert!(actual[..HVF_PAGE_SIZE].iter().all(|byte| *byte == 0));
+        assert_eq!(
+            &actual[HVF_PAGE_SIZE..2 * HVF_PAGE_SIZE + 4096],
+            &bytes[HVF_PAGE_SIZE..]
+        );
+        assert!(
+            actual[2 * HVF_PAGE_SIZE + 4096..]
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+        assert_eq!(
+            ram.backing_regions(0),
+            vec![
+                RamRegion {
+                    span: GuestSpan {
+                        gpa: 0,
+                        len: HVF_PAGE_SIZE as u64
+                    },
+                    backing: RamBacking::Anonymous
+                },
+                RamRegion {
+                    span: GuestSpan {
+                        gpa: HVF_PAGE_SIZE as u64,
+                        len: HVF_PAGE_SIZE as u64
+                    },
+                    backing: RamBacking::PrivateFile
+                },
+                RamRegion {
+                    span: GuestSpan {
+                        gpa: (2 * HVF_PAGE_SIZE) as u64,
+                        len: (2 * HVF_PAGE_SIZE) as u64
+                    },
+                    backing: RamBacking::Anonymous
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn invalid_or_unreadable_tail_leaves_existing_ram_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("write-only");
+        std::fs::write(&path, vec![0x5a; HVF_PAGE_SIZE + 1]).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let mut ram = GuestRam::new(2 * HVF_PAGE_SIZE).unwrap();
+        ram.copy_at(0, b"unchanged").unwrap();
+        assert!(
+            ram.map_private_fd_at(0, &file, 0, HVF_PAGE_SIZE + 1)
+                .is_err()
+        );
+        assert!(ram.map_private_fd_at(0, &file, 0, 0).is_err());
+        let aligned_max = u64::MAX - (HVF_PAGE_SIZE as u64 - 1);
+        assert!(
+            ram.map_private_fd_at(0, &file, aligned_max, HVF_PAGE_SIZE)
+                .is_err()
+        );
+        assert_eq!(&ram.snapshot_bytes()[..9], b"unchanged");
+        assert_all_anonymous(&ram, "failed range/tail read does not replace backing");
+    }
+
+    #[test]
+    fn file_range_past_eof_is_refused_before_replacing_ram() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("short");
+        std::fs::write(&path, b"short").unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).unwrap();
+        ram.copy_at(0, b"unchanged").unwrap();
+        assert!(ram.map_private_file_at(0, &path, HVF_PAGE_SIZE).is_err());
+        assert_eq!(&ram.snapshot_bytes()[..9], b"unchanged");
+        assert_all_anonymous(&ram, "invalid file range does not replace backing");
+    }
+
+    #[test]
     fn file_mapping_is_private_cow() {
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("Image");
@@ -805,9 +986,10 @@ mod tests {
     fn a_file_mapped_kernel_is_carved_out_of_anonymous_ram() {
         let dir = tempfile::tempdir().unwrap();
         let kernel = dir.path().join("Image");
-        std::fs::write(&kernel, b"abcdefgh").unwrap();
+        std::fs::write(&kernel, vec![0x42; HVF_PAGE_SIZE]).unwrap();
         let mut ram = GuestRam::new(HVF_PAGE_SIZE * 4).unwrap();
-        ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).unwrap();
+        ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, HVF_PAGE_SIZE)
+            .unwrap();
 
         let page = HVF_PAGE_SIZE as u64;
         let region = |gpa, len, backing| RamRegion {

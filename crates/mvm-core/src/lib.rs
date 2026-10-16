@@ -10,6 +10,7 @@ pub mod admission_durability;
 pub mod arch;
 pub mod audit_verify;
 pub mod build_env;
+pub mod canonical_linux;
 pub mod catalog;
 pub mod checkpoint;
 /// Content-addressed build-action cache records: a typed identity for one

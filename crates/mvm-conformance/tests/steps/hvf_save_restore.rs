@@ -67,6 +67,7 @@ fn parent_config(state_dir: &std::path::Path) -> HvfSupervisorConfig {
         vm_name: "parent".into(),
         builder_egress_endpoint: None,
         kernel: state_dir.join("Image"),
+        kernel_fd: None,
         cmdline: Some("console=ttyAMA0 root=/dev/vda ro".into()),
         memory_mib: 512,
         vcpus: 1,

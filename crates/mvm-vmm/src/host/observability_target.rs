@@ -224,6 +224,7 @@ mod tests {
             unsigned_runtime_development: false,
             source_runtime_archive_sha256: None,
             bundle_boot_assets: None,
+            canonical_kernel: None,
             legacy_portable_runtime: None,
             revision_hash: "abc".to_string(),
             flake_ref: "test".to_string(),

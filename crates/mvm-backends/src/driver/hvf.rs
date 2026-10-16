@@ -78,7 +78,7 @@ impl HvfDriver {
         spec: &VmmSpec,
         lock_path: &Path,
     ) -> Result<Box<dyn RunningVm>> {
-        boot_with_handoff(spec, None, Some(lock_path))
+        boot_with_handoff(spec, None, Some(lock_path), None)
     }
 }
 
@@ -237,6 +237,7 @@ fn relay_supervisor_config_with_handoff(
         console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
         vm_name: spec.name.clone(),
         kernel,
+        kernel_fd: None,
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -410,7 +411,9 @@ fn boot_with_handoff(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
+    kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
 ) -> Result<Box<dyn RunningVm>> {
+    use std::os::fd::AsRawFd;
     mvm_vmm::host::process_exit::require_owned_child_custody()?;
     let state_dir = stop_wire::state_dir(&spec.name)?;
     mvm_core::config::create_private_dir(&state_dir)?;
@@ -423,7 +426,9 @@ fn boot_with_handoff(
     // Clear any prior run's captured exit code and usage record so `wait` and
     // the exit report read only this launch's.
     crate::run_sidecars::clear_prior_run(&paths.state_dir);
-    let cfg = relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
+    let mut cfg =
+        relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
+    cfg.kernel_fd = kernel.map(|kernel| kernel.file().as_raw_fd());
     let config_path = paths.state_dir.join("supervisor.json");
     mvm_core::atomic_io::atomic_write_new(
         &config_path,
@@ -436,8 +441,24 @@ fn boot_with_handoff(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command =
-        bounded_supervisor_command(&supervisor, spec, &paths.state_dir, diagnostics.as_ref());
+    let mut command = if let Some(fd) = cfg.kernel_fd {
+        let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
+        StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
+        mvm_vmm::host::restore_image::inherit_descriptors(&mut command, vec![fd]);
+        let bound = mvm_core::spawn_scope::bind_spawn(
+            command,
+            &spec.name,
+            &paths.state_dir,
+            &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
+                .with_cpu_grant(spec.cpu_grant),
+        );
+        if bound.unit().is_some() {
+            bail!("spawn scope cannot carry the verified kernel descriptor; refusing boot");
+        }
+        bound
+    } else {
+        bounded_supervisor_command(&supervisor, spec, &paths.state_dir, diagnostics.as_ref())
+    };
     let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -680,7 +701,15 @@ impl VmmDriver for HvfDriver {
         fields(vm = %spec.name, vcpus = spec.vcpus, memory_mib = spec.memory_mib)
     )]
     fn boot(&self, spec: &VmmSpec) -> Result<Box<dyn RunningVm>> {
-        boot_with_handoff(spec, None, None)
+        boot_with_handoff(spec, None, None, None)
+    }
+
+    fn boot_verified_kernel(
+        &self,
+        spec: &VmmSpec,
+        kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
+    ) -> Result<Box<dyn RunningVm>> {
+        boot_with_handoff(spec, None, None, Some(kernel))
     }
 
     fn spawn_standby_parent(
@@ -689,7 +718,7 @@ impl VmmDriver for HvfDriver {
     ) -> std::result::Result<StandbyHandle, StandbyError> {
         let handoff = handoff_config(&req.spec.id)
             .map_err(|e| StandbyError::SpawnFailed(format!("prepare HVF handoff: {e}")))?;
-        let vm = boot_with_handoff(req.boot, Some(&handoff), None)
+        let vm = boot_with_handoff(req.boot, Some(&handoff), None, None)
             .map_err(|e| StandbyError::SpawnFailed(format!("boot HVF standby: {e}")))?;
         let state_dir = vm_state_dir(&req.spec.id);
         let pid = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)).ok_or_else(|| {
@@ -1355,6 +1384,18 @@ impl RunningVm for AbsentHvfVm {
 }
 
 impl RunningVm for HvfRunningVm {
+    fn authenticated_hvf_instance(
+        &self,
+    ) -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> {
+        match &self.owned {
+            Some(owned) => Ok(Some(owned.instance().clone())),
+            None => Ok(Some(
+                ConnectedInstance::connect_instance(self.instance.clone())?
+                    .instance()
+                    .clone(),
+            )),
+        }
+    }
     fn id(&self) -> &VmId {
         &self.id
     }
@@ -1380,17 +1421,25 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+        Ok(self.terminate_with_kernel_exit()?.timing)
+    }
+
+    fn terminate_with_kernel_exit(&self) -> Result<mvm_vmm::driver::traits::KernelStopOutcome> {
         let proof = match &self.owned {
             Some(owned) => owned.stop()?,
             None => ConnectedInstance::connect_instance(self.instance.clone())?.stop()?,
         };
         proof.verify_current()?;
-        Ok(Some(RunningVmStopTiming {
+        let timing = Some(RunningVmStopTiming {
             supervisor_signal: proof.dispatch,
             pid_disappearance: proof.exit_wait,
             force_kill_wait: std::time::Duration::ZERO,
             state_cleanup: std::time::Duration::ZERO,
-        }))
+        });
+        Ok(mvm_vmm::driver::traits::KernelStopOutcome {
+            timing,
+            hvf_exit: Some(proof),
+        })
     }
 
     fn pause(&self) -> Result<()> {

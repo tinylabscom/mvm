@@ -149,6 +149,24 @@ pub struct PublishedImageSet {
     download: Download,
 }
 
+/// Original publisher and applied-feed evidence from one export preparation.
+/// This authenticates the Linux root, not selected kernel bytes or a launch.
+#[derive(Debug)]
+pub struct RetainedPublisherProof {
+    root: mvm_core::image_set::RetainedImageSetRootProof,
+    revocations: mvm_core::image_set_revocation::RetainedImageSetRevocationProof,
+}
+
+impl RetainedPublisherProof {
+    pub fn root(&self) -> &mvm_core::image_set::RetainedImageSetRootProof {
+        &self.root
+    }
+
+    pub fn revocations(&self) -> &mvm_core::image_set_revocation::RetainedImageSetRevocationProof {
+        &self.revocations
+    }
+}
+
 impl PublishedImageSet {
     /// Acquire and verify the root object pinned by this build.
     pub fn acquire() -> Result<Self> {
@@ -242,6 +260,33 @@ impl PublishedImageSet {
     /// manifest again: even a whitespace change would create a different root.
     pub fn manifest_bytes(&self) -> &[u8] {
         &self.manifest_bytes
+    }
+
+    /// Capture the original canonical publisher proof for portable export.
+    ///
+    /// Re-reads the bounded proof cache, authenticates against the compiled
+    /// lock and currently applied signed revocation feed, and owns those exact
+    /// bytes. This does not select or authenticate a kernel stream and does
+    /// not authorize a consumer launch.
+    pub fn retained_publisher_proof(&self) -> Result<RetainedPublisherProof> {
+        let revocations = mvm_core::image_set_revocation::ImageSetRevocationStore::in_mvm_home()
+            .capture_applied_proof(chrono::Utc::now())
+            .context("current signed image-set revocations required for portable kernel proof")?;
+        let proof = mvm_core::image_set::read_cached_image_set_root_proof(
+            &mvm_core::image_set::image_set_root_proof_cache(),
+            &mvm_core::image_set::image_train_lock().image_set,
+            &crate::stage0_kernel::current_image_set_protocol_support(),
+            Some(revocations.verified()),
+        )?;
+        anyhow::ensure!(
+            proof.root().manifest_sha256() == &self.root
+                && proof.manifest_bytes() == self.manifest_bytes,
+            "retained canonical publisher proof differs from the acquired Linux image set"
+        );
+        Ok(RetainedPublisherProof {
+            root: proof,
+            revocations,
+        })
     }
 
     pub fn member_cache(&self) -> SetMemberCache {
@@ -561,13 +606,7 @@ pub fn verify_cached_default_workload(
         &host,
         None,
     )?;
-    if !root
-        .manifest()
-        .compatibility
-        .same_contract(&train.compatibility)
-    {
-        bail!("cached authenticated image-set compatibility does not match images.lock");
-    }
+    verify_cached_compatibility_binding(&train.compatibility, &root.manifest().compatibility)?;
     verify_installed_workload_files(
         root.manifest(),
         directory,
@@ -575,6 +614,16 @@ pub fn verify_cached_default_workload(
         WorkloadImageProfile::DefaultTenant,
         build_mode,
     )
+}
+
+fn verify_cached_compatibility_binding(
+    expected: &mvm_core::image_set::ImageSetCompatibility,
+    actual: &mvm_core::image_set::ImageSetCompatibility,
+) -> Result<()> {
+    if !actual.same_contract(expected) {
+        bail!("cached authenticated image-set compatibility does not match images.lock");
+    }
+    Ok(())
 }
 
 fn installed_workload_artifact_name(

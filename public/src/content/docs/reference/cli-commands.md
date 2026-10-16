@@ -1389,6 +1389,14 @@ streams verification of the signed manifest and every artifact's size and hash,
 enforces the size caps (2 GiB per entry, 4 GiB in total), checks posture
 coherence (a `sealed-prod` posture must cover a dm-verity rootfs and require
 authentication), and confirms the host architecture before printing a preview.
+Verification success (exit 0) is not a launch-readiness or freshness guarantee.
+The read-only preview does not prepare a runtime, apply a revocation feed,
+install the archive, or boot a VM. JSON reports `runnable_here: null` (unknown),
+`host_arch_compatible: true`, and `backend_compatibility_checked`, which is true
+only after at least one embedded image set was actually checked for `--backend`.
+Consumers of the former unconditional boolean must handle the nullable field.
+Neither cache-file presence nor package-publisher declarations establish
+canonical Linux authority or current-policy admission.
 The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
@@ -1448,6 +1456,24 @@ manifest. This structural binding is not independent Linux-publisher signature
 or current-revocation evidence; applications requiring that stronger authority
 must satisfy their separate admission requirements. A successful archive check
 alone is not a launch-readiness or protected-observer acceptance result.
+
+Schema 7's closed `canonical_linux_proof` member names the original Linux
+manifest and signature plus the original revocation document and signature.
+These are inventory references, not a publisher-authored permission or an
+evergreen freshness assertion. They must pair with the same Linux manifest
+selected by the CLI-runtime member. Older readers refuse the higher schema;
+missing, aliased, oversized, orphaned or repeated proof references are refused.
+The current plan-admission and client launch paths explicitly refuse this
+member until retained selected-kernel backend custody is supported. Recognizing
+its structure or verifying its application envelope does not enable execution.
+The explicit library preparation API, `launch::canonical_linux::prepare_canonical_linux`,
+is separate from archive preview: it snapshots a pinned Unix archive with
+bounded streaming I/O, authenticates the original feed and Linux root, verifies
+the selected kernel bytes, then applies the signed feed through the existing
+rollback-protected consumer store. It reloads effective policy after that update
+and whenever checked kernel bytes are requested. Its prepared owner is not a
+plan-admission or native-start capability. No command silently opts into that
+policy update, and preparation does not remove the launch refusal.
 
 Bundles carrying their own boot assets use the cold-boot path. The current
 warm-pool preparation command cannot prepare a parent from an archive's pinned
@@ -2038,6 +2064,8 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. The spec is read as data; no author code runs |
 | `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written |
+| `mvmctl pack build SPEC.json --out FILE.mvmpkg --input-observation PATH` | Opt into bounded, unsigned frozen Nix graph diagnostics; publish the no-clobber JSON report only after successful build, health checking and export. Not an admission credential |
+| `mvmctl pack build SPEC.json --out FILE.mvmpkg [--lock FILE] [--health-timeout SECS] [--hypervisor H]` | Compile a locked pack spec, build it in the builder VM, boot its entrypoint as a health check, and seal it into a `.mvmpkg` signed by the host key. The archive carries a sealed-prod posture and a signed environment naming the entrypoint, target and sizing. A stale lock, a non-zero health exit, or any artifact that changes between the health boot and signing is refused, and nothing is signed. Python (`mvm.packs`) and TypeScript (`packs`) write the spec as data |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
@@ -2061,6 +2089,66 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+Locked `pack build` inputs never receive the contributor build's automatic
+local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
+commit even when `mvmctl` was compiled from a local checkout. Each invocation owns
+its compile directory, checked builder-input snapshot and private template slot
+until health checking and export finish. The snapshot is verified before builder
+preparation and immediately before submission to the canonical one-shot builder;
+it is verified again after builder consumption.
+The disk-input staging filter must preserve every locked file and mode or the
+build is refused. Locked builds do not reuse a resident builder's unrelated
+`/work` or the contributor-source cache. Ordinary contributor builds retain their
+automatic source overrides.
+
+`pack build --input-observation PATH` explicitly opts into bounded diagnostic
+evidence about the frozen Nix input graph. The builder captures raw flake
+metadata for the same `/work` reference and output attribute, resolves `mvm`
+through the root input edge, and consumes that captured graph with
+`--reference-lock-file` and `--no-update-lock-file`. It does not change or write
+the frozen source tree. Unlocked graph nodes, a mismatched pinned revision,
+missing or malformed evidence, and oversized output are refused. Direct root
+edges are supported; a root `mvm` follows edge is refused rather than guessed.
+This diagnostic requires Nix 2.31.5, whose reference-lock write semantics were
+checked against the pinned builder package source. Other versions are refused.
+The one supported unhashed relative node is mvm's non-flake `mvm-workspace`:
+its actual input edge must point to `path:..` with parent input path `["mvm"]`.
+The selected mvm source must be the pinned, NAR-hashed GitHub repository with
+`dir=nix`, so `nix/..` stays inside that same immutable repository source.
+Other relative paths, parents, redirects and cycles are refused; this is
+inherited content identity, not acceptance of an arbitrary unhashed path.
+
+The JSON report is at most 1 MiB (raw metadata at most 512 KiB), includes the
+exact consuming lock bytes, source/input and command hashes, job identity and
+the returned Nix store path, and is published only after the pack operation
+succeeds. Output hashes describe the guest-produced members before host verity
+sidecar generation; the host checks those member bytes in staging and in the
+selected cache. The transport report is removed before shared artifact-cache
+promotion. This does not establish erasure of backend transport copies or
+guaranteed cleanup after filesystem errors or process termination. `PATH` must
+not already exist and is never overwritten. Without this flag the ordinary
+build remains unchanged. This unsigned diagnostic is not a
+signing attestation or admission credential; it does not prove a trusted
+builder, health boot, or external reproduction.
+`output_stage` is `builder-produced-before-host-sealing`; `output_sha256`
+records the builder's kernel, rootfs, and present optional image members.
+These streamed hashes must match both extracted output and the selected cache
+artifacts, even when the Nix store path matches. They describe builder-produced
+bytes, not later sealing/export transformations or final signed archive hashes.
+
+The private slot retains the builder's returned revision and refuses a changed
+`current` selection at health/export boundaries. This is invocation ownership,
+not support for launching arbitrary historical revisions through public manifest
+aliases. Temporary source and slot records are removed when the invocation ends;
+the archive records the exact pack lock as provenance, not a temporary source
+path. The sealed posture, health exit requirement and before/after artifact
+digests remain mandatory.
+
+Concurrent invocations must use distinct `--out` destinations. Private build slots
+do not make archive promotion or rollback safe for a shared output path; that
+separate ownership repair is tracked in
+[#4432](https://github.com/tinylabscom/mvm/issues/4432).
 
 For a built-image pack, `pull` authenticates its descriptor before fetching the
 exact public GitHub release assets, verifies their sizes, hashes, rootfs

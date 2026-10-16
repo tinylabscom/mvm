@@ -90,6 +90,12 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
         }
         validate_cli_runtime(runtime, manifest)?;
     }
+    if let Some(proof) = manifest.members.iter().find_map(|member| match member {
+        BundleMember::CanonicalLinuxProof(proof) => Some(proof),
+        _ => None,
+    }) {
+        validate_canonical_linux_proof(proof, manifest)?;
+    }
     if manifest
         .members
         .iter()
@@ -133,11 +139,76 @@ fn declaration_class(member: &BundleMember) -> Option<&'static str> {
         BundleMember::EmbeddedImageSet { .. } => None,
         BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
         BundleMember::EmbeddedCliBootAssets(_) => Some("embedded_cli_boot_assets"),
+        BundleMember::CanonicalLinuxProof(_) => Some("canonical_linux_proof"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
         BundleMember::Environment(_) => Some("environment"),
     }
+}
+
+fn validate_canonical_linux_proof(
+    proof: &mvm_contract::plan::bundle::CanonicalLinuxProof,
+    manifest: &BundleManifest,
+) -> Result<(), BundleVerifyError> {
+    let refused = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+    let runtime = manifest
+        .members
+        .iter()
+        .find_map(|member| match member {
+            BundleMember::EmbeddedCliBootAssets(runtime) => Some(runtime),
+            _ => None,
+        })
+        .ok_or_else(|| refused("canonical Linux proof requires explicit CLI boot assets"))?;
+    if proof.manifest_artifact != runtime.manifest_artifact {
+        return Err(refused(
+            "canonical Linux proof names a different selected Linux root",
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for name in [
+        &proof.manifest_artifact,
+        &proof.signature_bundle_artifact,
+        &proof.revocation_document_artifact,
+        &proof.revocation_signature_bundle_artifact,
+    ] {
+        if !seen.insert(name) {
+            return Err(refused("canonical Linux proof references must be distinct"));
+        }
+        let artifact = manifest
+            .find_by_name(name)
+            .ok_or_else(|| refused("canonical Linux proof artifact missing"))?;
+        let limit = if name == &proof.manifest_artifact {
+            4 * 1024 * 1024
+        } else {
+            1024 * 1024
+        };
+        if artifact.role != ArtifactRole::Other
+            || artifact.size_bytes == 0
+            || artifact.size_bytes > limit
+        {
+            return Err(refused(
+                "canonical Linux proof artifact has wrong role or invalid size",
+            ));
+        }
+        if name != &proof.manifest_artifact
+            && [
+                &runtime.archive_artifact,
+                &runtime.checksum_artifact,
+                &runtime.signature_bundle_artifact,
+                &runtime.checksum_signature_bundle_artifact,
+                &runtime.overlay_artifact,
+                &runtime.overlay_verity_artifact,
+                &runtime.initramfs_artifact,
+            ]
+            .contains(&name)
+        {
+            return Err(refused(
+                "canonical Linux proof cannot alias CLI runtime artifacts",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_cli_runtime(
@@ -433,6 +504,121 @@ mod tests {
             requires_auth: true,
             allows_volumes: false,
             allows_egress: false,
+        }
+    }
+
+    #[test]
+    fn canonical_linux_proof_requires_complete_paired_inventory_and_floor_seven() {
+        use mvm_contract::plan::bundle::{CanonicalLinuxProof, EmbeddedCliBootAssets};
+        let runtime = EmbeddedCliBootAssets {
+            manifest_artifact: "linux.json".into(),
+            version: "0.24.0".into(),
+            arch: "x86_64".into(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        };
+        let proof = CanonicalLinuxProof {
+            manifest_artifact: "linux.json".into(),
+            signature_bundle_artifact: "linux.bundle".into(),
+            revocation_document_artifact: "revocations.json".into(),
+            revocation_signature_bundle_artifact: "revocations.bundle".into(),
+        };
+        let artifacts = [
+            "linux.json",
+            "linux.bundle",
+            "revocations.json",
+            "revocations.bundle",
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+            "initrd",
+            "kernel",
+        ]
+        .into_iter()
+        .map(|name| {
+            artifact(
+                name,
+                match name {
+                    "initrd" => ArtifactRole::Initrd,
+                    "kernel" => ArtifactRole::Kernel,
+                    _ => ArtifactRole::Other,
+                },
+                &"a".repeat(64),
+                1,
+            )
+        })
+        .collect();
+        let valid = manifest(
+            artifacts,
+            vec![
+                BundleMember::EmbeddedCliBootAssets(runtime),
+                BundleMember::CanonicalLinuxProof(proof.clone()),
+            ],
+        );
+        // Structural/inventory validation only; no freshness or boot claim.
+        validate_declarations(&valid).unwrap();
+        let mut bad = valid.clone();
+        bad.schema_version = 6;
+        assert!(validate_declarations(&bad).is_err());
+        bad = valid.clone();
+        bad.members
+            .push(BundleMember::CanonicalLinuxProof(proof.clone()));
+        assert!(matches!(
+            validate_declarations(&bad),
+            Err(BundleVerifyError::DuplicateMember { .. })
+        ));
+        bad = valid.clone();
+        bad.members.remove(0);
+        assert!(validate_declarations(&bad).is_err());
+        for name in ["linux.bundle", "revocations.json", "revocations.bundle"] {
+            for mutation in 0..4 {
+                let mut bad = valid.clone();
+                let i = bad.artifacts.iter().position(|a| a.name == name).unwrap();
+                match mutation {
+                    0 => {
+                        bad.artifacts.remove(i);
+                    }
+                    1 => bad.artifacts[i].size_bytes = 0,
+                    2 => bad.artifacts[i].size_bytes = 1024 * 1024 + 1,
+                    _ => bad.artifacts[i].role = ArtifactRole::Kernel,
+                }
+                assert!(validate_declarations(&bad).is_err(), "{name}/{mutation}");
+            }
+        }
+        for replacement in ["different-root", "linux.bundle", "runtime.bundle"] {
+            let mut bad = valid.clone();
+            let BundleMember::CanonicalLinuxProof(p) = &mut bad.members[1] else {
+                unreachable!()
+            };
+            match replacement {
+                "different-root" => p.manifest_artifact = replacement.into(),
+                "linux.bundle" => p.revocation_document_artifact = replacement.into(),
+                _ => p.signature_bundle_artifact = replacement.into(),
+            }
+            assert!(validate_declarations(&bad).is_err(), "{replacement}");
+        }
+        for member in [
+            BundleMember::EmbeddedBootAssets {
+                manifest_artifact: "linux.json".into(),
+            },
+            BundleMember::EmbeddedImageSet {
+                manifest_artifact: "linux.json".into(),
+            },
+        ] {
+            let mut mixed = valid.clone();
+            mixed.members.push(member);
+            assert!(validate_declarations(&mixed).is_err());
         }
     }
 

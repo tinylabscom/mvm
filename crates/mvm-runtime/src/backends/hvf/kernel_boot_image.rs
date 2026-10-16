@@ -13,6 +13,7 @@ use mvm_vmm::runtime_artifacts::RuntimeArtifact;
 pub(super) enum KernelImageSource<'a> {
     Bytes(&'a [u8]),
     File(&'a Path),
+    HeldFile { file: &'a File, label: &'a Path },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +62,21 @@ impl KernelImageSource<'_> {
                     .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
                 KernelImageMeta::new(len, hdr.image_size, true)
             }
+            Self::HeldFile { file, .. } => {
+                use std::os::unix::fs::FileExt;
+                let mut header = [0_u8; 64];
+                file.read_exact_at(&mut header, 0)
+                    .map_err(|e| HvfError::BadBoot(BootFault::KernelRead(e.kind())))?;
+                let hdr = kernel_image::parse(&header)
+                    .map_err(|_| HvfError::BadBoot(BootFault::KernelNotArm64Image))?;
+                let len = usize::try_from(
+                    file.metadata()
+                        .map_err(|e| HvfError::BadBoot(BootFault::KernelOpen(e.kind())))?
+                        .len(),
+                )
+                .map_err(|_| HvfError::BadBoot(BootFault::Overflow))?;
+                KernelImageMeta::new(len, hdr.image_size, true)
+            }
         }
     }
 
@@ -75,6 +91,11 @@ impl KernelImageSource<'_> {
                 ram.map_private_file_at(offset, path, meta.file_len)?;
                 Ok(meta.file_len)
             }
+            Self::HeldFile { file, .. } => {
+                let meta = self.metadata()?;
+                ram.map_private_fd_at(offset, file, 0, meta.file_len)?;
+                Ok(meta.file_len)
+            }
         }
     }
 
@@ -86,8 +107,9 @@ impl KernelImageSource<'_> {
         offset: usize,
         loaded_len: usize,
     ) -> Result<Option<RuntimeArtifact>, HvfError> {
-        let Self::File(path) = self else {
-            return Ok(None);
+        let path = match self {
+            Self::Bytes(_) => return Ok(None),
+            Self::File(path) | Self::HeldFile { label: path, .. } => path,
         };
         // SAFETY: the caller's load_into validated and populated this range;
         // no vCPU exists yet, and ram outlives this immediate measurement.
@@ -102,6 +124,37 @@ impl KernelImageSource<'_> {
 mod tests {
     use super::super::super::guest_ram::HVF_PAGE_SIZE;
     use super::*;
+
+    #[test]
+    fn held_kernel_maps_verified_clone_after_source_path_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        mvm_core::config::create_private_dir(directory.path()).unwrap();
+        let source = directory.path().join("Image");
+        let mut image = vec![0_u8; 4096];
+        image[8..16].copy_from_slice(&0x80000_u64.to_le_bytes());
+        image[16..24].copy_from_slice(&4096_u64.to_le_bytes());
+        image[56..60].copy_from_slice(&0x644d_5241_u32.to_le_bytes());
+        std::fs::write(&source, &image).unwrap();
+        let held = mvm_vmm::host::restore_image::VerifiedRestoreFile::prepare(
+            &source,
+            directory.path(),
+            &mvm_core::plan::bundle::sha256_hex(&image),
+        )
+        .unwrap();
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, b"substituted after handoff").unwrap();
+        let source = KernelImageSource::HeldFile {
+            file: held.file(),
+            label: &source,
+        };
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).unwrap();
+        let loaded = source.load_into(&mut ram, 0).unwrap();
+        assert_eq!(loaded, image.len());
+        let actual = ram.snapshot_bytes();
+        assert_eq!(&actual[..image.len()], image);
+        assert!(actual[image.len()..].iter().all(|byte| *byte == 0));
+        assert!(source.loaded_artifact(&ram, 0, loaded).unwrap().is_some());
+    }
 
     #[test]
     fn byte_image_has_no_file_artifact_evidence() {

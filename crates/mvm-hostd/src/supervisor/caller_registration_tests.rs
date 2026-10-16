@@ -139,6 +139,27 @@ fn actual_startup_wire_uses_canonical_root_and_refuses_warm_without_state_change
 }
 
 #[test]
+fn canonical_descriptor_cannot_substitute_for_consumed_caller_admission() {
+    let (_env, _home) = isolate();
+    let vm = "canonical-caller-unit";
+    let admitted = admit_fixture(vm, 7);
+    let registration = registration_fixture(&admitted, vm, 7);
+    let mut cfg = startup_config(&admitted, &registration);
+    // This test exercises admission only, not descriptor adoption or a VM.
+    cfg.kernel_fd = Some(123);
+    std::fs::remove_file(&cfg.kernel).unwrap();
+    cfg.caller_registration = None;
+    assert!(prepare_startup(&cfg).is_err());
+    cfg.caller_registration = Some(registration);
+    assert!(prepare_startup(&cfg).unwrap().is_some());
+    assert!(
+        prepare_startup(&cfg).is_err(),
+        "the actual launch capability is one-shot"
+    );
+    assert!(!cfg.pid_file.exists());
+}
+
+#[test]
 fn actual_early_boot_input_failure_is_spent_before_status_or_capture_setup() {
     let (_env, _home) = isolate();
     for missing_kernel in [true, false] {
