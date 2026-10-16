@@ -274,16 +274,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notary=()
-          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
-            notary=(--notary-report signing-reports/npm-notarization.json)
-          fi
           packages=(npm-dist/runmvm-mvm-darwin-arm64-[0-9]*.tgz)
           [[ "${#packages[@]}" -eq 1 ]]
-          python3 scripts/release/verify_macos_package.py \
-            --archive "${packages[0]}" --envelope package --sdk-layout \
-            --producer-report signing-reports/npm-producer-signing.json \
-            "${notary[@]}" --report "${RUNNER_TEMP}/npm-final-package.json"
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive "${packages[0]}" --envelope package --sdk-layout
+            --producer-report signing-reports/npm-producer-signing.json
+            --report "${RUNNER_TEMP}/npm-final-package.json")
+          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
+            cmd+=(--notary-report signing-reports/npm-notarization.json)
+          fi
+          "${cmd[@]}"
 
       - name: Retain final Darwin npm package inspection
         if: ${{ always() && runner.os == 'macOS' }}
