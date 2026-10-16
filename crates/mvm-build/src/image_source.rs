@@ -42,6 +42,10 @@ mod cache;
 mod git;
 mod local_set;
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "image_source/tests/repository.rs"]
+pub mod repository_fixture;
+
 pub use build::{
     EMIT_MANIFEST_SCRIPT, EmitRequest, HOST_BINARIES_SCRIPT, LocalImageBuildError, OutputFile,
     OutputFormat, PairBuild, TargetContract, build_host_binaries, build_target_for_pair,
