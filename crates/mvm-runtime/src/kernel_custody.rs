@@ -97,6 +97,13 @@ impl KernelBoundLaunch {
         &self.config
     }
 
+    #[cfg(unix)]
+    pub(crate) fn verified_kernel(
+        &self,
+    ) -> Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile> {
+        self.kernel.as_ref()
+    }
+
     pub(crate) fn boot(
         &self,
         driver: &dyn mvm_vmm::driver::traits::VmmDriver,
@@ -129,7 +136,7 @@ impl KernelBoundLaunch {
     }
 
     pub(crate) fn observe_booted(&self, vm: &dyn RunningVm) -> Result<()> {
-        let Some(owner) = &self.config.canonical_kernel else {
+        let Some(_) = &self.config.canonical_kernel else {
             return Ok(());
         };
         ensure!(vm.id().0 == self.config.name, "driver returned another VM");
@@ -138,29 +145,44 @@ impl KernelBoundLaunch {
             let instance = vm
                 .authenticated_hvf_instance()?
                 .context("started VM has no authenticated lifetime identity; kernel retained")?;
-            ensure!(
-                instance.vm_id == self.config.name,
-                "kernel reader identity belongs to another VM"
-            );
-            let mut record = read_record(&self.record)?;
-            ensure!(
-                record.generation
-                    == owner
-                        .generation_dir()
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy(),
-                "kernel generation index changed during start"
-            );
-            record.instance = Some(instance);
-            mvm_core::util::atomic_io::atomic_write_durable(
-                &self.record,
-                &serde_json::to_vec(&record)?,
-            )?;
-            Ok(())
+            self.observe_instance(&instance)
         }
         #[cfg(not(unix))]
         anyhow::bail!("canonical kernel lifetime observation unsupported")
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn observe_instance(
+        &self,
+        instance: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<()> {
+        let Some(owner) = &self.config.canonical_kernel else {
+            return Ok(());
+        };
+        ensure!(
+            instance.vm_id == self.config.name,
+            "kernel reader identity belongs to another VM"
+        );
+        let mut record = read_record(&self.record)?;
+        ensure!(
+            record.instance.as_ref().is_none_or(|held| held == instance),
+            "kernel generation is already bound to another native instance"
+        );
+        ensure!(
+            record.generation
+                == owner
+                    .generation_dir()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+            "kernel generation index changed during start"
+        );
+        record.instance = Some(instance.clone());
+        mvm_core::util::atomic_io::atomic_write_durable(
+            &self.record,
+            &serde_json::to_vec(&record)?,
+        )?;
+        Ok(())
     }
 }
 

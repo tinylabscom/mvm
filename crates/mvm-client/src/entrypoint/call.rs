@@ -53,6 +53,130 @@ pub struct BootedEntrypoint {
     pub admission: AdmissionContext,
 }
 
+/// Caller-owned host result, retained before any ABI/JSON mapping. A failed
+/// stop never replaces the original outcome or drops its original owner.
+/// This is resource custody, not a dispatch certificate or helper permit.
+pub struct OwnedTransientResult {
+    custody: Option<Box<TransientCustody>>,
+}
+
+struct TransientCustody {
+    outcome: Option<CallOutcome>,
+    call_error: Option<anyhow::Error>,
+    flush_error: Option<anyhow::Error>,
+    stop_error: Option<anyhow::Error>,
+    owner: Option<super::boot::OwnedClientBoot>,
+}
+
+impl OwnedTransientResult {
+    pub fn outcome(&self) -> Option<&CallOutcome> {
+        self.custody.as_ref()?.outcome.as_ref()
+    }
+    pub fn call_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.call_error.as_ref()
+    }
+    pub fn flush_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.flush_error.as_ref()
+    }
+    pub fn stop_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.stop_error.as_ref()
+    }
+
+    pub fn retry_stop(&mut self) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("transient custody already consumed")?;
+        if let Some(owner) = group.owner.as_mut() {
+            owner.stop()?;
+        }
+        drop(group.owner.take());
+        Ok(())
+    }
+
+    /// No data-only conversion while native custody or an unresolved error
+    /// would be lost. The host caller receives the whole object back.
+    pub fn into_terminal_outcome(mut self) -> std::result::Result<CallOutcome, Self> {
+        let Some(group) = self.custody.as_mut() else {
+            return Err(self);
+        };
+        if group.owner.is_some()
+            || group.call_error.is_some()
+            || group.flush_error.is_some()
+            || group.stop_error.is_some()
+        {
+            return Err(self);
+        }
+        match group.outcome.take() {
+            Some(outcome) => Ok(outcome),
+            None => Err(self),
+        }
+    }
+}
+
+impl Drop for OwnedTransientResult {
+    fn drop(&mut self) {
+        if let Some(mut group) = self.custody.take()
+            && let Some(owner) = group.owner.take()
+            && let Err(owner) = owner.release_if_child_free()
+        {
+            group.owner = Some(owner);
+            // Abandonment is not recovery. Keep the actual output, every
+            // original error and the entire native/client group together.
+            std::mem::forget(group);
+        }
+    }
+}
+
+/// Retain the actual call value and the caller's actual owning context. This
+/// does not authorize a request or change RunEntrypoint into Exec. Flush uses
+/// the already-dispatched retained session and can legitimately refuse it.
+pub fn finish_owned_transient(
+    owner: super::boot::OwnedClientBoot,
+    call: Result<CallOutcome>,
+) -> OwnedTransientResult {
+    let (outcome, call_error) = match call {
+        Ok(outcome) => (Some(outcome), None),
+        Err(error) => (None, Some(error)),
+    };
+    // Install the entire group BEFORE either operation can fail or panic.
+    let mut result = OwnedTransientResult {
+        custody: Some(Box::new(TransientCustody {
+            outcome,
+            call_error,
+            flush_error: None,
+            stop_error: None,
+            owner: Some(owner),
+        })),
+    };
+    let group = result.custody.as_mut().expect("new transient custody");
+    let owner = group.owner.as_mut().expect("original client owner");
+    group.flush_error = owner.flush().err();
+    group.stop_error = owner.stop().err();
+    if group.stop_error.is_none() {
+        drop(group.owner.take());
+    }
+    result
+}
+
+/// Native boot-only resource handoff. The host caller keeps original
+/// admission and runtime custody; no SessionVm/name downgrade is made.
+pub fn boot_entrypoint_vm_owned(
+    vm: EntrypointVm<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<super::boot::OwnedClientBoot> {
+    let backend_name = vm.admission.backend_name().to_string();
+    let boot = SessionBoot::builder(vm.slot, vm.vm_name)
+        .cpus(vm.cpus)
+        .memory_mib(vm.memory_mib)
+        .network_policy(vm.admission.network_policy().clone())
+        .backend_name(&backend_name)
+        .build();
+    let owner = super::boot::boot_session_vm_owned(boot, &vm.admission, pair)?;
+    emit_launched(&owner.resources().admission, &backend_name, true);
+    Ok(owner)
+}
+
 impl BootedEntrypoint {
     /// Wait for the guest agent to answer. On a timeout the VM is torn down
     /// and `plan.failed` is written against its plan: a VM whose agent never
@@ -418,6 +542,50 @@ mod tests {
     use mvm_core::session::SessionState;
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::stream::ShownChunk;
+
+    #[test]
+    fn child_free_transient_retry_preserves_actual_outcome_and_all_error_values() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct OriginalError(Arc<AtomicUsize>);
+        impl std::fmt::Display for OriginalError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("original local error")
+            }
+        }
+        impl std::error::Error for OriginalError {}
+        impl Drop for OriginalError {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut result = OwnedTransientResult {
+            custody: Some(Box::new(TransientCustody {
+                outcome: Some(CallOutcome {
+                    terminal: CallTerminal::Exited { code: 7 },
+                    capture: None,
+                }),
+                call_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                flush_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                stop_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                owner: None,
+            })),
+        };
+        result.retry_stop().unwrap();
+        assert_eq!(result.outcome().unwrap().exit_code(), 7);
+        assert!(result.call_error().unwrap().is::<OriginalError>());
+        assert!(result.flush_error().unwrap().is::<OriginalError>());
+        assert!(result.stop_error().unwrap().is::<OriginalError>());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(result);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        // This is a genuinely child-free aggregate, not native stop or a
+        // manufactured uncertain/ConfirmedExit fixture.
+    }
 
     #[derive(Default)]
     struct NamingObserver {

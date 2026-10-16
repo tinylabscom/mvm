@@ -199,6 +199,17 @@ pub fn start_prepared(
     Ok(StartedVm { backend, vm_id })
 }
 
+/// The host-only counterpart keeps original admission, volume and runtime
+/// resources instead of converting a live failure into the core string error.
+pub(crate) fn start_prepared_owned(
+    resources: crate::entrypoint::boot::ClientBootResources,
+) -> std::result::Result<
+    crate::entrypoint::boot::OwnedClientBoot,
+    crate::entrypoint::boot::OwnedBootFailure,
+> {
+    crate::entrypoint::boot::OwnedClientBoot::start(resources)
+}
+
 /// Clamp a requested vCPU count against the selected backend before admission
 /// records the grant and before the backend serializes its machine config.
 #[must_use]

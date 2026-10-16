@@ -584,6 +584,9 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             failures: Vec::new(),
         });
     }
+    // Fail before spec creation, snapshot-key setup or child creation. A
+    // serialized pool handle and CLI exit cannot be a custody handoff.
+    p.backend.require_owned_warm_receiver()?;
     if !p.backend.capabilities().standby_pool {
         if !unsupported_standby_pool_is_fatal(residency_source()) {
             return Ok(WarmResult {
@@ -648,7 +651,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 .vsock_egress(want.vsock_egress)
                 .build()?,
         )?;
-        match p.backend.spawn_standby_via_runner(&spawn_ctx, &spec) {
+        match p.backend.spawn_standby_via_runner_owned(&spawn_ctx, &spec) {
             Ok(handle) => {
                 // Audit before recording: the claim refuses a parent with no
                 // signed creation entry, so pooling an unauditable one only
@@ -707,6 +710,19 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
                 }
             }
             Err(e) => {
+                let e = match e.downcast::<mvm_backends::driver::hvf::ColdHvfBootFailure>() {
+                    Ok(native) => match native.into_released_error() {
+                        Ok(error) => error,
+                        Err(native) => {
+                            // Unconfirmed native ownership is not an ordinary
+                            // failed pool fill. Return it before generic
+                            // continuation, keeping this exact pool lock too.
+                            return Err(anyhow::Error::new(native.retain_support(_warm_guard))
+                                .context("native standby launch remains owned; retain error for stop retry"));
+                        }
+                    },
+                    Err(error) => error,
+                };
                 failures.push(format!("spawning standby: {e:#}"));
                 tracing::warn!(error = %e, "spawn standby failed; pool stays under target");
                 failed += 1;

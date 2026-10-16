@@ -207,11 +207,11 @@ fn absent_or_verifying(store: &CheckpointStore, id: &CheckpointId) -> Option<Che
 /// Stage a capture of `id` whose memory image is `memory`, and return the
 /// staged capture and the record it would commit. Mirrors the capture path's
 /// use of the staging area without a backend in the way.
-fn stage<'a>(
-    store: &'a CheckpointStore,
+fn stage(
+    store: &CheckpointStore,
     id: &str,
     memory: &[u8],
-) -> (staging::StagedCapture<'a>, CheckpointMeta) {
+) -> (staging::StagedCapture, CheckpointMeta) {
     let staged = staging::StagedCapture::begin(store, &CheckpointId::new(id)).unwrap();
     let content = staged.content_dir();
     let memory_source = content.join(".memory-source");
@@ -252,7 +252,7 @@ fn a_crash_between_chunk_object_and_index_publication_leaves_no_checkpoint() {
 
 /// Run the first `steps` commit steps and then stop as a crash would: no
 /// further step, and no cleanup.
-fn commit_then_crash(mut staged: staging::StagedCapture<'_>, meta: &CheckpointMeta, steps: usize) {
+fn commit_then_crash(mut staged: staging::StagedCapture, meta: &CheckpointMeta, steps: usize) {
     let plan = staged.plan().unwrap();
     for step in plan.iter().take(steps) {
         staged.run(step, meta).unwrap();

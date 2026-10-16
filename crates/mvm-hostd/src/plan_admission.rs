@@ -1874,16 +1874,56 @@ pub fn apply_admitted_grants_or_undo_launch(
     admitted: &AdmittedPlan,
     emitter: Option<&crate::audit::emitter::AuditEmitter>,
 ) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Share admitted-grants policy with an original-owner rollback operation.
+pub fn apply_admitted_grants_with_owned_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<EnforcedGrants> {
+    apply_admitted_grants_with_rollback(
+        backend,
+        vm_id,
+        admitted,
+        emitter,
+        rollback,
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
+fn apply_admitted_grants_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<EnforcedGrants> {
     apply_admitted_grants(backend, vm_id, admitted).map_err(|err| {
-        undo_launch(UndoLaunch {
-            backend,
-            vm_id,
-            admitted,
-            emitter,
-            stage: "grants",
-            reason: "grants could not be applied",
-            err,
-        })
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "grants",
+                reason: "grants could not be applied",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
     })
 }
 
@@ -1900,21 +1940,65 @@ pub fn record_charge_or_undo_launch(
     admitted: &AdmittedPlan,
     emitter: Option<&crate::audit::emitter::AuditEmitter>,
 ) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+/// Share budget policy while the host receiver keeps original native custody.
+pub fn record_charge_with_owned_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    record_charge_with_rollback(
+        backend,
+        vm_id,
+        vm_name,
+        admitted,
+        emitter,
+        rollback,
+        FailureAuditPolicy::OwnedAfterConfirmedRollback,
+    )
+}
+
+fn record_charge_with_rollback(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> Result<()> {
     let undeclared = Grants::default();
     let charge = crate::admission_budget::charge_for(
         admitted.plan().resources.mem_mib,
         admitted.plan().grants.as_ref().unwrap_or(&undeclared),
     );
     crate::admission_budget::record_charge(vm_name, charge).map_err(|err| {
-        undo_launch(UndoLaunch {
-            backend,
-            vm_id,
-            admitted,
-            emitter,
-            stage: "host-budget",
-            reason: "its admitted charge could not be recorded",
-            err,
-        })
+        undo_launch_with(
+            UndoLaunch {
+                backend,
+                vm_id,
+                admitted,
+                emitter,
+                stage: "host-budget",
+                reason: "its admitted charge could not be recorded",
+                err,
+            },
+            rollback,
+            audit_policy,
+        )
     })
 }
 
@@ -1979,14 +2063,44 @@ struct UndoLaunch<'a> {
 /// never established would mean the only record of the run claims it was
 /// bounded when it was not.
 fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
-    if let Err(stop_err) = undo.backend.stop(undo.vm_id) {
+    let backend = undo.backend;
+    let vm_id = undo.vm_id;
+    undo_launch_with(
+        undo,
+        || backend.stop(vm_id).map(|_| ()),
+        FailureAuditPolicy::LegacyImmediate,
+    )
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{primary:#}; rollback remains unconfirmed: {stop:#}")]
+struct UndoLaunchFailure {
+    #[source]
+    primary: anyhow::Error,
+    stop: anyhow::Error,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum FailureAuditPolicy {
+    LegacyImmediate,
+    OwnedAfterConfirmedRollback,
+}
+
+fn undo_launch_with(
+    undo: UndoLaunch<'_>,
+    rollback: impl FnOnce() -> Result<()>,
+    audit_policy: FailureAuditPolicy,
+) -> anyhow::Error {
+    let stopped = rollback();
+    if let Err(stop_err) = &stopped {
         tracing::warn!(
             error = %stop_err,
             "stopping a VM whose {reason} failed; it may still be running",
             reason = undo.reason,
         );
     }
-    if let Some(emitter) = undo.emitter
+    if (audit_policy == FailureAuditPolicy::LegacyImmediate || stopped.is_ok())
+        && let Some(emitter) = undo.emitter
         && let Err(e) = emitter.emit_failed(
             undo.admitted.plan(),
             undo.stage,
@@ -1995,7 +2109,13 @@ fn undo_launch(undo: UndoLaunch<'_>) -> anyhow::Error {
     {
         tracing::warn!(error = %e, "audit emit_failed failed (non-fatal)");
     }
-    undo.err
+    match stopped {
+        Ok(()) => undo.err,
+        Err(stop) => anyhow::Error::new(UndoLaunchFailure {
+            primary: undo.err,
+            stop,
+        }),
+    }
 }
 
 /// Everything the post-admission tail needs, in one struct.

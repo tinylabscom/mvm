@@ -10,8 +10,9 @@
 //!
 //! The rename is the single point at which a checkpoint appears, and it is
 //! atomic. A crash before it leaves nothing under the checkpoint's name — only
-//! a staging directory, which the next capture removes once the process that
-//! made it is gone. A crash after it leaves a complete checkpoint whose blobs
+//! a staging directory, quarantined until actual writer quiescence is known.
+//! Capturing-process exit alone is not that proof. A crash after publication
+//! leaves a complete checkpoint whose blobs
 //! were durable before the record naming them was. The store therefore never
 //! holds a record whose digests disagree with its blobs because of a crash.
 //!
@@ -87,21 +88,22 @@ pub(super) fn commit_plan(
 /// A capture in progress: a private directory the capture writes into, which
 /// becomes the checkpoint only on [`StagedCapture::commit`]. Dropped without a
 /// commit — on an error or a panic — it removes what it wrote.
-pub(super) struct StagedCapture<'a> {
-    store: &'a CheckpointStore,
+pub(super) struct StagedCapture {
+    store: CheckpointStore,
     id: CheckpointId,
     dir: PathBuf,
+    _directory_owner: tempfile::TempDir,
     replaced: Option<PathBuf>,
     published: bool,
 }
 
-impl<'a> StagedCapture<'a> {
-    /// Start a capture of `id`, removing any staging a dead process left.
+impl StagedCapture {
+    /// Start a capture of `id`, quarantining staging a dead process left.
     /// [`begin`](Self::begin) a capture of `vm`, refused before anything is
     /// staged when `vm`'s run carries an entered human credential: a
     /// checkpoint, and every fork built from one, would copy that session.
     pub(super) fn begin_for_vm(
-        store: &'a CheckpointStore,
+        store: &CheckpointStore,
         id: &CheckpointId,
         vm: &str,
     ) -> Result<Self> {
@@ -109,16 +111,22 @@ impl<'a> StagedCapture<'a> {
         Self::begin(store, id)
     }
 
-    pub(super) fn begin(store: &'a CheckpointStore, id: &CheckpointId) -> Result<Self> {
+    pub(super) fn begin(store: &CheckpointStore, id: &CheckpointId) -> Result<Self> {
         ensure_capturable_id(id)?;
         let staging_root = admit_private_staging(store)?;
         sweep_abandoned(&staging_root);
-        let dir = staging_root.join(staging_name(std::process::id(), id));
-        create_private_dir_new(&dir)?;
+        let prefix = staging_name(std::process::id(), id);
+        let directory_owner = tempfile::Builder::new()
+            .prefix(&prefix)
+            .tempdir_in(&staging_root)?;
+        let dir = directory_owner.path().to_path_buf();
         let staged = Self {
-            store,
+            // This clones strong ownership of the SAME original custody and
+            // storage objects. It does not reopen a store or recover by name.
+            store: store.clone(),
             id: id.clone(),
             dir,
+            _directory_owner: directory_owner,
             replaced: None,
             published: false,
         };
@@ -225,7 +233,7 @@ impl<'a> StagedCapture<'a> {
     }
 }
 
-impl Drop for StagedCapture<'_> {
+impl Drop for StagedCapture {
     fn drop(&mut self) {
         if !self.published {
             let _ = std::fs::remove_dir_all(&self.dir);
@@ -313,30 +321,25 @@ fn staging_owner(name: &str) -> Option<i32> {
     name.split_once('-')?.0.parse().ok()
 }
 
-/// Remove every staging entry whose owning process is gone: the remains of a
-/// capture that crashed, or of a replaced checkpoint whose deletion did not
-/// finish. An entry of a live process is left alone, and so is a name this
-/// module did not make.
-///
-/// Best effort: a sweep that cannot remove something leaves it for the next
-/// one rather than failing the capture that triggered it.
-///
-/// Returns how many entries it removed.
+/// Quarantine staging left by a dead capturing process. Host process exit
+/// does not prove that its VMM writer stopped using the original directory.
+/// No entry is removed without that missing writer-quiescence binding.
+/// Returns zero; callers may inspect [`abandoned_entries`] for diagnostics.
 pub(super) fn sweep_abandoned(staging_root: &Path) -> usize {
-    abandoned_entries(staging_root)
-        .into_iter()
-        .filter(|path| match std::fs::remove_dir_all(path) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(path = %path.display(), %error, "could not sweep abandoned checkpoint staging");
-                false
-            }
-        })
-        .count()
+    // A dead capturing host is not proof that the original VMM writer stopped.
+    // Owned guards perform proven cleanup; crash leftovers stay quarantined.
+    let count = abandoned_entries(staging_root).len();
+    if count != 0 {
+        tracing::warn!(
+            count,
+            "checkpoint staging needs writer-quiescence proof before removal"
+        );
+    }
+    0
 }
 
-/// The staging entries [`sweep_abandoned`] would remove: those whose owning
-/// process is gone. A missing or unreadable staging root has none.
+/// Staging whose capturing process is gone, not proof of writer quiescence.
+/// A missing or unreadable staging root has none.
 pub(super) fn abandoned_entries(staging_root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(staging_root) else {
         return Vec::new();
@@ -481,7 +484,7 @@ mod tests {
     const DEAD_PID: u32 = 999_999_999;
 
     #[test]
-    fn the_sweep_removes_a_dead_process_staging_and_keeps_a_live_one_and_strangers() {
+    fn the_sweep_quarantines_dead_process_staging_without_writer_proof() {
         let tmp = tempfile::tempdir().unwrap();
         let id = CheckpointId::new("c");
         let dead = tmp.path().join(staging_name(DEAD_PID, &id));
@@ -496,10 +499,10 @@ mod tests {
         }
 
         assert_eq!(abandoned_entries(tmp.path()).len(), 2);
-        assert_eq!(sweep_abandoned(tmp.path()), 2);
+        assert_eq!(sweep_abandoned(tmp.path()), 0);
 
-        assert!(!dead.exists());
-        assert!(!dead_replaced.exists());
+        assert!(dead.exists());
+        assert!(dead_replaced.exists());
         assert!(live.exists());
         assert!(stranger.exists());
     }

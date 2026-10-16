@@ -74,9 +74,10 @@ struct RpcSession {
 }
 
 /// An authenticated control session that can carry multiple RPCs when the
-/// peer keeps the connection open. The guest agent's production control
-/// listener closes after one operational request, so callers that cross a
-/// restore boundary must obtain a new stream and handshake.
+/// peer keeps the connection open. Ordinary operational requests remain
+/// one-shot. A successful activation ACK permits only Exec followed by
+/// filesystem sync on that same session; it is not a persistent RPC loop.
+/// Callers crossing restore must still obtain a new stream and handshake.
 pub struct ControlSession {
     inner: RpcSession,
 }
@@ -843,6 +844,31 @@ where
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
     read_exec_stream_with_session(stream, &mut session, on_event)
+}
+
+/// Dispatch on an existing authenticated session, without hello, handshake or
+/// reconnect. A framing/transport failure is terminal for this session.
+pub fn send_exec_on_authenticated_session(
+    stream: &mut UnixStream,
+    session: &mut crate::vsock::AuthenticatedSession,
+    request: &GuestRequest,
+    mut on_event: impl FnMut(&ExecEvent),
+) -> Result<ExecEvent> {
+    anyhow::ensure!(
+        matches!(request, GuestRequest::Exec { .. }),
+        "expected Exec request"
+    );
+    session.write(stream, request)?;
+    loop {
+        let response = check_response(request, session.read(stream)?)?;
+        let GuestResponse::ExecEvent(event) = response else {
+            bail!("expected ExecEvent on retained session");
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
 }
 
 /// Run a declared command only after the guest has paused before spawn and

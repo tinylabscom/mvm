@@ -38,6 +38,12 @@ pub(super) fn wait_for_activation(
     Ok(())
 }
 
+/// The owning caller decides how to report/stop. A failed durability wait must
+/// not reap helpers while the original native instance remains unconfirmed.
+pub(super) fn wait_for_owned_activation(config: &VmStartConfig) -> Result<()> {
+    config.wait_for_admission_durability()
+}
+
 /// Tear down a guest that booted but must never be activated.
 ///
 /// Best-effort by necessity — the caller is already failing the launch —
