@@ -165,7 +165,8 @@ pub struct EntrypointCall<'a> {
 ///
 /// # Errors
 /// A refused admission or boot, an agent that never answered, or a failed
-/// dispatch — the last only after the VM has been torn down or kept alive.
+/// dispatch or backend stop. A failed or unconfirmed stop leaves the session
+/// record visible; a workload exit of zero does not override a stop failure.
 pub fn run_entrypoint_call(
     call: EntrypointCall<'_>,
     pair: Option<&mut PairArtifactSource<'_>>,
@@ -194,16 +195,17 @@ pub fn run_entrypoint_call(
         pair,
     )?;
     let vm_name = booted.vm.vm_name.clone();
+    observer.admitted(&booted.vm.vm_name, &booted.admission.admitted);
 
     let mode = match lifecycle {
         CallLifecycle::Transient => SessionMode::Prod,
         CallLifecycle::KeepAlive { mode } => mode,
     };
     let session_id = register_call_session(&vm_name, slot, mode);
-    if let Err(e) = booted.await_agent(AGENT_WAIT_SECS) {
-        deregister_call_session(session_id.as_ref());
-        return Err(e);
-    }
+    // Agent-wait teardown is best-effort and does not return its stop result.
+    // On failure retain the session record: removing it would hide a VM whose
+    // stop is unconfirmed. This path emits no stop-acknowledgement observation.
+    booted.await_agent(AGENT_WAIT_SECS)?;
 
     // The admitted plan is borrowed across the dispatch because a streamed
     // stdin is opened under it: the gate takes the proof-carrying type, so the
@@ -212,9 +214,8 @@ pub fn run_entrypoint_call(
     let dispatch_stdin = match authorize_stdin(stdin, Some(&booted.admission.admitted)) {
         Ok(stdin) => stdin,
         Err(refusal) => {
-            end_transient_call(&booted, &backend_name, CallEnd::NOT_RUN);
-            deregister_call_session(session_id.as_ref());
-            return Err(refusal);
+            let stopped = end_transient_call(&booted, &backend_name, CallEnd::NOT_RUN, observer);
+            return finish_transient_result(Err(refusal), stopped, session_id.as_ref());
         }
     };
     observer.dispatching(&vm_name, streams_stdin);
@@ -242,8 +243,9 @@ pub fn run_entrypoint_call(
             observer.kept_alive(&vm_name, session_id.as_ref());
         }
         CallLifecycle::Transient => {
-            end_transient_call(&booted, &backend_name, CallEnd::of(&result));
-            deregister_call_session(session_id.as_ref());
+            let stopped =
+                end_transient_call(&booted, &backend_name, CallEnd::of(&result), observer);
+            return finish_transient_result(result, stopped, session_id.as_ref());
         }
     }
     result
@@ -282,16 +284,56 @@ impl CallEnd {
 /// Stop a transient call's VM, then close its audit session. A VM whose stop
 /// failed may still be running, so its session is left open rather than
 /// sealed over a guest that can still act.
-fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
-    if let Err(e) = stop_session_vm(&booted.vm) {
+fn end_transient_call(
+    booted: &BootedEntrypoint,
+    backend: &str,
+    end: CallEnd,
+    observer: &mut dyn CallObserver,
+) -> Result<()> {
+    end_transient_call_with(booted, backend, end, observer, stop_session_vm)
+}
+
+fn end_transient_call_with(
+    booted: &BootedEntrypoint,
+    backend: &str,
+    end: CallEnd,
+    observer: &mut dyn CallObserver,
+    stop: impl FnOnce(&SessionVm) -> Result<()>,
+) -> Result<()> {
+    let stopped = stop(&booted.vm);
+    observer.vm_stop_finished(&booted.vm.vm_name, &booted.admission.admitted, &stopped);
+    if let Err(e) = stopped {
         record_unsealed_end(
             Some((&booted.admission.emitter, booted.admission.admitted.plan())),
             UnsealedEnd::new(&booted.vm.vm_name, UnsealedReason::StopFailed)
                 .error(format!("{e:#}")),
         );
-        return;
+        return Err(e);
     }
     close_call_session(&booted.admission, &booted.vm.vm_name, backend, end);
+    Ok(())
+}
+
+/// A workload's exit is not a clean lifecycle when its VM may still be alive.
+/// Preserve the call error as well when transport/dispatch and stop both failed.
+/// Remove the session record only after the backend acknowledged the stop.
+fn finish_transient_result(
+    result: Result<CallOutcome>,
+    stopped: Result<()>,
+    session_id: Option<&SessionId>,
+) -> Result<CallOutcome> {
+    if stopped.is_ok() {
+        deregister_call_session(session_id);
+    }
+    match (result, stopped) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(stop)) => {
+            Err(stop).context("entrypoint call ended but VM stop was not acknowledged")
+        }
+        (Err(call), Err(stop)) => {
+            Err(call.context(format!("VM stop was also not acknowledged: {stop:#}")))
+        }
+    }
 }
 
 /// Write `plan.exited` and the seal for a stopped transient call, under the
@@ -380,11 +422,16 @@ mod tests {
     #[derive(Default)]
     struct NamingObserver {
         named: Vec<String>,
+        admitted: Vec<String>,
     }
 
     impl CallObserver for NamingObserver {
         fn vm_named(&mut self, vm_name: &str) {
             self.named.push(vm_name.to_string());
+        }
+
+        fn admitted(&mut self, _vm_name: &str, admitted: &mvm_hostd::plan_admission::AdmittedPlan) {
+            self.admitted.push(admitted.plan().plan_id.0.clone());
         }
 
         fn output(&mut self, _chunk: &ShownChunk) {}
@@ -480,6 +527,10 @@ mod tests {
             "the final generated name must be known before boot fails"
         );
         assert!(
+            observer.admitted.is_empty(),
+            "a failed boot must not emit a successful-boot admission observation"
+        );
+        assert!(
             mvm_core::session::list_sessions().expect("list").is_empty(),
             "a call that never booted registers nothing"
         );
@@ -521,6 +572,164 @@ mod tests {
             terminal: CallTerminal::Exited { code },
             capture: None,
         })
+    }
+
+    struct StopObserver<'a> {
+        expected: &'a mvm_hostd::plan_admission::AdmittedPlan,
+        stop_completed: &'a std::cell::Cell<bool>,
+        stops: Vec<(String, bool)>,
+    }
+
+    impl CallObserver for StopObserver<'_> {
+        fn output(&mut self, _chunk: &ShownChunk) {}
+
+        fn control(&mut self, _header: &str, _payload_len: usize) {}
+
+        fn vm_stop_finished(
+            &mut self,
+            vm_name: &str,
+            admitted: &mvm_hostd::plan_admission::AdmittedPlan,
+            result: &Result<()>,
+        ) {
+            assert!(
+                self.stop_completed.get(),
+                "observation must follow the stop"
+            );
+            assert!(self.stops.is_empty(), "one observation per stop attempt");
+            assert!(
+                std::ptr::eq(admitted, self.expected),
+                "stop observation must borrow this boot's actual admission"
+            );
+            self.stops.push((vm_name.to_string(), result.is_ok()));
+        }
+    }
+
+    #[test]
+    fn stop_observation_uses_the_boot_admission_and_actual_backend_result() {
+        let _home = isolated();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let booted = BootedEntrypoint {
+            vm: SessionVm {
+                vm_name: "observed-stop".into(),
+            },
+            admission: crate::admission::admit_plan_tests::admitted_into(
+                keys_dir.path(),
+                audit_dir.path(),
+                "observed-stop",
+            ),
+        };
+        emit_launched(&booted.admission, "mock", true);
+        let session_id = register_call_session("observed-stop", "slot", SessionMode::Prod).unwrap();
+        let stop_completed = std::cell::Cell::new(false);
+        let mut observer = StopObserver {
+            expected: &booted.admission.admitted,
+            stop_completed: &stop_completed,
+            stops: Vec::new(),
+        };
+
+        let stopped = end_transient_call_with(
+            &booted,
+            "mock",
+            CallEnd::of(&exited(0)),
+            &mut observer,
+            |vm| {
+                assert!(std::ptr::eq(vm, &booted.vm));
+                stop_completed.set(true);
+                Ok(())
+            },
+        );
+
+        finish_transient_result(exited(0), stopped, Some(&session_id))
+            .expect("call exited and backend acknowledged stop");
+        assert_eq!(observer.stops, vec![("observed-stop".into(), true)]);
+        assert!(
+            mvm_core::session::read_session(&session_id)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            only_seal(&booted.admission, audit_dir.path())
+                .exit_code
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[test]
+    fn exit_zero_with_failed_stop_is_observed_as_failed_and_left_unsealed() {
+        let _home = isolated();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let booted = BootedEntrypoint {
+            vm: SessionVm {
+                vm_name: "unconfirmed-stop".into(),
+            },
+            admission: crate::admission::admit_plan_tests::admitted_into(
+                keys_dir.path(),
+                audit_dir.path(),
+                "unconfirmed-stop",
+            ),
+        };
+        emit_launched(&booted.admission, "mock", true);
+        let session_id =
+            register_call_session("unconfirmed-stop", "slot", SessionMode::Prod).unwrap();
+        let stop_completed = std::cell::Cell::new(false);
+        let mut observer = StopObserver {
+            expected: &booted.admission.admitted,
+            stop_completed: &stop_completed,
+            stops: Vec::new(),
+        };
+
+        let stopped = end_transient_call_with(
+            &booted,
+            "mock",
+            CallEnd::of(&exited(0)),
+            &mut observer,
+            |_| {
+                stop_completed.set(true);
+                Err(anyhow::anyhow!("backend stop was not acknowledged"))
+            },
+        );
+
+        assert!(stopped.is_err());
+        assert!(finish_transient_result(exited(0), stopped, Some(&session_id)).is_err());
+        assert_eq!(observer.stops, vec![("unconfirmed-stop".into(), false)]);
+        assert_eq!(
+            mvm_core::session::read_session(&session_id)
+                .unwrap()
+                .expect("unconfirmed VM must remain visible")
+                .state,
+            SessionState::Running
+        );
+        assert_eq!(
+            session_report(&booted.admission, audit_dir.path()).verdict,
+            mvm_hostd::audit::session::Verdict::Unsealed
+        );
+        let audit = std::fs::read_to_string(audit_dir.path().join("local.jsonl")).unwrap();
+        assert!(!audit.contains("session.sealed"));
+        assert!(!audit.contains("plan.exited"));
+    }
+
+    #[test]
+    fn a_transport_failure_and_stop_failure_are_both_retained() {
+        let result = finish_transient_result(
+            Err(anyhow::anyhow!("transport disconnected")),
+            Err(anyhow::anyhow!("backend stop failed")),
+            None,
+        )
+        .expect_err("neither a failed call nor a failed stop is success");
+        let detail = format!("{result:#}");
+        assert!(detail.contains("transport disconnected"), "{detail}");
+        assert!(detail.contains("backend stop failed"), "{detail}");
+    }
+
+    #[test]
+    fn acknowledged_stop_does_not_turn_a_failed_call_into_success() {
+        let result =
+            finish_transient_result(Err(anyhow::anyhow!("dispatch was refused")), Ok(()), None)
+                .expect_err("a successful stop is not a successful command");
+        assert!(result.to_string().contains("dispatch was refused"));
     }
 
     #[test]

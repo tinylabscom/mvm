@@ -262,6 +262,7 @@ pub(in crate::commands) fn export_template(
             provenance,
             environment: export.environment,
             boot_assets: None,
+            cli_boot_assets: None,
             out: &export.out,
             debug_out: None,
         },

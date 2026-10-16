@@ -89,10 +89,12 @@ fn record_signed_marker(exe: &std::path::Path) {
 /// serializes concurrent launches (codesign --force rewrites the shared binary
 /// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn ensure_self_signed() {
+fn ensure_self_signed(diagnostics: &mut mvm_vmm::host::hvf_supervisor::StartupReporter) {
+    use mvm_vmm::host::hvf_supervisor::StartupStage;
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
 
+    diagnostics.stage(StartupStage::SignCheck);
     if std::env::var("MVM_HVF_SIGNED").as_deref() == Ok("1") {
         return;
     }
@@ -111,6 +113,7 @@ fn ensure_self_signed() {
         return;
     }
 
+    diagnostics.stage(StartupStage::SigningLock);
     let lock = std::fs::OpenOptions::new()
         .create(true)
         .write(true)
@@ -125,6 +128,7 @@ fn ensure_self_signed() {
     }
 
     if !exe_has_hypervisor_entitlement(&exe) {
+        diagnostics.stage(StartupStage::Signing);
         let ent = std::env::temp_dir().join("mvm-hvf-supervisor-entitlements.plist");
         if std::fs::write(&ent, HVF_ENTITLEMENTS_PLIST).is_err() {
             return;
@@ -150,10 +154,13 @@ fn ensure_self_signed() {
     }
     drop(lock);
 
-    let err = mvm_core::env_hygiene::helper_command(&exe)
+    diagnostics.stage(StartupStage::Reexec);
+    let mut command = mvm_core::env_hygiene::helper_command(&exe);
+    command
         .args(std::env::args_os().skip(1))
-        .env("MVM_HVF_SIGNED", "1")
-        .exec();
+        .env("MVM_HVF_SIGNED", "1");
+    diagnostics.configure_reexec(&mut command);
+    let err = command.exec();
     eprintln!("mvm-hvf-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
 }
@@ -230,11 +237,17 @@ fn main() -> anyhow::Result<()> {
     use std::time::Duration;
 
     use anyhow::Context;
-    use mvm_vmm::host::hvf_supervisor::{HvfShutdownTimingRecord, HvfSupervisorConfig};
+    use mvm_vmm::host::hvf_supervisor::{
+        HvfShutdownTimingRecord, HvfSupervisorConfig, StartupReporter, StartupStage,
+    };
 
     mvm_vmm::host::helper_contract::exit_with_probe_answer_if_requested("mvm-hvf-supervisor");
+    // SAFETY: the native launcher transfers a distinct diagnostics pipe end
+    // exclusively to this exec. Adopt it before threads or other FD adoption;
+    // inherited() also enforces at most one adoption attempt per exec.
+    let mut diagnostics = unsafe { StartupReporter::inherited() };
     // Sign + re-exec before anything else (preserves the stdin config pipe).
-    ensure_self_signed();
+    ensure_self_signed(&mut diagnostics);
 
     // Graceful stop: SIGTERM/SIGINT set STOP, which the boot watchdog observes and
     // force-exits the guest (then we flush the console + drop the PID file).
@@ -251,10 +264,12 @@ fn main() -> anyhow::Result<()> {
         libc::signal(libc::SIGUSR2, resume_h);
     }
 
+    diagnostics.stage(StartupStage::ConfigRead);
     let mut raw = String::new();
     std::io::stdin()
         .read_to_string(&mut raw)
         .context("read HvfSupervisorConfig from stdin")?;
+    diagnostics.stage(StartupStage::ConfigParse);
     let cfg: HvfSupervisorConfig =
         serde_json::from_str(&raw).context("parse HvfSupervisorConfig JSON from stdin")?;
     let registered_startup = mvm_hostd::supervisor::caller_registration::prepare_startup(&cfg)?;
@@ -274,6 +289,7 @@ fn main() -> anyhow::Result<()> {
         anyhow::bail!("protected handoff requires a planless vsock standby");
     }
 
+    diagnostics.stage(StartupStage::StartupInputs);
     // Adopt the verified saved state before anything else can open a file, so
     // no descriptor number is reused out from under it.
     let restore = restore_image_from(&cfg)?;
@@ -285,6 +301,7 @@ fn main() -> anyhow::Result<()> {
     let _ = std::fs::remove_file(mvm_vmm::host::hvf_supervisor::shutdown_timing_path(
         state_dir,
     ));
+    diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Starting.publish(state_dir)?;
     if let Some(path) = &cfg.pause_state {
         let _ = std::fs::remove_file(path);
@@ -446,6 +463,7 @@ fn main() -> anyhow::Result<()> {
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
+    diagnostics.stage(StartupStage::CapturePolicy);
     use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
     let admitted_plan = cfg
         .plan
@@ -468,6 +486,7 @@ fn main() -> anyhow::Result<()> {
             None => anyhow::bail!("workload protected capture requires an admitted plan"),
         }
     };
+    diagnostics.stage(StartupStage::CaptureSetup);
     let (capture_owner, console_sink) =
         match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {
             vm: &cfg.vm_name,
@@ -488,9 +507,13 @@ fn main() -> anyhow::Result<()> {
     )?;
     let capture_control = cfg.handoff_socket.as_ref().map(|_| capture_owner.control());
     // Only a provisioned capture owner may announce this boot.
+    diagnostics.stage(StartupStage::StatusPublish);
     CaptureStatus::Running.publish(state_dir)?;
+    diagnostics.stage(StartupStage::PidPublish);
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
         .context("publish protected supervisor PID")?;
+    diagnostics.stage(StartupStage::PidPublished);
+    drop(diagnostics);
     let result = mvm_runtime::backends::hvf::boot_kernel_until(
         mvm_runtime::backends::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
             .initramfs(initramfs.as_deref())

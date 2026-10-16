@@ -1406,10 +1406,13 @@ mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
 ```
 
 The package carries the workload kernel, rootfs, resolved entrypoint and libc
-metadata, universal initramfs, and runtime overlay. Runtime members are acquired
-from the existing authenticated image-set pin; the original image-set manifest
-is carried unchanged. Materialization finishes before the CLI loads its host
-signing key. The builder never receives the publisher key.
+metadata, universal initramfs, runtime overlay and its verity tree. The kernel
+comes from the authenticated Linux image-set pin; the original image-set
+manifest is carried unchanged. Runtime assets come from the matching signed CLI
+release, with the original archive, checksum and both signature bundles retained
+inside the package. Source-built runtime bytes cannot substitute for these
+release proofs. Materialization finishes before the CLI loads its host signing
+key. The builder never receives the publisher key.
 
 `--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
 Packaging currently requires the selected architecture to match the host;
@@ -1432,11 +1435,19 @@ never falls back to an untrusted builder or replaces that seal through one.
 `--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
 not currently supported by that shared exporter.
 
-Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
-They retain the original image-set identity while carrying only the selected
-architecture's runtime archives, not the full builder/base-image release set.
-Older readers refuse these packages. Existing schema 3 packages and full
-embedded image sets retain their existing semantics.
+New portable OCI packages use bundle schema 6's explicit CLI-runtime declaration.
+The consumer verifies the package signature and inventory, then independently
+authenticates the retained CLI-runtime release and checks the prepared overlay,
+verity tree and initramfs against its assembly declaration. Consumer launch does
+not build, assemble, download or use a producer runtime cache. Readers supporting
+only schema 5 or earlier refuse these packages. Existing bundles retain their
+existing semantics; CLI and historical boot-asset declarations cannot be mixed.
+
+The package publisher binds the selected kernel bytes to the embedded Linux
+manifest. This structural binding is not independent Linux-publisher signature
+or current-revocation evidence; applications requiring that stronger authority
+must satisfy their separate admission requirements. A successful archive check
+alone is not a launch-readiness or protected-observer acceptance result.
 
 Bundles carrying their own boot assets use the cold-boot path. The current
 warm-pool preparation command cannot prepare a parent from an archive's pinned

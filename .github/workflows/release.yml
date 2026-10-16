@@ -4,16 +4,14 @@ on:
   push:
     tags:
       - "v*"
-  # Manual dry-run: validate the release build + packaging (binaries, host-bin
-  # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
-  # `dry_run=true` (the default) runs only the `build` job and skips the
-  # publishing `release` job and `verify-release`. A real
-  # release still happens via a `v*` tag push; an explicit `dry_run=false`
-  # dispatch publishes too (escape hatch).
+  # Manual validation runs the pre-publication build, packaging and native
+  # gates without creating a release. Explicit dry_run=false may rehearse the
+  # throwaway draft API where environment policy permits; it cannot mint the
+  # trusted tag identity or promote a public release. Production uses a v* tag.
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Build + package only; do NOT publish (no GitHub release, no crates.io)"
+        description: "Validate without a release (true); false permits a throwaway draft rehearsal, never public publication"
         type: boolean
         default: true
 
@@ -321,6 +319,22 @@ jobs:
             cp -r man "staging/${ARCHIVE_NAME}/"
           fi
 
+      - name: Mandatory ad-hoc producer signing
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --producer-adhoc --require-cli-inventory \
+            --payload staging/mvmctl-aarch64-apple-darwin \
+            --report "${RUNNER_TEMP}/macos-producer-signing.json"
+
+      - name: Retain macOS producer signing evidence
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-producer-signing
+          path: ${{ runner.temp }}/macos-producer-signing.json
+          if-no-files-found: warn
+
       - name: Sign and notarize the staged macOS release
         if: ${{ matrix.target == 'aarch64-apple-darwin' && github.ref_type == 'tag' }}
         env:
@@ -366,6 +380,29 @@ jobs:
 
           # Generate SHA256 checksum for the tarball
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+
+      - name: Inspect final macOS package bytes
+        if: ${{ matrix.target == 'aarch64-apple-darwin' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notary=()
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            notary=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
+          fi
+          python3 scripts/release/verify_macos_package.py \
+            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz \
+            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory \
+            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json" \
+            "${notary[@]}" --report "${RUNNER_TEMP}/macos-final-package.json"
+
+      - name: Retain final macOS package inspection
+        if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-final-package
+          path: ${{ runner.temp }}/macos-final-package.json
+          if-no-files-found: warn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -466,10 +503,9 @@ jobs:
     # this condition; a job listed and not checked is worse than one that was
     # never added, because it reads as covered.
     #
-    # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
-    # (the `build` job) but never reaches this publish job — only a tag push or
-    # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
+    # Default manual validation never creates even a draft release. Explicit
+    # draft API rehearsals remain subject to the environment policy below.
+    if: ${{ !cancelled() && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.archive-install-smoke.result == 'success' && needs.guest-runtime.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and

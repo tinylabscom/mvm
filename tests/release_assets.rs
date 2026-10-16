@@ -31,7 +31,7 @@ fn just_module(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
-/// The publish path must be reachable without pushing a tag.
+/// The draft API rehearsal path remains separate from default validation.
 ///
 /// Every release defect found while cutting v0.18.0-rc.1 lived in the publish
 /// job, and the publish job used to be unreachable except by a tag push: the
@@ -40,7 +40,7 @@ fn just_module(name: &str) -> String {
 /// cross-compile target, an incomplete boot image, a transient 403, and a
 /// duplicate asset name that 422'd *after* the release had been created.
 ///
-/// A dry run reaches `gh release create` against a throwaway draft, so those
+/// An explicit draft rehearsal reaches `gh release create`, so those
 /// same failures surface in minutes. The draft is deleted afterwards, and
 /// `always()` on the cleanup matters: a create that succeeds and then fails
 /// uploading leaves a draft behind, which is exactly the case that produced the
@@ -51,8 +51,23 @@ fn just_module(name: &str) -> String {
 /// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
 /// a green dry run mean more than it does.
 #[test]
-fn a_dry_run_reaches_the_publish_step_without_a_tag() {
+fn an_explicit_draft_rehearsal_retains_the_scratch_release_path() {
     let workflow = release_workflow();
+
+    let release = workflow
+        .split("\n  release:\n")
+        .nth(1)
+        .expect("release job exists");
+    let condition = release
+        .lines()
+        .find(|line| line.trim_start().starts_with("if:"))
+        .expect("release job has an explicit condition");
+    assert!(
+        condition.contains(
+            "(github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))"
+        ),
+        "default manual validation must not reach release creation"
+    );
 
     let create = workflow
         .find("gh release create \"${publish_tag}\"")
