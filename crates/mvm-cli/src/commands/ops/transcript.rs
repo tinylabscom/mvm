@@ -760,9 +760,10 @@ mod tests {
         // Historical cleanup cannot depend on mutable or deleted VM state.
         std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
         let original = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
+        let before = format!("{:#}", c.export("local", &id).unwrap_err());
         assert!(
-            c.export("local", &id).is_err(),
-            "deadline refuses before cleanup"
+            before.contains("retention deadline has passed"),
+            "read expiry refuses before cleanup: {before}"
         );
         assert!(dir.join(&terminal.chunks[0].file).exists());
         std::fs::write(dir.join("foreign"), b"synthetic foreign").unwrap();
@@ -789,7 +790,14 @@ mod tests {
             std::fs::read(dir.join("foreign")).unwrap(),
             b"synthetic foreign"
         );
-        assert!(c.export("local", &id).is_err());
+        let after = format!("{:#}", c.export("local", &id).unwrap_err());
+        assert!(
+            after.contains("authenticated retirement evidence"),
+            "removed payload is reported as signed retirement, not corruption: {after}"
+        );
+        let (_, kept) = c.load_manifest("local", &id).unwrap();
+        transcript::verify_sealed_root(&kept).unwrap();
+        assert_eq!(kept, terminal);
         let evidence = std::fs::read_to_string(c.audit_dir.join("local.jsonl")).unwrap();
         assert!(!evidence.contains("synthetic retention marker"));
         assert!(evidence.contains("transcript.retired"));
