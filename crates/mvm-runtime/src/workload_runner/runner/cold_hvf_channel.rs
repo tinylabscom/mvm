@@ -247,6 +247,28 @@ impl ColdHvfChannel {
         Ok(terminal)
     }
 
+    /// Exactly one original signed entrypoint verb, not an Exec substitution.
+    /// This lower transport operation carries no admission authority.
+    pub fn entrypoint(
+        &mut self,
+        request: &GuestRequest,
+        on_event: impl FnMut(&mvm_agentd::vsock::EntrypointEvent),
+    ) -> Result<mvm_agentd::vsock::EntrypointEvent> {
+        let custody = self.custody()?;
+        anyhow::ensure!(
+            custody.phase == Phase::Activated,
+            "entrypoint requires activation ACK"
+        );
+        custody.phase = Phase::Uncertain;
+        let terminal = custody
+            .native
+            .as_mut()
+            .context("native owner missing")?
+            .entrypoint(request, on_event)?;
+        custody.phase = Phase::Dispatched;
+        Ok(terminal)
+    }
+
     pub fn flush(&mut self) -> Result<()> {
         let custody = self.custody()?;
         anyhow::ensure!(

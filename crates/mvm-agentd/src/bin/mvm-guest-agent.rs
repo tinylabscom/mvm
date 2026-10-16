@@ -190,7 +190,9 @@ fn arm_tool_reply_timeout(fd: RawFd) -> std::io::Result<()> {
 #[derive(Clone, Copy, PartialEq)]
 enum ColdContinuation {
     OneShot,
+    // Await exactly one workload; the original Exec lane remains supported.
     Exec,
+    EntrypointTerminal,
     Flush,
 }
 
@@ -200,7 +202,15 @@ impl ColdContinuation {
             (Self::OneShot, GuestRequest::ActivateEnvironment(_)) => Ok(Some(Self::Exec)),
             (Self::OneShot, _) | (Self::Flush, GuestRequest::SyncFilesystems) => Ok(None),
             (Self::Exec, GuestRequest::Exec { .. }) => Ok(Some(Self::Flush)),
-            (Self::Exec | Self::Flush, _) => Err(()),
+            (
+                Self::Exec,
+                GuestRequest::RunEntrypoint {
+                    stream_input: false,
+                    ..
+                }
+                | GuestRequest::AgentPrompt { .. },
+            ) => Ok(Some(Self::EntrypointTerminal)),
+            (Self::Exec | Self::EntrypointTerminal | Self::Flush, _) => Err(()),
         }
     }
 
@@ -208,6 +218,11 @@ impl ColdContinuation {
         match (next, response) {
             (Some(Self::Exec), GuestResponse::ActivateEnvironmentAck) => Some(Self::Exec),
             (Some(Self::Flush), GuestResponse::ExecEvent(event)) if event.is_terminal() => {
+                Some(Self::Flush)
+            }
+            (Some(Self::EntrypointTerminal), GuestResponse::EntrypointEvent(event))
+                if event.is_terminal() =>
+            {
                 Some(Self::Flush)
             }
             _ => None,
@@ -244,6 +259,14 @@ trait ControlOperations {
         timeout_secs: Option<u64>,
     ) -> GuestResponse;
     fn sync_filesystems(&mut self) -> GuestResponse;
+    fn entrypoint(
+        &mut self,
+        context: &mut HandlerCtx<'_>,
+        stdin: Vec<u8>,
+        timeout_secs: u64,
+        env: Vec<(String, String)>,
+        stream_input: bool,
+    ) -> GuestResponse;
 }
 
 struct NativeControlOperations;
@@ -284,6 +307,17 @@ impl ControlOperations for NativeControlOperations {
 
     fn sync_filesystems(&mut self) -> GuestResponse {
         handle_sync_filesystems()
+    }
+
+    fn entrypoint(
+        &mut self,
+        context: &mut HandlerCtx<'_>,
+        stdin: Vec<u8>,
+        timeout_secs: u64,
+        env: Vec<(String, String)>,
+        stream_input: bool,
+    ) -> GuestResponse {
+        handle_run_entrypoint_request(context, stdin, timeout_secs, env, stream_input)
     }
 }
 
@@ -657,9 +691,7 @@ fn handle_client_operations(
                     timeout_secs,
                     env,
                     stream_input,
-                } => {
-                    handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input)
-                }
+                } => operations.entrypoint(&mut ctx, stdin, timeout_secs, env, stream_input),
 
                 // The resident agent is the boot-validated entrypoint, so a prompt
                 // is served by the same handler, with the prompt as the agent's
@@ -668,7 +700,7 @@ fn handle_client_operations(
                     prompt,
                     timeout_secs,
                     env,
-                } => handle_run_entrypoint_request(&mut ctx, prompt, timeout_secs, env, false),
+                } => operations.entrypoint(&mut ctx, prompt, timeout_secs, env, false),
 
                 GuestRequest::DriveOpen {
                     program_id: _,
@@ -1280,6 +1312,25 @@ mod tests {
             self.calls.lock().unwrap().push("sync");
             GuestResponse::FilesystemsSynced
         }
+
+        fn entrypoint(
+            &mut self,
+            context: &mut HandlerCtx<'_>,
+            stdin: Vec<u8>,
+            _timeout_secs: u64,
+            _env: Vec<(String, String)>,
+            stream_input: bool,
+        ) -> GuestResponse {
+            assert!(!stream_input);
+            self.calls.lock().unwrap().push("entrypoint");
+            write_response(
+                context.file,
+                &GuestResponse::EntrypointEvent(mvm_agentd::vsock::EntrypointEvent::Stdout {
+                    chunk: stdin,
+                }),
+            );
+            GuestResponse::EntrypointEvent(mvm_agentd::vsock::EntrypointEvent::Exit { code: 0 })
+        }
     }
 
     struct DispatchFixture {
@@ -1386,6 +1437,132 @@ mod tests {
             stdin: None,
             timeout_secs: Some(1),
         }
+    }
+
+    #[test]
+    fn production_dispatch_preserves_entrypoint_verbs_through_terminal_sync_and_close() {
+        for request in [
+            GuestRequest::RunEntrypoint {
+                stdin: b"original-call".to_vec(),
+                timeout_secs: 2,
+                env: vec![],
+                stream_input: false,
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"original-call".to_vec(),
+                timeout_secs: 2,
+                env: vec![],
+            },
+        ] {
+            let mut fixture = DispatchFixture::start(AgentProfile::Dev, dispatch_effects());
+            assert!(matches!(
+                fixture.call(&dispatch_activation()),
+                GuestResponse::ActivateEnvironmentAck
+            ));
+            let mut events = Vec::new();
+            let terminal = mvm_agentd::vsock::send_entrypoint_on_authenticated_session(
+                &mut fixture.stream,
+                &mut fixture.session,
+                &request,
+                |event| events.push(event.clone()),
+            )
+            .unwrap();
+            assert!(matches!(
+                terminal,
+                mvm_agentd::vsock::EntrypointEvent::Exit { code: 0 }
+            ));
+            assert!(matches!(events.as_slice(),
+                [mvm_agentd::vsock::EntrypointEvent::Stdout { chunk }] if chunk == b"original-call"));
+            assert!(matches!(
+                fixture.call(&GuestRequest::SyncFilesystems),
+                GuestResponse::FilesystemsSynced
+            ));
+            assert!(
+                fixture
+                    .session
+                    .read::<GuestResponse>(&mut fixture.stream)
+                    .is_err()
+            );
+            assert_eq!(fixture.finish(), ["activate", "entrypoint", "sync"]);
+        }
+    }
+
+    #[test]
+    fn production_dispatch_entrypoint_and_sync_each_recheck_their_own_gate() {
+        for refuse_sync in [false, true] {
+            let request = GuestRequest::AgentPrompt {
+                prompt: b"original-prompt".to_vec(),
+                timeout_secs: 2,
+                env: vec![],
+            };
+            let mut fixture = DispatchFixture::start(AgentProfile::Dev, dispatch_effects());
+            assert!(matches!(
+                fixture.call(&dispatch_activation()),
+                GuestResponse::ActivateEnvironmentAck
+            ));
+            if !refuse_sync {
+                fixture.boot.inner.lock().unwrap().trust_denied = true;
+            }
+            let result = mvm_agentd::vsock::send_entrypoint_on_authenticated_session(
+                &mut fixture.stream,
+                &mut fixture.session,
+                &request,
+                |_| {},
+            );
+            if refuse_sync {
+                assert!(result.is_ok());
+                fixture.boot.inner.lock().unwrap().trust_denied = true;
+                assert!(matches!(fixture.call(&GuestRequest::SyncFilesystems),
+                    GuestResponse::VerbNotAuthorized { verb } if verb == "sync-filesystems"));
+                assert_eq!(fixture.finish(), ["activate", "entrypoint"]);
+            } else {
+                assert!(result.unwrap_err().is::<mvm_agentd::vsock::RpcError>());
+                assert_eq!(fixture.finish(), ["activate"]);
+            }
+        }
+    }
+
+    #[test]
+    fn production_dispatch_rejects_second_entrypoint_and_second_transport_stdin() {
+        let request = GuestRequest::RunEntrypoint {
+            stdin: vec![],
+            timeout_secs: 2,
+            env: vec![],
+            stream_input: false,
+        };
+        let mut repeated = DispatchFixture::start(AgentProfile::Dev, dispatch_effects());
+        assert!(matches!(
+            repeated.call(&dispatch_activation()),
+            GuestResponse::ActivateEnvironmentAck
+        ));
+        mvm_agentd::vsock::send_entrypoint_on_authenticated_session(
+            &mut repeated.stream,
+            &mut repeated.session,
+            &request,
+            |_| {},
+        )
+        .unwrap();
+        assert!(matches!(
+            repeated.call(&request),
+            GuestResponse::Error { .. }
+        ));
+        assert_eq!(repeated.finish(), ["activate", "entrypoint"]);
+
+        let mut streamed = DispatchFixture::start(AgentProfile::Dev, dispatch_effects());
+        assert!(matches!(
+            streamed.call(&dispatch_activation()),
+            GuestResponse::ActivateEnvironmentAck
+        ));
+        assert!(matches!(
+            streamed.call(&GuestRequest::RunEntrypoint {
+                stdin: vec![],
+                timeout_secs: 2,
+                env: vec![],
+                stream_input: true,
+            }),
+            GuestResponse::Error { .. }
+        ));
+        assert_eq!(streamed.finish(), ["activate"]);
     }
 
     #[test]

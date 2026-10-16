@@ -1473,6 +1473,14 @@ impl ColdHvfOwner {
         self.inner_mut().exec(request, on_event)
     }
 
+    pub fn entrypoint(
+        &mut self,
+        request: &mvm_agentd::vsock::GuestRequest,
+        on_event: impl FnMut(&mvm_agentd::vsock::EntrypointEvent),
+    ) -> Result<mvm_agentd::vsock::EntrypointEvent> {
+        self.inner_mut().entrypoint(request, on_event)
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         self.stop_with_proof().map(|_| ())
     }
@@ -1662,6 +1670,51 @@ impl ColdNativeCustody {
         })?;
         self.finish_request()?;
         Ok(result)
+    }
+
+    fn entrypoint(
+        &mut self,
+        request: &mvm_agentd::vsock::GuestRequest,
+        on_event: impl FnMut(&mvm_agentd::vsock::EntrypointEvent),
+    ) -> Result<mvm_agentd::vsock::EntrypointEvent> {
+        use mvm_agentd::vsock::GuestRequest;
+        let seconds = match request {
+            GuestRequest::RunEntrypoint {
+                timeout_secs,
+                stream_input: false,
+                ..
+            }
+            | GuestRequest::AgentPrompt { timeout_secs, .. } => *timeout_secs,
+            _ => bail!("cold native entrypoint requires a one-shot original entrypoint verb"),
+        };
+        anyhow::ensure!(seconds > 0, "cold entrypoint deadline must be positive");
+        let budget = std::time::Duration::from_secs(seconds)
+            .checked_add(std::time::Duration::from_secs(5))
+            .context("cold entrypoint deadline overflow")?;
+        let deadline = Instant::now()
+            .checked_add(budget)
+            .context("cold entrypoint deadline overflow")?;
+        self.begin_request()?;
+        let stream = self
+            .bridge
+            .stream
+            .as_mut()
+            .context("native bridge missing")?;
+        let session = self
+            .bridge
+            .session
+            .as_mut()
+            .context("guest session missing")?;
+        // One overall deadline closes the exact socket on expiry. No
+        // timeout-and-continue can consume a partially read protected frame.
+        stream.set_read_timeout(None)?;
+        let terminal = mvm_agentd::vsock::run_with_stream_deadline(stream, deadline, |stream| {
+            mvm_agentd::vsock::send_entrypoint_on_authenticated_session(
+                stream, session, request, on_event,
+            )
+        })?;
+        self.finish_request()?;
+        Ok(terminal)
     }
 
     /// On any error all native, stream and key custody stays in `self`.
