@@ -70,6 +70,7 @@ pub mod local;
 pub mod manifest;
 pub mod notices;
 pub mod oci_bundle;
+pub mod output_audit;
 pub mod pack_scenario;
 pub mod policy_profiles;
 pub mod profile;

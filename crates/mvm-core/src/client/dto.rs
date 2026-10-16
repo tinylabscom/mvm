@@ -1,7 +1,8 @@
 //! The wire contract. These types are the seam between a caller and any
 //! backend; the same structs will be deserialized by mvmd-gateway from the
 //! network, so they fail closed on unknown fields and carry intent only —
-//! never local host artifacts (keys, paths).
+//! never authority or authenticated host artifacts. Host-local destination
+//! options are untrusted intent, not permission to publish or load keys.
 
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,48 @@ use crate::rootfs_source::{RootfsSource, RootfsSourceParseError};
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MachineId(pub String);
+
+/// Optional effects requested for an existing machine start, never authority.
+/// Providers without support must refuse these effects before starting.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineStartOptions {
+    /// Host-local destination intent. No provider currently publishes a receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<std::path::PathBuf>,
+}
+
+impl<'de> Deserialize<'de> for MachineStartOptions {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Object;
+        impl<'de> serde::de::Visitor<'de> for Object {
+            type Value = MachineStartOptions;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a machine start options object")
+            }
+
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                map: M,
+            ) -> Result<Self::Value, M::Error> {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Fields {
+                    #[serde(default)]
+                    receipt: Option<std::path::PathBuf>,
+                }
+                let fields =
+                    Fields::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+                Ok(MachineStartOptions {
+                    receipt: fields.receipt,
+                })
+            }
+        }
+        deserializer.deserialize_map(Object)
+    }
+}
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -494,6 +537,57 @@ pub struct ReconfigureRequest {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn start_options_are_strict_objects_and_empty_options_preserve_empty_bytes() {
+        use super::MachineStartOptions;
+        let empty: MachineStartOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty, MachineStartOptions::default());
+        assert_eq!(serde_json::to_string(&empty).unwrap(), "{}");
+        let options = MachineStartOptions {
+            receipt: Some("receipt.json".into()),
+        };
+        let bytes = serde_json::to_string(&options).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MachineStartOptions>(&bytes).unwrap(),
+            options
+        );
+        assert_eq!(
+            serde_json::from_str::<MachineStartOptions>(r#"{"receipt":null}"#).unwrap(),
+            empty
+        );
+        for input in [
+            "",
+            "[]",
+            "[null]",
+            r#"["receipt.json"]"#,
+            "null",
+            "42",
+            "true",
+            r#""path""#,
+            r#"{"receipt":"one","receipt":"two"}"#,
+            r#"{"receipt":null,"receipt":null}"#,
+            r#"{"receipt":[]}"#,
+            r#"{"receipt":{}}"#,
+            r#"{"unknown":true}"#,
+            r#"{"signer":"override"}"#,
+            "{} {}",
+        ] {
+            assert!(
+                serde_json::from_str::<MachineStartOptions>(input).is_err(),
+                "{input}"
+            );
+        }
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn start_options_schema_is_object_only_and_refuses_unknown_properties() {
+        let value =
+            serde_json::to_value(schemars::schema_for!(super::MachineStartOptions)).unwrap();
+        assert_eq!(value["type"], "object");
+        assert_eq!(value["additionalProperties"], false);
+    }
 
     #[test]
     fn a_declared_campaign_survives_the_builder_and_absence_changes_no_bytes() {
