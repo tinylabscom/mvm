@@ -17,6 +17,7 @@ mod list;
 mod prune;
 mod registry;
 mod rollback;
+mod staged;
 mod update;
 
 #[derive(ClapArgs, Debug, Clone)]

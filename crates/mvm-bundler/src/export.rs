@@ -51,7 +51,7 @@ pub struct ExportedBundle {
 /// Each artifact file is hashed in one streaming pass and copied into the
 /// archive in another, through a fixed buffer, so a multi-GiB rootfs is never
 /// held in memory. Its size is checked against the bundle caps before either.
-/// The archive is written to `<out>.partial`, created only once the manifest
+/// The archive is written to an invocation-private `<out>.<pid>.<n>.partial`, created only once the manifest
 /// is signed, and renamed into place when complete.
 pub fn export_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
@@ -556,7 +556,8 @@ fn manifest_for(
     }
 }
 
-/// The archive being written, at `<out>.partial` until it is complete.
+/// The archive being written, at an invocation-private `<out>.<pid>.<n>.partial`
+/// until it is complete.
 ///
 /// The file and its parent directories are created on the first byte, which
 /// the archive writer emits only after the manifest is validated and signed,
@@ -571,8 +572,10 @@ struct PartialOutput<'a> {
 
 impl<'a> PartialOutput<'a> {
     fn new(out: &'a Path) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut partial = out.as_os_str().to_owned();
-        partial.push(".partial");
+        partial.push(format!(".{}.{n}.partial", std::process::id()));
         Self {
             out,
             partial: PathBuf::from(partial),
@@ -588,7 +591,12 @@ impl<'a> PartialOutput<'a> {
             {
                 std::fs::create_dir_all(parent)?;
             }
-            self.file = Some(std::fs::File::create(&self.partial)?);
+            self.file = Some(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&self.partial)?,
+            );
         }
         self.file
             .as_mut()
@@ -707,6 +715,25 @@ mod tests {
         assert!(format!("{err:#}").contains("signer refused"));
         assert!(!out.exists());
         assert!(!dir.path().join("dist").join("app.mvmpkg.partial").exists());
+    }
+
+    #[test]
+    fn two_exports_to_one_destination_stage_in_distinct_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("app.mvmpkg");
+        let mut first = PartialOutput::new(&out);
+        let mut second = PartialOutput::new(&out);
+        assert_ne!(first.partial, second.partial);
+        std::io::Write::write_all(&mut first, b"first").unwrap();
+        std::io::Write::write_all(&mut second, b"second").unwrap();
+
+        // One invocation failing removes only its own staging file.
+        second
+            .finish(Err(anyhow::anyhow!("signer refused")))
+            .unwrap_err();
+        assert_eq!(first.finish(Ok(())).unwrap(), 5);
+        assert_eq!(std::fs::read(&out).unwrap(), b"first");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

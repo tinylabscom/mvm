@@ -30,11 +30,13 @@ use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
+use super::staged::StagedArchive;
 use crate::commands::bundle::export::{TemplateExport, export_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
 use mvm_client::bundle::{
-    PostureInputs, seal_template_rootfs, template_artifact_digests, template_entrypoint,
+    ExportedBundle, PostureInputs, seal_template_rootfs, template_artifact_digests,
+    template_entrypoint,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -178,24 +180,24 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
 
     // ---- 5. Seal and sign under the host key ----
     producer.build.verify_revision()?;
-    let mut export = pack_export(&args.out, &loaded.spec, &lock, image_argv)?;
+    let staged = StagedArchive::new(&args.out)?;
+    let mut export = pack_export(staged.path(), &loaded.spec, &lock, image_argv)?;
     export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
-    let exported = export_template(slot, export)?;
+    let exported = match export_template(slot, export) {
+        Ok(exported) => exported,
+        Err(error) => return Err(staged.discard(error)),
+    };
     // The exporter re-read the slot's files; what it sealed must be what the
-    // health check booted.
-    if let Err(error) = producer.build.verify_revision() {
-        let _ = fs::remove_file(&exported.path);
-        return Err(error.context("private build revision changed during export; archive removed"));
-    }
-    let sealed = SlotDigests::sealed(&exported.path)?;
-    if sealed != expected_export {
-        let _ = fs::remove_file(&exported.path);
-        bail!(
-            "the sealed archive differs from the health-checked build ({}); it was removed",
-            expected_export.changed(&sealed).join(", ")
-        );
-    }
-    let digest = file_sha256(&exported.path)?;
+    // health check booted. Failures remove only this invocation's staging file.
+    let digest = match verify_sealed(&producer.build, &exported.path, &expected_export) {
+        Ok(digest) => digest,
+        Err(error) => return Err(staged.discard(error)),
+    };
+    let final_path = staged.publish()?;
+    let exported = ExportedBundle {
+        path: final_path,
+        ..exported
+    };
     if let (Some(report), Some(destination)) = (observation, &args.input_observation) {
         report
             .persist_noclobber(destination)
@@ -475,6 +477,25 @@ fn sealed_manifest(archive: &Path) -> Result<BundleManifest> {
 
 /// Bound on the manifest read back from a sealed archive.
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Re-check a staged archive against the health-checked build and hash it.
+fn verify_sealed(
+    owned: &crate::commands::build::build::FrozenFlakeSlot,
+    archive: &Path,
+    checked: &SlotDigests,
+) -> Result<String> {
+    owned
+        .verify_revision()
+        .context("private build revision changed during export")?;
+    let sealed = SlotDigests::sealed(archive)?;
+    if &sealed != checked {
+        bail!(
+            "the sealed archive differs from the health-checked build ({})",
+            checked.changed(&sealed).join(", ")
+        );
+    }
+    file_sha256(archive)
+}
 
 fn file_sha256(path: &Path) -> Result<String> {
     mvm_core::crypto::image_verify::sha256_file(path)
