@@ -314,6 +314,15 @@ jobs:
 
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
+          # The native signer is MPL-covered even though the larger work is not.
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          cp crates/deps/mvm-macho-sign/LICENSE "staging/${ARCHIVE_NAME}/LICENSE-MPL-2.0.txt"
+          printf '%s\n' \
+            'This release contains mvm-macho-sign, modified MPL-2.0 Covered Software adapted from apple-codesign 0.29.0, Copyright Gregory Szorc.' \
+            'LICENSE-MPL-2.0.txt governs those files, not Apache-2.0 alone.' \
+            'Corresponding source, including modifications, is available under MPL-2.0 at:' \
+            "https://github.com/tinylabscom/mvm/tree/${GITHUB_SHA}/crates/deps/mvm-macho-sign" \
+            > "staging/${ARCHIVE_NAME}/THIRD_PARTY_NOTICES.txt"
           # Include generated man pages
           if [ -d man ] && ls man/*.1 2>/dev/null; then
             cp -r man "staging/${ARCHIVE_NAME}/"

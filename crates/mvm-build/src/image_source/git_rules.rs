@@ -1,6 +1,7 @@
 //! Private rule/config boundary. Pure-Rust gix crate replaces the former
 //! libgit2 C FFI. Only data/config/index/attribute APIs are entered; all
 //! attached indexes and workdirs are process-local.
+use std::cell::OnceCell;
 use std::path::{Path, PathBuf};
 
 use super::{IndexEntry, bytes_as_path, message, repository_config, validate_path};
@@ -19,10 +20,21 @@ pub(super) struct TreeEntry {
     pub id: [u8; 20],
 }
 
+type RuleIdMappings = Vec<(gix::bstr::BString, gix::ObjectId)>;
+
+#[derive(Default)]
+struct AttributeIdMappings {
+    sensitive: OnceCell<RuleIdMappings>,
+    folded: OnceCell<RuleIdMappings>,
+    #[cfg(test)]
+    preparations: std::cell::Cell<usize>,
+}
+
 pub(super) struct Rules {
     repo: gix::Repository,
     config: gix::config::File,
     index_state: gix::index::State,
+    attribute_id_mappings: AttributeIdMappings,
     prefix: Option<PathBuf>,
     system_attributes: Option<PathBuf>,
     worktree_hint: PathBuf,
@@ -433,6 +445,7 @@ impl Rules {
             repo,
             config,
             index_state: gix::index::State::new(gix::hash::Kind::Sha1),
+            attribute_id_mappings: AttributeIdMappings::default(),
             prefix: None,
             system_attributes: None,
             worktree_hint,
@@ -506,6 +519,8 @@ impl Rules {
     }
 
     pub(super) fn install_index(&mut self, entries: &[IndexEntry]) -> Result<(), String> {
+        // Even a rejected replacement must not retain mappings from the old index.
+        self.attribute_id_mappings = AttributeIdMappings::default();
         // Build a gix-index State from the provided entries and store it.
         // The state is passed explicitly to attribute/ignore resolution.
         let mut state = gix::index::State::new(gix::hash::Kind::Sha1);
@@ -896,13 +911,32 @@ impl Rules {
             collection,
         );
         let state = gix::worktree::stack::State::AttributesStack(attributes);
-        let case = if self.boolean("core.ignorecase")?.unwrap_or(false) {
-            gix::glob::pattern::Case::Fold
+        let (case, cache) = if self.boolean("core.ignorecase")?.unwrap_or(false) {
+            (
+                gix::glob::pattern::Case::Fold,
+                &self.attribute_id_mappings.folded,
+            )
         } else {
-            gix::glob::pattern::Case::Sensitive
+            (
+                gix::glob::pattern::Case::Sensitive,
+                &self.attribute_id_mappings.sensitive,
+            )
         };
-        let mappings =
-            state.id_mappings_from_index(&self.index_state, self.index_state.path_backing(), case);
+        // Only filtered index paths and blob IDs are reused. Globals, validation,
+        // attribute state and the stack above/below remain fresh for every query.
+        let mappings = cache
+            .get_or_init(|| {
+                #[cfg(test)]
+                self.attribute_id_mappings
+                    .preparations
+                    .set(self.attribute_id_mappings.preparations.get() + 1);
+                state.id_mappings_from_index(
+                    &self.index_state,
+                    self.index_state.path_backing(),
+                    case,
+                )
+            })
+            .clone();
         let mut stack = gix::worktree::Stack::new(self.workdir()?, state, case, buf, mappings);
         let mut outcome = stack.selected_attribute_matches([name]);
         let platform = stack
@@ -1011,6 +1045,172 @@ mod include_tests {
             .unwrap()
             .write_all(body.as_bytes())
             .unwrap();
+    }
+
+    fn read_index(root: &Path) -> Vec<IndexEntry> {
+        super::super::git_index::read(&root.join(".git/index")).unwrap()
+    }
+
+    fn set_case_policy(rules: &mut Rules, folded: bool) {
+        let bytes = format!("[core]\nignorecase = {folded}\n");
+        let config = gix::config::File::from_bytes_no_includes(
+            bytes.as_bytes(),
+            gix::config::file::Metadata::from(gix::config::Source::Api),
+            gix::config::file::init::Options::default(),
+        )
+        .unwrap();
+        rules.config.append(config).unwrap();
+    }
+
+    #[test]
+    fn attribute_mappings_are_reused_without_caching_rule_files() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        let root = tmp.path().join("repo");
+        repository(&root);
+        let attributes = root.join(".gitattributes");
+        std::fs::write(&attributes, b"a text\n").unwrap();
+        fixture::commit_all(&root, "attribute snapshot");
+        let global = tmp.path().join(".config/git/attributes");
+        std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+        std::fs::write(&global, b"a eol=lf\n").unwrap();
+        let rules = Rules::open(&root, &read_index(&root)).unwrap();
+        for _ in 0..3 {
+            assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+            assert_eq!(
+                rules.attribute(b"a", "eol").unwrap(),
+                Attribute::Value(b"lf".to_vec())
+            );
+        }
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 1);
+
+        std::fs::write(&attributes, b"a -text\n").unwrap();
+        std::fs::write(&global, b"a eol=crlf\n").unwrap();
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Unset);
+        assert_eq!(
+            rules.attribute(b"a", "eol").unwrap(),
+            Attribute::Value(b"crlf".to_vec())
+        );
+        std::fs::remove_file(&attributes).unwrap();
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 1);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&global, &attributes).unwrap();
+            assert!(rules.attribute(b"a", "text").is_err());
+        }
+    }
+
+    #[test]
+    fn attribute_mapping_cache_is_keyed_by_case_policy() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        let root = tmp.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join(".gitattributes"), b"a text\n").unwrap();
+        fixture::commit_all(&root, "attribute snapshot");
+        let entries = read_index(&root);
+        let mut rules = Rules::open(&root, &entries).unwrap();
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        assert!(rules.attribute_id_mappings.sensitive.get().is_some());
+        assert!(rules.attribute_id_mappings.folded.get().is_none());
+        set_case_policy(&mut rules, true);
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        assert!(rules.attribute_id_mappings.folded.get().is_some());
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 2);
+        set_case_policy(&mut rules, false);
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 2);
+
+        let independent = Rules::open(&root, &entries).unwrap();
+        assert!(independent.attribute_id_mappings.sensitive.get().is_none());
+        assert_eq!(independent.attribute_id_mappings.preparations.get(), 0);
+        assert_eq!(independent.attribute(b"a", "text").unwrap(), Attribute::Set);
+        assert_eq!(independent.attribute_id_mappings.preparations.get(), 1);
+    }
+
+    #[test]
+    fn replacing_or_rejecting_an_index_discards_cached_mappings() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        let root = tmp.path().join("repo");
+        repository(&root);
+        let attributes = root.join(".gitattributes");
+        std::fs::write(&attributes, b"a text\n").unwrap();
+        fixture::commit_all(&root, "old attribute snapshot");
+        let old_entries = read_index(&root);
+        let old_id = old_entries
+            .iter()
+            .find(|entry| entry.path == b".gitattributes")
+            .unwrap()
+            .oid
+            .clone();
+        let mut rules = Rules::open(&root, &old_entries).unwrap();
+        std::fs::remove_file(&attributes).unwrap();
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        set_case_policy(&mut rules, true);
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+        set_case_policy(&mut rules, false);
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 2);
+
+        std::fs::write(&attributes, b"a -text\n").unwrap();
+        fixture::commit_all(&root, "new attribute snapshot");
+        let new_entries = read_index(&root);
+        let new_id = &new_entries
+            .iter()
+            .find(|entry| entry.path == b".gitattributes")
+            .unwrap()
+            .oid;
+        assert_ne!(&old_id, new_id);
+        std::fs::remove_file(&attributes).unwrap();
+        rules.install_index(&new_entries).unwrap();
+        assert!(rules.attribute_id_mappings.sensitive.get().is_none());
+        assert!(rules.attribute_id_mappings.folded.get().is_none());
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Unset);
+        assert!(
+            rules
+                .attribute_id_mappings
+                .sensitive
+                .get()
+                .unwrap()
+                .iter()
+                .any(|(path, id)| {
+                    AsRef::<[u8]>::as_ref(path) == b".gitattributes"
+                        && *id == gix::ObjectId::from_bytes_or_panic(new_id)
+                })
+        );
+        set_case_policy(&mut rules, true);
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Unset);
+        set_case_policy(&mut rules, false);
+        let mut invalid = new_entries.clone();
+        invalid[0].oid.pop();
+        assert!(rules.install_index(&invalid).is_err());
+        assert!(rules.attribute_id_mappings.sensitive.get().is_none());
+        assert!(rules.attribute_id_mappings.folded.get().is_none());
+        assert_eq!(rules.attribute_id_mappings.preparations.get(), 0);
+
+        rules.install_index(&new_entries).unwrap();
+        assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Unset);
+        let without_attributes = new_entries
+            .into_iter()
+            .filter(|entry| entry.path != b".gitattributes")
+            .collect::<Vec<_>>();
+        rules.install_index(&without_attributes).unwrap();
+        assert_eq!(
+            rules.attribute(b"a", "text").unwrap(),
+            Attribute::Unspecified
+        );
+        assert!(
+            rules
+                .attribute_id_mappings
+                .sensitive
+                .get()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]

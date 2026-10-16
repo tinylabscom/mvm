@@ -90,12 +90,12 @@ fn main() -> ExitCode {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("libkrun-supervisor");
-    // macOS Hypervisor.framework rejects any process without
-    // `com.apple.security.hypervisor`. The ad-hoc signer
-    // self-signs + re-spawns the binary on first run; subsequent
-    // invocations are silent (`MVM_SIGNED=1`). Without this,
-    // `krun_start_enter` fails at VM creation with rc -22.
-    mvm_runtime::codesign::ensure_signed();
+    // Refuse before VM creation unless this loaded process has its entitlement.
+    // Executable preparation must happen before launch, not by self-signing.
+    if let Err(error) = mvm_runtime::codesign::ensure_signed() {
+        tracing::error!("{error}");
+        return ExitCode::FAILURE;
+    }
 
     // Diagnostic: opt-in libkrun internal logger. Set
     // `MVM_KRUN_LOG={off,error,warn,info,debug,trace}` to surface

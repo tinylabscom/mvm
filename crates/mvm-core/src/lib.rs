@@ -80,6 +80,7 @@ pub mod vcpu_quota;
 pub use mvm_contract::lifecycle;
 pub mod migration;
 pub mod naming;
+pub mod native_signature;
 pub mod net;
 pub mod observability;
 pub mod otlp_env;

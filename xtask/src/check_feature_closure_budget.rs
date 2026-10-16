@@ -100,7 +100,14 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 489 (was 487): the standalone public Rust hostlib client adds one crate and
 /// libloading 0.8, retaining Rust 1.85 support without internal runtime dependencies.
-const FEATURE_CLOSURE_BUDGET: usize = 489;
+///
+/// 549 (was 489): in-process checkout identity adds 57 Git support crates with
+/// only gix attributes/excludes/sha1 requested directly. The byte-only Mach-O signer,
+/// plist and XML parser add three more. Seven existing all-feature nodes also
+/// enter the default closure but do not increase this count. The identity
+/// path does not execute commands, filters, hooks, credential helpers or
+/// network clients; gix default/basic/extras/network-client features stay off.
+const FEATURE_CLOSURE_BUDGET: usize = 549;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

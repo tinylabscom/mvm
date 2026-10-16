@@ -1561,6 +1561,7 @@ mod tests {
             path: path.into(),
             applied: true,
             entitlements_present,
+            error: None,
         };
         sign_installed_binaries(true, || vec![report("mvmctl", true)])
             .expect("a signed macOS install is accepted");

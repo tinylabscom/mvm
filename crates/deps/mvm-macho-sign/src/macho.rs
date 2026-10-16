@@ -321,10 +321,9 @@ fn thin(data: &[u8], offset: usize) -> Result<Slice<'_>> {
                     )?;
                     if segment_name == "__TEXT"
                         && name(range(data, section, 16)?)? == "__info_plist"
+                        && slice.info.replace(payload).is_some()
                     {
-                        if slice.info.replace(payload).is_some() {
-                            return Err("duplicate embedded Info.plist".into());
-                        }
+                        return Err("duplicate embedded Info.plist".into());
                     }
                 }
             }

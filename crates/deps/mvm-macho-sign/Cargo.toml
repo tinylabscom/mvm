@@ -2,6 +2,7 @@
 # License, v. 2.0. See LICENSE.
 [package]
 name = "mvm-macho-sign"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
