@@ -345,6 +345,12 @@ sweeps arbitrary paths. Symlinks, hard-linked payloads, invalid clocks, missing
 authority, and conflicting evidence refuse cleanup. Unaccounted missing payload
 remains corruption, not successful expiry.
 
+An expired export is a read refusal, not a cleanup operation: it leaves the
+stored ciphertext and manifest unchanged. Use authenticated reconciliation for
+payload removal; an export failure is not evidence that deletion completed.
+Neither expiry nor reconciliation erases plaintext exports already held by an
+authorized recipient.
+
 Unattended producer startup/tick maintenance and hourly generation rotation need
 the protected capture lifecycle owner; the explicit command alone does not
 enable them. Workload-output generations may additionally opt into a separately
