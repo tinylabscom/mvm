@@ -4147,3 +4147,51 @@ mod instruction_admission_tests;
 #[cfg(test)]
 #[path = "bundle_admission_tests.rs"]
 mod bundle_admission_tests;
+
+#[cfg(test)]
+mod tool_decision_binding_tests {
+    use super::services_with_tool_decision;
+    use mvm_contract::policy::tool_rules::ToolRules;
+    use mvm_contract::protocol::broker::ServiceId;
+    use mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE;
+
+    fn tool_decision() -> ServiceId {
+        ServiceId::parse(HOST_TOOL_SERVICE).unwrap()
+    }
+
+    fn rules_with_a_tool() -> ToolRules {
+        ToolRules {
+            allow: vec!["read_file".into()],
+            ..ToolRules::default()
+        }
+    }
+
+    /// A plan that declares tools gets the tool-decision binding, once,
+    /// whether or not the caller already bound it. The deleted `!` survived
+    /// because nothing checked that the binding is *added* when absent, only
+    /// that a present one is not duplicated; the mutant keeps the second
+    /// promise while breaking the first, leaving every tool call unbound and
+    /// refused by the broker's binding gate.
+    #[test]
+    fn declaring_tools_binds_the_tool_decision_service_exactly_once() {
+        let other = ServiceId::parse("host.other.v1").unwrap();
+        let bound = services_with_tool_decision(vec![other.clone()], &rules_with_a_tool());
+        assert_eq!(bound, vec![other.clone(), tool_decision()]);
+
+        let already_bound =
+            services_with_tool_decision(vec![tool_decision(), other.clone()], &rules_with_a_tool());
+        assert_eq!(already_bound, vec![tool_decision(), other]);
+    }
+
+    /// Without tools there is nothing to decide, so no binding is minted and
+    /// the caller's services come back untouched.
+    #[test]
+    fn a_plan_without_tools_keeps_its_services_unchanged() {
+        let other = ServiceId::parse("host.other.v1").unwrap();
+        assert_eq!(
+            services_with_tool_decision(vec![other.clone()], &ToolRules::default()),
+            vec![other]
+        );
+        assert!(services_with_tool_decision(Vec::new(), &ToolRules::default()).is_empty());
+    }
+}
