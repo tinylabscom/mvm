@@ -521,6 +521,7 @@ fn dev_root_selection_uses_format_without_a_legacy_filename_escape() {
 
 #[test]
 fn installed_workload_requires_each_half_of_the_selected_pair() {
+    use mvm_core::image_set::ArtifactFormat;
     let profile = WorkloadImageProfile::DefaultTenant;
     let target = MemberTarget::Arch(ARCH);
     for missing_role in [
@@ -540,6 +541,11 @@ fn installed_workload_requires_each_half_of_the_selected_pair() {
                 "root.ext4",
                 b"root".to_vec(),
             )
+            .with_artifact_format(
+                "kernel",
+                ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+            )
+            .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
             .without_member(missing_role, target)
             .into_manifest();
         let out = tempfile::tempdir().unwrap();
@@ -553,6 +559,7 @@ fn installed_workload_requires_each_half_of_the_selected_pair() {
 
 #[test]
 fn installed_workload_refuses_a_symlink_even_when_its_size_and_target_digest_match() {
+    use mvm_core::image_set::ArtifactFormat;
     let profile = WorkloadImageProfile::DefaultTenant;
     let target = MemberTarget::Arch(ARCH);
     let manifest = ImageSetFixture::complete()
@@ -568,6 +575,11 @@ fn installed_workload_refuses_a_symlink_even_when_its_size_and_target_digest_mat
             "root.ext4",
             b"root".to_vec(),
         )
+        .with_artifact_format(
+            "kernel",
+            ArtifactFormat::Kernel(mvm_core::kernel_format::KernelFormat::Image),
+        )
+        .with_artifact_format("root.ext4", ArtifactFormat::Ext4)
         .into_manifest();
     let out = tempfile::tempdir().unwrap();
     std::fs::write(out.path().join("target"), b"kernel").unwrap();
