@@ -894,9 +894,14 @@ fn raw_rule_resources_and_workdir_preserve_native_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join(std::ffi::OsStr::from_bytes(b"repo\xff"));
     if let Err(error) = std::fs::create_dir(&root) {
-        assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "{error}");
-        eprintln!("raw-byte directory capability unavailable on this filesystem: {error}");
-        return;
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(error.raw_os_error(), Some(libc::EILSEQ), "{error}");
+            eprintln!("raw-byte directory capability unavailable on this filesystem: {error}");
+            return;
+        }
+        #[cfg(not(target_os = "macos"))]
+        panic!("raw-byte directory creation failed: {error}");
     }
     std::fs::write(root.join("a"), b"base\n").unwrap();
     fixture::commit_all(&root, "raw root");

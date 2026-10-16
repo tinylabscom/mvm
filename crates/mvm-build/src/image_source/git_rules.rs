@@ -467,7 +467,7 @@ impl Rules {
         }
         rules.resolve_rule_paths()?;
         let workdir = rules.workdir()?;
-        rules.validate_per_directory_rules(Path::new(""))?;
+        rules.validate_rules(Path::new(""))?;
         // Inject our custom config into the gix repo so attribute/ignore
         // resolution reads the correct core.attributesfile / core.excludesfile.
         {
@@ -521,12 +521,13 @@ impl Rules {
     pub(super) fn install_index(&mut self, entries: &[IndexEntry]) -> Result<(), String> {
         // Even a rejected replacement must not retain mappings from the old index.
         self.attribute_id_mappings = AttributeIdMappings::default();
+        self.validate_configured_rule_resources()?;
         // Build a gix-index State from the provided entries and store it.
         // The state is passed explicitly to attribute/ignore resolution.
         let mut state = gix::index::State::new(gix::hash::Kind::Sha1);
         for e in entries {
             validate_path(&e.path)?;
-            self.validate_per_directory_rules(bytes_as_path(&e.path)?)?;
+            self.validate_rules(bytes_as_path(&e.path)?)?;
             let id: [u8; 20] = e.oid.as_slice().try_into().map_err(message)?;
             let oid = gix::ObjectId::from_bytes_or_panic(&id);
             let mut flags = gix::index::entry::Flags::from_bits_retain(
@@ -893,7 +894,7 @@ impl Rules {
     pub(super) fn attribute(&self, path: &[u8], name: &str) -> Result<Attribute, String> {
         use gix::worktree::stack::state::attributes::Source as AttrSource;
         let rela_path = bytes_as_path(path)?;
-        self.validate_per_directory_rules(rela_path)?;
+        self.validate_rules(rela_path)?;
         // Build global sources from the resolved policy, never gix's implicit
         // installation discovery (which may execute Git).
         let mut files = self.system_attributes.iter().cloned().collect::<Vec<_>>();
@@ -959,7 +960,7 @@ impl Rules {
 
     pub(super) fn ignored(&self, path: &Path) -> Result<bool, String> {
         use gix::worktree::stack::state::ignore::Source as IgnSource;
-        self.validate_per_directory_rules(path)?;
+        self.validate_rules(path)?;
         let mut stack = self
             .repo
             .excludes(
@@ -972,7 +973,17 @@ impl Rules {
         Ok(platform.is_excluded())
     }
 
-    fn validate_per_directory_rules(&self, path: &Path) -> Result<(), String> {
+    fn validate_configured_rule_resources(&self) -> Result<(), String> {
+        for key in ["core.attributesfile", "core.excludesfile"] {
+            if let Some(path) = self.string(key)? {
+                validate_global_rule_resource(&unvalidated_path(&path)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_rules(&self, path: &Path) -> Result<(), String> {
+        self.validate_configured_rule_resources()?;
         let root = self.workdir()?;
         for ancestor in path.parent().unwrap_or(Path::new("")).ancestors() {
             for name in [".gitattributes", ".gitignore"] {
@@ -988,6 +999,19 @@ impl Rules {
             }
         }
         Ok(())
+    }
+}
+
+fn validate_global_rule_resource(path: &Path) -> Result<(), String> {
+    // Global rules follow symlinks, unlike per-directory rules. The loader treats
+    // directories as absent, so enforce our regular-file boundary before loading.
+    let null_sink = (cfg!(unix) && path == Path::new("/dev/null"))
+        || (cfg!(windows) && path.to_str().is_some_and(|p| p.eq_ignore_ascii_case("NUL")));
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() || null_sink => Ok(()),
+        Ok(_) => Err(format!("Git rule {} is not a regular file", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("reading Git rule {}: {error}", path.display())),
     }
 }
 
@@ -1060,6 +1084,123 @@ mod include_tests {
         )
         .unwrap();
         rules.config.append(config).unwrap();
+    }
+
+    #[test]
+    fn global_rule_resources_are_revalidated_after_replacement() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        for source in ["configured", "default"] {
+            let root = tmp.path().join(source);
+            repository(&root);
+            for (key, name, attribute) in [
+                ("core.attributesfile", "attributes", true),
+                ("core.excludesfile", "ignore", false),
+            ] {
+                let resource = if source == "configured" {
+                    tmp.path().join(name)
+                } else {
+                    tmp.path().join(".config/git").join(name)
+                };
+                std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+                if source == "configured" {
+                    let bytes =
+                        serialize_config(&[(key.as_bytes().to_vec(), Some(path_bytes(&resource)))])
+                            .unwrap();
+                    append(&root, std::str::from_utf8(&bytes).unwrap());
+                }
+                let query = |rules: &Rules| {
+                    if attribute {
+                        rules.attribute(b"a", "text").map(|_| ())
+                    } else {
+                        rules.ignored(Path::new("untracked")).map(|_| ())
+                    }
+                };
+                let rules = Rules::open(&root, &read_index(&root)).unwrap();
+                query(&rules).unwrap(); // Missing optional resources remain absent.
+                std::fs::write(&resource, b"").unwrap();
+                query(&rules).unwrap();
+                std::fs::remove_file(&resource).unwrap();
+                std::fs::create_dir(&resource).unwrap();
+                assert!(
+                    query(&rules).unwrap_err().contains("regular"),
+                    "{key} source={source}"
+                );
+                assert!(Rules::open(&root, &read_index(&root)).is_err());
+                std::fs::remove_dir(&resource).unwrap();
+                std::fs::write(&resource, b"").unwrap();
+                query(&rules).unwrap();
+                std::fs::remove_file(&resource).unwrap();
+                query(&rules).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn empty_index_replacement_revalidates_globals_and_discards_mappings() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        for key in ["core.attributesfile", "core.excludesfile"] {
+            let root = tmp.path().join(key);
+            repository(&root);
+            let attributes = root.join(".gitattributes");
+            std::fs::write(&attributes, b"a text\n").unwrap();
+            fixture::commit_all(&root, "indexed attributes");
+            let resource = tmp.path().join("global-rule");
+            std::fs::write(&resource, b"").unwrap();
+            let config =
+                serialize_config(&[(key.as_bytes().to_vec(), Some(path_bytes(&resource)))])
+                    .unwrap();
+            append(&root, std::str::from_utf8(&config).unwrap());
+            let entries = read_index(&root);
+            let mut rules = Rules::open(&root, &entries).unwrap();
+            std::fs::remove_file(attributes).unwrap();
+            assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+            set_case_policy(&mut rules, true);
+            assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+            assert!(rules.attribute_id_mappings.sensitive.get().is_some());
+            assert!(rules.attribute_id_mappings.folded.get().is_some());
+            std::fs::remove_file(&resource).unwrap();
+            std::fs::create_dir(&resource).unwrap();
+            assert!(rules.install_index(&[]).unwrap_err().contains("regular"));
+            assert!(rules.attribute_id_mappings.sensitive.get().is_none());
+            assert!(rules.attribute_id_mappings.folded.get().is_none());
+            assert_eq!(rules.attribute_id_mappings.preparations.get(), 0);
+            assert_eq!(rules.index_state.entries().len(), entries.len());
+            std::fs::remove_dir(&resource).unwrap();
+            std::fs::write(&resource, b"").unwrap();
+            assert_eq!(rules.attribute(b"a", "text").unwrap(), Attribute::Set);
+            rules.install_index(&[]).unwrap();
+            assert!(rules.index_state.entries().is_empty());
+            assert!(rules.attribute_id_mappings.folded.get().is_none());
+            assert_eq!(
+                rules.attribute(b"a", "text").unwrap(),
+                Attribute::Unspecified
+            );
+        }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn configured_global_rules_accept_the_platform_null_sink() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        isolated(&mut env, tmp.path());
+        let root = tmp.path().join("repo");
+        repository(&root);
+        let sink = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        append(
+            &root,
+            &format!("\n[core]\nattributesfile={sink}\nexcludesfile={sink}\n"),
+        );
+        let rules = Rules::open(&root, &read_index(&root)).unwrap();
+        assert_eq!(
+            rules.attribute(b"a", "text").unwrap(),
+            Attribute::Unspecified
+        );
+        assert!(!rules.ignored(Path::new("untracked")).unwrap());
     }
 
     #[test]
