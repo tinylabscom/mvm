@@ -965,8 +965,12 @@ fn capture_vm_full_inner(
                 serde_json::to_vec(&actual)?,
             )
             .context("writing paused-runtime capture evidence")?;
-            run_capture_writer(&mut guards.writer, || control.save_memory(&memory))
-                .context("saving machine memory")?;
+            run_capture_writer(
+                &mut guards.writer,
+                storage.staged.as_ref().expect("original capture guard"),
+                || control.save_memory(&memory),
+            )
+            .context("saving machine memory")?;
             let live_rootfs = control.rootfs_path()?;
             crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
                 .context("cloning rootfs in the pause window")?;
@@ -1042,7 +1046,11 @@ fn capture_vm_full_inner(
 
         // Include any extra blobs the backend wrote alongside save_memory
         // (e.g. Firecracker's vmstate.bin).
-        let extra = run_capture_writer(&mut guards.writer, || control.extra_content(&content_dir))?;
+        let extra = run_capture_writer(
+            &mut guards.writer,
+            storage.staged.as_ref().expect("original capture guard"),
+            || control.extra_content(&content_dir),
+        )?;
         for blob in extra {
             content.push(blob);
         }

@@ -72,14 +72,30 @@ impl Drop for CaptureGuardGroup {
 
 pub(super) fn run_capture_writer<T>(
     state: &mut CaptureWriterState,
+    staged: &staging::StagedCapture,
     write: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     // Errors AND unwinding leave the original guard armed. Only a completed
     // synchronous writer invocation permits ordinary storage cleanup.
-    *state = CaptureWriterState::Unconfirmed;
+    arm_capture_writer(state, || staged.arm_writer())?;
     let result = write()?;
     *state = CaptureWriterState::Quiescent;
+    staged.writer_completed()?;
     Ok(result)
+}
+
+fn arm_capture_writer(
+    state: &mut CaptureWriterState,
+    arm: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let previous = *state;
+    *state = CaptureWriterState::Unconfirmed;
+    if let Err(error) = arm() {
+        // Explicit refusal is before the delegated effect; unwind is not.
+        *state = previous;
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// Owns original capture storage/protection on failure, never a reopened path.
@@ -184,7 +200,12 @@ mod tests {
         assert!(!root.exists());
 
         let (mut group, root) = owned_capture_storage();
-        run_capture_writer(&mut group.writer, || Ok(())).unwrap();
+        run_capture_writer(
+            &mut group.writer,
+            group.storage.as_ref().unwrap().staged.as_ref().unwrap(),
+            || Ok(()),
+        )
+        .unwrap();
         drop(group);
         assert!(!root.exists());
     }
@@ -193,9 +214,11 @@ mod tests {
     fn original_temp_storage_survives_writer_error_and_unwind_without_native_claim() {
         let (mut group, root) = owned_capture_storage();
         assert!(
-            run_capture_writer(&mut group.writer, || -> Result<()> {
-                anyhow::bail!("local writer error")
-            })
+            run_capture_writer(
+                &mut group.writer,
+                group.storage.as_ref().unwrap().staged.as_ref().unwrap(),
+                || -> Result<()> { anyhow::bail!("local writer error") }
+            )
             .is_err()
         );
         drop(group);
@@ -205,8 +228,11 @@ mod tests {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let mut original = group;
-                let _: Result<()> =
-                    run_capture_writer(&mut original.writer, || panic!("local writer unwind"));
+                let _: Result<()> = run_capture_writer(
+                    &mut original.writer,
+                    original.storage.as_ref().unwrap().staged.as_ref().unwrap(),
+                    || panic!("local writer unwind"),
+                );
             }))
             .is_err()
         );
@@ -214,5 +240,79 @@ mod tests {
         // These original TempDir aggregates are deliberately retained. This
         // test proves only production storage-policy behavior, not a running
         // VMM writer, terminal proof, native recovery, or safe crash cleanup.
+    }
+
+    #[test]
+    fn returned_arm_failure_is_pre_effect_but_arm_unwind_retains_whole_custody() {
+        let (mut local, local_root) = owned_capture_storage();
+        let staged = local.storage.as_ref().unwrap().staged.as_ref().unwrap();
+        let disposition = staged
+            .content_dir()
+            .parent()
+            .unwrap()
+            .join(".capture-disposition.json");
+        std::fs::remove_file(&disposition).unwrap();
+        std::fs::create_dir(&disposition).unwrap();
+        assert!(
+            run_capture_writer(&mut local.writer, staged, || -> Result<()> {
+                panic!("writer must not run after returned persistence failure");
+            })
+            .is_err()
+        );
+        assert!(local.writer == CaptureWriterState::NotStarted);
+        drop(local);
+        assert!(
+            !local_root.exists(),
+            "known pre-effect failure uses normal RAII"
+        );
+
+        let (mut group, root) = owned_capture_storage();
+        let staged = group.storage.as_ref().unwrap().staged.as_ref().unwrap();
+        let old = staged.content_dir().parent().unwrap().to_path_buf();
+        // Replacing the lease defeats the real identity check before writing.
+        std::fs::rename(old.join(".capture-lease"), old.join("original-lease")).unwrap();
+        std::fs::write(old.join(".capture-lease"), b"replacement").unwrap();
+        let invoked = std::cell::Cell::new(false);
+        assert!(
+            run_capture_writer(&mut group.writer, staged, || {
+                invoked.set(true);
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(!invoked.get());
+        assert!(group.writer == CaptureWriterState::NotStarted);
+        drop(group);
+        assert!(
+            root.exists(),
+            "replacement/root custody must not be deleted"
+        );
+
+        let (group, panic_root) = owned_capture_storage();
+        assert!(
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let mut original = group;
+                let _ = arm_capture_writer(&mut original.writer, || {
+                    assert!(
+                        original
+                            .storage
+                            .as_ref()
+                            .unwrap()
+                            .staged
+                            .as_ref()
+                            .unwrap()
+                            .content_dir()
+                            .parent()
+                            .unwrap()
+                            .exists()
+                    );
+                    panic!("arming persistence unwind");
+                });
+            }))
+            .is_err()
+        );
+        assert!(panic_root.exists());
+        // The production arming seam is exercised with local guards only.
+        // Retention is not a VM-exit or recovery claim.
     }
 }
