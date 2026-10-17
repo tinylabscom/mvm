@@ -1,0 +1,16 @@
+{
+  "application": {
+    "bundle": {
+      "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "archive_size": 123,
+      "key_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source": "https://bundles.example/test/hello/1.0.0/app.mvmpkg"
+    },
+    "guest_arch": "aarch64",
+    "schema_version": 1
+  },
+  "description": "Synthetic app descriptor",
+  "kind": "application",
+  "reference": "test/hello@1.0.0",
+  "schema_version": 2
+}

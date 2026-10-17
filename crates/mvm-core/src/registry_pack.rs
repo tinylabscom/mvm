@@ -1040,6 +1040,7 @@ fn validate_registry_pack_manifest(
     Ok(())
 }
 
+pub mod application;
 mod built_image;
 mod install;
 pub mod local_input;

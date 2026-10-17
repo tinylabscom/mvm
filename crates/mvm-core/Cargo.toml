@@ -44,6 +44,8 @@ tracing.workspace = true
 uuid.workspace = true
 regex.workspace = true
 tempfile.workspace = true
+# Canonical descriptor locators only; this adds no network client or runtime.
+url = "=2.5.8"
 
 # Folded in with the former mvm-security crate: the
 # `crypto` module's AEAD (aes-gcm), HMAC, OS keychain (keyring),
