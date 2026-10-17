@@ -37,6 +37,61 @@ pub struct HvfDisk {
     pub ephemeral: bool,
 }
 
+/// Refuse actual ambient overrides at both checked startup and literal loading.
+/// This is an environment guard, not a checked-owner or admission constructor.
+pub fn refuse_bootarg_overrides() -> std::io::Result<()> {
+    inspect_bootarg_environment(|key| std::env::var_os(key))
+}
+
+fn inspect_bootarg_environment(
+    mut lookup: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> std::io::Result<()> {
+    if ["MVM_HVF_BOOTARGS", "MVM_HVF_BOOTARGS_EXTRA"]
+        .iter()
+        .any(|key| lookup(key).is_some())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "literal image boot refuses ambient bootarg overrides",
+        ));
+    }
+    Ok(())
+}
+
+/// Descriptor locators only, never authenticated facts or launch authority.
+/// Rootfs and verity occupy guest disk slots zero and one respectively;
+/// metadata and root-hash text are verification inputs, not guest disks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootImageFds {
+    pub rootfs: i32,
+    pub verity: i32,
+    pub metadata: i32,
+    pub root_hash: i32,
+}
+
+impl BootImageFds {
+    pub fn descriptors(self) -> [i32; 4] {
+        [self.rootfs, self.verity, self.metadata, self.root_hash]
+    }
+}
+
+/// Syntactic claims only. The consumed caller must authenticate their bytes.
+pub struct BootImageClaims<'a> {
+    cmdline: &'a str,
+    root_hash: &'a str,
+}
+
+impl BootImageClaims<'_> {
+    pub fn cmdline(&self) -> &str {
+        self.cmdline
+    }
+
+    pub fn root_hash(&self) -> &str {
+        self.root_hash
+    }
+}
+
 /// A host UDS the supervisor binds on behalf of one guest vsock port the guest
 /// listens on and the host dials — a console data stream or a builder control
 /// channel. Which ports appear is a policy decision made by the caller;
@@ -168,6 +223,9 @@ pub struct HvfSupervisorConfig {
     /// present the supervisor adopts it; `kernel` is diagnostic only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_fd: Option<i32>,
+    /// Untrusted cold-boot locators; the child authenticates the adopted files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_image_fds: Option<BootImageFds>,
     /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
     /// contract: `init=/init`). Set it to boot an image whose PID 1 differs — e.g.
     /// the builder rootfs, which boots the static `/sbin/mvm-host-vm-init`. The
@@ -402,6 +460,55 @@ impl std::fmt::Display for RestoreInputsError {
 impl std::error::Error for RestoreInputsError {}
 
 impl HvfSupervisorConfig {
+    /// Check fixed device placement and unambiguous literal command claims.
+    /// This is not publisher authentication or caller admission.
+    pub fn boot_image_claims(&self) -> Result<BootImageClaims<'_>, &'static str> {
+        if self.disks.len() < 2
+            || self.disks[..2]
+                .iter()
+                .any(|disk| !disk.read_only || disk.ephemeral)
+        {
+            return Err("boot image slots require two read-only non-ephemeral disks");
+        }
+        let cmdline = self
+            .cmdline
+            .as_deref()
+            .ok_or("explicit image cmdline required")?;
+        if !cmdline.is_ascii()
+            || cmdline
+                .bytes()
+                .any(|b| matches!(b, b'\'' | b'"' | b'\\' | 0))
+        {
+            return Err("ambiguous image cmdline");
+        }
+        let mut hash = None;
+        let mut data = None;
+        let mut tree = None;
+        for token in cmdline.split_ascii_whitespace() {
+            let (key, value) = token.split_once('=').unwrap_or((token, ""));
+            let slot = match key {
+                "mvm.roothash" => &mut hash,
+                "mvm.data" => &mut data,
+                "mvm.hash" => &mut tree,
+                _ => continue,
+            };
+            if value.is_empty() || slot.replace(value).is_some() {
+                return Err("missing or repeated image selector");
+            }
+        }
+        let root_hash = hash.ok_or("missing image root hash")?;
+        if root_hash.len() != 64
+            || !root_hash
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || data != Some("/dev/vda")
+            || tree != Some("/dev/vdb")
+        {
+            return Err("image selectors do not match the fixed device layout");
+        }
+        Ok(BootImageClaims { cmdline, root_hash })
+    }
+
     /// The verified descriptors this boot restores from, or `None` for a cold
     /// boot.
     pub fn restore_descriptors(&self) -> Result<Option<HvfRestoreFds>, RestoreInputsError> {
@@ -422,6 +529,57 @@ impl HvfSupervisorConfig {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn literal_bootargs_refuse_override_presence_including_nonunicode() {
+        use std::os::unix::ffi::OsStringExt;
+        assert!(super::inspect_bootarg_environment(|_| None).is_ok());
+        for key in ["MVM_HVF_BOOTARGS", "MVM_HVF_BOOTARGS_EXTRA"] {
+            for value in [
+                std::ffi::OsString::new(),
+                std::ffi::OsString::from_vec(vec![0xff]),
+            ] {
+                assert!(
+                    super::inspect_bootarg_environment(|candidate| {
+                        (candidate == key).then(|| value.clone())
+                    })
+                    .is_err()
+                );
+            }
+        }
+        // Only environment selection is tested; no kernel/VM is constructed.
+    }
+
+    #[test]
+    fn boot_image_claims_require_fixed_slots_and_unique_literal_selectors() {
+        let mut cfg = full_config_fixture();
+        cfg.disks[1].read_only = true;
+        let valid = format!(
+            "init=/init mvm.roothash={} mvm.data=/dev/vda mvm.hash=/dev/vdb",
+            "a".repeat(64)
+        );
+        cfg.cmdline = Some(valid.clone());
+        assert_eq!(cfg.boot_image_claims().unwrap().root_hash(), "a".repeat(64));
+        for invalid in [
+            format!("{valid} mvm.data=/dev/vda"),
+            format!("{valid} mvm.roothash"),
+            valid.replace("mvm.hash=/dev/vdb", "mvm.hash=/dev/vda"),
+            valid.replace("mvm.data=/dev/vda", "mvm.data"),
+            valid.replace("mvm.data=/dev/vda", "\"mvm.data=/dev/vda\""),
+            valid.replace(&"a".repeat(64), &"A".repeat(64)),
+            valid.replace("mvm.hash=/dev/vdb", ""),
+        ] {
+            cfg.cmdline = Some(invalid);
+            assert!(cfg.boot_image_claims().is_err());
+        }
+        cfg.cmdline = Some(valid);
+        cfg.disks[0].ephemeral = true;
+        assert!(cfg.boot_image_claims().is_err());
+        cfg.disks[0].ephemeral = false;
+        cfg.disks[1].read_only = false;
+        assert!(cfg.boot_image_claims().is_err());
+    }
+
     /// Every field populated, so the shape pin below sees the whole schema.
     fn full_config_fixture() -> HvfSupervisorConfig {
         HvfSupervisorConfig {
@@ -429,6 +587,7 @@ mod tests {
             vm_name: "fixture-vm".into(),
             kernel: "/k/Image".into(),
             kernel_fd: None,
+            boot_image_fds: None,
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
             vcpus: 1,
@@ -602,6 +761,7 @@ mod tests {
             vm_name: "fixture-vm".into(),
             kernel: "/k/Image".into(),
             kernel_fd: None,
+            boot_image_fds: None,
             cmdline: None,
             memory_mib: 0,
             vcpus: 1,

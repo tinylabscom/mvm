@@ -61,6 +61,334 @@ pub struct PreparedCallerStartup {
     pub initramfs: Option<Vec<u8>>,
 }
 
+/// Adopted inputs remain untrusted until the original consumed caller binds them.
+pub struct StartupFiles {
+    kernel: Option<std::fs::File>,
+    images: Option<[std::fs::File; 4]>,
+}
+
+/// Original caller, original kernel and authenticated image files, still owned.
+/// No DTO or raw-file constructor can mint this group.
+pub struct BoundCallerBoot {
+    launch: Box<ConsumedCallerLaunch>,
+    kernel: std::fs::File,
+    images: CheckedBootImageFiles,
+}
+
+/// Verified files for fixed disk slots; metadata/hash remain held, not attached.
+pub struct CheckedBootImageFiles {
+    rootfs: Option<std::fs::File>,
+    verity: Option<std::fs::File>,
+    _metadata: std::fs::File,
+    _root_hash: std::fs::File,
+    _facts: mvm_core::registry_pack_boot::AuthenticatedBootImageExpectations,
+    cmdline: String,
+}
+
+impl CheckedBootImageFiles {
+    pub fn cmdline(&self) -> &str {
+        &self.cmdline
+    }
+
+    /// A checked slot may be consumed once; absence never permits path fallback.
+    pub fn take_disk(&mut self, index: usize) -> Result<Option<std::fs::File>> {
+        match index {
+            0 => self
+                .rootfs
+                .take()
+                .map(Some)
+                .context("checked rootfs already consumed"),
+            1 => self
+                .verity
+                .take()
+                .map(Some)
+                .context("checked verity already consumed"),
+            _ => Ok(None),
+        }
+    }
+}
+
+impl BoundCallerBoot {
+    pub fn into_startup(
+        self,
+    ) -> (
+        Box<ConsumedCallerLaunch>,
+        std::fs::File,
+        CheckedBootImageFiles,
+    ) {
+        (self.launch, self.kernel, self.images)
+    }
+}
+
+/// Validate the COMPLETE locator set before the first ownership conversion.
+/// No opens occur between this preflight and adoption of the checked group.
+pub fn adopt_startup_files(
+    cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+) -> Result<StartupFiles> {
+    use mvm_vmm::host::restore_image::adopt_inherited;
+    let Some(table) = cfg.boot_image_fds else {
+        return Ok(StartupFiles {
+            kernel: cfg.kernel_fd.map(adopt_inherited).transpose()?,
+            images: None,
+        });
+    };
+    let kernel = cfg
+        .kernel_fd
+        .context("image table requires original kernel descriptor")?;
+    let mut fds = vec![kernel];
+    fds.extend(table.descriptors());
+    if let Some(restore) = cfg.restore_fds {
+        fds.extend([restore.ram, restore.frame]);
+    }
+    validate_startup_descriptors(&fds)?;
+    validate_diagnostics_descriptor(
+        &fds,
+        std::env::var_os("MVM_HVF_STARTUP_DIAGNOSTICS_FD").as_deref(),
+    )?;
+    anyhow::ensure!(
+        cfg.restore_fds.is_none() && cfg.restore_ram.is_none() && cfg.restore_frame.is_none(),
+        "checked boot images cannot enter restore"
+    );
+    cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
+    mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
+    let kernel = adopt_inherited(kernel)?;
+    let [rootfs, verity, metadata, hash] = table.descriptors();
+    let images = [
+        adopt_inherited(rootfs)?,
+        adopt_inherited(verity)?,
+        adopt_inherited(metadata)?,
+        adopt_inherited(hash)?,
+    ];
+    Ok(StartupFiles {
+        kernel: Some(kernel),
+        images: Some(images),
+    })
+}
+
+fn validate_diagnostics_descriptor(fds: &[i32], value: Option<&std::ffi::OsStr>) -> Result<()> {
+    let Some(value) = value else { return Ok(()) };
+    let text = value
+        .to_str()
+        .context("invalid diagnostics descriptor encoding")?;
+    let fd: i32 = text
+        .parse()
+        .context("invalid diagnostics descriptor locator")?;
+    anyhow::ensure!(
+        fd > 2 && text == fd.to_string() && !fds.contains(&fd),
+        "diagnostics descriptor collides with startup files"
+    );
+    // SAFETY: metadata inspection only; neither rejection nor success adopts/closes.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is inspected without ownership conversion.
+    let flags = unsafe {
+        if libc::fstat(fd, &mut stat) != 0 {
+            -1
+        } else {
+            libc::fcntl(fd, libc::F_GETFL)
+        }
+    };
+    anyhow::ensure!(
+        flags >= 0
+            && flags & libc::O_ACCMODE == libc::O_WRONLY
+            && stat.st_mode & libc::S_IFMT == libc::S_IFIFO,
+        "invalid diagnostics pipe"
+    );
+    Ok(())
+}
+
+fn validate_startup_descriptors(fds: &[i32]) -> Result<()> {
+    let mut numbers = std::collections::BTreeSet::new();
+    let mut inodes = std::collections::BTreeSet::new();
+    for fd in fds {
+        anyhow::ensure!(
+            *fd > 2 && numbers.insert(*fd),
+            "duplicate or reserved startup descriptor"
+        );
+        // SAFETY: fstat initializes this plain data; it is read only on success.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: only descriptor metadata is inspected, without taking ownership.
+        let status = unsafe {
+            if libc::fstat(*fd, &mut stat) != 0 {
+                -1
+            } else {
+                libc::fcntl(*fd, libc::F_GETFL)
+            }
+        };
+        anyhow::ensure!(
+            status >= 0
+                && (status & libc::O_ACCMODE) == libc::O_RDONLY
+                && (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+                && stat.st_nlink == 0
+                && inodes.insert((stat.st_dev, stat.st_ino)),
+            "startup descriptor is not a distinct private read-only file"
+        );
+    }
+    Ok(())
+}
+
+struct BootReader<'a> {
+    file: &'a std::fs::File,
+    offset: u64,
+}
+
+impl std::io::Read for BootReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        let count = self.file.read_at(out, self.offset)?;
+        self.offset = self
+            .offset
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("boot reader offset overflow"))?;
+        Ok(count)
+    }
+}
+
+impl StartupFiles {
+    pub fn into_legacy_kernel(self) -> Result<Option<std::fs::File>> {
+        anyhow::ensure!(
+            self.images.is_none(),
+            "checked images cannot use legacy startup"
+        );
+        Ok(self.kernel)
+    }
+
+    pub fn bind(
+        self,
+        launch: Box<ConsumedCallerLaunch>,
+        cfg: &mvm_vmm::host::hvf_supervisor::HvfSupervisorConfig,
+    ) -> Result<BoundCallerBoot> {
+        use mvm_core::registry_pack_boot::BootImageAsset as Role;
+        anyhow::ensure!(
+            launch.vm == cfg.vm_name,
+            "boot image caller identity mismatch"
+        );
+        let claims = cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
+        mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
+        let contract = reopen_caller_image(&launch.plan)?;
+        contract.verify_plan(
+            &launch.plan,
+            mvm_core::arch::GuestArch::Aarch64,
+            mvm_core::vm_backend::BackendKind::Hvf,
+        )?;
+        let kernel = self.kernel.context("original kernel missing")?;
+        let declaration = contract.kernel(
+            mvm_core::arch::GuestArch::Aarch64,
+            mvm_core::vm_backend::BackendKind::Hvf,
+        )?;
+        verify_kernel_contents(&kernel, &declaration)?;
+        let [rootfs, verity, metadata, root_hash] =
+            self.images.context("checked image files missing")?;
+        // Only the verifier-consumed roothash field is projected; unused defaults
+        // are NOT resource, runtime, helper, or admission facts.
+        let projection = mvm_core::vm_backend::VmStartConfig {
+            roothash: Some(claims.root_hash().to_owned()),
+            ..Default::default()
+        };
+        let facts = contract.capture_image_expectations(
+            &launch.plan,
+            &projection,
+            mvm_core::arch::GuestArch::Aarch64,
+            mvm_core::vm_backend::BackendKind::Hvf,
+            BootReader {
+                file: &root_hash,
+                offset: 0,
+            },
+        )?;
+        for (role, file) in [
+            (Role::Rootfs, &rootfs),
+            (Role::Verity, &verity),
+            (Role::Metadata, &metadata),
+            (Role::RootHash, &root_hash),
+        ] {
+            facts.verify_reader(role, BootReader { file, offset: 0 })?;
+        }
+        Ok(BoundCallerBoot {
+            launch,
+            kernel,
+            images: CheckedBootImageFiles {
+                rootfs: Some(rootfs),
+                verity: Some(verity),
+                _metadata: metadata,
+                _root_hash: root_hash,
+                _facts: facts,
+                cmdline: claims.cmdline().to_owned(),
+            },
+        })
+    }
+}
+
+fn verify_kernel_contents(
+    file: &std::fs::File,
+    declaration: &mvm_core::image_set::MemberArtifact,
+) -> Result<()> {
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() == declaration.size,
+        "held kernel differs from the authenticated size"
+    );
+    verify_kernel_digest(BootReader { file, offset: 0 }, declaration)
+}
+
+fn verify_kernel_digest(
+    reader: impl std::io::Read,
+    declaration: &mvm_core::image_set::MemberArtifact,
+) -> Result<()> {
+    let bound = declaration
+        .size
+        .checked_add(1)
+        .context("kernel size overflow")?;
+    let mut bounded = reader.take(bound);
+    let digest = mvm_core::crypto::image_verify::sha256_reader(&mut bounded)?;
+    anyhow::ensure!(
+        bound.checked_sub(bounded.limit()) == Some(declaration.size)
+            && digest == declaration.sha256.as_str(),
+        "held kernel differs from its authenticated bytes"
+    );
+    Ok(())
+}
+
+fn reopen_caller_image(
+    plan: &ExecutionPlan,
+) -> Result<mvm_core::registry_pack_boot::BuiltPackBootContract> {
+    use mvm_core::registry_pack::{PackPin, RegistryPackImage};
+    let mut selected = None;
+    for asset in plan
+        .asset_identities
+        .iter()
+        .filter(|asset| asset.kind == mvm_core::plan::AssetKind::RegistryPack)
+    {
+        let pin = PackPin::new(
+            asset.name.parse()?,
+            mvm_core::packs::Sha256Hex::new(&asset.digest)?,
+        )?;
+        let lock =
+            mvm_core::registry_pack_store::load_pack_lockfile(&config::pack_lockfile_path())?;
+        let policy = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+            &config::registry_pack_publisher_policy_path(),
+        )?;
+        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+            &config::registry_pack_cache_dir(),
+            &lock,
+            &policy.policy,
+            pin.reference(),
+        )?;
+        anyhow::ensure!(
+            verified.manifest_sha256() == pin.manifest_sha256(),
+            "caller pack pin changed"
+        );
+        if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
+            anyhow::ensure!(selected.is_none(), "ambiguous caller built image");
+            selected = Some(
+                mvm_core::registry_pack_boot::BuiltPackBootContract::open_for_admission(
+                    &pin,
+                    &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                )?,
+            );
+        }
+    }
+    selected.context("caller plan has no authenticated built image")
+}
+
 /// Verify and durably consume opt-in before any boot setup, status publication,
 /// timers, PID, or guest execution. Later input/setup failures remain spent.
 /// Opt-out returns without touching its legacy setup order.
@@ -69,8 +397,8 @@ pub fn prepare_startup(
 ) -> Result<Option<PreparedCallerStartup>> {
     let Some(registration) = cfg.caller_registration.as_ref() else {
         anyhow::ensure!(
-            cfg.kernel_fd.is_none(),
-            "verified kernel descriptor requires actual consumed caller admission"
+            cfg.kernel_fd.is_none() && cfg.boot_image_fds.is_none(),
+            "verified boot descriptors require actual consumed caller admission"
         );
         return Ok(None);
     };

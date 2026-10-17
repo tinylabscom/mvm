@@ -40,8 +40,8 @@ use mvm_vmm::driver::traits::{
 };
 
 mod cold_channel;
+use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
 pub use cold_channel::{ColdHvfBootFailure, ColdHvfOwner, RetainedHvfLaunch};
-use cold_channel::{boot_with_custody, failed_owned_boot, require_cold_config};
 
 /// How long a capture waits for the paused supervisor to publish both halves of
 /// its snapshot. Generous: the write is proportional to guest RAM.
@@ -70,16 +70,23 @@ impl HvfDriver {
         &self,
         spec: &VmmSpec,
     ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
-        self.boot_cold_owned_verified(spec, None)
+        self.boot_cold_owned_verified(spec, None, None)
     }
 
     pub fn boot_cold_owned_verified(
         &self,
         spec: &VmmSpec,
         kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        images: Option<&mvm_vmm::host::boot_images::FrozenBootImageBytes>,
     ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
-        boot_with_custody(spec, None, None, SupervisorLaunchPolicy::cold(), kernel)
-            .map(ColdHvfOwner::from_fresh)
+        boot_with_custody(
+            spec,
+            None,
+            None,
+            SupervisorLaunchPolicy::cold(),
+            BootInputFiles { kernel, images },
+        )
+        .map(ColdHvfOwner::from_fresh)
     }
 
     /// Boot a VM whose supervisor must hold the exclusive lock at `lock_path`
@@ -270,6 +277,7 @@ fn relay_supervisor_config_with_handoff(
         vm_name: spec.name.clone(),
         kernel,
         kernel_fd: None,
+        boot_image_fds: None,
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -379,7 +387,9 @@ impl SupervisorLaunchPolicy {
     fn legacy() -> Self {
         Self {
             validate_config: |_| Ok(()),
-            configure_environment: |_| {},
+            configure_environment: |command| {
+                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
+            },
         }
     }
 
@@ -392,6 +402,7 @@ impl SupervisorLaunchPolicy {
                 // binding seals the launch command.
                 command.env_remove("MVM_HVF_BOOTARGS");
                 command.env_remove("MVM_HVF_BOOTARGS_EXTRA");
+                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
             },
         }
     }
@@ -468,7 +479,10 @@ fn boot_with_handoff(
         handoff,
         exclusive_image_lock,
         SupervisorLaunchPolicy::legacy(),
-        kernel,
+        BootInputFiles {
+            kernel,
+            images: None,
+        },
     )
     .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
     .map_err(anyhow::Error::new)
@@ -481,9 +495,8 @@ fn boot_retaining_child(
     pending_child: &mut Option<std::process::Child>,
     rollback: &mut Option<mvm_vmm::host::hvf_stop::ConfirmedExit>,
     policy: &SupervisorLaunchPolicy,
-    kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+    files: BootInputFiles<'_>,
 ) -> Result<HvfRunningVm> {
-    use std::os::fd::AsRawFd;
     mvm_vmm::host::process_exit::require_owned_child_custody()?;
     let state_dir = stop_wire::state_dir(&spec.name)?;
     mvm_core::config::create_private_dir(&state_dir)?;
@@ -498,7 +511,7 @@ fn boot_retaining_child(
     crate::run_sidecars::clear_prior_run(&paths.state_dir);
     let mut cfg =
         relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
-    cfg.kernel_fd = kernel.map(|kernel| kernel.file().as_raw_fd());
+    files.project(&mut cfg)?;
     (policy.validate_config)(&cfg)?;
     let config_path = paths.state_dir.join("supervisor.json");
     mvm_core::atomic_io::atomic_write_new(
@@ -512,11 +525,12 @@ fn boot_retaining_child(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command = if let Some(fd) = cfg.kernel_fd {
+    let mut command = if cfg.kernel_fd.is_some() {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
         (policy.configure_environment)(&mut command);
         StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
-        mvm_vmm::host::restore_image::inherit_descriptors(&mut command, vec![fd]);
+        let inherited = BootInputFiles::inheritance_vector(&cfg)?;
+        mvm_vmm::host::restore_image::inherit_descriptors(&mut command, inherited);
         let bound = mvm_core::spawn_scope::bind_spawn(
             command,
             &spec.name,

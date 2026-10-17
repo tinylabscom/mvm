@@ -860,9 +860,10 @@ impl AnyBackend {
     pub fn prepare_owned_launch(
         &self,
         config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
     ) -> Result<crate::workload_runner::runner::OwnedRuntimeLaunch> {
         match self {
-            AnyBackend::Hvf(runner) => runner.prepare_cold_hvf_channel(config),
+            AnyBackend::Hvf(runner) => runner.prepare_cold_hvf_channel(config, images),
             _ => anyhow::bail!("owned native launch requires concrete macOS HVF"),
         }
     }

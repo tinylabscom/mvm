@@ -54,13 +54,22 @@ impl OwnedClientBoot {
         };
         let result = (|| {
             let group = owner.custody.as_mut().expect("new client custody");
-            let resources = group.resources.as_ref().expect("original client resources");
+            let resources = group.resources.as_mut().expect("original client resources");
             mvm_runtime::workload_backend::require_workload_backend(&resources.backend)?;
             if let Some(runtime) = &resources.built_runtime {
                 runtime.verify_config(&resources.config)?;
             }
             // Store the prepared runtime BEFORE the first native side effect.
-            group.runtime = Some(resources.backend.prepare_owned_launch(&resources.config)?);
+            let images = resources
+                .built_runtime
+                .as_mut()
+                .context("owned native image preparation missing")?
+                .take_boot_images()?;
+            group.runtime = Some(
+                resources
+                    .backend
+                    .prepare_owned_launch(&resources.config, images)?,
+            );
             let runtime = group.runtime.as_mut().expect("prepared runtime");
             if let Some(built) = &resources.built_runtime {
                 built.verify_config(runtime.config()?)?;
@@ -720,7 +729,13 @@ fn boot_session_core(
     let built_pack_check = substrate.built_pack_check.take();
     substrate.apply_to(&mut start_config);
     let _built_runtime = built_pack_check
-        .map(|check| check.prepare(&mut start_config, backend.kind()))
+        .map(|check| {
+            if context.is_some() && backend.kind() == mvm_core::vm_backend::BackendKind::Hvf {
+                check.freeze_native_boot(&mut start_config, backend.kind())
+            } else {
+                check.prepare(&mut start_config, backend.kind())
+            }
+        })
         .transpose()?
         .flatten();
     if let Some(runtime) = &_built_runtime {

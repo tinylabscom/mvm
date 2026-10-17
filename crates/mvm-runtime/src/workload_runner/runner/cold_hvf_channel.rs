@@ -37,6 +37,7 @@ enum Phase {
 
 pub(super) struct ColdHvfPreparation {
     pub(super) launch: crate::kernel_custody::KernelBoundLaunch,
+    pub(super) images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
     pub(super) _lifecycle: crate::runtime_evidence::RuntimeLifecycleLease,
     pub(super) prepared: PreparedWorkloadBoot,
     pub(super) _broker: BrokerGuard,
@@ -203,6 +204,10 @@ impl ColdHvfChannel {
         custody.phase = Phase::Uncertain;
         let preparation = &mut custody.preparation;
         let config = preparation.launch.config();
+        anyhow::ensure!(
+            config.roothash.as_deref() == Some(preparation.images.root_hash()),
+            "activation root hash differs from retained image facts"
+        );
         preparation.launch.before_boot(&preparation.prepared.spec)?;
         let capture = ConsoleCapture {
             vm_name: &config.name,
@@ -217,6 +222,7 @@ impl ColdHvfChannel {
                 Ok(HvfDriver::new().boot_cold_owned_verified(
                     &preparation.prepared.spec,
                     preparation.launch.verified_kernel(),
+                    Some(&preparation.images),
                 ))
             },
             || preparation.streamer.start(&capture),

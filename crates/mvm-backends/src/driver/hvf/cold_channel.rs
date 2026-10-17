@@ -10,12 +10,62 @@ use super::{
     OwnedInstance, SupervisorLaunchPolicy, VmId, VmmSpec, boot_retaining_child, stop_wire,
 };
 
+pub(super) struct BootInputFiles<'a> {
+    pub(super) kernel: Option<&'a mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+    pub(super) images: Option<&'a mvm_vmm::host::boot_images::FrozenBootImageBytes>,
+}
+
+impl BootInputFiles<'_> {
+    pub(super) fn project(&self, cfg: &mut HvfSupervisorConfig) -> Result<()> {
+        use std::os::fd::AsRawFd;
+        cfg.kernel_fd = self.kernel.map(|kernel| kernel.file().as_raw_fd());
+        cfg.boot_image_fds = self.images.map(|images| {
+            use mvm_core::registry_pack_boot::BootImageAsset as Role;
+            mvm_vmm::host::hvf_supervisor::BootImageFds {
+                rootfs: images.file(Role::Rootfs).as_raw_fd(),
+                verity: images.file(Role::Verity).as_raw_fd(),
+                metadata: images.file(Role::Metadata).as_raw_fd(),
+                root_hash: images.file(Role::RootHash).as_raw_fd(),
+            }
+        });
+        if let Some(images) = self.images {
+            anyhow::ensure!(
+                cfg.kernel_fd.is_some() && cfg.caller_registration.is_some(),
+                "frozen images require the original kernel and caller registration"
+            );
+            let claims = cfg.boot_image_claims().map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(
+                claims.root_hash() == images.root_hash(),
+                "projected command differs from original frozen image hash"
+            );
+        }
+        Ok(())
+    }
+
+    pub(super) fn inheritance_vector(cfg: &HvfSupervisorConfig) -> Result<Vec<i32>> {
+        let mut inherited = cfg.kernel_fd.into_iter().collect::<Vec<_>>();
+        if let Some(images) = cfg.boot_image_fds {
+            inherited.extend(images.descriptors());
+        }
+        anyhow::ensure!(
+            inherited.iter().all(|fd| *fd > 2)
+                && inherited
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == inherited.len(),
+            "native boot descriptors must be distinct original files"
+        );
+        Ok(inherited)
+    }
+}
+
 pub(super) fn boot_with_custody(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
     exclusive_image_lock: Option<&Path>,
     policy: SupervisorLaunchPolicy,
-    kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+    files: BootInputFiles<'_>,
 ) -> std::result::Result<HvfRunningVm, ColdHvfBootFailure> {
     let mut child = None;
     let mut rollback = None;
@@ -26,7 +76,7 @@ pub(super) fn boot_with_custody(
         &mut child,
         &mut rollback,
         &policy,
-        kernel,
+        files,
     )
     .map_err(|error| {
         let outcome = match (child, rollback) {

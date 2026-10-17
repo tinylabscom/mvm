@@ -6,6 +6,153 @@ use mvm_core::util::test_env::TestEnv;
 use crate::plan_admission::{InMemoryNonceLedger, RunPosture, admit_plan_for_run};
 use crate::stream::protected::{CaptureAuthority, CaptureOwner, CaptureParams};
 
+#[test]
+fn startup_preflight_refuses_collisions_aliases_linked_and_writable_without_closing_inputs() {
+    use std::os::fd::AsRawFd;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input");
+    std::fs::write(&path, b"nonnative bytes").unwrap();
+    let held = std::fs::File::open(&path).unwrap();
+    assert!(validate_startup_descriptors(&[held.as_raw_fd()]).is_err());
+    std::fs::remove_file(&path).unwrap();
+    assert!(validate_startup_descriptors(&[held.as_raw_fd()]).is_ok());
+    let alias = held.try_clone().unwrap();
+    for invalid in [
+        vec![held.as_raw_fd(), held.as_raw_fd()],
+        vec![held.as_raw_fd(), alias.as_raw_fd()],
+        vec![held.as_raw_fd(), 0],
+        vec![held.as_raw_fd(), -1],
+    ] {
+        assert!(validate_startup_descriptors(&invalid).is_err());
+        assert_eq!(held.metadata().unwrap().len(), 15);
+    }
+    let writable = std::fs::File::create(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(validate_startup_descriptors(&[writable.as_raw_fd()]).is_err());
+    let closed = alias.as_raw_fd();
+    drop(alias);
+    assert!(validate_startup_descriptors(&[closed]).is_err());
+    // These are descriptor-policy negatives, never native or signed-open proof.
+}
+
+#[test]
+fn startup_reader_is_zero_origin_and_preserves_shared_cursor() {
+    use std::io::{Read, Seek, SeekFrom};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input");
+    std::fs::write(&path, b"whole-member").unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let mut alias = file.try_clone().unwrap();
+    alias.seek(SeekFrom::Start(5)).unwrap();
+    let mut reader = BootReader {
+        file: &file,
+        offset: 0,
+    };
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"whole-member");
+    assert_eq!(alias.stream_position().unwrap(), 5);
+}
+
+#[test]
+fn held_kernel_verifier_rejects_substitution_size_changes_and_reader_errors() {
+    use std::io::{Read, Seek, SeekFrom};
+    let original = b"synthetic-kernel-bytes";
+    let declaration: mvm_core::image_set::MemberArtifact =
+        serde_json::from_value(serde_json::json!({
+            "name":"kernel", "format":{"kernel":mvm_core::kernel_format::KernelFormat::Image},
+            "size":original.len(), "sha256":mvm_core::packs::Sha256Hex::from_bytes(original),
+        }))
+        .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("kernel");
+    let mut changed = original.to_vec();
+    changed[0] ^= 1;
+    for bytes in [
+        changed.as_slice(),
+        &original[..original.len() - 1],
+        b"synthetic-kernel-bytes-extra",
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(verify_kernel_contents(&file, &declaration).is_err());
+    }
+    std::fs::write(&path, original).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let mut alias = file.try_clone().unwrap();
+    alias.seek(SeekFrom::Start(4)).unwrap();
+    verify_kernel_contents(&file, &declaration).unwrap();
+    assert_eq!(alias.stream_position().unwrap(), 4);
+    struct ReadFailure;
+    impl Read for ReadFailure {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("nonnative fixture read failure"))
+        }
+    }
+    assert!(verify_kernel_digest(ReadFailure, &declaration).is_err());
+    assert!(verify_kernel_digest(std::io::repeat(0), &declaration).is_err());
+    // Private mechanics with a SYNTHETIC declaration, not an authenticated
+    // contract/BoundCallerBoot/ConsumedCallerLaunch positive construction.
+}
+
+#[test]
+fn startup_diagnostics_collisions_refuse_without_adopting_or_closing_pipe() {
+    use std::os::fd::AsRawFd;
+    let (_read, write) = std::io::pipe().unwrap();
+    let fd = write.as_raw_fd();
+    let text = fd.to_string();
+    assert!(validate_diagnostics_descriptor(&[], Some(std::ffi::OsStr::new(&text))).is_ok());
+    assert!(validate_diagnostics_descriptor(&[fd], Some(std::ffi::OsStr::new(&text))).is_err());
+    assert!(validate_diagnostics_descriptor(&[], Some(std::ffi::OsStr::new("bad"))).is_err());
+    // SAFETY: metadata query only, no ownership conversion.
+    assert!(unsafe { libc::fcntl(fd, libc::F_GETFL) } >= 0);
+}
+
+#[test]
+fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
+    use std::os::fd::{AsRawFd, IntoRawFd};
+    let dir = tempfile::tempdir().unwrap();
+    let files = (0..5)
+        .map(|index| {
+            let path = dir.path().join(index.to_string());
+            std::fs::write(&path, b"untrusted unit bytes").unwrap();
+            let file = std::fs::File::open(&path).unwrap();
+            std::fs::remove_file(path).unwrap();
+            file
+        })
+        .collect::<Vec<_>>();
+    let fds = files.iter().map(AsRawFd::as_raw_fd).collect::<Vec<_>>();
+    validate_startup_descriptors(&fds).unwrap();
+    let cfg = serde_json::from_value(serde_json::json!({
+        "console_capture":"encrypted", "vm_name":"fd-mechanics", "kernel":"/unused",
+        "timeout_secs":0,
+        "kernel_fd":fds[0],
+        "boot_image_fds":{"rootfs":fds[1],"verity":fds[2],"metadata":fds[3],"root_hash":fds[4]},
+        "cmdline":format!("mvm.roothash={} mvm.data=/dev/vda mvm.hash=/dev/vdb", "a".repeat(64)),
+        "disks":[{"path":"/unused-root","read_only":true},{"path":"/unused-tree","read_only":true}],
+        "console_log":"/unused", "pid_file":"/unused", "workload_exit":"/unused"
+    }))
+    .unwrap();
+    // Transfer ONLY to the production adoption seam; no authenticated owner.
+    for file in files {
+        let _ = file.into_raw_fd();
+    }
+    let adopted = adopt_startup_files(&cfg).unwrap();
+    assert_eq!(adopted.kernel.as_ref().unwrap().as_raw_fd(), fds[0]);
+    for fd in &fds {
+        // SAFETY: descriptors are now exclusively held by the untrusted group.
+        assert_ne!(
+            unsafe { libc::fcntl(*fd, libc::F_GETFD) } & libc::FD_CLOEXEC,
+            0
+        );
+    }
+    drop(adopted);
+    for fd in fds {
+        // SAFETY: query only, with no intervening opens/reuse.
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    }
+}
+
 fn isolate() -> (TestEnv, tempfile::TempDir) {
     let mut env = TestEnv::new();
     let home = tempfile::tempdir().unwrap();

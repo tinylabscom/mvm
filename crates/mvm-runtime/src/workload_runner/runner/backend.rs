@@ -21,8 +21,16 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     /// Prepare lower transport custody, not an admission capability. No native
     /// launch occurs until the returned owner's `activate` method is called.
     /// Client integration must still pair its original opaque admission.
-    pub fn prepare_cold_hvf_channel(&self, config: &VmStartConfig) -> Result<ColdHvfChannel> {
+    pub fn prepare_cold_hvf_channel(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
+    ) -> Result<ColdHvfChannel> {
         cold_hvf_channel::require_cold_start_config(config)?;
+        anyhow::ensure!(
+            config.roothash.as_deref() == Some(images.root_hash()),
+            "original frozen root hash differs from the final config"
+        );
         self.require_caller_registration_shape(config)?;
         let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&config.name)?;
         let config = lifecycle.bind(config)?;
@@ -58,6 +66,7 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
         let (broker, _) = self.register_workload_broker(config, &prepared.socks)?;
         Ok(ColdHvfChannel::new(cold_hvf_channel::ColdHvfPreparation {
             launch,
+            images,
             _lifecycle: lifecycle,
             prepared,
             _broker: broker,

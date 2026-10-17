@@ -196,6 +196,28 @@ impl DiskImage {
         Self::open_with_sync(path, read_only, HOST_SYNC)
     }
 
+    /// Consume this exact file as a read-only backing without reopening a path.
+    /// This is byte transport only; the caller owns authentication and slot binding.
+    pub fn readonly_file(file: File) -> std::io::Result<Self> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: fcntl inspects the live, owned file descriptor.
+        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+        let metadata = file.metadata()?;
+        if flags < 0 || flags & libc::O_ACCMODE != libc::O_RDONLY || !metadata.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "read-only backing requires a read-only regular file",
+            ));
+        }
+        Ok(Self::File {
+            file,
+            len: metadata.len(),
+            read_only: true,
+            sync: HOST_SYNC,
+            dirty: false,
+        })
+    }
+
     fn open_with_sync(path: &Path, read_only: bool, sync: DiskSync) -> std::io::Result<Self> {
         let file = OpenOptions::new().read(true).write(!read_only).open(path)?;
         let len = file.metadata()?.len();
@@ -797,6 +819,43 @@ impl SnapshotDeviceState for VirtioBlk {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readonly_backing_consumes_original_file_not_replacement_path() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source");
+        std::fs::write(&path, b"original").unwrap();
+        let original = File::open(&path).unwrap();
+        let inode = original.metadata().unwrap().ino();
+        let fd = original.as_raw_fd();
+        std::fs::rename(&path, dir.path().join("old")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let image = DiskImage::readonly_file(original).unwrap();
+        match &image {
+            DiskImage::File {
+                file,
+                read_only,
+                dirty,
+                ..
+            } => {
+                assert_eq!(file.as_raw_fd(), fd);
+                assert_eq!(file.metadata().unwrap().ino(), inode);
+                assert!(*read_only && !*dirty);
+                let mut bytes = [0; 8];
+                file.read_exact_at(&mut bytes, 0).unwrap();
+                assert_eq!(&bytes, b"original");
+            }
+            DiskImage::Mem(_) => panic!("path-free file consumer became a memory copy"),
+        }
+        let writable = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        assert!(DiskImage::readonly_file(writable).is_err());
+    }
 
     /// Split-descriptor flag bits, as a conformant guest programs them.
     const DESC_F_NEXT: u16 = 1;
