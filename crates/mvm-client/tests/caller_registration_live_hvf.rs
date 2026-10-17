@@ -319,6 +319,7 @@ fn boot(inputs: &Inputs, vm: &OwnedVm, opted_in: bool) -> Result<BootEvidence> {
             cpus: 1,
             memory_mib: 256,
             admission: policy,
+            portable_boot_assets: None,
         },
         None,
     )?;

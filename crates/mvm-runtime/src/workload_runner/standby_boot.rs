@@ -182,11 +182,12 @@ pub fn factory_parent_config(
         unsigned_runtime_development,
         source_runtime_archive_sha256,
         mem_initial_mib,
+        kernel_read_sha256,
     } = launch;
 
-    if canonical_kernel.is_some() {
+    if canonical_kernel.is_some() || kernel_read_sha256.is_some() {
         return Err(StandbyError::SpawnFailed(
-            "canonical kernel custody is cold-only; standby reuse is unsupported".into(),
+            "kernel descriptor custody is cold-only; standby reuse is unsupported".into(),
         ));
     }
 
@@ -208,6 +209,7 @@ pub fn factory_parent_config(
         template_id: spec.template_id.clone(),
         rootfs_path: image.to_string(),
         kernel_path: Some(spec.kernel_path.clone()),
+        kernel_read_sha256: None,
         canonical_kernel: None,
         cpus: u32::from(spec.vcpus),
         cpu_grant: None,

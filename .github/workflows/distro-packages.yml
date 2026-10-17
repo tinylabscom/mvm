@@ -119,7 +119,7 @@ jobs:
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
-          pattern: mvmctl-*-unknown-linux-gnu
+          pattern: mvmctl-*-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: tarballs
           merge-multiple: true
 
@@ -127,7 +127,7 @@ jobs:
         if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: guest-runtime
 
       - name: Download a published release's tarballs
@@ -194,7 +194,7 @@ jobs:
         if: ${{ inputs.published_packages }}
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages
 
       # A release build packages under the tree's version, which the tag
@@ -229,13 +229,12 @@ jobs:
           done
           ls -la distro-packages/
 
-      # The packages and their `.sha256` files: the release job merges every
-      # artifact of the run and builds the combined checksum manifest from
-      # the `*.sha256` files, so these join it beside the tarballs'.
+      # The release collector selects this exact attempt's package/checksum
+      # pairs. Reports and payload manifests are not release signing inputs.
       - name: Upload the packages
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
+          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
           path: |
             distro-packages/*.deb
             distro-packages/*.rpm
@@ -247,7 +246,7 @@ jobs:
         if: ${{ !inputs.published_packages }}
         uses: actions/upload-artifact@v7
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages/*.sha256sums
           retention-days: 7
 
@@ -274,13 +273,13 @@ jobs:
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
-          name: ${{ inputs.published_packages && 'published-distro-packages' || 'distro-packages' }}
+          name: ${{ format('{0}-attempt-{1}', inputs.published_packages && 'published-distro-packages' || 'distro-packages', github.run_attempt) }}
           path: distro-packages
 
       - name: Download the payload manifests
         uses: actions/download-artifact@v8
         with:
-          name: distro-package-payloads
+          name: distro-package-payloads-attempt-${{ github.run_attempt }}
           path: distro-packages
 
       - name: Install, run, and remove the package

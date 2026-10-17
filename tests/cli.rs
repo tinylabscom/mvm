@@ -212,6 +212,7 @@ fn build_guest_bins_help_names_output_and_arch_controls() {
     for expected in [
         "--out",
         "--arch",
+        "--check-release-archive",
         "mvm-guest-bins-v",
         "mvmctl's guest-runtime archive",
     ] {
@@ -222,6 +223,43 @@ fn build_guest_bins_help_names_output_and_arch_controls() {
         long.contains("Its consumer is mvmctl; mvm-images does not consume it"),
         "{long}"
     );
+}
+
+#[test]
+fn build_guest_bins_archive_check_is_read_only_and_rejects_build_controls() {
+    let directory = tempfile::tempdir().expect("archive check directory");
+    let home = directory.path().join("state");
+    let missing = directory.path().join("missing.tar.gz");
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", &home)
+        .env("MVM_HOME", &home)
+        .current_dir(directory.path())
+        .args(["build", "guest-bins", "--check-release-archive"])
+        .arg(&missing)
+        .output()
+        .expect("check a missing archive outside a source checkout");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("checking the original release runtime archive"),
+        "{stderr}"
+    );
+    assert!(!home.join("cache").exists());
+    assert!(!home.join("vms").exists());
+    assert!(
+        !home.exists(),
+        "archive inspection must not create host state"
+    );
+    for control in [vec!["--out", "output"], vec!["--arch", "x86_64"]] {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(["build", "guest-bins", "--check-release-archive"])
+            .arg(&missing)
+            .args(&control)
+            .output()
+            .expect("reject build controls in archive checking mode");
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used"));
+    }
 }
 
 /// An unknown architecture is a parse error, not a silent fallback to the

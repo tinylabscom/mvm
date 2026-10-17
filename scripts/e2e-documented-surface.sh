@@ -320,6 +320,18 @@ just payload::supervisors --profile "$E2E_PROFILE"
 # `mvmctl run --mode live` boundary.
 build_sdk_hostlib "$MVMCTL" "$E2E_PROFILE"
 
+if [[ -n "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
+  # Keep signed candidate discovery out of the ordinary consumer executable
+  # prefix and every isolated consumer home. This is producer preparation,
+  # not a cold-consumer or logical-pull witness.
+  producer_root="$(mktemp -d "${TMPDIR:-/tmp}/mvm-e2e-producer.XXXXXX")"
+  python3 scripts/runtime-proof-candidate.py stage-producer \
+    --candidate-dir "$MVM_E2E_RUNTIME_CANDIDATE_DIR" --cli "$MVMCTL" \
+    --out-dir "$producer_root/bin"
+  export MVM_E2E_PRODUCER_MVMCTL="$producer_root/bin/mvmctl"
+  echo "==> producer-only candidate prefix: $producer_root (retained; cleanup requires confirmed absence of readers)"
+fi
+
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1

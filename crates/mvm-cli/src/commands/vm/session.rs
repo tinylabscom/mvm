@@ -736,6 +736,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                     cpus: args.cpus,
                     memory_mib: args.memory_mib,
                     admission,
+                    portable_boot_assets: None,
                 },
                 mode,
                 idle_timeout_secs: args.idle_timeout,

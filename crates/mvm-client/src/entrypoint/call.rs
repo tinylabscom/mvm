@@ -43,6 +43,9 @@ pub struct EntrypointVm<'a> {
     pub memory_mib: u32,
     /// The admission policy; its backend is the one booted on.
     pub admission: EntrypointAdmission,
+    /// Producer-owned release inputs for health. Ordinary consumers leave this
+    /// unset and may not use it to repair an incomplete installed archive.
+    pub portable_boot_assets: Option<&'a crate::portable_boot_assets::PreparedPortableBootAssets>,
 }
 
 /// A booted entrypoint VM and the admission it booted under.
@@ -89,6 +92,7 @@ pub fn boot_entrypoint_vm(
         cpus,
         memory_mib,
         admission,
+        portable_boot_assets,
     } = vm;
     let backend_name = admission.backend_name().to_string();
     let admitted: RefCell<Option<AdmissionContext>> = RefCell::new(None);
@@ -102,6 +106,7 @@ pub fn boot_entrypoint_vm(
         .memory_mib(memory_mib)
         .network_policy(admission.network_policy().clone())
         .backend_name(&backend_name)
+        .portable_boot_assets(portable_boot_assets)
         .build();
     match boot_session_vm(boot, &admit, pair) {
         Ok(vm) => {
@@ -191,6 +196,7 @@ pub fn run_entrypoint_call(
             cpus: vm.cpus,
             memory_mib: vm.memory_mib,
             admission: vm.admission,
+            portable_boot_assets: vm.portable_boot_assets,
         },
         pair,
     )?;
@@ -508,6 +514,7 @@ mod tests {
                     cpus: 1,
                     memory_mib: 256,
                     admission,
+                    portable_boot_assets: None,
                 },
                 stdin: CallStdin::OneShot(b"[[], {}]".to_vec()),
                 timeout_secs: 5,

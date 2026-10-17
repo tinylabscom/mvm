@@ -1,5 +1,20 @@
 use std::path::Path;
 
+pub fn producer_binary(
+    arguments: &[String],
+    live: bool,
+    configured: Option<std::ffi::OsString>,
+) -> Option<std::ffi::OsString> {
+    if live
+        && arguments.first().is_some_and(|arg| arg == "pack")
+        && arguments.get(1).is_some_and(|arg| arg == "build")
+    {
+        configured
+    } else {
+        None
+    }
+}
+
 /// Stage authored data independently of the output archive and lock, so later
 /// outputs cannot change the source tree the lock commits to.
 pub fn stage(dir: &Path) {

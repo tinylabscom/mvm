@@ -151,6 +151,7 @@ pub struct SessionBoot<'a> {
     memory_mib: u32,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     backend_name: Option<&'a str>,
+    portable_boot_assets: Option<&'a crate::portable_boot_assets::PreparedPortableBootAssets>,
 }
 
 impl<'a> SessionBoot<'a> {
@@ -165,6 +166,7 @@ impl<'a> SessionBoot<'a> {
             memory_mib: 256,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             backend_name: None,
+            portable_boot_assets: None,
         })
     }
 }
@@ -173,6 +175,17 @@ impl<'a> SessionBoot<'a> {
 pub struct SessionBootBuilder<'a>(SessionBoot<'a>);
 
 impl<'a> SessionBootBuilder<'a> {
+    /// Producer health may select an already verified release closure. This is
+    /// not a consumer acquisition path or an admission grant.
+    #[must_use]
+    pub fn portable_boot_assets(
+        mut self,
+        assets: Option<&'a crate::portable_boot_assets::PreparedPortableBootAssets>,
+    ) -> Self {
+        self.0.portable_boot_assets = assets;
+        self
+    }
+
     /// vCPUs for the VM.
     #[must_use]
     pub fn cpus(mut self, cpus: u32) -> Self {
@@ -251,6 +264,7 @@ pub fn boot_session_vm(
         memory_mib,
         network_policy,
         backend_name,
+        portable_boot_assets,
     } = boot;
     let (spec, vmlinux, initrd, rootfs, rev) =
         mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot)
@@ -287,8 +301,16 @@ pub fn boot_session_vm(
     // The runtime overlay is the single source of the guest agent and its
     // helpers here, as on the transient path; a missing required overlay is
     // built or acquired, never replaced by a copy baked into the rootfs.
-    attach_runtime_overlay_if_cached_version(&mut start_config, backend.name(), None, pair)?;
-    attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
+    if let Some(assets) = portable_boot_assets {
+        anyhow::ensure!(
+            bundle_archive.is_none(),
+            "producer health cannot replace an installed bundle's boot closure"
+        );
+        assets.apply_for_health(&mut start_config)?;
+    } else {
+        attach_runtime_overlay_if_cached_version(&mut start_config, backend.name(), None, pair)?;
+        attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
+    }
 
     // Admission starts the plan and verb-grant validity windows. All boot
     // preparation therefore completes before this point, immediately before
@@ -323,6 +345,9 @@ pub fn boot_session_vm(
     if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;
+    }
+    if let Some(assets) = portable_boot_assets {
+        assets.verify_health_config(&start_config)?;
     }
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");

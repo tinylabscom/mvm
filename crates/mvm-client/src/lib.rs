@@ -73,6 +73,7 @@ pub mod oci_bundle;
 pub mod output_audit;
 pub mod pack_scenario;
 pub mod policy_profiles;
+pub mod portable_boot_assets;
 pub mod profile;
 pub mod readiness;
 pub mod registration;

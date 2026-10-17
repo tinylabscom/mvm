@@ -50,6 +50,7 @@ fn no_archive_or_build_progress(world: &mut CliWorld) {
 }
 
 fn run(world: &mut CliWorld, args: &str, live: bool) {
+    let arguments = mvm_conformance::doc_examples::tokenize(args);
     let home = world
         .isolated_home
         .as_ref()
@@ -60,18 +61,38 @@ fn run(world: &mut CliWorld, args: &str, live: bool) {
         .as_ref()
         .expect("pack fixture is staged")
         .path();
-    let mut command = super::cli::mvmctl_command();
+    let selected = fixture::producer_binary(
+        &arguments,
+        live,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &selected {
+        Some(path) => super::cli::command_for_binary(std::path::Path::new(&path)),
+        None => super::cli::mvmctl_command(),
+    };
     if live {
         super::live_home::prepare_live_home(home);
         super::live_home::use_seeded_runtime(&mut command);
         mvm_conformance::vmm_reaper::register_launched_home(home);
         world.last_live_home = Some(home.to_path_buf());
+        if let Some(path) = &selected {
+            let policy = super::cli::command_for_binary(std::path::Path::new(path))
+                .current_dir(dir)
+                .isolated_home(home)
+                .args(["image", "revocations", "update"])
+                .output()
+                .expect("apply the canonical signed image revocation policy for the producer");
+            if !policy.status.success() {
+                world.last_run = Some(policy);
+                return;
+            }
+        }
     }
     world.last_run = Some(
         command
             .current_dir(dir)
             .isolated_home(home)
-            .args(mvm_conformance::doc_examples::tokenize(args))
+            .args(arguments)
             .output()
             .expect("spawn mvmctl against the pack fixture"),
     );
