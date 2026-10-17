@@ -71,6 +71,7 @@ pub(crate) fn render_flake_nix_at_url(
           version = "0";
           src = ./src;
           nodejs = pkgs.nodejs_22;
+          nativeBuildInputs = buildTools pkgs;
           npmDeps = pkgs.importNpmLock {{ npmRoot = ./src; }};
           npmConfigHook = pkgs.importNpmLock.npmConfigHook;
           # No transpile step — Node strips TS types at import (>=22.18). The
@@ -106,6 +107,9 @@ pub(crate) fn render_flake_nix_at_url(
         then builtins.fromJSON (builtins.readFile ./pack-build.json)
         else {{ }};
       pythonWheels = packBuild.python or null;
+      # Build-scoped packages exist only for the derivations that install a
+      # pack's dependencies; they are never in the image or its closure.
+      buildTools = pkgs: map (name: pkgs.${{name}}) (packBuild.build_packages or [ ]);
       mkPythonDeps = pkgs:
         if pythonWheels == null then null
         else
@@ -133,7 +137,7 @@ pub(crate) fn render_flake_nix_at_url(
             version = "0";
             dontUnpack = true;
             dontStrip = true;
-            nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;
             buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
             installPhase = ''
               runHook preInstall
@@ -472,8 +476,22 @@ mod tests {
             "PYTHONPATH=${python.pkgs.installer}/${python.sitePackages} \\\n                ${python.interpreter} -m installer --prefix \"$out\""
         ));
         assert!(s.contains("--compile-bytecode 0"));
-        assert!(s.contains("nativeBuildInputs = [ pkgs.autoPatchelfHook ];"));
+        assert!(s.contains("nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;"));
         assert!(s.contains("buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];"));
+    }
+
+    #[test]
+    fn build_packages_reach_the_install_derivations_and_not_the_image() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(s.contains(
+            "buildTools = pkgs: map (name: pkgs.${name}) (packBuild.build_packages or [ ]);"
+        ));
+        assert!(s.contains("nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;"));
+        assert!(s.contains("nativeBuildInputs = buildTools pkgs;"));
+        assert!(
+            !s.contains("imagePackages = buildTools"),
+            "the image package list never reads the build set"
+        );
     }
 
     #[test]

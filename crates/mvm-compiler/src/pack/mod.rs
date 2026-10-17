@@ -14,8 +14,8 @@
 //! set is recorded in the workload, so the lock binds every wheel's URL and
 //! hash, and the generated flake installs exactly that set at build time.
 //!
-//! Lowering refuses what the IR and Nix factories cannot honor yet: build-scoped
-//! packages, exact package versions, Python dependency files other than a uv
+//! Lowering refuses what the IR and Nix factories cannot honor yet: exact
+//! package versions, Python dependency files other than a uv
 //! lockfile, non-npm Node lockfiles and copies outside the application tree.
 //! Builder execution happens elsewhere and is not implied by a successful
 //! compile.
@@ -66,10 +66,6 @@ pub enum PackError {
     Spec(#[from] PackSpecError),
     #[error("invalid pack lock: {0}")]
     Lock(#[from] PackLockError),
-    #[error(
-        "package {package:?} is build-scoped; the workload compiler has no build-only package set yet"
-    )]
-    UnsupportedBuildScope { package: String },
     #[error(
         "package {package:?} requests version {version:?}; exact package versions cannot be resolved yet"
     )]

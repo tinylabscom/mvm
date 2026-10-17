@@ -2,7 +2,7 @@
 
 use super::app_tree::assemble;
 use super::lock::{LockInputs, derive_lock, stale_fields};
-use super::lower::{APP_TREE, lower, record_python_environment};
+use super::lower::{APP_TREE, build_packages, lower, record_python_environment};
 use super::python::{self, Interpreter, PythonEnvironment, UV_LOCKFILE};
 use super::{LOCK_FILE, PACK_BUILD_FILE, PackError, PackInput};
 use crate::deps::validate_lockfiles;
@@ -42,8 +42,10 @@ pub fn compile_frozen(
     if !fields.is_empty() {
         return Err(PackError::StaleLock { fields });
     }
+    let build_packages = build_packages(input.spec)?;
     let extra = pack_build_file(&PackBuild {
         python: resolved.python.as_ref(),
+        build_packages: &build_packages,
     })?;
     compile_pinned_with(
         &resolved.workload,
@@ -61,11 +63,13 @@ pub fn compile_frozen(
 struct PackBuild<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     python: Option<&'a PythonEnvironment>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    build_packages: &'a [String],
 }
 
 impl PackBuild<'_> {
     fn is_empty(&self) -> bool {
-        self.python.is_none()
+        self.python.is_none() && self.build_packages.is_empty()
     }
 }
 
@@ -531,6 +535,46 @@ mod tests {
     }
 
     #[test]
+    fn build_packages_are_written_to_the_pack_build_file_and_bound_by_the_lock() {
+        let dir = source_tree();
+        let mut spec = spec();
+        let plain = lock_pack(&PackInput {
+            spec: &spec,
+            spec_dir: dir.path(),
+            revision: &revision(),
+        })
+        .unwrap();
+        spec.packages.push(mvm_contract::pack_spec::PackageRequest {
+            name: "gcc".into(),
+            version: None,
+            scope: mvm_contract::pack_spec::PackageScope::Build,
+        });
+        let out = TempDir::new().unwrap();
+        let artifact = out.path().join("a");
+        let locked = compile_spec(&spec, dir.path(), &artifact).unwrap();
+        assert_eq!(
+            read_json(&artifact.join(PACK_BUILD_FILE)),
+            serde_json::json!({"build_packages": ["gcc"]})
+        );
+        let launch = read_json(&artifact.join("launch.json"));
+        assert!(
+            !launch.to_string().contains("gcc"),
+            "a build package is not in the image: {launch}"
+        );
+        assert_ne!(locked, plain, "the lock binds the build set");
+        let result = compile_frozen(
+            &PackInput {
+                spec: &spec,
+                spec_dir: dir.path(),
+                revision: &revision(),
+            },
+            &plain,
+            &out.path().join("b"),
+        );
+        assert!(matches!(result, Err(PackError::StaleLock { .. })));
+    }
+
+    #[test]
     fn a_pack_without_python_dependencies_writes_no_pack_build_file() {
         let dir = source_tree();
         let locked = lock_for(dir.path());
@@ -784,7 +828,7 @@ mod tests {
     fn unsupported_requests_fail_before_touching_the_source() {
         let dir = TempDir::new().unwrap();
         let mut spec = spec();
-        spec.packages[0].scope = mvm_contract::pack_spec::PackageScope::Build;
+        spec.packages[0].version = Some("1.36.1".into());
         spec.source = PackSource::Local {
             path: "absent".into(),
         };
@@ -795,7 +839,7 @@ mod tests {
         });
         assert!(matches!(
             result,
-            Err(PackError::UnsupportedBuildScope { .. })
+            Err(PackError::UnsupportedPackageVersion { .. })
         ));
     }
 }
