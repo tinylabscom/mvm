@@ -39,6 +39,59 @@ pub struct BuiltPackBootContract {
     base: ImageSetManifest,
 }
 
+/// Which authenticated image member a reader supplies. Not a boot authority.
+#[derive(Debug, Clone, Copy)]
+pub enum BootImageAsset {
+    Rootfs,
+    Verity,
+    Metadata,
+    RootHash,
+}
+
+/// Expectations copied only from an authenticated contract's private assets.
+///
+/// This verifies artifact bytes, not plan admission, descriptor custody, or a
+/// native launch. Readers must still be frozen and retained by their consumer.
+#[derive(Debug)]
+pub struct AuthenticatedBootImageExpectations {
+    rootfs: crate::registry_pack_image::BuiltImageAsset,
+    verity: crate::registry_pack_image::BuiltImageAsset,
+    metadata: crate::registry_pack_image::BuiltImageAsset,
+    roothash: crate::registry_pack_image::BuiltImageAsset,
+    root_hash: String,
+}
+
+impl AuthenticatedBootImageExpectations {
+    fn asset(&self, role: BootImageAsset) -> &crate::registry_pack_image::BuiltImageAsset {
+        match role {
+            BootImageAsset::Rootfs => &self.rootfs,
+            BootImageAsset::Verity => &self.verity,
+            BootImageAsset::Metadata => &self.metadata,
+            BootImageAsset::RootHash => &self.roothash,
+        }
+    }
+
+    pub fn expected_size(&self, role: BootImageAsset) -> u64 {
+        self.asset(role).size
+    }
+
+    pub fn expected_sha256(&self, role: BootImageAsset) -> &Sha256Hex {
+        &self.asset(role).sha256
+    }
+
+    /// The captured, authenticated value, never a later unsigned sidecar read.
+    pub fn root_hash(&self) -> &str {
+        &self.root_hash
+    }
+
+    /// Verify a reader positioned at the member's beginning against original
+    /// signed size/digest. Success does not freeze that reader or mint a permit.
+    pub fn verify_reader(&self, role: BootImageAsset, reader: impl Read) -> Result<()> {
+        let asset = self.asset(role);
+        check_reader(reader, &asset.sha256, asset.size)
+    }
+}
+
 impl BuiltPackBootContract {
     /// Reopen for admission under the host's applied image-set revocation list.
     ///
@@ -128,6 +181,69 @@ impl BuiltPackBootContract {
 
     pub fn rootfs_sha256(&self) -> &Sha256Hex {
         &self.image.assets.rootfs.sha256
+    }
+
+    /// Capture original authenticated asset expectations without treating a
+    /// mutable source's current digest as authority. Large members are verified
+    /// later through the exact readers supplied by their owning consumer.
+    pub fn image_expectations(
+        &self,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+        arch: GuestArch,
+        backend: BackendKind,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        self.verify_plan(plan, arch, backend)?;
+        let directory = Path::new(&config.rootfs_path)
+            .parent()
+            .context("built rootfs has no parent directory")?;
+        let captured = read_roothash(
+            &directory.join("rootfs.roothash"),
+            &self.image.assets.roothash,
+        )?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    /// Capture signed image facts from an untrusted, already-held hash reader.
+    ///
+    /// Reads from the reader's CURRENT position, bounded by signed size + 1.
+    /// The caller must supply the whole member from offset zero (for a shared
+    /// file, use positional reads). This does not rewind, freeze, or retain the
+    /// reader and confers neither descriptor custody nor launch admission.
+    pub fn capture_image_expectations(
+        &self,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+        arch: GuestArch,
+        backend: BackendKind,
+        root_hash_reader: impl Read,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        self.verify_plan(plan, arch, backend)?;
+        let captured = decode_roothash(root_hash_reader, &self.image.assets.roothash)?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    fn bind_captured_hash(
+        &self,
+        config: &VmStartConfig,
+        captured: &str,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        let root_hash = captured.trim();
+        ensure!(
+            root_hash.len() == 64
+                && root_hash
+                    .bytes()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+                && config.roothash.as_deref() == Some(root_hash),
+            "built image config lacks its authenticated canonical roothash"
+        );
+        Ok(AuthenticatedBootImageExpectations {
+            rootfs: self.image.assets.rootfs.clone(),
+            verity: self.image.assets.verity.clone(),
+            metadata: self.image.assets.mvm_meta.clone(),
+            roothash: self.image.assets.roothash.clone(),
+            root_hash: root_hash.to_owned(),
+        })
     }
 
     /// Resolve only the pack/base-owned image fields and verify the proposed
@@ -316,9 +432,17 @@ fn read_roothash(
     asset: &crate::registry_pack_image::BuiltImageAsset,
 ) -> Result<String> {
     ensure!(asset.size <= 128, "oversized built image roothash");
-    let mut bytes = Vec::new();
     let file = open_regular(path, asset.size)?;
-    file.take(asset.size + 1).read_to_end(&mut bytes)?;
+    decode_roothash(file, asset)
+}
+
+fn decode_roothash(
+    reader: impl Read,
+    asset: &crate::registry_pack_image::BuiltImageAsset,
+) -> Result<String> {
+    ensure!(asset.size <= 128, "oversized built image roothash");
+    let mut bytes = Vec::new();
+    reader.take(asset.size + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 == asset.size && Sha256Hex::from_bytes(&bytes) == asset.sha256,
         "built image roothash differs from its signed digest"
@@ -328,7 +452,12 @@ fn read_roothash(
 
 fn check_file(path: &Path, expected: &Sha256Hex, size: u64) -> Result<()> {
     let file = open_regular(path, size)?;
-    let mut reader = file.take(size.checked_add(1).context("artifact size overflow")?);
+    check_reader(file, expected, size)
+        .with_context(|| format!("checking built boot artifact {}", path.display()))
+}
+
+fn check_reader(reader: impl Read, expected: &Sha256Hex, size: u64) -> Result<()> {
+    let mut reader = reader.take(size.checked_add(1).context("artifact size overflow")?);
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65536];
     let mut count = 0u64;
@@ -337,13 +466,14 @@ fn check_file(path: &Path, expected: &Sha256Hex, size: u64) -> Result<()> {
         if n == 0 {
             break;
         }
-        count += n as u64;
+        count = count
+            .checked_add(n as u64)
+            .context("artifact byte count overflow")?;
         hash.update(&buffer[..n]);
     }
     ensure!(
         count == size && hex::encode(hash.finalize()) == expected.as_str(),
-        "built boot artifact {} differs from its signed digest",
-        path.display()
+        "built boot artifact reader differs from its signed size or digest"
     );
     Ok(())
 }

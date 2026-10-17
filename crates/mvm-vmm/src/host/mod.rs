@@ -6,6 +6,7 @@
 pub mod audit_substrate;
 pub mod aux_bin;
 pub mod boot_config;
+pub mod boot_images;
 pub mod broker_services_spawn;
 pub mod cmdline;
 pub mod codesign;
