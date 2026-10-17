@@ -72,9 +72,18 @@ impl TopLevelCommand for Commands {
         // Uninstall runs before startup creates config, host signing keys and
         // the command audit envelope: it must not create the state directory
         // it is deciding whether to remove.
+        // The archive-only reader likewise must not create keys or lifecycle
+        // state while checking untrusted bytes.
         matches!(
             self,
             Commands::QemuVsockBridge(_)
+                | Commands::Build(build::group::Args {
+                    action: build::group::BuildCmd::GuestBins(build::guest_bins::Args {
+                        check_release_archive: Some(_),
+                        ..
+                    }),
+                    ..
+                })
                 | Commands::Env(env::group::Args {
                     action: env::group::EnvCmd::Uninstall(_),
                 })
@@ -87,6 +96,14 @@ impl TopLevelCommand for Commands {
         }
         match self {
             Commands::QemuVsockBridge(a) => Some(qemu_bridge::run(a)),
+            Commands::Build(build::group::Args {
+                action:
+                    build::group::BuildCmd::GuestBins(build::guest_bins::Args {
+                        check_release_archive: Some(archive),
+                        ..
+                    }),
+                ..
+            }) => Some(build::guest_bins::check_archive_to_stdout(archive)),
             Commands::Env(env::group::Args {
                 action: env::group::EnvCmd::Uninstall(a),
             }) => Some(env::uninstall::run(a)),

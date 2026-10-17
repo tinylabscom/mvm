@@ -152,6 +152,9 @@ pub(in crate::commands) struct TemplateExport {
     pub provenance: Option<BuildProvenance>,
     /// The signed environment descriptor to seal beside the artifacts.
     pub environment: Option<EnvironmentDescriptor>,
+    /// Owned verified producer closure, shared with the preceding health call.
+    pub portable_boot_assets:
+        Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
 }
 
 impl TemplateExport {
@@ -164,6 +167,7 @@ impl TemplateExport {
             resources: None,
             provenance: None,
             environment: None,
+            portable_boot_assets: None,
         }
     }
 }
@@ -220,7 +224,28 @@ pub(in crate::commands) fn export_template(
     // while still containing an aarch64 rootfs — and the label is what the
     // boot-time gate trusts. A slot built here has no manifest, so it takes
     // the host arch, which is correct for that case.
-    let installed_arch = tmpl::installed_bundle_arch_for_export(template);
+    let installed_arch = match tmpl::installed_bundle_archive(template)? {
+        Some(archive) => {
+            let verified = mvm_core::plan::bundle::verify_bundle_file(
+                &archive,
+                &mvm_core::plan::bundle::FsTrustStore::default_path()?,
+            )
+            .context("verifying the original bundle before re-export")?;
+            anyhow::ensure!(
+                !verified.manifest.members.iter().any(|member| matches!(
+                    member,
+                    mvm_core::plan::bundle::BundleMember::EmbeddedBootAssets { .. }
+                        | mvm_core::plan::bundle::BundleMember::EmbeddedCliBootAssets(_)
+                        | mvm_core::plan::bundle::BundleMember::CanonicalLinuxProof(_)
+                        | mvm_core::plan::bundle::BundleMember::EmbeddedImageSet { .. }
+                )),
+                "re-export of protected boot members requires original closure custody; refusing to drop publisher evidence"
+            );
+            Some(verified.manifest.arch)
+        }
+        None => None,
+    };
+    let installed_export = installed_arch.is_some();
     let provenance = export
         .provenance
         .or_else(|| template_provenance(&spec.flake_ref, installed_arch.is_some()));
@@ -238,36 +263,56 @@ pub(in crate::commands) fn export_template(
         None => None,
     };
 
+    if let Some(assets) = &export.portable_boot_assets {
+        anyhow::ensure!(
+            !installed_export,
+            "cannot replace an installed bundle's closure"
+        );
+        assets.verify_build_kernel(std::path::Path::new(&vmlinux))?;
+    }
     // ---- 2. Seal, sign under the host key, and write the archive ----
+    let selected_initrd = export
+        .portable_boot_assets
+        .as_ref()
+        .map(|assets| {
+            assets
+                .initramfs_path()
+                .to_str()
+                .context("portable initramfs path is not UTF-8")
+        })
+        .transpose()?
+        .or(initrd.as_deref());
     let signer = HostBundleSigner::load()?;
-    export_bundle_with_signer(
-        &BundleExportInputs {
-            vmlinux: &vmlinux,
-            initrd: initrd.as_deref(),
-            rootfs: &rootfs,
-            verity_bytes: verity_bytes.as_deref(),
-            roothash: roothash.as_deref(),
-            profile: Some(&spec.profile),
-            // The template's declared resources travel with the bundle so a
-            // launch on another host starts from them without rediscovering
-            // them. `--cpus` / `--memory` still override at launch time.
-            resources: Some(export.resources.unwrap_or(BundleResources {
-                vcpus: u32::from(spec.vcpus),
-                mem_mib: spec.mem_mib,
-            })),
-            arch_label: &source_arch,
-            label: export.label,
-            cmdline: export.cmdline.as_deref(),
-            posture: export.posture,
-            provenance,
-            environment: export.environment,
-            boot_assets: None,
-            cli_boot_assets: None,
-            out: &export.out,
-            debug_out: None,
-        },
-        &signer,
-    )
+    let inputs = BundleExportInputs {
+        vmlinux: &vmlinux,
+        initrd: selected_initrd,
+        rootfs: &rootfs,
+        verity_bytes: verity_bytes.as_deref(),
+        roothash: roothash.as_deref(),
+        profile: Some(&spec.profile),
+        // The template's declared resources travel with the bundle so a
+        // launch on another host starts from them without rediscovering
+        // them. `--cpus` / `--memory` still override at launch time.
+        resources: Some(export.resources.unwrap_or(BundleResources {
+            vcpus: u32::from(spec.vcpus),
+            mem_mib: spec.mem_mib,
+        })),
+        arch_label: &source_arch,
+        label: export.label,
+        cmdline: export.cmdline.as_deref(),
+        posture: export.posture,
+        provenance,
+        environment: export.environment,
+        boot_assets: None,
+        cli_boot_assets: None,
+        canonical_linux_proof: None,
+        out: &export.out,
+        debug_out: None,
+    };
+    match &export.portable_boot_assets {
+        Some(assets) => assets.export(&inputs, &signer),
+        None => export_bundle_with_signer(&inputs, &signer),
+    }
 }
 
 #[cfg(test)]

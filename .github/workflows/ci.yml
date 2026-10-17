@@ -1584,6 +1584,72 @@ jobs:
       - name: Run Linux, no_std, filesystem, and conformance coverage
         run: bash scripts/ci-linux-coverage.sh
 
+      - name: Require exact producer kernel Linux regressions
+        if: github.event_name == 'merge_group'
+        timeout-minutes: 30
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import re
+          import subprocess
+          import sys
+          import tempfile
+          import os
+
+          def require_one_pass(text, name):
+              lines = text.splitlines()
+              results = [line for line in lines if re.fullmatch(r"test .+ \.\.\. (ok|FAILED|ignored)", line)]
+              summaries = [line for line in lines if line.startswith("test result:")]
+              summary = r"test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9.]+s"
+              if (lines.count("running 1 test") != 1
+                      or results != [f"test {name} ... ok"]
+                      or len(summaries) != 1
+                      or re.fullmatch(summary, summaries[0]) is None):
+                  raise RuntimeError(f"missing exact executed single-test success: {name}")
+
+          # Parser self-tests are synthetic, not Linux witness evidence.
+          fixture = "running 1 test\ntest fixture ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s\n"
+          require_one_pass(fixture, "fixture")
+          for bad in [
+              "",
+              fixture.replace("running 1 test", "running 0 tests"),
+              fixture.replace("test fixture ... ok", "test other ... ok"),
+              fixture.replace("test fixture ... ok", "test fixture ... ignored"),
+              fixture.replace("1 passed; 0 failed", "0 passed; 1 failed"),
+              fixture.replace("0 ignored", "1 ignored"),
+              fixture + fixture,
+              fixture.replace("test fixture ... ok", "\x1b[32mtest fixture ... ok\x1b[0m"),
+          ]:
+              try:
+                  require_one_pass(bad, "fixture")
+              except RuntimeError:
+                  pass
+              else:
+                  raise RuntimeError("single-test parser accepted a negative fixture")
+
+          if sys.platform != "linux":
+              raise RuntimeError("producer descriptor regressions must execute on Linux")
+          tests = [
+              ("mvm-backends", "driver::fc::tests::descriptor_boot_source_reads_held_bytes_after_slot_replacement"),
+              ("mvm-runtime", "kernel_custody::tests::producer_kernel_descriptor_survives_replacement_after_final_check"),
+              ("mvm-cli", "commands::pack::build::tests::health_backend_requires_an_actual_same_host_descriptor_route"),
+          ]
+          logs = pathlib.Path(tempfile.mkdtemp(prefix="mvm-producer-linux-", dir=os.environ["RUNNER_TEMP"]))
+          print(f"Exact Linux producer regression logs: {logs}", flush=True)
+          for package, name in tests:
+              log = logs / f"{package}.log"
+              subprocess.run([
+                  sys.executable, "scripts/run-bounded-command.py",
+                  "--timeout", "595", "--grace", "5", "--log", str(log), "--",
+                  "cargo", "test", "--locked", "-p", package, "--lib", name,
+                  "--", "--exact", "--color", "never",
+              ], check=True)
+              require_one_pass(log.read_text(), name)
+              print(f"EXACT_LINUX_PASS {package}::{name}", flush=True)
+          PY
+
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
     needs: [scope]

@@ -21,7 +21,11 @@ use mvm_conformance::IsolatedHome;
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
     let bin_path = mvmctl_path();
-    let mut cmd = Command::new(&bin_path);
+    command_for_binary(&bin_path)
+}
+
+pub(crate) fn command_for_binary(bin_path: &Path) -> Command {
+    let mut cmd = Command::new(bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
         path.push(":");

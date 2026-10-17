@@ -20,8 +20,8 @@ assert lib.elem variant [
 
 let
   kernelSrc = fetchurl {
-    url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.112.tar.xz";
-    hash = "sha256-Fk3J0fbJPGGhXh8HHEg3m0Z/KxfEacznIjRxloII7QM=";
+    url = "mirror://kernel/linux/kernel/v6.x/linux-6.12.113.tar.xz";
+    hash = "sha256-4JtnJ+XFISU/DUFpSQC5w4+3YE2301I4qBl6qffeJCg=";
   };
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -37,7 +37,7 @@ stdenv.mkDerivation (finalAttrs: {
 
   postPatch = ''
     substituteInPlace Makefile \
-      --replace-fail 'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-6.12.112' \
+      --replace-fail 'KERNEL_VERSION = linux-6.12.91' 'KERNEL_VERSION = linux-6.12.113' \
       --replace-fail 'curl $(KERNEL_REMOTE) -o $(KERNEL_TARBALL)' 'ln -s ${kernelSrc} $(KERNEL_TARBALL)'
     substituteInPlace patches/0008-virtio-vsock-support-dgrams.patch \
       --replace-fail 'virtio_transport_alloc_skb(&info, dgram_len, false,' \

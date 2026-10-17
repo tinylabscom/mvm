@@ -51,6 +51,10 @@ impl FirecrackerIO {
         }
     }
 
+    pub(super) fn fork_devices(&self) -> Option<&super::ForkDevices> {
+        self.fork_devices.as_ref()
+    }
+
     /// Point this handle's fork load at the child's own devices.
     #[must_use]
     pub fn forking_onto(mut self, devices: super::ForkDevices) -> Self {
