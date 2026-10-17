@@ -11,6 +11,7 @@ Feature: Package an OCI image and verify the signed archive
   Scenario: Build and verify an Alpine OCI package with explicit publisher trust
     Given an isolated mvm home
     And a scratch working directory
+    And the isolated mvm home is prepared for live launches
     When I run mvmctl in the scratch directory with "bundle build --image docker.io/library/alpine:3.20 --out alpine.mvmpkg --debug-out alpine.bundle.json"
     Then the command exits with code 0
     And the output contains "OCI digest: sha256:"
