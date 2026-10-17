@@ -90,6 +90,9 @@ pub struct MockDriver {
     /// `rootfs_path()` — a test seeds this to a file it already wrote so the
     /// capture orchestration has something real to clone.
     vm_full_rootfs: PathBuf,
+    /// Whether a capture leaves the paused source resident, as HVF's live
+    /// hand-off does; the standby handle then keeps a real pid.
+    retain_paused: bool,
     /// Shared with every `MockVmFullControl` this driver hands out, so a test
     /// can read back the pause/save_memory/resume call order via
     /// `vm_full_calls()` regardless of which `vm_full_control()` call produced
@@ -149,6 +152,7 @@ impl MockDriver {
             forked: Arc::new(Mutex::new(Vec::new())),
             guest_ends: Arc::new(Mutex::new(HashMap::new())),
             vm_full_rootfs: PathBuf::from("/mock/rootfs.ext4"),
+            retain_paused: false,
             vm_full_calls: Arc::new(Mutex::new(Vec::new())),
             child_identity: Some(rotated_child_identity()),
             child_identity_scripted: false,
@@ -190,6 +194,14 @@ impl MockDriver {
     #[must_use]
     pub fn with_preloaded_standby(mut self) -> Self {
         self.preloaded_standby = true;
+        self
+    }
+
+    /// Keep the paused source resident after a capture, with a live pid on the
+    /// standby handle, as a resident hand-off backend does.
+    #[must_use]
+    pub fn with_retained_paused_source(mut self) -> Self {
+        self.retain_paused = true;
         self
     }
 
@@ -378,7 +390,11 @@ impl VmmDriver for MockDriver {
             id: spec.id.clone(),
             template_id: spec.template_id.clone(),
             control_socket: spec.control_socket.clone(),
-            pid: 0,
+            pid: if self.retain_paused {
+                std::process::id()
+            } else {
+                0
+            },
             kernel_sha256: spec.kernel_sha256.clone(),
             vcpus: spec.vcpus,
             mem_mib: spec.mem_mib,
@@ -473,6 +489,7 @@ impl VmmDriver for MockDriver {
     ) -> Option<Box<dyn mvm_vmm::checkpoint::VmFullControl>> {
         Some(Box::new(MockVmFullControl {
             rootfs: self.vm_full_rootfs.clone(),
+            retain_paused: self.retain_paused,
             calls: Arc::clone(&self.vm_full_calls),
             observation: self.observations.lock().unwrap().get(vm_name).cloned(),
         }))
@@ -567,6 +584,7 @@ impl RunningVm for MockRunningVm {
 /// the pause-then-save-then-resume ordering without a live hypervisor.
 struct MockVmFullControl {
     rootfs: PathBuf,
+    retain_paused: bool,
     calls: Arc<Mutex<Vec<&'static str>>>,
     observation: Option<BootObservation>,
 }
@@ -594,6 +612,10 @@ fn observe_boot(boot: &VmmSpec) -> Result<RuntimeArtifacts> {
 }
 
 impl mvm_vmm::checkpoint::VmFullControl for MockVmFullControl {
+    fn retain_paused_after_capture(&self) -> bool {
+        self.retain_paused
+    }
+
     fn runtime_artifacts(&self) -> Result<RuntimeArtifacts> {
         match &self.observation {
             Some(Ok(actual)) => Ok(actual.clone()),

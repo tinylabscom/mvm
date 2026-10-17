@@ -694,6 +694,52 @@ mod tests {
         }
     }
 
+    fn running_vm_at(dir: &Path) -> LibkrunRunningVm {
+        LibkrunRunningVm {
+            id: VmId("vm".into()),
+            state_dir: dir.to_path_buf(),
+            pid_file: dir.join("libkrun.pid"),
+        }
+    }
+
+    #[test]
+    fn pause_and_resume_are_refused_because_libkrun_cannot_do_either() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = running_vm_at(dir.path());
+        assert!(vm.pause().unwrap_err().to_string().contains("pause"));
+        assert!(vm.resume().unwrap_err().to_string().contains("resume"));
+    }
+
+    /// A supervisor that ignores SIGTERM is still stopped: the grace window
+    /// ends in SIGKILL, and only then is the pid file dropped.
+    #[test]
+    fn kill_escalates_to_sigkill_for_a_supervisor_that_ignores_sigterm() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = running_vm_at(dir.path());
+        let ready = dir.path().join("ready");
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "trap '' TERM; : > '{}'; while :; do sleep 1; done",
+                ready.display()
+            ))
+            .spawn()
+            .unwrap();
+        while !ready.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::fs::write(&vm.pid_file, child.id().to_string()).unwrap();
+        let pid = child.id();
+        // The observer may reap the child before this thread does.
+        let reaper = std::thread::spawn(move || child.wait());
+        vm.kill().expect("a SIGKILL-able supervisor is stopped");
+        reaper.join().unwrap().ok();
+        assert!(!vm.pid_file.exists());
+        assert!(!crate::driver::libkrun_process::pid_alive(
+            pid as libc::pid_t
+        ));
+    }
+
     fn relay(spec: &VmmSpec) -> SupervisorConfig {
         relay_libkrun_supervisor_config(spec, Path::new("/state/w")).unwrap()
     }
@@ -1057,8 +1103,17 @@ mod tests {
             Some("console=hvc0 root=/dev/vda ro init=/init")
         );
 
-        // Empty + an initramfs (no disk root) ⇒ the console-only verity base.
+        // Empty + an initramfs ⇒ the console-only verity base, even though the
+        // spec carries disks: the initramfs owns root selection.
         spec.initramfs = Some("/img/initrd.cpio".into());
+        spec.cmdline = String::new();
+        let cfg = relay(&spec);
+        assert_eq!(
+            cfg.krun.kernel_cmdline.as_deref(),
+            Some(crate::driver::libkrun_process::VERITY_CMDLINE)
+        );
+
+        // Empty + an initramfs and no disks ⇒ the same base.
         spec.blocks.clear();
         spec.cmdline = String::new();
         let cfg = relay(&spec);

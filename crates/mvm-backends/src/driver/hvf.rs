@@ -35,7 +35,7 @@ use crate::driver::hvf_process::{
 use mvm_contract::grants::CpuGrant;
 use mvm_core::checkpoint::{DeviceAnchors, HVF_FRAME_BLOB};
 use mvm_vmm::checkpoint::VmFullControl;
-use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
+use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec, VsockPort};
 use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
@@ -130,6 +130,36 @@ impl SupervisorPaths {
 #[cfg(test)]
 fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<HvfSupervisorConfig> {
     relay_supervisor_config_with_handoff(spec, paths, None, None)
+}
+
+/// The channel bits a live hand-off tells the resident parent to hand its child.
+fn handoff_channel_mask(channels: &[VsockPort]) -> u8 {
+    channels.iter().fold(0_u8, |mask, channel| {
+        if channel.service == GuestService::MachineControl {
+            mask | 1
+        } else if channel.service == GuestService::NetworkFlow {
+            mask | 2
+        } else if channel.service == GuestService::Broker {
+            mask | 4
+        } else if channel.service == GuestService::Telemetry {
+            mask | mvm_vmm::hvf_handoff::HANDOFF_TELEMETRY
+        } else if channel.service == GuestService::DisplayFrame {
+            mask | mvm_vmm::hvf_handoff::HANDOFF_DISPLAY
+        } else if channel.service == GuestService::Gpu {
+            // GPU remoting is fork-safe: the child reconnects to the same
+            // host endpoint over its own channel, so the mask carries it
+            // exactly like display.
+            mask | mvm_vmm::hvf_handoff::HANDOFF_GPU
+        } else if matches!(
+            channel.service,
+            GuestService::ConsoleData { port }
+                if dev_console_data_ports().any(|candidate| candidate == port)
+        ) {
+            mask | 8
+        } else {
+            mask
+        }
+    })
 }
 
 fn relay_supervisor_config_with_handoff(
@@ -804,32 +834,7 @@ impl VmmDriver for HvfDriver {
         })?;
         let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
             .map_err(|e| StandbyError::ClaimFailed(format!("load host handoff identity: {e}")))?;
-        let channel_mask = req.channels.iter().fold(0_u8, |mask, channel| {
-            if channel.service == GuestService::MachineControl {
-                mask | 1
-            } else if channel.service == GuestService::NetworkFlow {
-                mask | 2
-            } else if channel.service == GuestService::Broker {
-                mask | 4
-            } else if channel.service == GuestService::Telemetry {
-                mask | mvm_vmm::hvf_handoff::HANDOFF_TELEMETRY
-            } else if channel.service == GuestService::DisplayFrame {
-                mask | mvm_vmm::hvf_handoff::HANDOFF_DISPLAY
-            } else if channel.service == GuestService::Gpu {
-                // GPU remoting is fork-safe: the child reconnects to the same
-                // host endpoint over its own channel, so the mask carries it
-                // exactly like display.
-                mask | mvm_vmm::hvf_handoff::HANDOFF_GPU
-            } else if matches!(
-                channel.service,
-                GuestService::ConsoleData { port }
-                    if dev_console_data_ports().any(|candidate| candidate == port)
-            ) {
-                mask | 8
-            } else {
-                mask
-            }
-        });
+        let channel_mask = handoff_channel_mask(req.channels);
         let mut request = HvfHandoffRequest {
             child_vm_name: req.child_vm_name.to_string(),
             parent_pid,
@@ -1515,7 +1520,7 @@ mod tests {
         );
     }
     use mvm_core::vm_backend::SnapshotCapability;
-    use mvm_vmm::driver::spec::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
+    use mvm_vmm::driver::spec::{ConsoleCapture, VsockDirection};
 
     #[test]
     fn supervisor_unavailable_message_names_the_remedies() {
@@ -1857,6 +1862,100 @@ mod tests {
             "{rendered}"
         );
         assert_eq!(parent.requests().len(), LIVE_HANDOFF_ATTEMPTS);
+    }
+
+    fn port_for(service: GuestService) -> VsockPort {
+        VsockPort {
+            service,
+            host_uds: "/s".into(),
+            direction: VsockDirection::GuestDials,
+        }
+    }
+
+    #[test]
+    fn each_handed_off_channel_sets_exactly_its_own_bit() {
+        use mvm_vmm::hvf_handoff::{HANDOFF_DISPLAY, HANDOFF_GPU, HANDOFF_TELEMETRY};
+        let console_port = dev_console_data_ports().next().expect("a console port");
+        let cases = [
+            (GuestService::MachineControl, 1),
+            (GuestService::NetworkFlow, 2),
+            (GuestService::Broker, 4),
+            (GuestService::ConsoleData { port: console_port }, 8),
+            (GuestService::Telemetry, HANDOFF_TELEMETRY),
+            (GuestService::DisplayFrame, HANDOFF_DISPLAY),
+            (GuestService::Gpu, HANDOFF_GPU),
+            (GuestService::ConsoleData { port: 1 }, 0),
+        ];
+        for (service, bit) in cases {
+            assert_eq!(handoff_channel_mask(&[port_for(service)]), bit);
+        }
+        let all: Vec<VsockPort> = cases.iter().map(|(s, _)| port_for(*s)).collect();
+        assert_eq!(
+            handoff_channel_mask(&all),
+            cases.iter().fold(0, |m, (_, b)| m | b)
+        );
+        // Setting a bit twice leaves it set (OR, not XOR).
+        let twice: Vec<VsockPort> = all.iter().chain(all.iter()).cloned().collect();
+        assert_eq!(handoff_channel_mask(&twice), handoff_channel_mask(&all));
+        assert_eq!(handoff_channel_mask(&[]), 0);
+    }
+
+    #[test]
+    fn the_resident_handoff_is_offered_because_the_standby_pool_is() {
+        assert!(HvfDriver.supports_resident_handoff());
+    }
+
+    fn fork_request<'a>(
+        child_dir: &'a Path,
+        parent: Option<&'a str>,
+        child: &'a str,
+    ) -> ChildForkRequest<'a> {
+        ChildForkRequest {
+            child_vm_name: child,
+            child_dir,
+            runtime_artifacts_sha256: None,
+            device_anchors_sha256: None,
+            parent_vm_name: parent,
+            genid: mvm_core::crypto::vmgenid::GenerationToken {
+                token: [0u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+                content_hash: "test-content-hash".into(),
+            },
+            channels: &[],
+            cpu_grant: None,
+            admitted_plan: None,
+            late_volumes: &[],
+        }
+    }
+
+    #[test]
+    fn a_live_standby_claim_is_refused_before_any_handoff_unless_its_inputs_are_sound() {
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let refusal = |req: ChildForkRequest<'_>| match HvfDriver::new().fork_standby_child(&req) {
+            Err(StandbyError::ClaimFailed(message)) => message,
+            other => panic!("expected a claim refusal, got {other:?}"),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        assert!(refusal(fork_request(dir.path(), None, "c")).contains("resident paused parent"));
+
+        let missing = dir.path().join("never-materialized");
+        assert!(refusal(fork_request(&missing, Some("p"), "c")).contains("is missing"));
+
+        // A directory that exists but is not the canonical state dir of the child.
+        assert!(
+            refusal(fork_request(dir.path(), Some("p"), "c")).contains("not the canonical dir")
+        );
+
+        // The canonical dir exists, so the refusal moves on to the parent, which
+        // was never started.
+        let canonical = vm_state_dir("c");
+        std::fs::create_dir_all(&canonical).unwrap();
+        assert!(refusal(fork_request(&canonical, Some("p"), "c")).contains("no longer live"));
     }
 
     fn egress_port(uds: &str) -> VsockPort {

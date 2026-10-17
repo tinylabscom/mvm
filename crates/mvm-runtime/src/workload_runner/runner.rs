@@ -3641,6 +3641,145 @@ mod tests {
         );
     }
 
+    /// A backend that keeps the paused source resident after capture hands the
+    /// claim a handle that still names the live process, and does not stop it.
+    #[test]
+    fn spawn_standby_captured_keeps_a_retained_parent_resident() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+
+        let runner = WorkloadRunner::new(
+            MockDriver::default()
+                .with_vm_full_rootfs(&rootfs)
+                .with_retained_paused_source(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let launch = checked_source_config("workload-a", rootfs.display().to_string());
+        let spec = standby_spec_for("parent-retained", tmp.path(), &launch);
+        let guest = spawn_activation_guest(runner.driver.clone(), &spec.id);
+        let handle = runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .unwrap();
+        guest.join().unwrap();
+        assert_eq!(handle.pid, std::process::id());
+        assert!(!runner.driver.killed_vms().contains(&spec.id));
+    }
+
+    /// The trusted-snapshot backend is opened only on a macOS build that has the
+    /// feature; setting its switch elsewhere must not change how a parent is
+    /// captured.
+    #[test]
+    fn the_trusted_snapshot_switch_does_not_reroute_a_capture_on_a_build_without_the_backend() {
+        if cfg!(all(feature = "trusted-apfs", target_os = "macos")) {
+            return;
+        }
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        env.set("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT", "1");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("checkpoints"));
+        let rootfs = tmp.path().join("parent-rootfs.ext4");
+        std::fs::write(&rootfs, b"parent rootfs bytes").unwrap();
+        let runner = WorkloadRunner::new(
+            MockDriver::default().with_vm_full_rootfs(&rootfs),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let launch = checked_source_config("workload-a", rootfs.display().to_string());
+        let spec = standby_spec_for("parent-switch", tmp.path(), &launch);
+        let guest = spawn_activation_guest(runner.driver.clone(), &spec.id);
+        runner
+            .spawn_standby_captured(
+                &SpawnContext {
+                    checkpoints: &store,
+                    launch: Some(&launch),
+                },
+                &spec,
+            )
+            .expect("the switch is inert without the backend");
+        guest.join().unwrap();
+    }
+
+    #[test]
+    fn a_runner_reports_the_standby_capabilities_of_its_driver() {
+        let plain = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        assert!(!plain.supports_preloaded_standby());
+        assert_eq!(plain.late_volume_slots(), 0);
+        let slotted = WorkloadRunner::new(
+            MockDriver::default()
+                .with_preloaded_standby()
+                .with_late_volume_slots(4),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        assert!(slotted.supports_preloaded_standby());
+        assert_eq!(slotted.late_volume_slots(), 4);
+    }
+
+    /// An unsigned source-built runtime is booted on the cmdline the runner
+    /// derives from the bound launch, never on the one the caller supplied.
+    #[test]
+    fn a_checked_source_launch_boots_the_derived_cmdline_not_the_supplied_one() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let (_image, rootfs) = overlay_aware_rootfs("checked-cmdline");
+        let config = checked_source_config("checked-cmdline", rootfs.clone());
+        let driver = MockDriver::default().with_vm_full_rootfs(Path::new(&rootfs));
+        let guest = spawn_activation_guest(driver.clone(), "checked-cmdline");
+        let runner = WorkloadRunner::new(
+            driver,
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let redaction = RedactionPolicy::default();
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &config,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &config.network_policy,
+                cmdline: "mvm.supplied_sentinel=1".into(),
+            })
+            .unwrap();
+        guest.join().unwrap();
+        let specs = runner.driver.booted_specs();
+        assert!(
+            !specs[0].cmdline.contains("mvm.supplied_sentinel"),
+            "{}",
+            specs[0].cmdline
+        );
+    }
+
     /// The launch a warm parent is spawned for: a plain sealed boot whose rootfs
     /// is the one the parent will attach.
     fn standby_launch_config(rootfs: &Path) -> VmStartConfig {

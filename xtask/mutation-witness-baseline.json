@@ -462,6 +462,11 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace + with - in <impl RunningVm for HvfRunningVm>::wait",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace + with - in <impl VmFullControl for HvfVmFullControl>::save_memory",
       "reason": "HVF snapshot memory-size calculation is a macOS-specific sizing check; mutating the arithmetic changes buffer sizing or timing, not a security decision, and is covered by live HVF snapshot tests."
     },
@@ -487,8 +492,23 @@
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
-      "mutant": "replace <impl RunningVm for HvfRunningVm>::kill -> Result<()> with Ok(())",
-      "reason": "HVF pause/resume/snapshot/full-control operations are macOS-specific and validated by live HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+      "mutant": "replace <impl RunningVm for AbsentHvfVm>::pause -> Result<()> with Ok(())",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for AbsentHvfVm>::resume -> Result<()> with Ok(())",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for AbsentHvfVm>::terminate_with_timing -> Result<Option<RunningVmStopTiming>> with Ok(Some(Default::default()))",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace <impl RunningVm for HvfRunningVm>::authenticated_hvf_instance -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> with Ok(None)",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -579,6 +599,11 @@
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace | with ^ in <impl VmmDriver for HvfDriver>::fork_standby_child",
       "reason": "HVF standby child fork identity-bitmask operation; the correct bitmask is asserted by live HVF warm-claim tests."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/hvf.rs",
+      "mutant": "replace | with ^ in claim_hvf_launch",
+      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -792,6 +817,11 @@
     },
     {
       "file": "crates/mvm-backends/src/fc/host.rs",
+      "mutant": "replace observe_process -> Result<ProcessView> with Ok(Default::default())",
+      "reason": "valid only while ProcessView lacks a Default derive: with no Default, this mutant cannot compile against the Linux implementation, so the surviving form is the non-Linux probe stub (#[cfg(not(target_os = \"linux\"))], which shells out to the builder VM) — it is not compiled on the Linux mutation host, so no test there can distinguish it. The Linux implementation is `observe_process_at`, witnessed directly against fixture /proc directories; the shared function name means this single entry covers the stub without masking mutations of the Linux path."
+    },
+    {
+      "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace prepare_rootfs -> Result<()> with Ok(())",
       "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
     },
@@ -811,9 +841,9 @@
       "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
     },
     {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace observe_process -> Result<ProcessView> with Ok(Default::default())",
-      "reason": "valid only while ProcessView lacks a Default derive: with no Default, this mutant cannot compile against the Linux implementation, so the surviving form is the non-Linux probe stub (#[cfg(not(target_os = \"linux\"))], which shells out to the builder VM) — it is not compiled on the Linux mutation host, so no test there can distinguish it. The Linux implementation is `observe_process_at`, witnessed directly against fixture /proc directories; the shared function name means this single entry covers the stub without masking mutations of the Linux path."
+      "file": "crates/mvm-compiler/src/deps_audit.rs",
+      "mutant": "replace * with + in hash_file_raw",
+      "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
     },
     {
       "file": "crates/mvm-contract/src/plan/types.rs",
@@ -826,6 +856,11 @@
       "reason": "provably equivalent: `AiPolicy::disabled` returns `Self::default()` directly. No test can distinguish the two expressions; the adjacent constructor test pins disabled equality and separately proves that `metered` differs by enabling metering."
     },
     {
+      "file": "crates/mvm-contract/src/policy/restricted_address.rs",
+      "mutant": "replace | with ^ in embedded_v4",
+      "reason": "Provably equivalent: u32::from(s[6]) << 16 occupies only the high 16 bits, while u32::from(s[7]) occupies only the low 16 bits. OR and XOR are identical for these disjoint bit ranges before the complement."
+    },
+    {
       "file": "crates/mvm-contract/src/protocol/capability_negotiation.rs",
       "mutant": "replace ClientOperationCapabilities::builder -> ClientOperationCapabilitiesBuilder with Default::default()",
       "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
@@ -836,19 +871,24 @@
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
     },
     {
-      "file": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
-      "mutant": "replace TerminatedFlow::builder -> TerminatedFlowBuilder with Default::default()",
-      "reason": "provably equivalent: `TerminatedFlow::builder` returns `TerminatedFlowBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` rejects the flow until every field is set."
+      "file": "crates/mvm-fs/src/os_inventory.rs",
+      "mutant": "replace || with && in parse_dpkg_status",
+      "reason": "Provably equivalent: a continuation beginning with a space or tab cannot start with the exact Package: or Version: prefixes checked immediately afterward. Removing its early skip changes no parsed component or limitation."
     },
     {
-      "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
-      "mutant": "replace confine_endpoint_without_lsm -> Result<()> with Ok(())",
-      "reason": "This is the macOS/Windows compatibility stub: those hosts have no Landlock or seccomp confinement to witness. The distinct function name keeps this exception from masking mutations of the Linux fail-closed confine_endpoint implementation."
+      "file": "crates/mvm-fs/src/os_inventory.rs",
+      "mutant": "replace || with && in parse_os_release",
+      "reason": "Provably equivalent: an empty line fails split_once and is ignored anyway; a comment line starts with #, so its key cannot equal ID, VERSION_ID or PRETTY_NAME. Removing the early skip changes no parsed field or error."
     },
     {
       "file": "crates/mvm-hostd/src/admission_budget.rs",
       "mutant": "replace committed -> MachineCharge with Default::default()",
       "reason": "committed aggregates persisted MachineCharge records from disk; the aggregation logic is covered by integration tests that write and read back real records."
+    },
+    {
+      "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
+      "mutant": "replace confine_endpoint_without_lsm -> Result<()> with Ok(())",
+      "reason": "This is the macOS/Windows compatibility stub: those hosts have no Landlock or seccomp confinement to witness. The distinct function name keeps this exception from masking mutations of the Linux fail-closed confine_endpoint implementation."
     },
     {
       "file": "crates/mvm-hostd/src/keyholder/substitution.rs",
@@ -869,16 +909,6 @@
       "file": "crates/mvm-hostd/src/plan_admission.rs",
       "mutant": "replace AdmitAndStartParams<'a>::builder -> AdmitAndStartParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `AdmitAndStartParams::builder` is a one-line alias for `AdmitAndStartParamsBuilder::new()`, and this file's `impl Default for AdmitAndStartParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
-    },
-    {
-      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
-      "mutant": "replace > with >= in highest_sealed_segment",
-      "reason": "equivalent. Segment file names are unique per sequence, so two entries never compare equal and `>` and `>=` select the same maximum on every input. No test can distinguish them because no input distinguishes them."
-    },
-    {
-      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
-      "mutant": "replace RotationPolicy::never -> Self with Default::default()",
-      "reason": "RotationPolicy::never is a constant constructor; the policy behavior is exercised by audit-file integration tests that verify rotation decisions."
     },
     {
       "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
@@ -906,44 +936,24 @@
       "reason": "after verification and range validation, `through` names an existing sealed segment and a later active segment exists. Both comparisons therefore find an entry, and the result is used only as an existence proof; no input reaching this point distinguishes them."
     },
     {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
-      "reason": "preload_standby_child's support check is a guard that returns Unsupported early. The error path is exercised through VmmDriver implementations in backend-specific tests; mutating the guard only changes which code path reports the error."
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace > with >= in highest_sealed_segment",
+      "reason": "equivalent. Segment file names are unique per sequence, so two entries never compare equal and `>` and `>=` select the same maximum on every input. No test can distinguish them because no input distinguishes them."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/audit_file.rs",
+      "mutant": "replace RotationPolicy::never -> Self with Default::default()",
+      "reason": "RotationPolicy::never is a constant constructor; the policy behavior is exercised by audit-file integration tests that verify rotation decisions."
+    },
+    {
+      "file": "crates/mvm-hostd/src/supervisor/terminator/flow.rs",
+      "mutant": "replace TerminatedFlow::builder -> TerminatedFlowBuilder with Default::default()",
+      "reason": "provably equivalent: `TerminatedFlow::builder` returns `TerminatedFlowBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` rejects the flow until every field is set."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in WorkloadRunner<D, S, B>::preload_standby_child",
-      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in WorkloadRunner<D, S, B>::spawn_standby_captured",
-      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "delete ! in reserve_and_verify_parent",
-      "reason": "Warm-claim standby orchestration interacts with the on-disk VM registry, snapshot store, and a full VmFullControl stack. Catching these mutants at unit granularity requires heavy doubles; the warm-pool BDD suite and backend-specific integration tests cover the real paths."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace && with || in WorkloadRunner<D, S, B>::preload_standby_child",
-      "reason": "preload_standby_child's name-reservation loop interacts with the on-disk VM name registry and snapshot store. Catching these mutants at unit granularity requires a full snapshot-store double; the warm-pool BDD suite and backend integration tests cover the real paths."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace && with || in WorkloadRunner<D, S, B>::spawn_standby_captured",
-      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace == with != in WorkloadRunner<D, S, B>::spawn_standby_captured",
-      "reason": "spawn_standby_captured orchestrates a full VM capture lifecycle. Exercising the retain-parent vs. release-parent branch at unit granularity requires a complete mock VmFullControl stack and snapshot backend; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace == with != in reclaim_consumed_resident_checkpoint_at",
-      "reason": "Warm-claim snapshot manifest verification and checkpoint reclamation depend on the on-disk snapshot store and backend snapshot semantics; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
+      "mutant": "replace == with != in WorkloadRunner<D, S, B>::spawn_bound_standby_captured",
+      "reason": "Equivalent off macOS: the condition is `cfg!(all(feature = \"trusted-apfs\", target_os = \"macos\")) && env == \"1\"`, and the cfg! half is constant false on every other host, so flipping the comparison cannot change a branch. The && to || mutant of the same line is caught."
     },
     {
       "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
@@ -961,34 +971,9 @@
       "reason": "The method is a transparent passthrough to VmmDriver::supports_preloaded_standby. The driver's own implementation and the BDD standby-pool matrix exercise both return values; a unit test of the passthrough would only assert the code equals itself."
     },
     {
-      "file": "crates/mvm-runtime/src/workload_runner/runner.rs",
-      "mutant": "replace || with && in verify_resident_snapshot_manifest",
-      "reason": "Warm-claim snapshot manifest verification and checkpoint reclamation depend on the on-disk snapshot store and backend snapshot semantics; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
-    },
-    {
-      "file": "crates/mvm-compiler/src/deps_audit.rs",
-      "mutant": "replace * with + in hash_file_raw",
-      "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
-    },
-    {
       "file": "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
       "mutant": "replace SubstitutionSpawnParams<'a>::builder -> SubstitutionSpawnParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SubstitutionSpawnParams::builder` is a one-line alias for `SubstitutionSpawnParamsBuilder::new()`, and this file's `impl Default for SubstitutionSpawnParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
-    },
-    {
-      "file": "crates/mvm-contract/src/policy/restricted_address.rs",
-      "mutant": "replace | with ^ in embedded_v4",
-      "reason": "Provably equivalent: u32::from(s[6]) << 16 occupies only the high 16 bits, while u32::from(s[7]) occupies only the low 16 bits. OR and XOR are identical for these disjoint bit ranges before the complement."
-    },
-    {
-      "file": "crates/mvm-fs/src/os_inventory.rs",
-      "mutant": "replace || with && in parse_dpkg_status",
-      "reason": "Provably equivalent: a continuation beginning with a space or tab cannot start with the exact Package: or Version: prefixes checked immediately afterward. Removing its early skip changes no parsed component or limitation."
-    },
-    {
-      "file": "crates/mvm-fs/src/os_inventory.rs",
-      "mutant": "replace || with && in parse_os_release",
-      "reason": "Provably equivalent: an empty line fails split_once and is ignored anyway; a comment line starts with #, so its key cannot equal ID, VERSION_ID or PRETTY_NAME. Removing the early skip changes no parsed field or error."
     }
   ]
 }
