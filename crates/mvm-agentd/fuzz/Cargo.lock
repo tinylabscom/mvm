@@ -2213,6 +2213,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-normalization",
+ "url",
  "uuid",
  "x25519-dalek",
  "zeroize",
