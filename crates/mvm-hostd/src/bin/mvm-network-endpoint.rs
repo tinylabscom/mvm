@@ -717,7 +717,7 @@ fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
     match transport {
         EndpointTransport::Uds { path } => {
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
+                mvm_core::private_fs::ensure_private_dir(parent)
                     .with_context(|| format!("create UDS parent {}", parent.display()))?;
             }
             let listener = std::os::unix::net::UnixListener::bind(path)
@@ -754,7 +754,7 @@ fn bind_session_readiness(path: Option<&std::path::Path>) -> Result<Option<Bound
         return Ok(None);
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        mvm_core::private_fs::ensure_private_dir(parent)
             .with_context(|| format!("create readiness socket parent {}", parent.display()))?;
     }
     let listener = std::os::unix::net::UnixListener::bind(path)
@@ -775,7 +775,7 @@ fn bind_connector(path: Option<&std::path::Path>) -> Result<Option<BoundConnecto
         return Ok(None);
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        mvm_core::private_fs::ensure_private_dir(parent)
             .with_context(|| format!("create connector socket parent {}", parent.display()))?;
     }
     let listener = std::os::unix::net::UnixListener::bind(path)
@@ -1615,6 +1615,35 @@ mod tests {
         );
         assert!(std::os::unix::net::UnixListener::bind(&path).is_err());
         drop(bound);
+    }
+
+    #[test]
+    fn a_socket_parent_the_endpoint_creates_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("sock-ns");
+        std::fs::create_dir(&parent).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let uds = EndpointTransport::Uds {
+            path: parent.join("vsock.sock"),
+        };
+        drop(bind_transport(&uds).unwrap());
+        let ready = dir.path().join("ready-ns").join("ready.sock");
+        drop(bind_session_readiness(Some(&ready)).unwrap());
+        let connector = dir.path().join("conn-ns").join("conn.sock");
+        drop(bind_connector(Some(&connector)).unwrap());
+        for path in [
+            &parent,
+            ready.parent().unwrap(),
+            connector.parent().unwrap(),
+        ] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o077,
+                0,
+                "{} must not be group or world accessible",
+                path.display()
+            );
+        }
     }
 
     #[test]

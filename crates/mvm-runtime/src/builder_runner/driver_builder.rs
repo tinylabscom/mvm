@@ -124,7 +124,7 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
                 memory_mib: self.memory_mib,
             })
             .map_err(|e| {
-                map_runner_failure(format!("{} builder shell job: {e}", self.driver.name()))
+                map_runner_failure(format!("{} builder shell job: {e:#}", self.driver.name()))
             })?;
         if !outcome.stopped {
             return Err(deadline_exceeded(&format!(
@@ -354,7 +354,9 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
             })
-            .map_err(|e| map_runner_failure(format!("{} builder run: {e}", self.driver.name())))?;
+            .map_err(|e| {
+                map_runner_failure(format!("{} builder run: {e:#}", self.driver.name()))
+            })?;
         if !outcome.stopped {
             return Err(deadline_exceeded(&format!(
                 "{} builder VM",

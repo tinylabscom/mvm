@@ -14,6 +14,13 @@ mod deadline;
 const SOCKET: &str = "runtime-artifacts.sock";
 const MAX_REPLY: u64 = 256 * 1024;
 
+/// Where a VM's observer socket lives. Through the per-VM socket namespace, not
+/// the state directory itself: a deep configured home overflows the Unix
+/// socket path limit, and every other socket of the VM already makes this move.
+fn socket_path(state_dir: &Path) -> std::path::PathBuf {
+    mvm_core::config::vm_socket_dir_at(state_dir).join(SOCKET)
+}
+
 /// A typed refusal is distinct from missing/unreachable supervisor IPC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ObservationError {
@@ -57,7 +64,7 @@ struct Evidence {
 /// measures current guest RAM or protects against a hostile same-UID host.
 pub fn query(state_dir: &Path, expected_pid: u32) -> Result<RuntimeArtifacts> {
     let end = Instant::now() + Duration::from_secs(2);
-    let stream = mvm_agentd::vsock::connect_unix_before(&state_dir.join(SOCKET), end)
+    let stream = mvm_agentd::vsock::connect_unix_before(&socket_path(state_dir), end)
         .context("connect supervisor runtime artifact observer")?;
     let (pid, uid) = peer_identity(&stream)?;
     // SAFETY: geteuid takes no pointers and has no preconditions.
@@ -111,7 +118,10 @@ impl Observer {
         );
         // Do not unlink a pre-existing endpoint: a second supervisor must not
         // silently steal an existing instance's query channel.
-        let path = state_dir.join(SOCKET);
+        let path = socket_path(state_dir);
+        if let Some(parent) = path.parent() {
+            mvm_core::private_fs::ensure_private_dir(parent)?;
+        }
         let listener = UnixListener::bind(&path)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
@@ -329,6 +339,19 @@ mod tests {
         let mut prefix = [0; 4];
         client.read_exact(&mut prefix).unwrap();
         serde_json::from_reader(client.take(u64::from(u32::from_be_bytes(prefix)))).unwrap()
+    }
+
+    #[test]
+    fn a_state_directory_too_deep_for_a_socket_path_still_binds() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("a".repeat(60)).join("b".repeat(60));
+        mvm_core::private_fs::ensure_private_dir(&deep).unwrap();
+        assert!(deep.join(SOCKET).as_os_str().len() > 104);
+        let observer = Observer::bind(&deep, None).unwrap();
+        let socket = socket_path(&deep);
+        assert!(socket.exists());
+        drop(observer);
+        let _ = std::fs::remove_dir(socket.parent().unwrap());
     }
 
     #[test]

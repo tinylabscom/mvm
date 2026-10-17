@@ -2799,8 +2799,8 @@ mod tests {
 
     /// Diagnostic evidence cannot change the existing launch deadline.
     #[test]
-    fn startup_diagnostics_do_not_extend_the_five_second_pid_deadline() {
-        assert_eq!(PID_FILE_TIMEOUT, std::time::Duration::from_secs(5));
+    fn startup_diagnostics_do_not_extend_the_pid_deadline() {
+        assert_eq!(PID_FILE_TIMEOUT, std::time::Duration::from_secs(60));
     }
 
     /// Same contract as every other driver: the bound rides on the spawn.

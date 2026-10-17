@@ -25,8 +25,12 @@ use mvm_vmm::host::cmdline;
 /// backends' markers so HVF VMs coexist under the same `~/.mvm/vms/` root.
 pub(crate) const PID_FILE_NAME: &str = "hvf.pid";
 /// How long `start` waits for the supervisor to confirm boot (PID file). Shared
-/// with the hvf driver, which spawns the same supervisor binary.
-pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
+/// with the hvf driver, which spawns the same supervisor binary. The supervisor
+/// measures every read-only disk before it announces itself, so the wait has to
+/// cover hashing a root filesystem of several hundred MiB in an unoptimized
+/// build on a loaded host. A supervisor that exits early is still reported at
+/// once; only a live one that never publishes waits this long.
+pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 pub const PAUSE_ACK_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<HostDialSocket> {
