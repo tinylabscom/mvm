@@ -7,12 +7,28 @@ use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 /// Ownership of the authenticated archive for a checked runtime selection.
 /// The normal runtime lifecycle rechecks and owns payload snapshots before
 /// backend effects, and retains their authenticated closure for the VM.
-#[derive(Debug)]
 pub struct PreparedBuiltPackRuntime {
     _manifest: mvm_build::guest_runtime::evidence::VerifiedRuntimeManifest,
+    boot_images: Option<mvm_vmm::host::boot_images::FrozenBootImageBytes>,
+}
+
+impl std::fmt::Debug for PreparedBuiltPackRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedBuiltPackRuntime")
+            .finish_non_exhaustive()
+    }
 }
 
 impl PreparedBuiltPackRuntime {
+    /// Move original snapshots into the concrete runtime before launch.
+    /// This transfers bytes, never the original admission's authority.
+    pub fn take_boot_images(&mut self) -> Result<mvm_vmm::host::boot_images::FrozenBootImageBytes> {
+        self.boot_images
+            .take()
+            .context("owned native boot requires original frozen image bytes")
+    }
+
     /// Recheck the actual selection immediately before dispatch. This cannot
     /// turn the earlier checked release into a source or alternate release.
     pub fn verify_config(&self, config: &VmStartConfig) -> Result<()> {
@@ -74,6 +90,25 @@ impl BuiltPackBootCheck {
         config: &mut VmStartConfig,
         backend: BackendKind,
     ) -> Result<Option<PreparedBuiltPackRuntime>> {
+        self.check_original_config(config, backend)?;
+        verify_registry_pack_boot(&self.plan, config, backend)
+    }
+
+    /// Freeze only the original admitted native image, never caller digests.
+    pub fn freeze_native_boot(
+        self,
+        config: &mut VmStartConfig,
+        backend: BackendKind,
+    ) -> Result<Option<PreparedBuiltPackRuntime>> {
+        self.check_original_config(config, backend)?;
+        anyhow::ensure!(
+            backend == BackendKind::Hvf,
+            "image freezing requires owned HVF"
+        );
+        finalize_registry_images(&self.plan, config, backend, ImagePreparation::Freeze)
+    }
+
+    fn check_original_config(&self, config: &VmStartConfig, backend: BackendKind) -> Result<()> {
         anyhow::ensure!(
             backend == self.backend,
             "registry pack backend differs from the admitted backend"
@@ -83,7 +118,7 @@ impl BuiltPackBootCheck {
                 && config.tenant_id.as_deref() == Some(self.plan.tenant.0.as_str()),
             "registry pack final configuration differs from its admitted plan"
         );
-        verify_registry_pack_boot(&self.plan, config, backend)
+        Ok(())
     }
 }
 
@@ -171,10 +206,25 @@ pub(super) fn verify_registry_pack_boot(
     config: &mut VmStartConfig,
     backend: BackendKind,
 ) -> Result<Option<PreparedBuiltPackRuntime>> {
+    finalize_registry_images(plan, config, backend, ImagePreparation::Legacy)
+}
+
+enum ImagePreparation {
+    Legacy,
+    Freeze,
+}
+
+fn finalize_registry_images(
+    plan: &ExecutionPlan,
+    config: &mut VmStartConfig,
+    backend: BackendKind,
+    preparation: ImagePreparation,
+) -> Result<Option<PreparedBuiltPackRuntime>> {
     use mvm_core::registry_pack::{PackPin, RegistryPackImage};
     use mvm_core::registry_pack_boot::BuiltPackBootContract;
 
     let mut built = false;
+    let mut boot_images = None;
     for identity in plan
         .asset_identities
         .iter()
@@ -221,12 +271,72 @@ pub(super) fn verify_registry_pack_boot(
                 mvm_core::arch::GuestArch::host(),
                 backend,
             )?;
+            if matches!(preparation, ImagePreparation::Freeze) {
+                boot_images = Some(freeze_admitted_images(&contract, plan, config, backend)?);
+            }
         }
     }
     if !built {
         return Ok(None);
     }
-    checked_release_runtime(config).map(Some)
+    let mut runtime = checked_release_runtime(config)?;
+    runtime.boot_images = boot_images;
+    Ok(Some(runtime))
+}
+
+fn freeze_admitted_images(
+    contract: &mvm_core::registry_pack_boot::BuiltPackBootContract,
+    plan: &ExecutionPlan,
+    config: &VmStartConfig,
+    backend: BackendKind,
+) -> Result<mvm_vmm::host::boot_images::FrozenBootImageBytes> {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom};
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::path::Path;
+    let open = |path: &Path| -> Result<std::fs::File> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        anyhow::ensure!(
+            file.metadata()?.is_file(),
+            "boot source must be a regular file"
+        );
+        Ok(file)
+    };
+    let root_path = Path::new(&config.rootfs_path);
+    let directory = root_path.parent().context("rootfs directory missing")?;
+    // Acquire every original input before capturing facts; no hash-sidecar reopen.
+    let rootfs = open(root_path)?;
+    let verity = open(Path::new(
+        config
+            .verity_path
+            .as_deref()
+            .context("verity source missing")?,
+    ))?;
+    let metadata = open(&directory.join("mvm-meta.json"))?;
+    let mut root_hash = open(&directory.join("rootfs.roothash"))?;
+    root_hash.seek(SeekFrom::Start(0))?;
+    let expectations = contract.capture_image_expectations(
+        plan,
+        config,
+        mvm_core::arch::GuestArch::host(),
+        backend,
+        &mut root_hash,
+    )?;
+    let private = mvm_core::config::vm_state_dir(&config.name).join("boot-images");
+    mvm_core::config::create_private_dir(&private)?;
+    mvm_vmm::host::boot_images::FrozenBootImageBytes::prepare(
+        expectations,
+        mvm_vmm::host::boot_images::BootImageSources {
+            rootfs: &rootfs,
+            verity: &verity,
+            metadata: &metadata,
+            root_hash: &root_hash,
+            private_dir: &private,
+        },
+    )
 }
 
 fn checked_release_runtime(config: &VmStartConfig) -> Result<PreparedBuiltPackRuntime> {
@@ -243,6 +353,7 @@ fn checked_release_runtime(config: &VmStartConfig) -> Result<PreparedBuiltPackRu
     )?;
     Ok(PreparedBuiltPackRuntime {
         _manifest: manifest,
+        boot_images: None,
     })
 }
 

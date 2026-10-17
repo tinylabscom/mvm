@@ -638,14 +638,41 @@ impl AnyBackend {
         spec: &mvm_core::vm_backend::StandbySpec,
     ) -> std::result::Result<mvm_core::vm_backend::StandbyHandle, mvm_core::vm_backend::StandbyError>
     {
+        self.spawn_standby_via_runner_owned(ctx, spec)
+            .map_err(|error| {
+                match error.downcast::<mvm_core::vm_backend::StandbyError>() {
+                    Ok(error) => error,
+                    // An unconfirmed native error retains its original aggregate
+                    // on Drop. This compatibility string does not permit retry.
+                    Err(error) => {
+                        mvm_core::vm_backend::StandbyError::SpawnFailed(format!("{error:#}"))
+                    }
+                }
+            })
+    }
+
+    /// Host-only launch-error boundary. Concrete HVF launch failures retain
+    /// their original child and runtime lifecycle lease as typed error custody.
+    pub fn spawn_standby_via_runner_owned(
+        &self,
+        ctx: &crate::workload_runner::SpawnContext<'_>,
+        spec: &mvm_core::vm_backend::StandbySpec,
+    ) -> Result<mvm_core::vm_backend::StandbyHandle> {
+        self.require_owned_warm_receiver()?;
         match self {
-            AnyBackend::Firecracker(runner) => runner.spawn_standby_captured(ctx, spec),
-            AnyBackend::Libkrun(runner) => runner.spawn_standby_captured(ctx, spec),
-            AnyBackend::Hvf(runner) => runner.spawn_standby_captured(ctx, spec),
+            AnyBackend::Firecracker(runner) => {
+                runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
+            }
+            AnyBackend::Libkrun(runner) => {
+                runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
+            }
+            AnyBackend::Hvf(runner) => runner.spawn_standby_captured_owned(ctx, spec),
             // The hermetic lifecycle double mirrors the runner's captured
             // checkpoint contract while keeping the VM itself in memory.
             #[cfg(feature = "test-support")]
-            AnyBackend::Mock(backend) => backend.spawn_standby_captured(ctx, spec),
+            AnyBackend::Mock(backend) => backend
+                .spawn_standby_captured(ctx, spec)
+                .map_err(Into::into),
             // No warm pool on these backends: qemu and wasm are not
             // workload-bearing; apple-container is, but the HVF driver has no
             // standby support — all fail closed.
@@ -654,8 +681,20 @@ impl AnyBackend {
             | AnyBackend::AppleContainer(_)
             | AnyBackend::WebLinux(_) => Err(mvm_core::vm_backend::StandbyError::Unsupported {
                 backend: self.inner().name().to_string(),
-            }),
+            }
+            .into()),
         }
+    }
+
+    /// Refuse before preparation or launch until an authenticated durable
+    /// receiver actually holds the native preparation's required resources.
+    pub fn require_owned_warm_receiver(&self) -> Result<()> {
+        if let AnyBackend::Hvf(_) = self {
+            anyhow::bail!(
+                "owned HVF warm launch unavailable: authenticated durable custody receiver required"
+            );
+        }
+        Ok(())
     }
 
     /// Pause/save-memory/resume control over a running VM this backend owns —
@@ -814,6 +853,19 @@ impl AnyBackend {
             config.wait_for_admission_durability()?;
         }
         self.inner().start(config)
+    }
+
+    /// Prepare native custody without creating a child. The caller must keep
+    /// this return through activation, dispatch, flush and terminal stop.
+    pub fn prepare_owned_launch(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
+    ) -> Result<crate::workload_runner::runner::OwnedRuntimeLaunch> {
+        match self {
+            AnyBackend::Hvf(runner) => runner.prepare_cold_hvf_channel(config, images),
+            _ => anyhow::bail!("owned native launch requires concrete macOS HVF"),
+        }
     }
 
     /// Whether this backend's start holds the guest's activation until the

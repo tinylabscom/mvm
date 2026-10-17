@@ -309,6 +309,7 @@ static NEVER_PAUSE: AtomicBool = AtomicBool::new(false);
 /// control stays explicit without growing a positional argument list.
 pub struct KernelBootUntilParams<'a> {
     kernel: KernelImageSource<'a>,
+    literal_bootargs: Option<String>,
     initramfs: Option<&'a [u8]>,
     disks: Vec<DiskImage>,
     vsock: bool,
@@ -343,6 +344,7 @@ impl<'a> KernelBootUntilParams<'a> {
     pub fn builder(image: &'a [u8], timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
         KernelBootUntilParamsBuilder {
             kernel: KernelImageSource::Bytes(image),
+            literal_bootargs: None,
             initramfs: None,
             disks: Vec::new(),
             vsock: false,
@@ -358,6 +360,7 @@ impl<'a> KernelBootUntilParams<'a> {
     pub fn builder_file(kernel: &'a Path, timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
         KernelBootUntilParamsBuilder {
             kernel: KernelImageSource::File(kernel),
+            literal_bootargs: None,
             initramfs: None,
             disks: Vec::new(),
             vsock: false,
@@ -373,6 +376,7 @@ impl<'a> KernelBootUntilParams<'a> {
 
 pub struct KernelBootUntilParamsBuilder<'a> {
     kernel: KernelImageSource<'a>,
+    literal_bootargs: Option<String>,
     initramfs: Option<&'a [u8]>,
     disks: Vec<DiskImage>,
     vsock: bool,
@@ -385,6 +389,14 @@ pub struct KernelBootUntilParamsBuilder<'a> {
 }
 
 impl<'a> KernelBootUntilParamsBuilder<'a> {
+    /// Select literal transport text, not an authentication or admission proof.
+    /// Unlike the dev path this never applies defaults or environment overrides.
+    pub fn literal_bootargs(mut self, args: &str) -> std::io::Result<Self> {
+        mvm_vmm::host::hvf_supervisor::refuse_bootarg_overrides()?;
+        self.literal_bootargs = Some(args.to_owned());
+        Ok(self)
+    }
+
     pub fn initramfs(mut self, initramfs: Option<&'a [u8]>) -> Self {
         self.initramfs = initramfs;
         self
@@ -433,6 +445,7 @@ impl<'a> KernelBootUntilParamsBuilder<'a> {
     pub fn build(self) -> KernelBootUntilParams<'a> {
         KernelBootUntilParams {
             kernel: self.kernel,
+            literal_bootargs: self.literal_bootargs,
             initramfs: self.initramfs,
             disks: self.disks,
             vsock: self.vsock,
@@ -512,6 +525,7 @@ fn initrd_load_offset(
 fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResult, HvfError> {
     let KernelBootUntilParams {
         kernel,
+        literal_bootargs,
         initramfs,
         disks,
         vsock,
@@ -575,17 +589,23 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // built-in default. The append hook lets a caller thread runtime-discovered
     // values (e.g. a dynamically bound egress target) on top without reproducing
     // the whole base.
-    let mut bootargs = std::env::var("MVM_HVF_BOOTARGS")
-        .ok()
-        .or_else(|| channels.cmdline.clone())
-        .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
-    if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
-        let extra = extra.trim();
-        if !extra.is_empty() {
-            bootargs.push(' ');
-            bootargs.push_str(extra);
+    let bootargs = match literal_bootargs {
+        Some(args) => args,
+        None => {
+            let mut args = std::env::var("MVM_HVF_BOOTARGS")
+                .ok()
+                .or_else(|| channels.cmdline.clone())
+                .unwrap_or_else(|| default_bootargs(!disks.is_empty()));
+            if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
+                let extra = extra.trim();
+                if !extra.is_empty() {
+                    args.push(' ');
+                    args.push_str(extra);
+                }
+            }
+            args
         }
-    }
+    };
     if let Some(observer) = &mut channels.runtime_observer {
         if let Some(frame) = &restore_frame {
             let parsed = super::snapshot::parse_hvf_snapshot_frame(

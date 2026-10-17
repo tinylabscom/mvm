@@ -56,6 +56,380 @@ pub struct BootedEntrypoint {
     pub admission: AdmissionContext,
 }
 
+/// Caller-owned host result, retained before any ABI/JSON mapping. A failed
+/// stop never replaces the original outcome or drops its original owner.
+/// This is resource custody, not a dispatch certificate or helper permit.
+pub struct OwnedTransientResult<O = ()> {
+    custody: Option<Box<TransientCustody<O>>>,
+}
+
+struct TransientCustody<O> {
+    observer: O,
+    outcome: Option<CallOutcome>,
+    call_error: Option<anyhow::Error>,
+    flush_error: Option<anyhow::Error>,
+    stop_error: Option<anyhow::Error>,
+    cleanup_error: Option<anyhow::Error>,
+    owner: Option<super::boot::OwnedClientBoot>,
+    completion: Option<mvm_runtime::workload_runner::runner::NativeCompletion>,
+    legacy_terminal: bool,
+    stopped: bool,
+    started: bool,
+}
+
+impl<O> OwnedTransientResult<O> {
+    pub fn prepare(observer: O) -> Self {
+        Self {
+            custody: Some(Box::new(TransientCustody {
+                observer,
+                outcome: None,
+                call_error: None,
+                flush_error: None,
+                stop_error: None,
+                cleanup_error: None,
+                owner: None,
+                completion: None,
+                legacy_terminal: false,
+                stopped: true,
+                started: false,
+            })),
+        }
+    }
+
+    pub fn outcome(&self) -> Option<&CallOutcome> {
+        self.custody.as_ref()?.outcome.as_ref()
+    }
+    pub fn call_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.call_error.as_ref()
+    }
+    pub fn flush_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.flush_error.as_ref()
+    }
+    pub fn stop_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.stop_error.as_ref()
+    }
+    pub fn cleanup_error(&self) -> Option<&anyhow::Error> {
+        self.custody.as_ref()?.cleanup_error.as_ref()
+    }
+
+    pub fn fail_preparation(&mut self, error: anyhow::Error) {
+        if let Some(group) = self.custody.as_mut()
+            && !group.started
+        {
+            group.started = true;
+            group.call_error = Some(error);
+        }
+    }
+
+    /// Observation only: these labels never identify or reconstruct an owner.
+    pub fn recovery_details(&self) -> Option<(String, String)> {
+        let group = self.custody.as_ref()?;
+        if group.stopped {
+            return None;
+        }
+        let resources = group.owner.as_ref()?.resources();
+        Some((
+            resources.config.name.clone(),
+            resources.admission.admitted.plan_id().0.clone(),
+        ))
+    }
+
+    /// Copies may be rendered only after the native owner's completion
+    /// witness, never from a successful transport Result or caller status.
+    pub fn projection(&self) -> Result<(&CallOutcome, &O)> {
+        let group = self
+            .custody
+            .as_ref()
+            .context("invocation already consumed")?;
+        anyhow::ensure!(
+            group.completion.is_some() || group.legacy_terminal,
+            "output is retained: original completion remains unconfirmed"
+        );
+        anyhow::ensure!(
+            group.call_error.is_none()
+                && group.flush_error.is_none()
+                && group.stop_error.is_none()
+                && group.cleanup_error.is_none(),
+            "invocation failed; original errors remain retained"
+        );
+        Ok((
+            group.outcome.as_ref().context("no completed call result")?,
+            &group.observer,
+        ))
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.projection()
+            .is_ok_and(|(outcome, _)| matches!(outcome.terminal, CallTerminal::Exited { code: 0 }))
+    }
+
+    pub fn close(&mut self) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("invocation already consumed")?;
+        if !group.stopped {
+            if let Some(owner) = group.owner.as_mut()
+                && let Err(error) = owner.quiesce()
+            {
+                group.cleanup_error = Some(error);
+                anyhow::bail!("original owner cleanup remains unconfirmed");
+            }
+            group.stopped = true;
+        }
+        Ok(())
+    }
+
+    pub fn retry_stop(&mut self) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("transient custody already consumed")?;
+        if group.stopped {
+            return Ok(());
+        }
+        if let Some(owner) = group.owner.as_mut()
+            && group.flush_error.is_none()
+            && group.outcome.is_some()
+        {
+            match owner.complete() {
+                Ok(completion) => {
+                    let matches = group.outcome.as_ref().is_some_and(|outcome| {
+                        outcome.terminal == CallTerminal::from_event(completion.terminal())
+                    });
+                    group.completion = Some(completion);
+                    group.stopped = true;
+                    if !matches {
+                        group.call_error = Some(anyhow::anyhow!(
+                            "call result differs from original native terminal"
+                        ));
+                        anyhow::bail!("call result differs from original native terminal");
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    group.cleanup_error = Some(error);
+                    anyhow::bail!("original completion remains unconfirmed");
+                }
+            }
+        }
+        self.close()
+    }
+
+    /// No data-only conversion while native custody or an unresolved error
+    /// would be lost. The host caller receives the whole object back.
+    pub fn into_terminal_outcome(mut self) -> std::result::Result<CallOutcome, Self> {
+        let Some(group) = self.custody.as_mut() else {
+            return Err(self);
+        };
+        if group.completion.is_none()
+            || group.call_error.is_some()
+            || group.flush_error.is_some()
+            || group.stop_error.is_some()
+            || group.cleanup_error.is_some()
+        {
+            return Err(self);
+        }
+        match group.outcome.take() {
+            Some(outcome) => Ok(outcome),
+            None => Err(self),
+        }
+    }
+}
+
+impl<O> Drop for OwnedTransientResult<O> {
+    fn drop(&mut self) {
+        if let Some(mut group) = self.custody.take()
+            && let Some(owner) = group.owner.take()
+            && let Err(owner) = owner.release_if_child_free()
+        {
+            group.owner = Some(owner);
+            // Abandonment is not recovery. Keep the actual output, every
+            // original error and the entire native/client group together.
+            std::mem::forget(group);
+        }
+    }
+}
+
+trait FinalizeOperations {
+    fn sync(&mut self) -> Result<()>;
+    fn complete_original(
+        &mut self,
+    ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>>;
+    fn quiesce_original(&mut self) -> Result<()>;
+}
+
+impl FinalizeOperations for super::boot::OwnedClientBoot {
+    fn sync(&mut self) -> Result<()> {
+        self.flush()
+    }
+    fn complete_original(
+        &mut self,
+    ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>> {
+        self.complete().map(Some)
+    }
+    fn quiesce_original(&mut self) -> Result<()> {
+        self.quiesce()
+    }
+}
+
+struct FinalizeState<'a> {
+    outcome: &'a Option<CallOutcome>,
+    call_error: &'a mut Option<anyhow::Error>,
+    flush_error: &'a mut Option<anyhow::Error>,
+    stop_error: &'a mut Option<anyhow::Error>,
+    completion: &'a mut Option<mvm_runtime::workload_runner::runner::NativeCompletion>,
+    stopped: &'a mut bool,
+}
+
+fn drive_finalization(state: FinalizeState<'_>, operations: &mut impl FinalizeOperations) {
+    *state.flush_error = operations.sync().err();
+    if state.flush_error.is_none() {
+        match operations.complete_original() {
+            Ok(completion) => {
+                if let Some(proof) = &completion
+                    && state.outcome.as_ref().is_none_or(|outcome| {
+                        outcome.terminal != CallTerminal::from_event(proof.terminal())
+                    })
+                {
+                    *state.call_error = Some(anyhow::anyhow!(
+                        "call result differs from original native terminal"
+                    ));
+                }
+                *state.completion = completion;
+                *state.stopped = true;
+            }
+            Err(error) => *state.stop_error = Some(error),
+        }
+    } else {
+        match operations.quiesce_original() {
+            Ok(()) => *state.stopped = true,
+            Err(error) => *state.stop_error = Some(error),
+        }
+    }
+}
+
+/// Retain the actual call value and the caller's actual owning context. This
+/// does not authorize a request or change RunEntrypoint into Exec. Flush uses
+/// the already-dispatched retained session and can legitimately refuse it.
+pub fn finish_owned_transient(
+    owner: super::boot::OwnedClientBoot,
+    call: Result<CallOutcome>,
+) -> OwnedTransientResult {
+    let (outcome, call_error) = match call {
+        Ok(outcome) => (Some(outcome), None),
+        Err(error) => (None, Some(error)),
+    };
+    // Install the entire group BEFORE either operation can fail or panic.
+    let mut result = OwnedTransientResult {
+        custody: Some(Box::new(TransientCustody {
+            observer: (),
+            outcome,
+            call_error,
+            flush_error: None,
+            stop_error: None,
+            cleanup_error: None,
+            owner: Some(owner),
+            completion: None,
+            legacy_terminal: false,
+            stopped: false,
+            started: true,
+        })),
+    };
+    let group = result.custody.as_mut().expect("new transient custody");
+    let owner = group.owner.as_mut().expect("original client owner");
+    drive_finalization(
+        FinalizeState {
+            outcome: &group.outcome,
+            call_error: &mut group.call_error,
+            flush_error: &mut group.flush_error,
+            stop_error: &mut group.stop_error,
+            completion: &mut group.completion,
+            stopped: &mut group.stopped,
+        },
+        owner,
+    );
+    result
+}
+
+/// Explicit unsupported source boundary, not recovery without an owner.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "native owned invocation is unsupported until immutable verified rootfs/verity custody is available"
+)]
+pub struct NativeOwnedInvocationUnavailable;
+
+/// The observer is moved BEFORE resolution, boot, callbacks and conversions.
+/// Ordinary nonnative behavior remains on its existing implementation. Native
+/// positive entry stays closed until the original verified-input seam exists.
+pub fn run_owned_entrypoint_call<O: CallObserver>(
+    call: EntrypointCall<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+    observer: O,
+) -> OwnedTransientResult<O> {
+    let mut result = OwnedTransientResult::prepare(observer);
+    let _ = result.run(call, pair);
+    result
+}
+
+impl<O: CallObserver> OwnedTransientResult<O> {
+    pub fn run(
+        &mut self,
+        call: EntrypointCall<'_>,
+        pair: Option<&mut PairArtifactSource<'_>>,
+    ) -> Result<()> {
+        let group = self
+            .custody
+            .as_mut()
+            .expect("invocation custody remains present");
+        if group.started {
+            anyhow::bail!("owned invocation has already been used");
+        }
+        group.started = true;
+        let operation = (|| {
+            let backend = super::boot::resolve_backend(Some(call.vm.admission.backend_name()))?;
+            if backend.kind() == mvm_core::vm_backend::BackendKind::Hvf {
+                return Err(NativeOwnedInvocationUnavailable.into());
+            }
+            anyhow::ensure!(
+                matches!(call.lifecycle, CallLifecycle::Transient),
+                "owned invocation requires one transient turn"
+            );
+            run_entrypoint_call_recording(call, pair, &mut group.observer, &mut group.outcome)
+        })();
+        match operation {
+            Ok(outcome) => {
+                group.outcome = Some(outcome);
+                group.legacy_terminal = true;
+                Ok(())
+            }
+            Err(error) => {
+                group.call_error = Some(error);
+                anyhow::bail!("owned invocation failed; original error remains retained")
+            }
+        }
+    }
+}
+
+/// Native boot-only resource handoff. The host caller keeps original
+/// admission and runtime custody; no SessionVm/name downgrade is made.
+pub fn boot_entrypoint_vm_owned(
+    vm: EntrypointVm<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<super::boot::OwnedClientBoot> {
+    let backend_name = vm.admission.backend_name().to_string();
+    let boot = SessionBoot::builder(vm.slot, vm.vm_name)
+        .cpus(vm.cpus)
+        .memory_mib(vm.memory_mib)
+        .network_policy(vm.admission.network_policy().clone())
+        .backend_name(&backend_name)
+        .portable_boot_assets(vm.portable_boot_assets)
+        .build();
+    let owner = super::boot::boot_session_vm_owned(boot, &vm.admission, pair)?;
+    emit_launched(&owner.resources().admission, &backend_name, true);
+    Ok(owner)
+}
+
 impl BootedEntrypoint {
     /// Wait for the guest agent to answer. On a timeout the VM is torn down
     /// and `plan.failed` is written against its plan: a VM whose agent never
@@ -177,6 +551,15 @@ pub fn run_entrypoint_call(
     pair: Option<&mut PairArtifactSource<'_>>,
     observer: &mut dyn CallObserver,
 ) -> Result<CallOutcome> {
+    run_entrypoint_call_recording(call, pair, observer, &mut None)
+}
+
+fn run_entrypoint_call_recording(
+    call: EntrypointCall<'_>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+    observer: &mut dyn CallObserver,
+    terminal: &mut Option<CallOutcome>,
+) -> Result<CallOutcome> {
     let EntrypointCall {
         mut vm,
         stdin,
@@ -235,6 +618,9 @@ pub fn run_entrypoint_call(
         observer,
     );
     observer.dispatched();
+    if let Ok(outcome) = &result {
+        *terminal = Some(outcome.clone());
+    }
 
     match lifecycle {
         CallLifecycle::KeepAlive { mode } => {
@@ -333,13 +719,29 @@ fn finish_transient_result(
     }
     match (result, stopped) {
         (result, Ok(())) => result,
-        (Ok(_), Err(stop)) => {
-            Err(stop).context("entrypoint call ended but VM stop was not acknowledged")
+        (Ok(outcome), Err(stop)) => Err(TransientStopFailure::AfterTerminal {
+            _outcome: outcome,
+            stop,
         }
-        (Err(call), Err(stop)) => {
-            Err(call.context(format!("VM stop was also not acknowledged: {stop:#}")))
-        }
+        .into()),
+        (Err(call), Err(stop)) => Err(TransientStopFailure::AfterError { call, stop }.into()),
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum TransientStopFailure {
+    #[error("entrypoint call ended but VM stop was not acknowledged: {stop:#}")]
+    AfterTerminal {
+        _outcome: CallOutcome,
+        #[source]
+        stop: anyhow::Error,
+    },
+    #[error("{call:#}; VM stop was also not acknowledged: {stop:#}")]
+    AfterError {
+        #[source]
+        call: anyhow::Error,
+        stop: anyhow::Error,
+    },
 }
 
 /// Write `plan.exited` and the seal for a stopped transient call, under the
@@ -424,6 +826,114 @@ mod tests {
     use mvm_core::session::SessionState;
     use mvm_core::util::test_env::TestEnv;
     use mvm_hostd::stream::ShownChunk;
+
+    #[test]
+    fn consumer_keeps_typed_terminal_error_through_sync_cleanup_and_final_failure() {
+        struct NoChildOperations(Vec<&'static str>);
+        impl FinalizeOperations for NoChildOperations {
+            fn sync(&mut self) -> Result<()> {
+                self.0.push("sync");
+                Ok(())
+            }
+            fn complete_original(
+                &mut self,
+            ) -> Result<Option<mvm_runtime::workload_runner::runner::NativeCompletion>>
+            {
+                self.0.extend(["stop", "cleanup"]);
+                Ok(None) // no Child existed, so no opaque native witness exists
+            }
+            fn quiesce_original(&mut self) -> Result<()> {
+                panic!("sync succeeded; completion branch must be used")
+            }
+        }
+        let terminal = mvm_agentd::vsock::EntrypointEvent::Error {
+            kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
+            message: "local terminal fixture".into(),
+        };
+        let mut result =
+            OwnedTransientResult::prepare(super::super::dispatch::CapturedOutput::default());
+        let group = result.custody.as_mut().unwrap();
+        group.outcome = Some(CallOutcome {
+            terminal: CallTerminal::from_event(&terminal),
+            capture: None,
+        });
+        let mut operations = NoChildOperations(Vec::new());
+        drive_finalization(
+            FinalizeState {
+                outcome: &group.outcome,
+                call_error: &mut group.call_error,
+                flush_error: &mut group.flush_error,
+                stop_error: &mut group.stop_error,
+                completion: &mut group.completion,
+                stopped: &mut group.stopped,
+            },
+            &mut operations,
+        );
+        assert_eq!(operations.0, ["sync", "stop", "cleanup"]);
+        assert_eq!(result.outcome().unwrap().exit_code(), 124);
+        assert!(!result.succeeded());
+        assert!(result.projection().is_err());
+        // Exercise the existing nonnative result projection separately. This
+        // does not construct NativeCompletion or authorize native output.
+        result.custody.as_mut().unwrap().legacy_terminal = true;
+        assert!(result.projection().is_ok());
+        assert!(
+            !result.succeeded(),
+            "a delivered typed error is never success"
+        );
+        // Actual consumer control flow, adapted only at its side effects.
+        // None never mints a native exit/output witness or success receipt.
+    }
+
+    #[test]
+    fn child_free_transient_retry_preserves_actual_outcome_and_all_error_values() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        #[derive(Debug)]
+        struct OriginalError(Arc<AtomicUsize>);
+        impl std::fmt::Display for OriginalError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("original local error")
+            }
+        }
+        impl std::error::Error for OriginalError {}
+        impl Drop for OriginalError {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut result = OwnedTransientResult {
+            custody: Some(Box::new(TransientCustody {
+                observer: (),
+                outcome: Some(CallOutcome {
+                    terminal: CallTerminal::Exited { code: 7 },
+                    capture: None,
+                }),
+                call_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                flush_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                stop_error: Some(anyhow::Error::new(OriginalError(Arc::clone(&drops)))),
+                owner: None,
+                cleanup_error: None,
+                completion: None,
+                legacy_terminal: false,
+                stopped: true,
+                started: true,
+            })),
+        };
+        result.retry_stop().unwrap();
+        assert_eq!(result.outcome().unwrap().exit_code(), 7);
+        assert!(result.call_error().unwrap().is::<OriginalError>());
+        assert!(result.flush_error().unwrap().is::<OriginalError>());
+        assert!(result.stop_error().unwrap().is::<OriginalError>());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(result);
+        assert_eq!(drops.load(Ordering::SeqCst), 3);
+        // This is a genuinely child-free aggregate, not native stop or a
+        // manufactured uncertain/ConfirmedExit fixture.
+    }
 
     #[derive(Default)]
     struct NamingObserver {

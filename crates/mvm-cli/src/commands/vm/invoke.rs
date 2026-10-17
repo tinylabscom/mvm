@@ -223,6 +223,11 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
 /// its baked entrypoint, and return the workload's exit status rather than
 /// exiting with it.
 pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall) -> Result<i32> {
+    let selected_backend = mvm_client::entrypoint::backend_name_for(call.hypervisor.as_deref())?;
+    anyhow::ensure!(
+        mvm_client::backend_kind_for(&selected_backend) != mvm_core::vm_backend::BackendKind::Hvf,
+        "native CLI invocation is unsupported before verified input custody and a held recovery lifetime"
+    );
     warn_accepted_but_inert(&call);
 
     // The entrypoint action targets a manifest slot, resolved through the same

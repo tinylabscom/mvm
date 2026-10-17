@@ -19,6 +19,359 @@ use crate::launch::runtime_source::{
     attach_universal_initramfs_if_cached,
 };
 
+/// The original higher-layer objects for one host-owned launch. This object is
+/// never serialized, sent to the VMM, or reconstructed from the substrate DTO.
+pub(crate) struct ClientBootResources {
+    pub backend: AnyBackend,
+    pub config: VmStartConfig,
+    pub admission: crate::admission::AdmissionContext,
+    // Custody-only: dropping this original uncommitted preparation rolls back
+    // and reseals attachments, so it must outlive every uncertain native use.
+    pub _volumes: Option<crate::volume::LaunchPreparation>,
+    pub built_runtime: Option<mvm_hostd::plan_admission::PreparedBuiltPackRuntime>,
+}
+
+struct ClientCustody {
+    resources: Option<ClientBootResources>,
+    runtime: Option<mvm_runtime::workload_runner::runner::OwnedRuntimeLaunch>,
+}
+
+/// A caller-owned native lifetime, not a serializable session name or helper
+/// permit. Keep this value in the host context until terminal stop.
+pub struct OwnedClientBoot {
+    custody: Option<Box<ClientCustody>>,
+}
+
+impl OwnedClientBoot {
+    pub(crate) fn start(
+        resources: ClientBootResources,
+    ) -> std::result::Result<Self, OwnedBootFailure> {
+        let mut owner = Self {
+            custody: Some(Box::new(ClientCustody {
+                resources: Some(resources),
+                runtime: None,
+            })),
+        };
+        let result = (|| {
+            let group = owner.custody.as_mut().expect("new client custody");
+            let resources = group.resources.as_mut().expect("original client resources");
+            mvm_runtime::workload_backend::require_workload_backend(&resources.backend)?;
+            if let Some(runtime) = &resources.built_runtime {
+                runtime.verify_config(&resources.config)?;
+            }
+            // Store the prepared runtime BEFORE the first native side effect.
+            let images = resources
+                .built_runtime
+                .as_mut()
+                .context("owned native image preparation missing")?
+                .take_boot_images()?;
+            group.runtime = Some(
+                resources
+                    .backend
+                    .prepare_owned_launch(&resources.config, images)?,
+            );
+            let runtime = group.runtime.as_mut().expect("prepared runtime");
+            if let Some(built) = &resources.built_runtime {
+                built.verify_config(runtime.config()?)?;
+            }
+            runtime.activate()
+        })();
+        match result {
+            Ok(()) => Ok(owner),
+            Err(error) => Err(owner.failure(error)),
+        }
+    }
+
+    pub(crate) fn resources(&self) -> &ClientBootResources {
+        self.custody
+            .as_ref()
+            .expect("client custody present")
+            .resources
+            .as_ref()
+            .expect("original client resources present")
+    }
+
+    pub(crate) fn with_original<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &ClientBootResources,
+            &mut mvm_runtime::workload_runner::runner::OwnedRuntimeLaunch,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let group = self
+            .custody
+            .as_mut()
+            .context("client custody already released")?;
+        operation(
+            group
+                .resources
+                .as_ref()
+                .context("client resources missing")?,
+            group.runtime.as_mut().context("native runtime missing")?,
+        )
+    }
+
+    pub(crate) fn record_charge(&mut self) -> Result<()> {
+        self.with_original(|resources, runtime| {
+            let vm_id = runtime.vm_id()?.clone();
+            mvm_hostd::plan_admission::record_charge_with_owned_rollback(
+                &resources.backend,
+                &vm_id,
+                &resources.config.name,
+                &resources.admission.admitted,
+                // The owning caller queues canonical failure/seal after
+                // original stop proof; do not emit a duplicate raw failure.
+                None,
+                || runtime.stop(),
+            )
+        })
+    }
+
+    pub(crate) fn flush(&mut self) -> Result<()> {
+        self.with_original(|_, runtime| runtime.flush())
+    }
+
+    pub(crate) fn complete(
+        &mut self,
+    ) -> Result<mvm_runtime::workload_runner::runner::NativeCompletion> {
+        self.with_original(|_, runtime| runtime.complete())
+    }
+
+    pub fn stop(&mut self) -> Result<()> {
+        self.quiesce()?;
+        // Only actual original-owner stop/child-free classification permits
+        // leases, payloads and admission to be released.
+        drop(self.custody.take());
+        Ok(())
+    }
+
+    pub(crate) fn quiesce(&mut self) -> Result<()> {
+        if let Some(group) = self.custody.as_mut()
+            && let Some(runtime) = group.runtime.as_mut()
+        {
+            runtime.stop()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn failure(self, error: anyhow::Error) -> OwnedBootFailure {
+        OwnedBootFailure {
+            error: Some(error),
+            owner: std::sync::Mutex::new(Some(self)),
+            pending_failure: None,
+            audit_panic: None,
+        }
+    }
+
+    fn release_native_if_child_free(&mut self) -> bool {
+        if let Some(group) = self.custody.as_mut()
+            && let Some(runtime) = group.runtime.take()
+            && let Err(runtime) = runtime.release_if_child_free()
+        {
+            group.runtime = Some(*runtime);
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn release_if_child_free(mut self) -> std::result::Result<(), Self> {
+        if !self.release_native_if_child_free() {
+            return Err(self);
+        }
+        drop(self.custody.take());
+        Ok(())
+    }
+}
+
+impl Drop for OwnedClientBoot {
+    fn drop(&mut self) {
+        if let Some(mut group) = self.custody.take()
+            && let Some(mut runtime) = group.runtime.take()
+        {
+            if let Some(resources) = group.resources.take() {
+                // Runtime's actual child/terminal state decides RAII versus
+                // conservative abandonment of the ENTIRE original group.
+                let _ = runtime.retain_support(resources);
+            }
+            drop(runtime);
+        }
+    }
+}
+
+/// Host-only error ownership. It is not the cloneable core facade error.
+pub struct OwnedBootFailure {
+    error: Option<anyhow::Error>,
+    owner: std::sync::Mutex<Option<OwnedClientBoot>>,
+    pending_failure: Option<PendingFailureAudit>,
+    // Audit uncertainty is distinct from native stop proof. Keep the original
+    // panic value without exposing it or automatically repeating audit writes.
+    audit_panic: Option<std::sync::Mutex<Box<dyn std::any::Any + Send>>>,
+}
+
+#[derive(Clone, Copy)]
+enum PendingFailureAudit {
+    Queued(&'static str),
+    Attempted,
+    Returned,
+}
+
+impl OwnedBootFailure {
+    pub fn error(&self) -> &anyhow::Error {
+        self.error.as_ref().expect("original launch error present")
+    }
+
+    pub fn retry_stop(&mut self) -> Result<()> {
+        let slot = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owner) = slot.as_mut() {
+            owner.quiesce()?;
+        }
+        self.flush_pending_failure()?;
+        drop(
+            self.owner
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        Ok(())
+    }
+
+    pub fn into_released_error(mut self) -> std::result::Result<anyhow::Error, Self> {
+        let slot = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owner) = slot.as_mut()
+            && !owner.release_native_if_child_free()
+        {
+            return Err(self);
+        }
+        if self.flush_pending_failure().is_err() {
+            return Err(self);
+        }
+        drop(
+            self.owner
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+        Ok(self.error.take().expect("original error consumed once"))
+    }
+
+    pub(crate) fn emit_failed(&mut self, stage: &'static str) {
+        // This records intent, not a terminal event. In particular activation
+        // failure after adoption cannot seal a potentially live native run.
+        if self.pending_failure.is_none() {
+            self.pending_failure = Some(PendingFailureAudit::Queued(stage));
+        }
+        let slot = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let released = slot
+            .as_mut()
+            .is_none_or(OwnedClientBoot::release_native_if_child_free);
+        if released && let Err(error) = self.flush_pending_failure() {
+            tracing::warn!(error = %error, "owned terminal failure audit remains unresolved");
+        }
+    }
+
+    fn flush_pending_failure(&mut self) -> Result<()> {
+        let Some(pending) = self.pending_failure else {
+            return Ok(());
+        };
+        if matches!(pending, PendingFailureAudit::Returned) {
+            return Ok(());
+        }
+        let PendingFailureAudit::Queued(stage) = pending else {
+            anyhow::bail!("owned terminal failure audit was attempted but remains unconfirmed");
+        };
+        let error = self.error.as_ref().expect("original launch error present");
+        let owner = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .context("original audit custody missing")?;
+        self.pending_failure = Some(PendingFailureAudit::Attempted);
+        let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::admission::emit_failed(&owner.resources().admission, stage, error);
+        }));
+        match emitted {
+            Ok(()) => {
+                // Canonical audit policy reports its own write/seal failures
+                // through the existing unsealed path. Returned is not a new
+                // audit durability proof, and this call is never repeated.
+                self.pending_failure = Some(PendingFailureAudit::Returned);
+                Ok(())
+            }
+            Err(payload) => {
+                self.audit_panic = Some(std::sync::Mutex::new(payload));
+                anyhow::bail!(
+                    "owned terminal failure audit panicked; original failure and audit custody retained"
+                )
+            }
+        }
+    }
+}
+
+impl Drop for OwnedBootFailure {
+    fn drop(&mut self) {
+        let slot = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owner) = slot.take()
+            && let Err(owner) = owner.release_if_child_free()
+        {
+            // Preserve pending audit and the primary error with the exact
+            // native/client group even on conservative abandonment.
+            std::mem::forget((
+                owner,
+                self.error.take(),
+                self.pending_failure.take(),
+                self.audit_panic.take(),
+            ));
+        }
+    }
+}
+
+impl OwnedBootFailure {
+    pub(crate) fn observe_failure(
+        &mut self,
+        observe: impl FnOnce(&crate::admission::AdmissionContext, &anyhow::Error),
+    ) {
+        let error = self.error.as_ref().expect("launch error present");
+        let slot = self
+            .owner
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owner) = slot.as_ref() {
+            observe(&owner.resources().admission, error);
+        }
+    }
+}
+
+impl std::fmt::Debug for OwnedBootFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedBootFailure")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+impl std::fmt::Display for OwnedBootFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self.error(), f)
+    }
+}
+impl std::error::Error for OwnedBootFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.error().as_ref())
+    }
+}
+
 /// A booted microVM, named so it can be dispatched into and torn down.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionVm {
@@ -257,6 +610,59 @@ pub fn boot_session_vm(
     admit: &SessionAdmit<'_>,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<SessionVm> {
+    match boot_session_core(
+        boot,
+        |inputs| {
+            admit(inputs)?
+                .map(Box::new)
+                .map(BootAdmission::Legacy)
+                .context("refusing to boot an entrypoint VM without an admitted plan")
+        },
+        pair,
+    )? {
+        SessionBootResult::Legacy(vm) => Ok(vm),
+        SessionBootResult::Owned(owner) => Err(anyhow::Error::new(
+            owner.failure(anyhow::anyhow!("owning receiver required")),
+        )),
+    }
+}
+
+/// Host-owned admission and resources, with no DTO/name downgrade on success.
+pub fn boot_session_vm_owned(
+    boot: SessionBoot<'_>,
+    admission: &super::admission::EntrypointAdmission,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<OwnedClientBoot> {
+    match boot_session_core(
+        boot,
+        |inputs| {
+            admission
+                .admit(inputs)
+                .map(Box::new)
+                .map(BootAdmission::Owned)
+        },
+        pair,
+    )? {
+        SessionBootResult::Owned(owner) => Ok(owner),
+        SessionBootResult::Legacy(_) => anyhow::bail!("owned boot did not return native custody"),
+    }
+}
+
+enum BootAdmission {
+    Legacy(Box<SessionAuditSubstrate>),
+    Owned(Box<super::admission::AdmittedEntrypoint>),
+}
+
+enum SessionBootResult {
+    Legacy(SessionVm),
+    Owned(OwnedClientBoot),
+}
+
+fn boot_session_core(
+    boot: SessionBoot<'_>,
+    admit: impl FnOnce(AdmitInputs<'_>) -> Result<BootAdmission>,
+    pair: Option<&mut PairArtifactSource<'_>>,
+) -> Result<SessionBootResult> {
     let SessionBoot {
         slot,
         vm_name,
@@ -315,7 +721,7 @@ pub fn boot_session_vm(
     // Admission starts the plan and verb-grant validity windows. All boot
     // preparation therefore completes before this point, immediately before
     // the backend consumes the admitted start config.
-    let substrate = admit(AdmitInputs {
+    let admitted = admit(AdmitInputs {
         rootfs: std::path::Path::new(&rootfs),
         kernel: start_config
             .kernel_path
@@ -330,13 +736,28 @@ pub fn boot_session_vm(
         volumes: &start_config.volumes,
         bundle_archive: bundle_archive.as_deref(),
         runtime_config: Some(&start_config),
-    })?
-    .context("refusing to boot an entrypoint VM without an admitted plan")?;
-    let mut substrate = substrate;
+    })?;
+    let (mut substrate, context) = match admitted {
+        BootAdmission::Legacy(substrate) => (*substrate, None),
+        BootAdmission::Owned(admitted) => {
+            let admitted = *admitted;
+            (admitted.substrate, Some(admitted.context))
+        }
+    };
+    anyhow::ensure!(
+        backend.kind() != mvm_core::vm_backend::BackendKind::Hvf || context.is_some(),
+        "native session requires an owning host context; name-only return is unavailable before launch"
+    );
     let built_pack_check = substrate.built_pack_check.take();
     substrate.apply_to(&mut start_config);
     let _built_runtime = built_pack_check
-        .map(|check| check.prepare(&mut start_config, backend.kind()))
+        .map(|check| {
+            if context.is_some() && backend.kind() == mvm_core::vm_backend::BackendKind::Hvf {
+                check.freeze_native_boot(&mut start_config, backend.kind())
+            } else {
+                check.prepare(&mut start_config, backend.kind())
+            }
+        })
         .transpose()?
         .flatten();
     if let Some(runtime) = &_built_runtime {
@@ -351,6 +772,25 @@ pub fn boot_session_vm(
     }
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
+    if let Some(admission) = context {
+        let mut owner = crate::boot::start_prepared_owned(ClientBootResources {
+            backend,
+            config: start_config,
+            admission,
+            _volumes: None,
+            built_runtime: _built_runtime,
+        })
+        .map_err(|mut failure| {
+            failure.emit_failed("backend-start");
+            anyhow::Error::new(failure)
+        })?;
+        if let Err(error) = owner.record_charge() {
+            let mut failure = owner.failure(error);
+            failure.emit_failed("host-budget");
+            return Err(anyhow::Error::new(failure));
+        }
+        return Ok(SessionBootResult::Owned(owner));
+    }
     let vm_id = backend
         .start(&start_config)
         .with_context(|| format!("starting session microVM '{vm_name}'"))?;
@@ -374,7 +814,7 @@ pub fn boot_session_vm(
         }
         return Err(err).context("recording the session boot's admitted charge");
     }
-    Ok(SessionVm { vm_name })
+    Ok(SessionBootResult::Legacy(SessionVm { vm_name }))
 }
 
 /// Tear down a session VM. Best-effort: a failure (already stopped, backend
@@ -403,6 +843,49 @@ pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_free_failure_audits_once_and_keeps_original_error_through_retry() {
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let admission = crate::admission::admit_plan_tests::admitted_into(
+            keys.path(),
+            audit.path(),
+            "owned-no-child",
+        );
+        let owner = OwnedClientBoot {
+            custody: Some(Box::new(ClientCustody {
+                resources: Some(ClientBootResources {
+                    backend: AnyBackend::from_hypervisor("libkrun"),
+                    config: VmStartConfig {
+                        name: "owned-no-child".into(),
+                        ..Default::default()
+                    },
+                    admission,
+                    _volumes: None,
+                    built_runtime: None,
+                }),
+                runtime: None,
+            })),
+        };
+        let mut failure = owner.failure(anyhow::anyhow!("original prechild error"));
+        failure.emit_failed("backend-start");
+        failure.emit_failed("backend-start");
+        failure.retry_stop().unwrap();
+        assert_eq!(failure.error().to_string(), "original prechild error");
+        let error = failure.into_released_error().unwrap();
+        assert_eq!(error.to_string(), "original prechild error");
+        let chain = std::fs::read_to_string(audit.path().join("local.jsonl")).unwrap();
+        assert_eq!(
+            chain
+                .lines()
+                .filter(|line| line.contains("\"plan.failed\""))
+                .count(),
+            1
+        );
+        // No original Child ever existed. This does not test native terminal
+        // proof, uncertain deferral, or a synthesized ConfirmedExit.
+    }
 
     #[test]
     fn applying_admission_preserves_durability_and_materialized_images() {

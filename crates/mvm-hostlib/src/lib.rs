@@ -74,6 +74,7 @@ mod host_local;
 pub mod image_admin;
 pub mod launch;
 pub mod manifest;
+pub mod owned_context;
 #[cfg(feature = "schema")]
 pub mod registry;
 pub mod status;
@@ -97,7 +98,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// per-machine collector read seam. 7 added built-manifest inspection through
 /// `manifest.list`, `manifest.info`, and `manifest.verify`.
 /// 8 added host-local attestation/revocation data and nonretryable recovery details.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 8;
+/// 9 added caller-owned invocation contexts with independent negotiation.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 9;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -621,11 +623,12 @@ mod tests {
 
     #[test]
     fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
-        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 8));
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 9));
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
         assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
-        assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 0);
-        for minor in [7, 8, 7] {
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 10), 0);
+        for minor in [7, 8, 9, 7] {
             assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
             let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {
                 machine_id: "machine".into(),

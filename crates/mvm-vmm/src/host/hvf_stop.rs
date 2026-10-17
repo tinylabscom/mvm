@@ -190,6 +190,80 @@ impl OwnedInstance {
         &self.instance
     }
 
+    /// Open the guest bridge only while the original child and signed native
+    /// generation still agree. The returned socket is the one checked here;
+    /// callers must retain it rather than resolving the VM name again. Once
+    /// connected, even a validation failure leaves that exact stream in custody.
+    pub fn open_agent_bridge(
+        &self,
+        path: &std::path::Path,
+        retained: &mut Option<UnixStream>,
+    ) -> Result<()> {
+        ensure!(retained.is_none(), "native bridge must not be replaced");
+        require_owned_child_custody()?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned HVF child already exited"
+        );
+        ensure!(
+            self.observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
+            "owned HVF lifetime ended before bridge open"
+        );
+        let before = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        *retained = Some(mvm_agentd::vsock::connect_unix_before(
+            path,
+            Instant::now()
+                .checked_add(wire::CONNECTION_BUDGET)
+                .ok_or_else(|| anyhow::anyhow!("native bridge connection deadline overflow"))?,
+        )?);
+        let stream = retained
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("native bridge missing"))?;
+        require_bridge_peer(stream, child.id())?;
+        // The bridge runs in the same supervisor, never in a delegated socket
+        // server. A fresh native answer brackets the actual bridge connection.
+        let after = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned HVF child exited during bridge open"
+        );
+        ensure!(
+            self.observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
+            "owned HVF lifetime ended during bridge open"
+        );
+        drop((before, after));
+        Ok(())
+    }
+
+    /// Revalidate the retained bridge without opening or substituting a stream.
+    pub fn validate_agent_bridge(&self, stream: &UnixStream) -> Result<()> {
+        require_owned_child_custody()?;
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owned child poisoned"))?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned HVF child already exited"
+        );
+        require_bridge_peer(stream, child.id())?;
+        let peer = ConnectedInstance::connect_bound(self.instance.clone(), Some(child.id()))?;
+        ensure!(
+            child.try_wait()?.is_none(),
+            "owned HVF child exited during bridge validation"
+        );
+        ensure!(
+            self.observer.wait_event(Instant::now())? == ProcessExitWait::TimedOut,
+            "owned HVF bridge lifetime ended"
+        );
+        drop(peer);
+        Ok(())
+    }
+
     pub fn try_exited(&self) -> Result<bool> {
         require_owned_child_custody()?;
         let exited = {
@@ -290,6 +364,14 @@ impl OwnedInstance {
     }
 }
 
+fn require_bridge_peer(stream: &UnixStream, child_id: u32) -> Result<()> {
+    ensure!(
+        u32::try_from(super::uds_peer::connected_peer_pid(stream)?)? == child_id,
+        "HVF agent bridge peer is not the retained native child"
+    );
+    Ok(())
+}
+
 fn terminal_proof(
     instance: HvfInstance,
     root: &VerifyingKey,
@@ -311,6 +393,23 @@ fn terminal_proof(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_peer_comparison_rejects_substitution() {
+        // This witnesses only kernel comparison, never native VM ownership.
+        let (stream, _peer) = UnixStream::pair().unwrap();
+        let peer =
+            u32::try_from(super::super::uds_peer::connected_peer_pid(&stream).unwrap()).unwrap();
+        assert!(require_bridge_peer(&stream, peer).is_ok());
+        assert!(require_bridge_peer(&stream, peer.checked_add(1).unwrap()).is_err());
+    }
+
+    #[test]
+    fn missing_child_cannot_be_adopted() {
+        let mut child = None;
+        assert!(OwnedInstance::adopt(&mut child, "not-an-existing-instance").is_err());
+        assert!(child.is_none());
+    }
 
     #[test]
     fn reaped_child_is_refused_before_any_instance_lookup_and_retains_status() {

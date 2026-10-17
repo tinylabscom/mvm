@@ -3,6 +3,79 @@
 use super::*;
 use std::time::Instant;
 
+impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
+    WorkloadRunner<mvm_backends::driver::hvf::HvfDriver, S, B>
+{
+    /// Preserve native launch failures and this exact runtime lease before any
+    /// compatibility conversion to the string-only standby error.
+    pub fn spawn_standby_captured_owned(
+        &self,
+        _ctx: &SpawnContext<'_>,
+        _spec: &StandbySpec,
+    ) -> Result<StandbyHandle> {
+        // There is no authenticated durable receiver for the preparation's
+        // original leases. Do not launch and later downgrade to a DTO.
+        anyhow::bail!("owned HVF warm launch unavailable: durable custody handoff required")
+    }
+
+    /// Prepare lower transport custody, not an admission capability. No native
+    /// launch occurs until the returned owner's `activate` method is called.
+    /// Client integration must still pair its original opaque admission.
+    pub fn prepare_cold_hvf_channel(
+        &self,
+        config: &VmStartConfig,
+        images: mvm_vmm::host::boot_images::FrozenBootImageBytes,
+    ) -> Result<ColdHvfChannel> {
+        cold_hvf_channel::require_cold_start_config(config)?;
+        anyhow::ensure!(
+            config.roothash.as_deref() == Some(images.root_hash()),
+            "original frozen root hash differs from the final config"
+        );
+        self.require_caller_registration_shape(config)?;
+        let lifecycle = crate::runtime_evidence::RuntimeLifecycleLease::acquire(&config.name)?;
+        let config = lifecycle.bind(config)?;
+        let launch =
+            crate::kernel_custody::KernelBoundLaunch::bind(config, self.driver.kind(), &lifecycle)?;
+        let config = launch.config();
+        cold_hvf_channel::require_cold_start_config(config)?;
+        ClaimGuards::new(&self.spawner)
+            .admit_overlay_contract(std::path::Path::new(&config.rootfs_path))?;
+        refuse_rootfs_needing_journal_replay(&config.rootfs_path)?;
+        let state_dir = vm_state_dir(&config.name);
+        let decoded = decode_plan_secrets_from_state(&state_dir)?;
+        let default_redaction = RedactionPolicy::default();
+        let (secrets, redaction, tenant) = match &decoded {
+            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
+            None => (
+                &[][..],
+                &default_redaction,
+                config.tenant_id.as_deref().unwrap_or("local"),
+            ),
+        };
+        let inputs = WorkloadLaunchInputs {
+            config,
+            tenant,
+            secrets,
+            redaction,
+            network_policy: &config.network_policy,
+            cmdline: cmdline::runner_cmdline(config, &state_dir, |has_disk| {
+                self.driver.workload_base_bootargs(has_disk)
+            }),
+        };
+        let prepared = self.prepare_workload_boot(&inputs)?;
+        let (broker, _) = self.register_workload_broker(config, &prepared.socks)?;
+        Ok(ColdHvfChannel::new(cold_hvf_channel::ColdHvfPreparation {
+            launch,
+            images,
+            _lifecycle: lifecycle,
+            prepared,
+            _broker: broker,
+            streamer: Arc::clone(&self.console_streamer),
+            redaction: redaction.clone(),
+        }))
+    }
+}
+
 /// Refuse a rootfs whose ext4 journal still needs replay, without touching it.
 ///
 /// The rootfs is attached to the guest read-only, so the guest kernel cannot
@@ -181,6 +254,12 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
+        anyhow::ensure!(
+            (&self.driver as &dyn std::any::Any)
+                .downcast_ref::<mvm_backends::driver::hvf::HvfDriver>()
+                .is_none(),
+            "native HVF start requires an owning host receiver; VM-id-only start is unavailable"
+        );
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;

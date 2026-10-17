@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 8,
+  "abi_minor": 9,
   "methods": [
     {
       "classification": "prod_safe",

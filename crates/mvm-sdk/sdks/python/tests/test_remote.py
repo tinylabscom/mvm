@@ -20,6 +20,24 @@ import pytest
 
 import mvm
 
+def test_actual_remote_terminal_error_stays_failure_after_context_cleanup(monkeypatch):
+    from mvm import _hostlib, _remote
+    calls = []
+    class NoChildContext:
+        def call(self, _method, _request):
+            calls.append("terminal-error")
+            return {"exit_code": 124, "stdout_b64": "", "stderr_b64": "",
+                    "output_truncated": False,
+                    "agent_error": {"kind": "timeout", "message": "fixture"}}
+        def close(self):
+            calls.append("close")
+        def free(self):
+            calls.append("free")
+    monkeypatch.setattr(_hostlib, "NativeContext", NoChildContext)
+    with pytest.raises(_remote.MvmTransportError):
+        _remote._dispatch_host("fixture", "json", b"[[],{}]")
+    assert calls == ["terminal-error", "close", "free"]
+
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch: pytest.MonkeyPatch):

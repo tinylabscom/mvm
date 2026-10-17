@@ -74,9 +74,10 @@ struct RpcSession {
 }
 
 /// An authenticated control session that can carry multiple RPCs when the
-/// peer keeps the connection open. The guest agent's production control
-/// listener closes after one operational request, so callers that cross a
-/// restore boundary must obtain a new stream and handshake.
+/// peer keeps the connection open. Ordinary operational requests remain
+/// one-shot. A successful activation ACK permits one workload followed by
+/// filesystem sync on that same session; it is not a persistent RPC loop.
+/// Callers crossing restore must still obtain a new stream and handshake.
 pub struct ControlSession {
     inner: RpcSession,
 }
@@ -845,6 +846,66 @@ where
     read_exec_stream_with_session(stream, &mut session, on_event)
 }
 
+/// Dispatch on an existing authenticated session, without hello, handshake or
+/// reconnect. A framing/transport failure is terminal for this session.
+pub fn send_exec_on_authenticated_session(
+    stream: &mut UnixStream,
+    session: &mut crate::vsock::AuthenticatedSession,
+    request: &GuestRequest,
+    mut on_event: impl FnMut(&ExecEvent),
+) -> Result<ExecEvent> {
+    anyhow::ensure!(
+        matches!(request, GuestRequest::Exec { .. }),
+        "expected Exec request"
+    );
+    session.write(stream, request)?;
+    loop {
+        let response = check_response(request, session.read(stream)?)?;
+        let GuestResponse::ExecEvent(event) = response else {
+            bail!("expected ExecEvent on retained session");
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
+/// One original entrypoint verb on an already authenticated session. Never
+/// negotiates, reopens, resets counters, or retries a partial protected frame.
+pub fn send_entrypoint_on_authenticated_session(
+    stream: &mut UnixStream,
+    session: &mut AuthenticatedSession,
+    request: &GuestRequest,
+    mut on_event: impl FnMut(&EntrypointEvent),
+) -> Result<EntrypointEvent> {
+    let capability = match request {
+        GuestRequest::RunEntrypoint {
+            stream_input: false,
+            ..
+        } => GuestCapability::RunEntrypoint,
+        GuestRequest::AgentPrompt { .. } => GuestCapability::AgentPrompt,
+        _ => bail!("retained entrypoint session requires one-shot RunEntrypoint or AgentPrompt"),
+    };
+    // Same local compatibility check as production negotiation, without
+    // opening a new authenticated session on the retained stream.
+    anyhow::ensure!(
+        supported_capabilities().contains(&capability),
+        "unsupported entrypoint capability"
+    );
+    session.write(stream, request)?;
+    loop {
+        let response = check_response(request, session.read(stream)?)?;
+        let GuestResponse::EntrypointEvent(event) = response else {
+            bail!("expected EntrypointEvent on retained session");
+        };
+        if event.is_terminal() {
+            return Ok(event);
+        }
+        on_event(&event);
+    }
+}
+
 /// Run a declared command only after the guest has paused before spawn and
 /// the caller's host gate has decided and audited the exact invocation.
 /// The decision travels back on the same authenticated control session.
@@ -1123,6 +1184,149 @@ mod tests {
                 reason: DriveRefusal::OutsideWorkspaceRoots
             }
         ));
+    }
+
+    #[test]
+    fn retained_entrypoint_preserves_real_keys_counters_and_original_verbs() {
+        for request in [
+            GuestRequest::RunEntrypoint {
+                stdin: b"bounded".to_vec(),
+                timeout_secs: 2,
+                env: vec![],
+                stream_input: false,
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"bounded".to_vec(),
+                timeout_secs: 2,
+                env: vec![],
+            },
+        ] {
+            use std::io::Write;
+            let (mut host, mut guest) = UnixStream::pair().unwrap();
+            host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            guest
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let host_key = ed25519_dalek::SigningKey::from_bytes(&[51; 32]);
+            let anchor = host_key.verifying_key();
+            let guest_key = ed25519_dalek::SigningKey::from_bytes(&[52; 32]);
+            let expected_key = guest_key.verifying_key();
+            let expected_verb = std::mem::discriminant(&request);
+            let peer = std::thread::spawn(move || {
+                let mut session =
+                    AuthenticatedSession::guest(&mut guest, guest_key, &anchor).unwrap();
+                let incoming: GuestRequest = session.read(&mut guest).unwrap();
+                assert_eq!(std::mem::discriminant(&incoming), expected_verb);
+                session
+                    .write(
+                        &mut guest,
+                        &GuestResponse::EntrypointEvent(EntrypointEvent::Stdout {
+                            chunk: b"retained".to_vec(),
+                        }),
+                    )
+                    .unwrap();
+                session
+                    .write(
+                        &mut guest,
+                        &GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 }),
+                    )
+                    .unwrap();
+                assert!(matches!(
+                    session.read::<GuestRequest>(&mut guest).unwrap(),
+                    GuestRequest::SyncFilesystems
+                ));
+                session
+                    .write(&mut guest, &GuestResponse::FilesystemsSynced)
+                    .unwrap();
+                guest.flush().unwrap();
+            });
+            let (mut session, key) = AuthenticatedSession::host_retaining_peer(
+                &mut host,
+                "retained-entrypoint-test",
+                host_key,
+            )
+            .unwrap();
+            assert_eq!(key, expected_key);
+            let mut events = Vec::new();
+            let terminal = send_entrypoint_on_authenticated_session(
+                &mut host,
+                &mut session,
+                &request,
+                |event| events.push(event.clone()),
+            )
+            .unwrap();
+            assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
+            assert_eq!(events.len(), 1);
+            session
+                .write(&mut host, &GuestRequest::SyncFilesystems)
+                .unwrap();
+            assert!(matches!(
+                session.read::<GuestResponse>(&mut host).unwrap(),
+                GuestResponse::FilesystemsSynced
+            ));
+            peer.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn retained_entrypoint_terminates_on_refusal_wrong_terminal_and_partial_frame() {
+        for mode in 0..3 {
+            use std::io::Write;
+            let (mut host, mut guest) = UnixStream::pair().unwrap();
+            host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let host_key = ed25519_dalek::SigningKey::from_bytes(&[53; 32]);
+            let anchor = host_key.verifying_key();
+            let peer = std::thread::spawn(move || {
+                let mut session = AuthenticatedSession::guest(
+                    &mut guest,
+                    ed25519_dalek::SigningKey::from_bytes(&[54; 32]),
+                    &anchor,
+                )
+                .unwrap();
+                assert!(matches!(
+                    session.read::<GuestRequest>(&mut guest).unwrap(),
+                    GuestRequest::RunEntrypoint { .. }
+                ));
+                let response = match mode {
+                    0 => GuestResponse::VerbNotAuthorized {
+                        verb: "run-entrypoint".into(),
+                    },
+                    1 => GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+                    _ => GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 }),
+                };
+                if mode == 2 {
+                    let mut frame = Vec::new();
+                    session.write(&mut frame, &response).unwrap();
+                    guest.write_all(&frame[..frame.len() - 1]).unwrap();
+                    guest.shutdown(std::net::Shutdown::Write).unwrap();
+                } else {
+                    session.write(&mut guest, &response).unwrap();
+                }
+            });
+            let (mut session, _) = AuthenticatedSession::host_retaining_peer(
+                &mut host,
+                "retained-negative-test",
+                host_key,
+            )
+            .unwrap();
+            let mut delivered = 0;
+            assert!(
+                send_entrypoint_on_authenticated_session(
+                    &mut host,
+                    &mut session,
+                    &GuestRequest::RunEntrypoint {
+                        stdin: vec![],
+                        timeout_secs: 2,
+                        env: vec![],
+                        stream_input: false,
+                    },
+                    |_| delivered += 1,
+                )
+                .is_err()
+            );
+            assert_eq!(delivered, 0);
+            peer.join().unwrap();
+        }
     }
 
     /// A plain call: no streamed input, so the guest closes stdin as soon as

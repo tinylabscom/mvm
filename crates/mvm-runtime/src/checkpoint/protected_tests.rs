@@ -1080,14 +1080,12 @@ fn an_abandoned_protected_capture_and_its_orphaned_objects_are_reclaimed() {
         CheckpointKeyDomain::host(),
     )
     .unwrap();
-    // A capture that died after sealing, leaving its staging behind under a
-    // pid that no longer runs, holds only sealed bytes.
-    let abandoned = store
-        .root()
-        .join(staging::STAGING_DIR)
-        .join("2147483646-1-0-gone");
-    std::fs::create_dir_all(&abandoned).unwrap();
+    // A genuinely local abandoned stage holds only sealed bytes. Release its
+    // real creator lease; a PID label or forgotten lock is not that event.
+    let staged = staging::StagedCapture::begin(&store, &CheckpointId::new("abandoned")).unwrap();
+    let abandoned = staged.content_dir().parent().unwrap().to_path_buf();
     std::fs::rename(store.dir_for(&gone.id), abandoned.join("dead")).unwrap();
+    assert_eq!(staged.release_lease_for_gc_fixture(), abandoned);
     assert_no_plaintext(store.root());
 
     let report = prune_unreferenced_content(&store, false).unwrap();
@@ -1103,4 +1101,46 @@ fn an_abandoned_protected_capture_and_its_orphaned_objects_are_reclaimed() {
         std::fs::read(dest.join("rootfs.ext4")).unwrap(),
         marked_bytes(30)
     );
+}
+
+#[test]
+fn uncertain_protected_staging_keeps_members_and_defers_orphan_collection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = protected_store(&tmp.path().join("store"));
+    let kept = capture_quick(
+        &store,
+        &write_rootfs(&tmp.path().join("k"), 30),
+        "kept",
+        CheckpointKeyDomain::host(),
+    )
+    .unwrap();
+    let gone = capture_quick(
+        &store,
+        &write_rootfs(&tmp.path().join("g"), 31),
+        "gone",
+        CheckpointKeyDomain::host(),
+    )
+    .unwrap();
+    let orphan = capture_quick(
+        &store,
+        &write_rootfs(&tmp.path().join("o"), 32),
+        "orphan",
+        CheckpointKeyDomain::host(),
+    )
+    .unwrap();
+    store.remove(&orphan.id).unwrap();
+    let staged = staging::StagedCapture::begin(&store, &CheckpointId::new("held")).unwrap();
+    std::fs::rename(store.dir_for(&gone.id), staged.content_dir().join("sealed")).unwrap();
+    staged.arm_writer().unwrap();
+    let retained = staged.release_lease_for_gc_fixture();
+    for dry_run in [true, false] {
+        assert!(
+            prune_unreferenced_content(&store, dry_run)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(retained.join("content/sealed").exists());
+        assert_no_plaintext(store.root());
+        verify_content(&store, &kept).unwrap();
+    }
 }

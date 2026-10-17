@@ -40,6 +40,12 @@ pub fn record_boot_charge(
     )
 }
 
+pub(crate) fn record_owned_charge(
+    owner: &mut crate::entrypoint::boot::OwnedClientBoot,
+) -> anyhow::Result<()> {
+    owner.record_charge()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

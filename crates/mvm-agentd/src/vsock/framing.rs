@@ -221,9 +221,19 @@ impl AuthenticatedSession {
         session_id: &str,
         signing_key: SigningKey,
     ) -> Result<Self> {
-        let (inner, _peer_key) = Session::host(stream, session_id, signing_key)
+        Self::host_retaining_peer(stream, session_id, signing_key).map(|(session, _)| session)
+    }
+
+    /// Retain the actual handshake key. This is peer authentication, not a
+    /// claim that the transport belongs to a particular native generation.
+    pub fn host_retaining_peer<S: Read + Write>(
+        stream: &mut S,
+        session_id: &str,
+        signing_key: SigningKey,
+    ) -> Result<(Self, VerifyingKey)> {
+        let (inner, peer_key) = Session::host(stream, session_id, signing_key)
             .context("host session handshake failed")?;
-        Ok(Self { inner })
+        Ok((Self { inner }, peer_key))
     }
 
     /// Establish a guest session and require the host identity to match `anchor`.
@@ -314,6 +324,34 @@ mod tests {
             rand::rng().fill_bytes(&mut __ed_seed);
             SigningKey::from_bytes(&__ed_seed)
         }
+    }
+
+    #[test]
+    fn retaining_handshake_returns_the_real_guest_key_and_preserves_counters() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let host_key = test_keypair();
+        let guest_key = test_keypair();
+        let expected = guest_key.verifying_key();
+        let anchor = host_key.verifying_key();
+        let peer = std::thread::spawn(move || {
+            let mut session = AuthenticatedSession::guest(&mut guest, guest_key, &anchor).unwrap();
+            for value in [1_u32, 2, 3] {
+                assert_eq!(session.read::<u32>(&mut guest).unwrap(), value);
+                session.write(&mut guest, &value).unwrap();
+            }
+        });
+        let (mut session, key) =
+            AuthenticatedSession::host_retaining_peer(&mut host, "retained-key", host_key).unwrap();
+        assert_eq!(key, expected);
+        for value in [1_u32, 2, 3] {
+            session.write(&mut host, &value).unwrap();
+            assert_eq!(session.read::<u32>(&mut host).unwrap(), value);
+        }
+        peer.join().unwrap();
     }
 
     struct WouldBlockReader;

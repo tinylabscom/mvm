@@ -57,6 +57,7 @@ mod admission;
 mod backend;
 mod broker;
 mod claim_lease;
+mod cold_hvf_channel;
 mod console_boot;
 mod durability;
 mod parent_verify;
@@ -65,6 +66,15 @@ mod refusal;
 mod sockets;
 mod spawner;
 mod warm_claim;
+
+pub use cold_hvf_channel::{ColdHvfChannel, NativeCompletion, OwnedRuntimeLaunch};
+
+struct PreparedWorkloadBoot {
+    spec: mvm_vmm::driver::spec::VmmSpec,
+    socks: sockets::StandingSockets,
+    endpoint: crate::workload_runner::claim::EndpointHandle,
+    trace: Option<mvm_core::launch_trace::LaunchTraceRecorder>,
+}
 
 use admission::{admitted_ingress, admitted_network_limits, admitted_tool_rules};
 pub use broker::RealBrokerRegistrar;
@@ -332,19 +342,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        if inputs.config.caller_registration.is_some() {
-            anyhow::ensure!(
-                self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
-                "caller registration requires a cold HVF workload"
-            );
-            let plan = inputs
-                .config
-                .plan_json
-                .as_deref()
-                .context("caller registration requires a signed plan")?;
-            serde_json::from_str::<mvm_core::plan::SignedExecutionPlan>(plan)
-                .context("caller registration requires a signed plan")?;
-        }
+        anyhow::ensure!(
+            self.driver.kind() != BackendKind::Hvf,
+            "native HVF workload requires OwnedRuntimeLaunch; legacy activation return is unavailable"
+        );
+        self.require_caller_registration_shape(inputs.config)?;
         let lifecycle =
             crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
         anyhow::ensure!(
@@ -377,7 +379,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             network_policy: inputs.network_policy,
             cmdline: bound_cmdline,
         };
-        self.boot_bound_workload_guarded(inputs, Some(&kernel_binding))
+        let result = self.boot_bound_workload_guarded(inputs, Some(&kernel_binding));
+        result.map_err(|error| {
+            cold_hvf_channel::retain_boot_error(error, (lifecycle, kernel_binding))
+        })
     }
 
     /// Maps an already-bound configuration into a backend boot. Production
@@ -387,23 +392,28 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         self.boot_bound_workload_guarded(inputs, None)
     }
 
-    fn boot_bound_workload_guarded(
+    fn require_caller_registration_shape(&self, config: &VmStartConfig) -> Result<()> {
+        if config.caller_registration.is_some() {
+            anyhow::ensure!(
+                self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
+                "caller registration requires a cold HVF workload"
+            );
+            let plan = config
+                .plan_json
+                .as_deref()
+                .context("caller registration requires a signed plan")?;
+            serde_json::from_str::<mvm_core::plan::SignedExecutionPlan>(plan)
+                .context("caller registration requires a signed plan")?;
+        }
+        Ok(())
+    }
+
+    /// Prepare the same policy, endpoint and device mapping for both ordinary
+    /// boots and the concrete owned cold channel.
+    fn prepare_workload_boot(
         &self,
         inputs: &WorkloadLaunchInputs<'_>,
-        kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
-    ) -> Result<Box<dyn RunningVm>> {
-        anyhow::ensure!(
-            (inputs.config.canonical_kernel.is_none()
-                && inputs.config.kernel_read_sha256.is_none())
-                || kernel.is_some(),
-            "canonical kernel launch has no actual final-config custody guard"
-        );
-        if let Some(kernel) = kernel {
-            anyhow::ensure!(
-                std::ptr::eq(inputs.config, kernel.config()),
-                "launch substituted the final config object"
-            );
-        }
+    ) -> Result<PreparedWorkloadBoot> {
         // A caller times this call from outside and cannot see past it, yet the
         // VMM boot and every post-boot registration happen in here. Off unless
         // a measurement asked for it.
@@ -427,7 +437,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // a cold boot does, keyed on this VM's own id. A deny-all, secret-free
         // workload receives no egress channel and therefore needs no process.
         let guards = ClaimGuards::new(&self.spawner);
-        let mut endpoint = guards.spawn_endpoint(
+        let endpoint = guards.spawn_endpoint(
             &VmId(inputs.config.name.clone()),
             &EndpointSpawnInputs {
                 state_dir: &state_dir,
@@ -479,6 +489,41 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
 
         trace.mark("spec_assembly");
 
+        Ok(PreparedWorkloadBoot {
+            spec,
+            socks,
+            endpoint,
+            trace: Some(trace),
+        })
+    }
+
+    /// Maps an already-bound configuration into a backend boot. Production
+    /// callers must hold the lifecycle lease and pass the verifier's paths.
+    fn boot_bound_workload_guarded(
+        &self,
+        inputs: &WorkloadLaunchInputs<'_>,
+        kernel: Option<&crate::kernel_custody::KernelBoundLaunch>,
+    ) -> Result<Box<dyn RunningVm>> {
+        anyhow::ensure!(
+            (inputs.config.canonical_kernel.is_none()
+                && inputs.config.kernel_read_sha256.is_none())
+                || kernel.is_some(),
+            "canonical kernel launch has no actual final-config custody guard"
+        );
+        if let Some(kernel) = kernel {
+            anyhow::ensure!(
+                std::ptr::eq(inputs.config, kernel.config()),
+                "launch substituted the final config object"
+            );
+        }
+        let PreparedWorkloadBoot {
+            spec,
+            socks,
+            mut endpoint,
+            trace,
+        } = self.prepare_workload_boot(inputs)?;
+        let mut trace = trace.context("prepared workload launch trace missing")?;
+        let state_dir = vm_state_dir(&inputs.config.name);
         // Unconditional and best-effort. The follower can wait for a console
         // file that does not exist yet, so install it alongside VMM boot rather
         // than serializing its process setup after guest readiness.
@@ -495,14 +540,23 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             kernel.before_boot(&spec)?;
         }
         let streamer = Arc::clone(&self.console_streamer);
-        let vm = console_boot::boot_while_starting_console(
+        let boot = console_boot::boot_while_starting_console(
             || match kernel {
                 Some(kernel) => kernel.boot(&self.driver, &spec),
                 None => self.driver.boot(&spec),
             },
             || streamer.start(&capture),
             || trace.mark("driver_boot"),
-        )?;
+        );
+        let vm = match boot {
+            Ok(vm) => vm,
+            Err(error) => {
+                return Err(cold_hvf_channel::retain_boot_error(
+                    error,
+                    (endpoint, Arc::clone(&self.console_streamer)),
+                ));
+            }
+        };
         if let Some(kernel) = kernel {
             kernel.observe_booted(&*vm)?;
         }
@@ -524,23 +578,33 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // Register the per-VM broker for the exact admitted host-service set.
         // The guard's Drop reaps on any early return until it is defused. A
         // requested service whose broker cannot start fails the launch closed.
-        let (services, capability_bindings) =
-            admitted_broker_bindings(inputs.config.plan_json.as_deref())?;
-        let mut broker_guard = self.broker.register(&BrokerRegisterRequest {
-            vm_name: &inputs.config.name,
-            state_dir: &state_dir,
-            tenant: inputs.config.tenant_id.as_deref(),
-            broker_listen_socket: socks.broker.as_deref(),
-            services: &services,
-            capability_bindings: &capability_bindings,
-            service_proxies: &inputs.config.service_proxies,
-        })?;
+        let (mut broker_guard, services) = self.register_workload_broker(inputs.config, &socks)?;
         endpoint.defuse();
         broker_guard.defuse();
         trace.mark("broker_register");
         trace.degrade_unless("host_services", broker_guard.services_healthy(&services));
         trace.write_to(&state_dir);
         Ok(vm)
+    }
+
+    fn register_workload_broker(
+        &self,
+        config: &VmStartConfig,
+        socks: &sockets::StandingSockets,
+    ) -> Result<(BrokerGuard, Vec<ServiceId>)> {
+        let state_dir = vm_state_dir(&config.name);
+        let (services, capability_bindings) =
+            admitted_broker_bindings(config.plan_json.as_deref())?;
+        let guard = self.broker.register(&BrokerRegisterRequest {
+            vm_name: &config.name,
+            state_dir: &state_dir,
+            tenant: config.tenant_id.as_deref(),
+            broker_listen_socket: socks.broker.as_deref(),
+            services: &services,
+            capability_bindings: &capability_bindings,
+            service_proxies: &config.service_proxies,
+        })?;
+        Ok((guard, services))
     }
 
     /// Fork a clean standby parent into a fresh, admitted child, gated exactly as
@@ -1026,7 +1090,10 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         &self,
         ctx: &SpawnContext<'_>,
         spec: &StandbySpec,
-    ) -> std::result::Result<StandbyHandle, StandbyError> {
+    ) -> std::result::Result<StandbyHandle, StandbyError>
+    where
+        D: 'static,
+    {
         let launch = ctx.launch.ok_or_else(|| {
             StandbyError::SpawnFailed(format!(
                 "standby '{}' has no launch config to mirror: a warm parent boots the same \
@@ -1041,7 +1108,24 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         let parent_config = lifecycle.bind(&parent_config).map_err(|e| {
             StandbyError::SpawnFailed(format!("bind standby runtime artifacts: {e:#}"))
         })?;
-        self.spawn_bound_standby_captured(ctx, spec, &parent_config)
+        let result = match (&self.driver as &dyn std::any::Any)
+            .downcast_ref::<mvm_backends::driver::hvf::HvfDriver>()
+        {
+            Some(driver) => {
+                self.spawn_bound_standby_captured_using(ctx, spec, &parent_config, |request| {
+                    driver.spawn_standby_parent_owned(request)
+                })
+            }
+            None => self
+                .spawn_bound_standby_captured(ctx, spec, &parent_config)
+                .map_err(anyhow::Error::new),
+        };
+        result.map_err(|error| {
+            cold_hvf_channel::standby_compatibility_error(cold_hvf_channel::retain_boot_error(
+                error,
+                (lifecycle, parent_config),
+            ))
+        })
     }
 
     /// Maps an already-bound parent while its caller holds the lifecycle lease.
@@ -1051,6 +1135,21 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         spec: &StandbySpec,
         parent_config: &VmStartConfig,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
+        self.spawn_bound_standby_captured_using(ctx, spec, parent_config, |request| {
+            self.driver
+                .spawn_standby_parent(request)
+                .map_err(anyhow::Error::new)
+        })
+        .map_err(cold_hvf_channel::standby_compatibility_error)
+    }
+
+    fn spawn_bound_standby_captured_using(
+        &self,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
+        parent_config: &VmStartConfig,
+        launch: impl FnOnce(&StandbyParentSpawn<'_>) -> Result<StandbyHandle>,
+    ) -> Result<StandbyHandle> {
         let state_dir = PathBuf::from(&spec.vm_state_dir);
 
         // Written before boot, exactly as `start` does for a workload, so a
@@ -1091,12 +1190,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             return Err(StandbyError::SpawnFailed(format!(
                 "refusing to boot standby parent '{}': {problem}",
                 spec.id
-            )));
+            ))
+            .into());
         }
         let boot = mvm_vmm::host::spec_map::with_identity_drive(boot, identity.as_deref());
-        let mut handle = self
-            .driver
-            .spawn_standby_parent(&StandbyParentSpawn { spec, boot: &boot })?;
+        let mut handle = launch(&StandbyParentSpawn { spec, boot: &boot })?;
 
         // The universal initramfs waits in a fail-closed pre-activation state.
         // Capturing it there would make every restored child refuse PostRestore

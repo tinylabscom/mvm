@@ -218,14 +218,54 @@ enum ProbeOutcome {
 /// is pathological.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run `helper --contract-version` and classify the answer.
-fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
-    let child = match mvm_core::env_hygiene::helper_command(helper)
+fn contract_probe_command(mut command: std::process::Command) -> std::process::Command {
+    // A resolver probe has null stdin, never a legacy supervisor's RAM replay.
+    // Scrub here, BEFORE resolution returns to a later boot-command policy.
+    command
+        .env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY")
         .arg(helper_contract::CONTRACT_PROBE_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    command
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn contract_probe_scrubs_replay_hint_even_when_not_unicode_without_execution() {
+    use std::os::unix::ffi::OsStringExt;
+    for value in [
+        std::ffi::OsString::from("shm-v1:2"),
+        std::ffi::OsString::from_vec(vec![0xff]),
+    ] {
+        let mut command = mvm_core::env_hygiene::helper_command("probe-not-executed");
+        command.env("MVM_HVF_LEGACY_CONFIG_REPLAY", value);
+        command.env("MVM_HVF_SIGNED", "1");
+        let command = contract_probe_command(command);
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "MVM_HVF_LEGACY_CONFIG_REPLAY")
+                .map(|(_, value)| value),
+            Some(None)
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "MVM_HVF_SIGNED")
+                .and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("1"))
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [std::ffi::OsStr::new(helper_contract::CONTRACT_PROBE_FLAG)]
+        );
+    }
+}
+
+/// Run `helper --contract-version` and classify the answer.
+fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
+    let child = match contract_probe_command(mvm_core::env_hygiene::helper_command(helper)).spawn()
     {
         Ok(child) => child,
         Err(e) => {

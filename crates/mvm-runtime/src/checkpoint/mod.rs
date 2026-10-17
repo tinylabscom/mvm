@@ -12,6 +12,7 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
+mod capture_custody;
 mod chunks;
 mod custody;
 mod diff;
@@ -29,6 +30,11 @@ mod retention;
 mod sealed;
 mod staging;
 
+pub use capture_custody::{
+    CaptureCustodyFailure, capture_vm_full, capture_vm_full_into_snapshot_store,
+    capture_vm_full_to_trusted_snapshot_backend,
+};
+use capture_custody::{CaptureGuardGroup, CaptureStorage, CaptureWriterState, run_capture_writer};
 pub use custody::{
     CheckpointKeyCustody, CheckpointKeyError, HostKeyCustody, TenantKeyFailure, derive_domain_keys,
     tenant_of,
@@ -66,9 +72,11 @@ pub use mvm_core::checkpoint::SUPERVISOR_CONFIG_BLOB as SUPERVISOR_CONFIG_FILE_N
 /// one without it captures the legacy unprotected layout and refuses to open a
 /// protected record. Either reads a legacy record as legacy: a record's
 /// protection is stated in its own digest-sealed metadata, never inferred.
+#[derive(Clone)]
 pub struct CheckpointStore {
     root: PathBuf,
     custody: Option<Arc<dyn CheckpointKeyCustody>>,
+    _storage_owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl CheckpointStore {
@@ -81,11 +89,23 @@ impl CheckpointStore {
     /// An explicit root with no key custody: captures are unprotected and
     /// protected records cannot be opened until custody is attached with
     /// [`Self::with_key_custody`]. The compatibility constructor, for tests
-    /// and embedders that hold no keys.
+    /// and embedders that hold no keys. This does not own an external root
+    /// deletion guard: `at(tempdir.path())` does NOT retain that TempDir.
     pub fn at(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
             custody: None,
+            _storage_owner: None,
+        }
+    }
+
+    /// An actual temporary storage owner, moved rather than recreated from its
+    /// pathname. Capture failures retain this same owner and key-custody Arc.
+    pub fn owning_tempdir(directory: tempfile::TempDir) -> Self {
+        Self {
+            root: directory.path().to_path_buf(),
+            custody: None,
+            _storage_owner: Some(Arc::new(directory)),
         }
     }
 
@@ -886,41 +906,6 @@ pub(crate) mod runtime_binding;
 pub use runtime_binding::verify_checkpoint_runtime;
 pub(crate) use runtime_binding::{metadata_blob_sha256, verify_checkpoint_runtime_at};
 
-/// Capture a running VM's consistent {rootfs, memory, machine-id} triple in one
-/// pause window. The disk clone happens while paused so memory and disk match.
-pub fn capture_vm_full(
-    store: &CheckpointStore,
-    params: CaptureVmFullParams,
-    control: &dyn VmFullControl,
-) -> Result<CheckpointMeta> {
-    capture_vm_full_inner(store, params, control, None, None)
-}
-
-/// Capture a vm_full checkpoint and stage its immutable bytes in the supplied
-/// snapshot store before writing metadata. The resulting snapshot ID is part
-/// of the checkpoint's load-bearing digest, so later claims can materialize it
-/// without rereading the captured memory image.
-pub fn capture_vm_full_into_snapshot_store(
-    store: &CheckpointStore,
-    params: CaptureVmFullParams,
-    control: &dyn VmFullControl,
-    snapshot_store: &FsSnapshotStore,
-) -> Result<CheckpointMeta> {
-    capture_vm_full_inner(store, params, control, Some(snapshot_store), None)
-}
-
-/// Capture a vm_full checkpoint and publish its bytes through an immutable
-/// trusted-snapshot backend. The backend owns the publication proof, allowing
-/// a later claim to materialize without hashing the captured blobs again.
-pub fn capture_vm_full_to_trusted_snapshot_backend(
-    store: &CheckpointStore,
-    params: CaptureVmFullParams,
-    control: &dyn VmFullControl,
-    backend: &dyn TrustedSnapshotBackend,
-) -> Result<CheckpointMeta> {
-    capture_vm_full_inner(store, params, control, None, Some(backend))
-}
-
 fn capture_vm_full_inner(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
@@ -935,257 +920,306 @@ fn capture_vm_full_inner(
     // Everything is written under a private staging name and appears under
     // the checkpoint's own name only once it is complete and durable.
     let staged = staging::StagedCapture::begin_for_vm(store, &params.id, &params.vm_name)?;
-    let content_dir = staged.content_dir();
-
-    let memory = content_dir.join("memory.bin");
-    let rootfs_dst = content_dir.join("rootfs.ext4");
-    let machine_id = content_dir.join("machine-id");
-    let workspace = params
-        .workspace_volumes
-        .iter()
-        .map(|volume| Ok((volume.blob_name()?, volume.image.clone())))
-        .collect::<Result<Vec<(String, PathBuf)>>>()?;
-
-    control.pause().context("pausing VM for vm_full capture")?;
-    // From here, RESUME on every exit path so a failure never strands the guest.
-    let captured = (|| {
-        let actual = control
-            .runtime_artifacts()
-            .context("querying the paused VM's runtime artifacts")?;
-        runtime_binding::verify_capture(params.runtime_launch_binding.as_ref(), &actual)?;
-        if let Some(source) = params.supervisor_config_src.as_deref() {
-            runtime_binding::capture_supervisor_config(
-                source,
-                &content_dir.join(SUPERVISOR_CONFIG_FILE_NAME),
-                &actual,
-            )?;
-        }
-        std::fs::write(
-            content_dir.join(runtime_binding::EVIDENCE_BLOB),
-            serde_json::to_vec(&actual)?,
-        )
-        .context("writing paused-runtime capture evidence")?;
-        control
-            .save_memory(&memory)
-            .context("saving machine memory")?;
-        let live_rootfs = control.rootfs_path()?;
-        crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
-            .context("cloning rootfs in the pause window")?;
-        // The workspace is frozen with the machine: a clone taken after resume
-        // could hold writes the captured memory never made.
-        for (blob, image) in &workspace {
-            crate::base::cow::clone_rootfs_for_instance(image, &content_dir.join(blob))
-                .with_context(|| format!("cloning workspace volume {}", image.display()))?;
-        }
-        // Collect the machine-id sidecar when the backend wrote one.
-        // Backends that do not have a machine-id concept (e.g. Firecracker) skip
-        // this step — the blob is absent from the manifest and restore does not
-        // require it.
-        let sidecar = PathBuf::from(format!("{}.machine-id", memory.display()));
-        if sidecar.exists() {
-            std::fs::rename(&sidecar, &machine_id)
-                .or_else(|_| std::fs::copy(&sidecar, &machine_id).map(|_| ()))
-                .with_context(|| format!("collecting machine-id sidecar {}", sidecar.display()))?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })();
-    let resumed =
-        if params.retain_paused && control.retain_paused_after_capture() && captured.is_ok() {
-            Ok(())
-        } else {
-            control.resume()
-        };
-    captured?;
-    resumed.context("resuming VM after vm_full capture")?;
-
-    let domain = &params.key_domain;
-    let mut content = vec![
-        protection.store_chunked(
-            store,
-            domain,
-            &content_dir,
-            "rootfs.ext4",
-            &rootfs_dst,
-            true,
-        )?,
-        protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?,
-        ContentBlob {
-            name: runtime_binding::EVIDENCE_BLOB.into(),
-            sha256: sha256_file_hex(&content_dir.join(runtime_binding::EVIDENCE_BLOB))?,
-        },
-    ];
-
-    for (blob, _) in &workspace {
-        content.push(ContentBlob {
-            name: blob.clone(),
-            sha256: sha256_file_hex(&content_dir.join(blob))?,
-        });
-    }
-
-    // Include the machine-id blob when the backend wrote one.
-    if machine_id.exists() {
-        content.push(ContentBlob {
-            name: "machine-id".into(),
-            sha256: sha256_file_hex(&machine_id)?,
-        });
-    }
-
-    // Include any extra blobs the backend wrote alongside save_memory
-    // (e.g. Firecracker's vmstate.bin).
-    for blob in control.extra_content(&content_dir)? {
-        content.push(blob);
-    }
-
-    // Persist the launch config into the checkpoint when the backend provides one.
-    // Restore needs it to rebuild the state dir the stop reaped. Backends that do
-    // not persist a supervisor config omit this blob.
-    if params.supervisor_config_src.is_some() {
-        let config_dst = content_dir.join(SUPERVISOR_CONFIG_FILE_NAME);
-        content.push(ContentBlob {
-            name: SUPERVISOR_CONFIG_FILE_NAME.into(),
-            sha256: sha256_file_hex(&config_dst)?,
-        });
-    }
-
-    // Mirror the fs_quick path: copy guest sidecars (mvm-meta.json,
-    // rootfs.verity, rootfs.roothash) so that forks of this
-    // vm_full checkpoint can read them from their content dir and boot through
-    // the runtime-meta gate plus verity reconstruction.
-    // The sidecar read is from the static source dir — outside the pause window
-    // is fine.
-    let live_rootfs_for_sidecar = control.rootfs_path()?;
-    for sidecar_blob in copy_guest_sidecars_if_present(&live_rootfs_for_sidecar, &content_dir)? {
-        content.push(sidecar_blob);
-    }
-
-    // Capture the absolute host paths the snapshot embeds, so a forked child
-    // can remap them to its own copies without editing Firecracker bitcode.
-    let anchors = control.device_anchors()?;
-    let anchor_files = control.device_anchor_files()?;
-    let embedded_files = embedded_devices::embedded_device_files(&anchors, &anchor_files)?;
-    let anchors_path = content_dir.join("device-anchors.json");
-    std::fs::write(
-        &anchors_path,
-        serde_json::to_string_pretty(&anchors).context("serializing device anchors")?,
-    )
-    .with_context(|| format!("writing {}", anchors_path.display()))?;
-    content.push(ContentBlob {
-        name: "device-anchors.json".into(),
-        sha256: sha256_file_hex(&anchors_path)?,
-    });
-
-    // Copy the anchor files the snapshot references (verity sidecar, config,
-    // secrets, transport identity) into the checkpoint so the child can
-    // materialize its own copies.
-    // The rootfs itself is already cloned above; the vsock UDS is recreated at
-    // restore time and must not be copied while the parent is bound to it.
-    for src in embedded_files {
-        let name = src
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("anchor path has no file name: {}", src.display()))?
-            .to_string_lossy();
-        // A verity anchor is also a guest sidecar when it sits beside the
-        // captured rootfs. Keep one manifest entry for the shared bytes; the
-        // checkpoint content directory is already the canonical copy.
-        if content.iter().any(|blob| blob.name == name) {
-            continue;
-        }
-        let dst = content_dir.join(name.as_ref());
-        std::fs::copy(src, &dst)
-            .with_context(|| format!("copying anchor {} to checkpoint", src.display()))?;
-        content.push(ContentBlob {
-            name: name.into_owned(),
-            sha256: sha256_file_hex(&dst)?,
-        });
-    }
-
-    // A protected capture is sealed in full here, before any mirror sees the
-    // content dir, so a mirror only ever copies opaque objects.
-    let content = protection.finish(store, &content_dir, content)?;
-
-    let snapshot_id = if let Some(backend) = trusted_backend {
-        if snapshot_store.is_some() {
-            anyhow::bail!("capture configured with both snapshot backends");
-        }
-        let id = format!(
-            "trusted-checkpoint-{}-content-{}",
-            params.id,
-            mvm_core::checkpoint::content_manifest_digest(&content)
-        );
-        let manifest_digest = mvm_core::checkpoint::content_manifest_digest(&content).to_string();
-        let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
-        let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
-            .context("load host identity for checkpoint snapshot manifest")?;
-        mvm_core::crypto::snapshot_sign::sign_manifest(
-            &content_dir,
-            &manifest_digest,
-            &identity.signing,
-        )
-        .with_context(|| format!("sign trusted checkpoint snapshot manifest {id}"))?;
-        backend
-            .stage(&snapshot_id, &content_dir)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("staging trusted checkpoint snapshot {id}"))?;
-        if let Err(error) = backend
-            .seal(&snapshot_id)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("sealing trusted checkpoint snapshot {id}"))
-        {
-            let _ = backend.remove(&snapshot_id);
-            return Err(error);
-        }
-        Some(id)
-    } else {
-        snapshot_store
-            .map(|snapshots| {
-                let id = format!(
-                    "checkpoint-{}-content-{}",
-                    params.id,
-                    mvm_core::checkpoint::content_manifest_digest(&content)
-                );
-                let manifest_digest =
-                    mvm_core::checkpoint::content_manifest_digest(&content).to_string();
-                let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
-                snapshots
-                    .create(&snapshot_id, &content_dir)
-                    .with_context(|| format!("staging checkpoint snapshot {id}"))?;
-                let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
-                    .context("load host identity for checkpoint snapshot manifest")?;
-                mvm_core::crypto::snapshot_sign::sign_manifest(
-                    &snapshots.root().join(&id),
-                    &manifest_digest,
-                    &identity.signing,
-                )
-                .with_context(|| format!("sign checkpoint snapshot manifest {id}"))?;
-                Ok::<_, anyhow::Error>(Some(id))
-            })
-            .transpose()?
-            .flatten()
+    let mut guards = CaptureGuardGroup {
+        storage: Some(Box::new(CaptureStorage {
+            staged: Some(staged),
+            protection,
+        })),
+        writer: CaptureWriterState::NotStarted,
     };
+    let mut resume_failure = None;
+    let attempt = (|| {
+        let storage = guards.storage.as_mut().expect("original capture storage");
+        let protection = &storage.protection;
+        let content_dir = storage
+            .staged
+            .as_ref()
+            .expect("original capture guard")
+            .content_dir();
 
-    // Snapshot backends still consume a materialized directory. Keep the two
-    // large files through that staging step, then remove only these redundant
-    // private staging copies. Their synced chunk objects and canonical indexes
-    // are the checkpoint representation published below.
-    protection::remove_source(&rootfs_dst)?;
-    protection::remove_source(&memory)?;
+        let memory = content_dir.join("memory.bin");
+        let rootfs_dst = content_dir.join("rootfs.ext4");
+        let machine_id = content_dir.join("machine-id");
+        let workspace = params
+            .workspace_volumes
+            .iter()
+            .map(|volume| Ok((volume.blob_name()?, volume.image.clone())))
+            .collect::<Result<Vec<(String, PathBuf)>>>()?;
 
-    let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
-        .tag(params.tag)
-        .parent(params.parent)
-        .created_unix(params.created_unix)
-        .content(content)
-        .supervisor_config_digest(params.supervisor_config_digest)
-        .runtime_overlay_version(params.runtime_overlay_version)
-        .runtime_launch_binding(params.runtime_launch_binding)
-        .snapshot_id(snapshot_id)
-        .grants(params.grants)
-        .session(params.session)
-        .key_domain(params.key_domain)
-        .protection(protection.kind())
-        .build();
-    staged.commit(&meta)?;
-    Ok(meta)
+        control.pause().context("pausing VM for vm_full capture")?;
+        // From here, RESUME on every exit path so a failure never strands the guest.
+        let captured = (|| {
+            let actual = control
+                .runtime_artifacts()
+                .context("querying the paused VM's runtime artifacts")?;
+            runtime_binding::verify_capture(params.runtime_launch_binding.as_ref(), &actual)?;
+            if let Some(source) = params.supervisor_config_src.as_deref() {
+                runtime_binding::capture_supervisor_config(
+                    source,
+                    &content_dir.join(SUPERVISOR_CONFIG_FILE_NAME),
+                    &actual,
+                )?;
+            }
+            std::fs::write(
+                content_dir.join(runtime_binding::EVIDENCE_BLOB),
+                serde_json::to_vec(&actual)?,
+            )
+            .context("writing paused-runtime capture evidence")?;
+            run_capture_writer(
+                &mut guards.writer,
+                storage.staged.as_ref().expect("original capture guard"),
+                || control.save_memory(&memory),
+            )
+            .context("saving machine memory")?;
+            let live_rootfs = control.rootfs_path()?;
+            crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
+                .context("cloning rootfs in the pause window")?;
+            // The workspace is frozen with the machine: a clone taken after resume
+            // could hold writes the captured memory never made.
+            for (blob, image) in &workspace {
+                crate::base::cow::clone_rootfs_for_instance(image, &content_dir.join(blob))
+                    .with_context(|| format!("cloning workspace volume {}", image.display()))?;
+            }
+            // Collect the machine-id sidecar when the backend wrote one.
+            // Backends that do not have a machine-id concept (e.g. Firecracker) skip
+            // this step — the blob is absent from the manifest and restore does not
+            // require it.
+            let sidecar = PathBuf::from(format!("{}.machine-id", memory.display()));
+            if sidecar.exists() {
+                std::fs::rename(&sidecar, &machine_id)
+                    .or_else(|_| std::fs::copy(&sidecar, &machine_id).map(|_| ()))
+                    .with_context(|| {
+                        format!("collecting machine-id sidecar {}", sidecar.display())
+                    })?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })();
+        let resumed =
+            if params.retain_paused && control.retain_paused_after_capture() && captured.is_ok() {
+                Ok(())
+            } else {
+                control.resume()
+            };
+        match (captured, resumed) {
+            (Err(primary), Err(resume)) => {
+                resume_failure = Some(resume);
+                return Err(primary);
+            }
+            (Err(primary), Ok(())) => return Err(primary),
+            (Ok(()), Err(resume)) => {
+                return Err(resume).context("resuming VM after vm_full capture");
+            }
+            (Ok(()), Ok(())) => {}
+        }
+
+        let domain = &params.key_domain;
+        let mut content = vec![
+            protection.store_chunked(
+                store,
+                domain,
+                &content_dir,
+                "rootfs.ext4",
+                &rootfs_dst,
+                true,
+            )?,
+            protection.store_chunked(store, domain, &content_dir, "memory.bin", &memory, false)?,
+            ContentBlob {
+                name: runtime_binding::EVIDENCE_BLOB.into(),
+                sha256: sha256_file_hex(&content_dir.join(runtime_binding::EVIDENCE_BLOB))?,
+            },
+        ];
+
+        for (blob, _) in &workspace {
+            content.push(ContentBlob {
+                name: blob.clone(),
+                sha256: sha256_file_hex(&content_dir.join(blob))?,
+            });
+        }
+
+        // Include the machine-id blob when the backend wrote one.
+        if machine_id.exists() {
+            content.push(ContentBlob {
+                name: "machine-id".into(),
+                sha256: sha256_file_hex(&machine_id)?,
+            });
+        }
+
+        // Include any extra blobs the backend wrote alongside save_memory
+        // (e.g. Firecracker's vmstate.bin).
+        let extra = run_capture_writer(
+            &mut guards.writer,
+            storage.staged.as_ref().expect("original capture guard"),
+            || control.extra_content(&content_dir),
+        )?;
+        for blob in extra {
+            content.push(blob);
+        }
+
+        // Persist the launch config into the checkpoint when the backend provides one.
+        // Restore needs it to rebuild the state dir the stop reaped. Backends that do
+        // not persist a supervisor config omit this blob.
+        if params.supervisor_config_src.is_some() {
+            let config_dst = content_dir.join(SUPERVISOR_CONFIG_FILE_NAME);
+            content.push(ContentBlob {
+                name: SUPERVISOR_CONFIG_FILE_NAME.into(),
+                sha256: sha256_file_hex(&config_dst)?,
+            });
+        }
+
+        // Mirror the fs_quick path: copy guest sidecars (mvm-meta.json,
+        // rootfs.verity, rootfs.roothash) so that forks of this
+        // vm_full checkpoint can read them from their content dir and boot through
+        // the runtime-meta gate plus verity reconstruction.
+        // The sidecar read is from the static source dir — outside the pause window
+        // is fine.
+        let live_rootfs_for_sidecar = control.rootfs_path()?;
+        for sidecar_blob in copy_guest_sidecars_if_present(&live_rootfs_for_sidecar, &content_dir)?
+        {
+            content.push(sidecar_blob);
+        }
+
+        // Capture the absolute host paths the snapshot embeds, so a forked child
+        // can remap them to its own copies without editing Firecracker bitcode.
+        let anchors = control.device_anchors()?;
+        let anchor_files = control.device_anchor_files()?;
+        let embedded_files = embedded_devices::embedded_device_files(&anchors, &anchor_files)?;
+        let anchors_path = content_dir.join("device-anchors.json");
+        std::fs::write(
+            &anchors_path,
+            serde_json::to_string_pretty(&anchors).context("serializing device anchors")?,
+        )
+        .with_context(|| format!("writing {}", anchors_path.display()))?;
+        content.push(ContentBlob {
+            name: "device-anchors.json".into(),
+            sha256: sha256_file_hex(&anchors_path)?,
+        });
+
+        // Copy the anchor files the snapshot references (verity sidecar, config,
+        // secrets, transport identity) into the checkpoint so the child can
+        // materialize its own copies.
+        // The rootfs itself is already cloned above; the vsock UDS is recreated at
+        // restore time and must not be copied while the parent is bound to it.
+        for src in embedded_files {
+            let name = src
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("anchor path has no file name: {}", src.display()))?
+                .to_string_lossy();
+            // A verity anchor is also a guest sidecar when it sits beside the
+            // captured rootfs. Keep one manifest entry for the shared bytes; the
+            // checkpoint content directory is already the canonical copy.
+            if content.iter().any(|blob| blob.name == name) {
+                continue;
+            }
+            let dst = content_dir.join(name.as_ref());
+            std::fs::copy(src, &dst)
+                .with_context(|| format!("copying anchor {} to checkpoint", src.display()))?;
+            content.push(ContentBlob {
+                name: name.into_owned(),
+                sha256: sha256_file_hex(&dst)?,
+            });
+        }
+
+        // A protected capture is sealed in full here, before any mirror sees the
+        // content dir, so a mirror only ever copies opaque objects.
+        let content = protection.finish(store, &content_dir, content)?;
+
+        let snapshot_id = if let Some(backend) = trusted_backend {
+            if snapshot_store.is_some() {
+                anyhow::bail!("capture configured with both snapshot backends");
+            }
+            let id = format!(
+                "trusted-checkpoint-{}-content-{}",
+                params.id,
+                mvm_core::checkpoint::content_manifest_digest(&content)
+            );
+            let manifest_digest =
+                mvm_core::checkpoint::content_manifest_digest(&content).to_string();
+            let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
+            let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+                .context("load host identity for checkpoint snapshot manifest")?;
+            mvm_core::crypto::snapshot_sign::sign_manifest(
+                &content_dir,
+                &manifest_digest,
+                &identity.signing,
+            )
+            .with_context(|| format!("sign trusted checkpoint snapshot manifest {id}"))?;
+            backend
+                .stage(&snapshot_id, &content_dir)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("staging trusted checkpoint snapshot {id}"))?;
+            if let Err(error) = backend
+                .seal(&snapshot_id)
+                .map_err(anyhow::Error::from)
+                .with_context(|| format!("sealing trusted checkpoint snapshot {id}"))
+            {
+                let _ = backend.remove(&snapshot_id);
+                return Err(error);
+            }
+            Some(id)
+        } else {
+            snapshot_store
+                .map(|snapshots| {
+                    let id = format!(
+                        "checkpoint-{}-content-{}",
+                        params.id,
+                        mvm_core::checkpoint::content_manifest_digest(&content)
+                    );
+                    let manifest_digest =
+                        mvm_core::checkpoint::content_manifest_digest(&content).to_string();
+                    let snapshot_id = SnapshotId::with_digest(id.clone(), manifest_digest.clone());
+                    snapshots
+                        .create(&snapshot_id, &content_dir)
+                        .with_context(|| format!("staging checkpoint snapshot {id}"))?;
+                    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+                        .context("load host identity for checkpoint snapshot manifest")?;
+                    mvm_core::crypto::snapshot_sign::sign_manifest(
+                        &snapshots.root().join(&id),
+                        &manifest_digest,
+                        &identity.signing,
+                    )
+                    .with_context(|| format!("sign checkpoint snapshot manifest {id}"))?;
+                    Ok::<_, anyhow::Error>(Some(id))
+                })
+                .transpose()?
+                .flatten()
+        };
+
+        // Snapshot backends still consume a materialized directory. Keep the two
+        // large files through that staging step, then remove only these redundant
+        // private staging copies. Their synced chunk objects and canonical indexes
+        // are the checkpoint representation published below.
+        protection::remove_source(&rootfs_dst)?;
+        protection::remove_source(&memory)?;
+
+        let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
+            .tag(params.tag)
+            .parent(params.parent)
+            .created_unix(params.created_unix)
+            .content(content)
+            .supervisor_config_digest(params.supervisor_config_digest)
+            .runtime_overlay_version(params.runtime_overlay_version)
+            .runtime_launch_binding(params.runtime_launch_binding)
+            .snapshot_id(snapshot_id)
+            .grants(params.grants)
+            .session(params.session)
+            .key_domain(params.key_domain)
+            .protection(protection.kind())
+            .build();
+        storage
+            .staged
+            .take()
+            .expect("original staging consumed once")
+            .commit(&meta)?;
+        Ok(meta)
+    })();
+    match attempt {
+        Ok(meta) => Ok(meta),
+        Err(primary) => Err(anyhow::Error::new(CaptureCustodyFailure {
+            primary: Some(primary),
+            resume: resume_failure,
+            custody: std::sync::Mutex::new(Some(Box::new(guards))),
+        })),
+    }
 }
 
 fn validate_step_lineage(

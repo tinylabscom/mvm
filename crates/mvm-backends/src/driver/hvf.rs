@@ -13,12 +13,11 @@ use std::time::Instant;
 use anyhow::{Context, Result, anyhow, bail};
 use ed25519_dalek::Signer;
 use mvm_agentd::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
-use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir, vms_dir};
+use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
-    VmId, VmStatus,
+    ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -39,6 +38,10 @@ use mvm_vmm::driver::spec::{BlockDev, KernelImage, VmmSpec};
 use mvm_vmm::driver::traits::{
     ChildForkRequest, DuplexStream, RunningVm, RunningVmStopTiming, StandbyParentSpawn, VmmDriver,
 };
+
+mod cold_channel;
+use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
+pub use cold_channel::{ColdHvfBootFailure, ColdHvfOwner, RetainedHvfLaunch};
 
 /// How long a capture waits for the paused supervisor to publish both halves of
 /// its snapshot. Generous: the write is proportional to guest RAM.
@@ -61,6 +64,31 @@ impl HvfDriver {
         Self
     }
 
+    /// Mint transport custody only through this concrete fresh launch path.
+    /// Failed launches retain the original child if safe rollback is uncertain.
+    pub fn boot_cold_owned(
+        &self,
+        spec: &VmmSpec,
+    ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
+        self.boot_cold_owned_verified(spec, None, None)
+    }
+
+    pub fn boot_cold_owned_verified(
+        &self,
+        spec: &VmmSpec,
+        kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
+        images: Option<&mvm_vmm::host::boot_images::FrozenBootImageBytes>,
+    ) -> std::result::Result<ColdHvfOwner, ColdHvfBootFailure> {
+        boot_with_custody(
+            spec,
+            None,
+            None,
+            SupervisorLaunchPolicy::cold(),
+            BootInputFiles { kernel, images },
+        )
+        .map(ColdHvfOwner::from_fresh)
+    }
+
     /// Boot a VM whose supervisor must hold the exclusive lock at `lock_path`
     /// for as long as it runs.
     ///
@@ -79,6 +107,17 @@ impl HvfDriver {
         lock_path: &Path,
     ) -> Result<Box<dyn RunningVm>> {
         boot_with_handoff(spec, None, Some(lock_path), None)
+    }
+
+    /// Host-only counterpart of the string-only standby trait seam. Launch
+    /// errors retain original native custody for the concrete runtime caller.
+    pub fn spawn_standby_parent_owned(
+        &self,
+        _req: &StandbyParentSpawn<'_>,
+    ) -> Result<StandbyHandle> {
+        // No durable receiver currently holds the original preparation leases.
+        // Refuse before handoff config, child or capture-writer creation.
+        bail!("owned HVF warm launch unavailable: authenticated durable custody receiver required")
     }
 }
 
@@ -238,6 +277,7 @@ fn relay_supervisor_config_with_handoff(
         vm_name: spec.name.clone(),
         kernel,
         kernel_fd: None,
+        boot_image_fds: None,
         cmdline,
         memory_mib: spec.memory_mib,
         vcpus: spec.vcpus,
@@ -300,17 +340,6 @@ fn relay_supervisor_config_with_handoff(
     })
 }
 
-fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
-    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
-        .context("load host identity for HVF handoff")?;
-    let state_dir = vm_state_dir(parent_vm_name);
-    Ok(HandoffConfig {
-        socket: state_dir.join("hvf-handoff.sock"),
-        root: vms_dir(),
-        verify_key: hex::encode(identity.verifying.to_bytes()),
-    })
-}
-
 /// Remediation attached when the supervisor binary cannot be resolved or
 /// verified at spawn time. A missing or stale helper is a build or install
 /// problem, not a run-time one: the raw resolution error alone sends users
@@ -335,8 +364,10 @@ fn bounded_supervisor_command(
     spec: &VmmSpec,
     state_dir: &Path,
     diagnostics: Option<&StartupDiagnostics>,
+    policy: &SupervisorLaunchPolicy,
 ) -> mvm_core::spawn_scope::BoundCommand {
     let mut command = mvm_core::env_hygiene::helper_command(supervisor);
+    (policy.configure_environment)(&mut command);
     StartupDiagnostics::configure(&mut command, diagnostics);
     mvm_core::spawn_scope::bind_spawn(
         command,
@@ -345,6 +376,36 @@ fn bounded_supervisor_command(
         &mvm_core::spawn_scope::SpawnBounds::for_guest_memory(spec.memory_mib)
             .with_cpu_grant(spec.cpu_grant),
     )
+}
+
+struct SupervisorLaunchPolicy {
+    validate_config: fn(&HvfSupervisorConfig) -> Result<()>,
+    configure_environment: fn(&mut std::process::Command),
+}
+
+impl SupervisorLaunchPolicy {
+    fn legacy() -> Self {
+        Self {
+            validate_config: |_| Ok(()),
+            configure_environment: |command| {
+                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
+            },
+        }
+    }
+
+    fn cold() -> Self {
+        Self {
+            validate_config: require_cold_config,
+            configure_environment: |command| {
+                // Bind projected boot arguments, not ambient debug overrides.
+                // Remove both from the actual child environment before scope
+                // binding seals the launch command.
+                command.env_remove("MVM_HVF_BOOTARGS");
+                command.env_remove("MVM_HVF_BOOTARGS_EXTRA");
+                command.env_remove("MVM_HVF_LEGACY_CONFIG_REPLAY");
+            },
+        }
+    }
 }
 
 fn claim_hvf_launch(state_dir: &Path) -> Result<std::fs::File> {
@@ -413,7 +474,29 @@ fn boot_with_handoff(
     exclusive_image_lock: Option<&Path>,
     kernel: Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile>,
 ) -> Result<Box<dyn RunningVm>> {
-    use std::os::fd::AsRawFd;
+    boot_with_custody(
+        spec,
+        handoff,
+        exclusive_image_lock,
+        SupervisorLaunchPolicy::legacy(),
+        BootInputFiles {
+            kernel,
+            images: None,
+        },
+    )
+    .map(|vm| Box::new(vm) as Box<dyn RunningVm>)
+    .map_err(anyhow::Error::new)
+}
+
+fn boot_retaining_child(
+    spec: &VmmSpec,
+    handoff: Option<&HandoffConfig>,
+    exclusive_image_lock: Option<&Path>,
+    pending_child: &mut Option<std::process::Child>,
+    rollback: &mut Option<mvm_vmm::host::hvf_stop::ConfirmedExit>,
+    policy: &SupervisorLaunchPolicy,
+    files: BootInputFiles<'_>,
+) -> Result<HvfRunningVm> {
     mvm_vmm::host::process_exit::require_owned_child_custody()?;
     let state_dir = stop_wire::state_dir(&spec.name)?;
     mvm_core::config::create_private_dir(&state_dir)?;
@@ -428,7 +511,8 @@ fn boot_with_handoff(
     crate::run_sidecars::clear_prior_run(&paths.state_dir);
     let mut cfg =
         relay_supervisor_config_with_handoff(spec, &paths, handoff, exclusive_image_lock)?;
-    cfg.kernel_fd = kernel.map(|kernel| kernel.file().as_raw_fd());
+    files.project(&mut cfg)?;
+    (policy.validate_config)(&cfg)?;
     let config_path = paths.state_dir.join("supervisor.json");
     mvm_core::atomic_io::atomic_write_new(
         &config_path,
@@ -441,10 +525,12 @@ fn boot_with_handoff(
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
     // Diagnostics are optional evidence, never a launch or readiness gate.
     let mut diagnostics = StartupDiagnostics::new().ok();
-    let mut command = if let Some(fd) = cfg.kernel_fd {
+    let mut command = if cfg.kernel_fd.is_some() {
         let mut command = mvm_core::env_hygiene::helper_command(&supervisor);
+        (policy.configure_environment)(&mut command);
         StartupDiagnostics::configure(&mut command, diagnostics.as_ref());
-        mvm_vmm::host::restore_image::inherit_descriptors(&mut command, vec![fd]);
+        let inherited = BootInputFiles::inheritance_vector(&cfg)?;
+        mvm_vmm::host::restore_image::inherit_descriptors(&mut command, inherited);
         let bound = mvm_core::spawn_scope::bind_spawn(
             command,
             &spec.name,
@@ -457,14 +543,24 @@ fn boot_with_handoff(
         }
         bound
     } else {
-        bounded_supervisor_command(&supervisor, spec, &paths.state_dir, diagnostics.as_ref())
+        bounded_supervisor_command(
+            &supervisor,
+            spec,
+            &paths.state_dir,
+            diagnostics.as_ref(),
+            policy,
+        )
     };
-    let mut child = command
+    let child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
+    *pending_child = Some(child);
+    let child = pending_child
+        .as_mut()
+        .context("spawned supervisor missing")?;
     if let Some(diagnostics) = &mut diagnostics {
         diagnostics.launched();
     }
@@ -543,51 +639,33 @@ fn boot_with_handoff(
         Ok(())
     })();
     if let Err(error) = readiness {
-        return Err(failed_owned_boot(error, &mut child, &spec.name));
+        return Err(failed_owned_boot(
+            error,
+            pending_child,
+            &spec.name,
+            rollback,
+        ));
     }
-    let mut child = Some(child);
-    let owned = match OwnedInstance::adopt(&mut child, &spec.name) {
+    let owned = match OwnedInstance::adopt(pending_child, &spec.name) {
         Ok(owned) => owned,
         Err(error) => {
             return Err(failed_owned_boot(
                 error,
-                child.as_mut().context("unadopted supervisor missing")?,
+                pending_child,
                 &spec.name,
+                rollback,
             ));
         }
     };
     let instance = owned.instance().clone();
-    Ok(Box::new(HvfRunningVm {
+    Ok(HvfRunningVm {
         id: VmId(spec.name.clone()),
         state_dir: paths.state_dir,
         pid_file: paths.pid_file,
         agent_socket,
         instance,
         owned: Some(owned),
-    }))
-}
-
-fn failed_owned_boot(
-    original: anyhow::Error,
-    child: &mut std::process::Child,
-    vm: &str,
-) -> anyhow::Error {
-    if matches!(child.try_wait(), Ok(Some(_))) {
-        return original.context("owned supervisor exited; runtime evidence retained");
-    }
-    let cleanup = ConnectedInstance::connect_owned(vm, child.id())
-        .and_then(ConnectedInstance::stop)
-        .and_then(|proof| {
-            proof.verify_current()?;
-            child.wait()?;
-            Ok(())
-        });
-    match cleanup {
-        Ok(()) => original.context("owned HVF rollback confirmed; runtime evidence retained"),
-        Err(error) => anyhow!(
-            "{original:#}; safe HVF rollback unconfirmed: {error:#}; runtime evidence retained"
-        ),
-    }
+    })
 }
 
 impl VmmDriver for HvfDriver {
@@ -716,49 +794,11 @@ impl VmmDriver for HvfDriver {
         &self,
         req: &StandbyParentSpawn<'_>,
     ) -> std::result::Result<StandbyHandle, StandbyError> {
-        let handoff = handoff_config(&req.spec.id)
-            .map_err(|e| StandbyError::SpawnFailed(format!("prepare HVF handoff: {e}")))?;
-        let vm = boot_with_handoff(req.boot, Some(&handoff), None, None)
-            .map_err(|e| StandbyError::SpawnFailed(format!("boot HVF standby: {e}")))?;
-        let state_dir = vm_state_dir(&req.spec.id);
-        let pid = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)).ok_or_else(|| {
-            let _ = vm.kill();
-            StandbyError::SpawnFailed(format!(
-                "HVF standby '{}' did not publish a pid",
-                req.spec.id
-            ))
-        })?;
-        let pid_u32 = u32::try_from(pid).map_err(|_| {
-            StandbyError::SpawnFailed(format!("HVF standby '{}' pid is negative", req.spec.id))
-        })?;
-        wait_for_guest_agent(&state_dir).map_err(|e| {
-            let _ = vm.kill();
-            StandbyError::SpawnFailed(format!(
-                "HVF standby '{}' guest agent did not become ready: {e}",
-                req.spec.id
-            ))
-        })?;
-        drop(vm);
-        Ok(StandbyHandle {
-            id: req.spec.id.clone(),
-            template_id: req.spec.template_id.clone(),
-            control_socket: state_dir
-                .join("hvf-control.sock")
-                .to_string_lossy()
-                .into_owned(),
-            pid: pid_u32,
-            kernel_sha256: req.spec.kernel_sha256.clone(),
-            vcpus: req.spec.vcpus,
-            mem_mib: req.spec.mem_mib,
-            binding_nonce: req.spec.binding_nonce.clone(),
-            spawned_unix_secs: mvm_core::time::now_unix_secs(),
-            state: StandbyState::Idle,
-            image_sha256: req.spec.image_sha256.clone(),
-            root_strategy: req.spec.root_strategy,
-            parent_checkpoint: None,
-            preloaded_child_vm_name: None,
-            vsock_egress: req.spec.vsock_egress,
-        })
+        // The compatibility trait cannot return host custody. Its typed
+        // error's Drop conservatively retains an unconfirmed child; callers
+        // needing retry must use the inherent owned entry point.
+        self.spawn_standby_parent_owned(req)
+            .map_err(|error| StandbyError::SpawnFailed(format!("boot HVF standby: {error:#}")))
     }
 
     fn vm_full_control(&self, vm_name: &str) -> Option<Box<dyn VmFullControl>> {
@@ -1053,17 +1093,6 @@ fn wait_for_agent_socket(
     }
 }
 
-/// How long a factory parent's guest agent has to start answering.
-const STANDBY_AGENT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Do not capture a factory parent until its guest agent has completed init.
-/// The child resumes from the captured CPU/device state rather than rebooting,
-/// so a parent captured before the agent listener is serving would make every
-/// later post-restore identity handshake impossible.
-fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
-    wait_for_standby_agent(&hvf_agent_socket(state_dir), STANDBY_AGENT_READY_TIMEOUT)
-}
-
 /// Poll `socket` until a guest agent answers the authenticated readiness probe
 /// in either serving state.
 ///
@@ -1073,6 +1102,7 @@ fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
 /// answer is the agent serving, so it counts. Requiring `Pong` instead waits
 /// for a reply the guest cannot give until the caller's next step, and fails
 /// every such parent at the deadline.
+#[cfg(test)]
 fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
@@ -1491,6 +1521,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cold_actual_child_command_removes_both_bootarg_overrides_before_sealing() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = spec_with(KernelImage::Path("/test-kernel".into()), vec![], vec![]);
+        let command = bounded_supervisor_command(
+            Path::new("/native-supervisor-not-executed"),
+            &spec,
+            directory.path(),
+            None,
+            &SupervisorLaunchPolicy::cold(),
+        );
+        for name in ["MVM_HVF_BOOTARGS", "MVM_HVF_BOOTARGS_EXTRA"] {
+            assert!(
+                command
+                    .as_command()
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none())
+            );
+        }
+    }
+
+    #[test]
     fn capabilities_pin_every_explicit_backend_capability() {
         // Every field this expression names is a design assertion, not a
         // default: deleting one changes what admission believes the backend
@@ -1883,7 +1934,11 @@ mod tests {
         }
     }
 
-    fn spec_with(kernel: KernelImage, vsock: Vec<VsockPort>, blocks: Vec<BlockDev>) -> VmmSpec {
+    pub(super) fn spec_with(
+        kernel: KernelImage,
+        vsock: Vec<VsockPort>,
+        blocks: Vec<BlockDev>,
+    ) -> VmmSpec {
         VmmSpec {
             builder_egress_endpoint: None,
             name: "w".into(),
@@ -1952,7 +2007,7 @@ mod tests {
         assert!(cfg.plan.is_some(), "the plan's own bound is what enforces");
     }
 
-    fn sample_paths() -> SupervisorPaths {
+    pub(super) fn sample_paths() -> SupervisorPaths {
         SupervisorPaths::resolve(PathBuf::from("/state/w"), 0)
     }
 
@@ -2818,6 +2873,7 @@ mod tests {
             &spec,
             scratch.path(),
             None,
+            &SupervisorLaunchPolicy::legacy(),
         );
         let argv = mvm_core::spawn_scope::rendered_argv(cmd.as_command());
 

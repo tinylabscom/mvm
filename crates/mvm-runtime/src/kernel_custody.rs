@@ -128,6 +128,13 @@ impl KernelBoundLaunch {
         &self.config
     }
 
+    #[cfg(unix)]
+    pub(crate) fn verified_kernel(
+        &self,
+    ) -> Option<&mvm_vmm::host::restore_image::VerifiedRestoreFile> {
+        self.kernel.as_ref()
+    }
+
     pub(crate) fn boot(
         &self,
         driver: &dyn mvm_vmm::driver::traits::VmmDriver,
@@ -173,7 +180,7 @@ impl KernelBoundLaunch {
     }
 
     pub(crate) fn observe_booted(&self, vm: &dyn RunningVm) -> Result<()> {
-        let Some(owner) = &self.config.canonical_kernel else {
+        let Some(_) = &self.config.canonical_kernel else {
             return Ok(());
         };
         ensure!(vm.id().0 == self.config.name, "driver returned another VM");
@@ -182,29 +189,44 @@ impl KernelBoundLaunch {
             let instance = vm
                 .authenticated_hvf_instance()?
                 .context("started VM has no authenticated lifetime identity; kernel retained")?;
-            ensure!(
-                instance.vm_id == self.config.name,
-                "kernel reader identity belongs to another VM"
-            );
-            let mut record = read_record(&self.record)?;
-            ensure!(
-                record.generation
-                    == owner
-                        .generation_dir()
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy(),
-                "kernel generation index changed during start"
-            );
-            record.instance = Some(instance);
-            mvm_core::util::atomic_io::atomic_write_durable(
-                &self.record,
-                &serde_json::to_vec(&record)?,
-            )?;
-            Ok(())
+            self.observe_instance(&instance)
         }
         #[cfg(not(unix))]
         anyhow::bail!("canonical kernel lifetime observation unsupported")
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn observe_instance(
+        &self,
+        instance: &mvm_core::protocol::hvf_control::HvfInstance,
+    ) -> Result<()> {
+        let Some(owner) = &self.config.canonical_kernel else {
+            return Ok(());
+        };
+        ensure!(
+            instance.vm_id == self.config.name,
+            "kernel reader identity belongs to another VM"
+        );
+        let mut record = read_record(&self.record)?;
+        ensure!(
+            record.instance.as_ref().is_none_or(|held| held == instance),
+            "kernel generation is already bound to another native instance"
+        );
+        ensure!(
+            record.generation
+                == owner
+                    .generation_dir()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+            "kernel generation index changed during start"
+        );
+        record.instance = Some(instance.clone());
+        mvm_core::util::atomic_io::atomic_write_durable(
+            &self.record,
+            &serde_json::to_vec(&record)?,
+        )?;
+        Ok(())
     }
 }
 
@@ -293,12 +315,21 @@ fn release_generation(
     );
     let parent = mvm_core::config::mvm_home_strict()?.join("canonical-kernel-generations");
     let generation = parent.join(&record.generation);
-    ensure!(
-        directory_identity(&generation)? == (record.device, record.inode),
-        "kernel generation directory identity changed; retained"
-    );
+    let generation_present = match std::fs::symlink_metadata(&generation) {
+        Ok(_) => {
+            ensure!(
+                directory_identity(&generation)? == (record.device, record.inode),
+                "kernel generation directory identity changed; retained"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
     recheck_exit()?;
-    std::fs::remove_dir_all(&generation)?;
+    if generation_present {
+        std::fs::remove_dir_all(&generation)?;
+    }
     std::fs::remove_file(&path)?;
     Ok(())
 }
@@ -469,6 +500,59 @@ mod tests {
         assert!(directory_identity(&link).is_err());
         std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(directory_identity(&generation).is_err());
+    }
+
+    #[test]
+    fn cleanup_mechanics_retry_partial_removal_and_refuse_replacement_or_corruption() {
+        use mvm_core::protocol::hvf_control::HvfInstance;
+        for case in 0..3 {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            let lease = RuntimeLifecycleLease::acquire("kernel-partial-unit").unwrap();
+            let generation = home
+                .path()
+                .join("canonical-kernel-generations/kernel-partial");
+            mvm_core::config::create_private_dir(&generation).unwrap();
+            let (device, inode) = directory_identity(&generation).unwrap();
+            let instance = HvfInstance {
+                vm_id: "kernel-partial-unit".into(),
+                boot_nonce: [8; 32],
+            };
+            let record = KernelUse {
+                version: 1,
+                vm: instance.vm_id.clone(),
+                generation: "kernel-partial".into(),
+                device,
+                inode,
+                instance: Some(instance.clone()),
+            };
+            let path = lease.canonical_kernel_record();
+            let bytes = serde_json::to_vec(&record).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            match case {
+                0 => {
+                    std::fs::remove_dir_all(&generation).unwrap();
+                    release_generation(&lease, &instance, || Ok(())).unwrap();
+                    assert!(!path.exists());
+                }
+                1 => {
+                    std::fs::rename(&generation, generation.with_extension("held")).unwrap();
+                    mvm_core::config::create_private_dir(&generation).unwrap();
+                    assert!(release_generation(&lease, &instance, || Ok(())).is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert!(generation.exists());
+                }
+                _ => {
+                    std::fs::write(&path, b"corrupt index").unwrap();
+                    assert!(release_generation(&lease, &instance, || Ok(())).is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt index");
+                    assert!(generation.exists());
+                }
+            }
+            // Resource mechanics only. The closure cannot create an opaque
+            // ConfirmedExit or a native output/receipt completion witness.
+        }
     }
 
     #[test]
