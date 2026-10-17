@@ -358,3 +358,18 @@ fn node_dependency_files_reuse_the_ir_node_tool_vocabulary() {
         );
     }
 }
+
+#[test]
+fn a_spec_has_no_nix_module_or_build_script_to_execute() {
+    for field in ["nix_module", "build_script", "install_script", "hooks"] {
+        let mut value = document();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert(field.into(), json!("anything"));
+        assert!(
+            serde_json::from_value::<PackSpec>(value).is_err(),
+            "{field} must not be accepted: the only build code is the generated flake"
+        );
+    }
+}
