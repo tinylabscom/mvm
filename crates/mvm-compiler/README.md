@@ -67,6 +67,12 @@ installs them with pypa's `installer` into one store path patched against the
 image closure, and puts it on the command's `PYTHONPATH`; nothing installs at
 boot and the guest needs no network.
 
+Build-scoped packages are not in the image. They are recorded in the same
+extension (`build_packages`, so the lock binds them), written to
+`pack-build.json`, and the flake adds them to the dependency-install
+derivations only. A pack spec has no field for a Nix module or build script,
+so the only code that runs at build time is the generated flake.
+
 Resolution refuses, by name, what it cannot decide exactly for one target: git,
 URL, path and directory sources; a marker over a variable the target does not
 fix (`platform_release`, `extra`, ...) or whose outcome depends on the
@@ -74,7 +80,7 @@ interpreter's patch release; a dependency edge that matches several locked
 versions; and a package with no compatible wheel, since nothing is built from
 an sdist.
 
-Lowering still refuses build-scoped packages, exact package versions, Python
+Lowering still refuses exact package versions, Python
 dependency files other than a uv lockfile at the source root, other Node
 lockfiles and more than one dependency declaration, because the IR and Nix
 factories cannot honor them for a command workload yet. A successful frozen compile runs no build; `mvmctl pack lock` and

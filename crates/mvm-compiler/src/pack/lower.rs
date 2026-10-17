@@ -35,6 +35,9 @@ pub const NPM_LOCKFILE: &str = "package-lock.json";
 /// the workload digest a lock records covers every wheel's URL and hash.
 pub const PACK_PYTHON_KEY: &str = "python";
 
+/// Key under [`PACK_EXTENSION`] holding the build-scoped package names.
+pub const PACK_BUILD_PACKAGES_KEY: &str = "build_packages";
+
 /// Lower a validated spec into a single-app, command-entrypoint Workload and
 /// validate the result.
 ///
@@ -46,15 +49,19 @@ pub const PACK_PYTHON_KEY: &str = "python";
 /// and recorded with [`record_python_environment`].
 ///
 /// Requests the current IR and Nix factories cannot honor are refused rather
-/// than dropped: build-scoped packages (the IR has one unscoped package list),
-/// exact package versions (nixpkgs is pinned only through the mvm revision),
+/// than dropped: exact package versions (nixpkgs is pinned only through the mvm revision),
 /// Python dependency files other than a uv lockfile at the source root, uv
 /// dependencies without exactly one `python3NN` interpreter package, non-npm
 /// Node lockfiles (nothing installs them for a command workload yet), and
 /// copies outside the application tree.
+///
+/// The IR has one package list, so only runtime packages go in the image.
+/// Build-scoped packages ride in the pack extension, which the workload digest
+/// covers, and the generated flake puts them on the build derivations only.
 pub fn lower(spec: &PackSpec) -> Result<Workload, PackError> {
     spec.validate()?;
-    let packages = runtime_packages(spec)?;
+    let packages = scoped_packages(spec, PackageScope::Runtime)?;
+    let build_packages = build_packages(spec)?;
     let dependencies = lower_dependencies(spec)?;
     let path = source_path(spec)?;
     let id = workload_id(spec);
@@ -90,22 +97,18 @@ pub fn lower(spec: &PackSpec) -> Result<Workload, PackError> {
             health_check: None,
         }],
         volumes: Vec::new(),
-        extensions: pack_extension(spec),
+        extensions: pack_extension(spec, &build_packages),
     };
     validate(&workload).map_err(PackError::InvalidWorkload)?;
     Ok(workload)
 }
 
-/// Runtime package names in authored order.
-fn runtime_packages(spec: &PackSpec) -> Result<Vec<String>, PackError> {
+/// Names of the packages in `scope`, in authored order.
+fn scoped_packages(spec: &PackSpec, scope: PackageScope) -> Result<Vec<String>, PackError> {
     spec.packages
         .iter()
+        .filter(|package| package.scope == scope)
         .map(|package| {
-            if package.scope == PackageScope::Build {
-                return Err(PackError::UnsupportedBuildScope {
-                    package: package.name.clone(),
-                });
-            }
             if let Some(version) = &package.version {
                 return Err(PackError::UnsupportedPackageVersion {
                     package: package.name.clone(),
@@ -219,12 +222,23 @@ fn workload_id(spec: &PackSpec) -> String {
         .to_string()
 }
 
-fn pack_extension(spec: &PackSpec) -> BTreeMap<String, serde_json::Value> {
-    let value = serde_json::json!({
+/// Build-scoped package names in authored order.
+pub(super) fn build_packages(spec: &PackSpec) -> Result<Vec<String>, PackError> {
+    scoped_packages(spec, PackageScope::Build)
+}
+
+fn pack_extension(
+    spec: &PackSpec,
+    build_packages: &[String],
+) -> BTreeMap<String, serde_json::Value> {
+    let mut value = serde_json::json!({
         "name": spec.identity.name,
         "version": spec.identity.version,
         "target": spec.target,
     });
+    if !build_packages.is_empty() {
+        value[PACK_BUILD_PACKAGES_KEY] = serde_json::json!(build_packages);
+    }
     BTreeMap::from([(PACK_EXTENSION.to_string(), value)])
 }
 
@@ -304,16 +318,37 @@ mod tests {
     }
 
     #[test]
-    fn build_scoped_packages_are_refused() {
-        let mut spec = spec();
-        spec.packages.push(PackageRequest {
+    fn build_scoped_packages_stay_out_of_the_image_and_into_the_digest() {
+        let base = spec();
+        let mut scoped = spec();
+        scoped.packages.push(PackageRequest {
             name: "gcc".into(),
             version: None,
             scope: PackageScope::Build,
         });
+        let workload = lower(&scoped).unwrap();
+        assert_eq!(workload.apps[0].image, lower(&base).unwrap().apps[0].image);
+        assert_eq!(
+            workload.extensions[PACK_EXTENSION][PACK_BUILD_PACKAGES_KEY],
+            serde_json::json!(["gcc"])
+        );
+        assert_ne!(
+            ir_hash(&workload).unwrap(),
+            ir_hash(&lower(&base).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_versioned_build_package_is_refused() {
+        let mut spec = spec();
+        spec.packages.push(PackageRequest {
+            name: "gcc".into(),
+            version: Some("13".into()),
+            scope: PackageScope::Build,
+        });
         assert!(matches!(
             lower(&spec),
-            Err(PackError::UnsupportedBuildScope { package }) if package == "gcc"
+            Err(PackError::UnsupportedPackageVersion { package, .. }) if package == "gcc"
         ));
     }
 
