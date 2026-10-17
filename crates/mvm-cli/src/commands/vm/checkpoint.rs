@@ -21,8 +21,7 @@ use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, ForkParentLiveness,
-    capture_fs_quick, capture_vm_full, fork_checkpoint,
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, capture_fs_quick, capture_vm_full,
 };
 
 use super::Cli;
@@ -136,12 +135,14 @@ pub(in crate::commands) enum CheckpointCmd {
     /// vm_full forks always auto-boot as part of the fork; `--boot` is
     /// accepted there but has no extra effect.
     ///
-    /// Unbooted fs_quick copies require complete, unpruned signed original
+    /// FsQuick copies require complete, unpruned signed original
     /// lineage and a matching content-addressed parent plan (at most 4 MiB).
     /// Unknown parent secret policy refuses even with --allow-secret-drop.
-    /// Without --boot, metadata classification also requires private 0600
-    /// records and refuses oversized historical records; valid vm_full records
-    /// still use the existing arm. No permissions are repaired.
+    /// With --boot, every declared credential must resolve to a nonempty
+    /// effective destination set; empty is not encoded as pinned deny-all.
+    /// Metadata classification requires private 0600 records and refuses
+    /// oversized historical records, including with --boot. Valid vm_full
+    /// records still use the existing arm. No permissions are repaired.
     Fork {
         /// Parent checkpoint id.
         id: String,
@@ -864,25 +865,20 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     // Pick the fork arm by the parent's class: vm_full carries memory and must
     // restore through the vm_full fork arm (which auto-boots the child); fs_quick
     // is a rootfs-only clone that the operator can optionally boot with `--boot`.
-    let parent = if boot {
-        store.read_meta(&checkpoint)?
-    } else {
-        lineage::read_unbooted_fork_parent(&store, &checkpoint)?
-    };
+    let parent = lineage::read_fork_parent(&store, &checkpoint)?;
     if intent == ForkIntent::Replay && parent.class != CheckpointClass::VmFull {
         bail!("machine replay requires a vm_full checkpoint");
     }
-    let bound_secrets =
-        if declared_secrets.is_empty() || (parent.class == CheckpointClass::FsQuick && !boot) {
-            declared_secrets.to_vec()
-        } else {
-            let tenant = super::tenant_resolution::resolve_tenant(None);
-            mvm_client::admission::secrets::ResolvedPlanSecrets::from_bindings(
-                declared_secrets.to_vec(),
-            )
-            .bind_approval(&mvm_client::secret::SecretService::local()?, &tenant)?
-            .secrets
-        };
+    let bound_secrets = if declared_secrets.is_empty() || parent.class == CheckpointClass::FsQuick {
+        declared_secrets.to_vec()
+    } else {
+        let tenant = super::tenant_resolution::resolve_tenant(None);
+        mvm_client::admission::secrets::ResolvedPlanSecrets::from_bindings(
+            declared_secrets.to_vec(),
+        )
+        .bind_approval(&mvm_client::secret::SecretService::local()?, &tenant)?
+        .secrets
+    };
     match parent.class {
         CheckpointClass::VmFull => fork_vm_full_arm(fork_vm_full::ForkVmFullArmParams {
             store: &store,
@@ -936,152 +932,95 @@ fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
     if !p.boot {
         return lineage::fork_fs_quick_unbooted(p);
     }
-    if !p.boot && !p.declared_secrets.is_empty() {
-        bail!(
-            "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
-        );
-    }
-    let child_tenant = super::tenant_resolution::resolve_tenant(None);
-    if p.boot {
-        validate_fork_secret_policy(
-            p.checkpoint,
-            p.store,
-            &child_tenant,
-            p.declared_secrets,
-            p.allow_secret_drop,
-        )?;
-    }
-    let now = now_unix();
-    let child_vm_name = p
-        .new_id
-        .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
-    let dest_dir = vm_state_dir(&child_vm_name);
-    let child_id = CheckpointId::new(format!("fork-{child_vm_name}-{now}"));
-
-    // Verify the parent against the signed audit chain before any bytes are
-    // cloned — a fork must never build on a checkpoint edited after it was
-    // audited.
-    let anchor = SignedChainAnchor::load()
-        .context("loading the signed audit chain to verify the fork parent")?;
-    let meta = fork_checkpoint(
-        p.store,
-        ForkParams {
-            checkpoint: p.checkpoint.clone(),
-            child_id,
-            child_vm_name: child_vm_name.clone(),
-            dest_dir: dest_dir.clone(),
-            created_unix: now,
-            parent_liveness: ForkParentLiveness::MustBeStopped,
-            child_plan_json: None,
-            child_tenant_id: None,
-        },
-        &anchor,
-    )
-    .with_context(|| format!("forking checkpoint {:?}", p.checkpoint.as_str()))?;
-
-    // A fork that we can't audit (signer present but emit fails) is refused —
-    // an unaudited lineage record would break the chain. A missing plan/signer
-    // is best-effort, matching capture.
-    bind_checkpoint_forked(
-        p.checkpoint,
-        &meta,
-        &child_vm_name,
-        p.store,
-        p.declared_secrets,
-        &child_tenant,
-    )?;
-
-    if p.boot {
-        let instance_rootfs = dest_dir.join("rootfs.ext4");
+    #[cfg(unix)]
+    {
+        let prepared = lineage::PreparedBootFork::prepare(&p)?;
+        let meta = prepared.materialize()?;
+        prepared.publish(&meta)?;
+        let instance_rootfs = prepared.destination().join("rootfs.ext4");
         boot_forked_child(BootForkedChildParams {
-            child_vm_name: &child_vm_name,
+            prepared: &prepared,
             instance_rootfs: &instance_rootfs,
-            parent_checkpoint: p.checkpoint,
-            store: p.store,
             hypervisor: p.hypervisor,
             cpus_override: p.cpus_override,
             memory_override: p.memory_override,
-            declared_secrets: p.declared_secrets,
             emit_text: !p.json,
-        })?;
-    }
-
-    if p.json {
-        crate::json_out::emit_json(&CheckpointForkJson {
-            schema_version: 1,
-            action: "fork",
-            parent_id: p.checkpoint,
-            child_vm_name: &child_vm_name,
-            booted: p.boot,
-            checkpoint: &meta,
-        })?;
-    } else {
-        ui::success(&format!(
-            "forked {} -> checkpoint {} (vm '{}')",
-            p.checkpoint.as_str(),
-            meta.id.as_str(),
-            child_vm_name
-        ));
-        if !p.boot {
-            ui::info(&format!(
-                "child '{child_vm_name}' materialized at {}; re-run the fork with \
-                 --boot to admit and launch a child, or delete the directory to \
-                 discard this one",
-                dest_dir.display()
+        })
+        .map_err(|error| prepared.retained_error(error))?;
+        if p.json {
+            crate::json_out::emit_json(&CheckpointForkJson {
+                schema_version: 1,
+                action: "fork",
+                parent_id: p.checkpoint,
+                child_vm_name: prepared.child_name(),
+                booted: true,
+                checkpoint: &meta,
+            })?;
+        } else {
+            ui::success(&format!(
+                "forked {} -> checkpoint {} (vm '{}')",
+                p.checkpoint.as_str(),
+                meta.id.as_str(),
+                prepared.child_name()
             ));
         }
+        Ok(())
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        bail!("authenticated fs_quick boots are unavailable on this platform")
+    }
 }
 
 /// Inputs for [`boot_forked_child`]. Grouped to stay under the
 /// `clippy::too_many_arguments` workspace ceiling.
-struct BootForkedChildParams<'a> {
-    child_vm_name: &'a str,
+#[cfg(unix)]
+struct BootForkedChildParams<'a, 'store> {
+    prepared: &'a lineage::PreparedBootFork<'store>,
     /// Absolute path to the materialized child rootfs (the fork output).
     /// Passed as-is to admission so `prepare_instance_rootfs`'s
     /// source-equals-instance arm returns without clobbering it.
     instance_rootfs: &'a std::path::Path,
-    /// The parent fs_quick checkpoint id — used to look up the parent VM's
-    /// plan when the child has none yet.
-    parent_checkpoint: &'a CheckpointId,
-    store: &'a CheckpointStore,
     hypervisor: &'a str,
     cpus_override: Option<u32>,
     memory_override: Option<&'a str>,
-    /// Declared for this child's plan. A fs_quick fork admits a plan only under
-    /// `--boot`, which is this function, so this is where they land.
-    declared_secrets: &'a [mvm_core::plan::SecretBinding],
     emit_text: bool,
 }
 
 /// Admit and boot a forked child VM after its rootfs has been materialized.
 ///
-/// Resource resolution: flags win > parent's persisted plan > global defaults.
+/// Resource resolution: flags win over the captured authenticated original plan.
 /// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
 /// returns early when source == instance, so nothing gets clobbered).
-fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
+#[cfg(unix)]
+fn boot_forked_child(p: BootForkedChildParams<'_, '_>) -> Result<()> {
     use mvm_core::util::parse_human_size;
     use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
-    let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
-    let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
-    let parent_bundle = InheritedBundle::of_parent_vm(&parent_meta.vm_name)?;
-    // Resource shape: flag > parent plan > global defaults.
-    let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
-    let user_cfg = mvm_core::user_config::load(None);
-    let cpus = p
-        .cpus_override
-        .or(parent_cpus)
-        .unwrap_or(user_cfg.default_cpus);
+    let parent_plan = p.prepared.parent_plan();
+    let parent_agent_verbs = parent_plan
+        .agent_verbs
+        .as_ref()
+        .map(|verbs| {
+            verbs
+                .iter()
+                .map(|verb| verb.as_str().to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let parent_meta = p.prepared.parent_meta();
+    let parent_bundle = InheritedBundle::from_parent_plan(parent_plan)?;
+    let child_vm_name = p.prepared.child_name();
+    let cpus = p.cpus_override.unwrap_or(parent_plan.resources.cpus);
     let mem_mib = match p.memory_override {
         Some(s) => parse_human_size(s).context("parsing --memory for --boot")?,
-        None => parent_mem.unwrap_or(user_cfg.default_memory_mib),
+        None => parent_plan.resources.mem_mib as u32,
     } as u64;
 
-    let tenant = super::tenant_resolution::resolve_tenant(None);
+    let tenant = p.prepared.child_tenant();
 
     // The booted child needs a real kernel path; work-image boots ship none.
     // Fall back to the cached builder-VM kernel when the placeholder is absent.
@@ -1099,7 +1038,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     // validity window, which admission starts (see
     // `mvm_client::launch::boot_order`).
     let mut start_config = mvm_core::vm_backend::VmStartConfig {
-        name: p.child_vm_name.to_string(),
+        name: child_vm_name.to_string(),
         // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
         // hits the source-equals-instance no-op arm and leaves the fork intact.
         rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
@@ -1123,9 +1062,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         gpu: false,
         instructions: Default::default(),
         outputs: Vec::new(),
-        network_mode: parent_network_mode(p.parent_checkpoint, p.store),
-        tenant: &tenant,
-        vm_name: p.child_vm_name,
+        network_mode: parent_plan.network_mode,
+        tenant,
+        vm_name: child_vm_name,
         backend_name: &effective_hypervisor,
         configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
         rootfs_path: p.instance_rootfs,
@@ -1137,9 +1076,9 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         mem_mib,
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: crate::commands::vm::managed_secrets::secret_release_for_bindings(
-            p.declared_secrets,
+            p.prepared.bindings(),
         ),
-        secrets: p.declared_secrets.to_vec(),
+        secrets: p.prepared.bindings().to_vec(),
         caller_commitment: None,
         ledger: &ledger,
         keys_dir: None,
@@ -1181,6 +1120,10 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)?;
     }
 
+    if let Err(error) = p.prepared.validate_admitted_plan(admission.admitted.plan()) {
+        super::up::emit_failed(&admission, "fork-secret-policy", &error);
+        return Err(error);
+    }
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
     if let Err(e) = backend.start(&start_config) {
         super::up::emit_failed(&admission, "backend-start", &e);
@@ -1191,7 +1134,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     if p.emit_text {
         ui::success(&format!(
             "child VM '{}' booted (hypervisor: {})",
-            p.child_vm_name, effective_hypervisor
+            child_vm_name, effective_hypervisor
         ));
     }
     Ok(())
@@ -1408,6 +1351,7 @@ fn resolve_fork_secret_audit(
         .collect()
 }
 
+#[cfg(test)]
 fn parent_plan_resources(
     parent_checkpoint: &CheckpointId,
     store: &CheckpointStore,

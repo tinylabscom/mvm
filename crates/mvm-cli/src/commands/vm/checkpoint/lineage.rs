@@ -9,10 +9,13 @@ use mvm_runtime::image_lineage::ImageChainAnchor;
 use super::validated_checkpoint_id;
 use crate::ui;
 
-/// Classify a no-boot request before any permissive checkpoint-store read.
+#[cfg(unix)]
+pub(super) use strict_fs_quick::PreparedBootFork;
+
+/// Classify a fork request before any permissive checkpoint-store read.
 /// This also bounds classification of vm_full records; their valid records
 /// continue through the existing vm_full arm, not the strict fs_quick route.
-pub(super) fn read_unbooted_fork_parent(
+pub(super) fn read_fork_parent(
     store: &CheckpointStore,
     id: &mvm_core::checkpoint::CheckpointId,
 ) -> Result<CheckpointMeta> {
@@ -24,7 +27,7 @@ pub(super) fn read_unbooted_fork_parent(
     #[cfg(not(unix))]
     {
         let _ = (store, id);
-        anyhow::bail!("guarded unbooted checkpoint classification is unavailable on this platform")
+        anyhow::bail!("guarded checkpoint classification is unavailable on this platform")
     }
 }
 
@@ -303,37 +306,71 @@ mod strict_fs_quick {
         json: bool,
     }
 
-    fn prepare(p: super::super::ForkFsQuickArmParams<'_>) -> Result<PreparedFork<'_>> {
-        mvm_client::admission::secrets::validate_secret_sources(p.declared_secrets)?;
-        if !p.declared_secrets.is_empty() {
-            bail!(
-                "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
-            );
-        }
+    /// Authenticated source facts only, not a permit to copy or start a VM.
+    struct AuthenticatedFsQuickParent {
+        parent: CheckpointMeta,
+        plan: ExecutionPlan,
+        anchor: SignedChainAnchor,
+        home: std::path::PathBuf,
+        history_key: ed25519_dalek::VerifyingKey,
+    }
+
+    fn authenticate_parent(
+        store: &CheckpointStore,
+        checkpoint: &mvm_core::checkpoint::CheckpointId,
+    ) -> Result<AuthenticatedFsQuickParent> {
         let mut remaining = METADATA_READ_BUDGET;
-        let parent = read_checkpoint(p.store, p.checkpoint, &mut remaining)?;
+        let parent = read_checkpoint(store, checkpoint, &mut remaining)?;
         if parent.class != mvm_core::checkpoint::CheckpointClass::FsQuick {
-            bail!("unbooted fork requires an fs_quick checkpoint");
+            bail!("strict fork requires an fs_quick checkpoint");
         }
         let home = mvm_core::config::mvm_home_strict()?;
         let key_store = LocalTranscriptStore::open(&home)
             .context("existing fork authority root is required")?;
         let (anchor, history_key) = load_anchor(&home, &key_store)?;
-        preflight_store(p.store)?;
-        verify_lineage(p.store, p.checkpoint, &anchor)?;
+        preflight_store(store)?;
+        verify_lineage(store, checkpoint, &anchor)?;
         let plan = original_plan(&home, &anchor, &parent)?;
-        let names = plan
+        Ok(AuthenticatedFsQuickParent {
+            parent,
+            plan,
+            anchor,
+            home,
+            history_key,
+        })
+    }
+
+    fn validate_drop(
+        original: &ExecutionPlan,
+        declared: &[mvm_core::plan::SecretBinding],
+        allow_secret_drop: bool,
+    ) -> Result<()> {
+        let names = original
             .secrets
             .iter()
             .map(|binding| binding.name.clone())
             .collect::<Vec<_>>();
         super::super::enforce_secret_attenuation(
-            &super::super::dropped_parent_secret_names(&names, &[]),
-            p.allow_secret_drop,
-        )?;
+            &super::super::dropped_parent_secret_names(&names, declared),
+            allow_secret_drop,
+        )
+    }
+
+    fn prepare_common<'a>(
+        p: &super::super::ForkFsQuickArmParams<'a>,
+        facts: AuthenticatedFsQuickParent,
+    ) -> Result<PreparedFork<'a>> {
+        let AuthenticatedFsQuickParent {
+            parent,
+            plan,
+            anchor,
+            home,
+            history_key,
+        } = facts;
         let now = super::super::now_unix();
         let name = p
             .new_id
+            .clone()
             .unwrap_or_else(|| format!("{}-fork-{now}", p.checkpoint.as_str()));
         mvm_core::naming::validate_vm_name(&name)?;
         let child_id = validated_checkpoint_id(&format!("fork-{name}-{now}"))?;
@@ -343,6 +380,8 @@ mod strict_fs_quick {
         let destination = mvm_core::config::vm_state_dir(&name);
         absent(&destination)?;
         absent(&p.store.dir_for(&child_id))?;
+        let key_store =
+            LocalTranscriptStore::open(&home).context("existing fork signing root is required")?;
         let (signing, verifying) = key_store
             .existing_host_keypair()
             .context("existing matching host signing authority is required")?;
@@ -365,6 +404,185 @@ mod strict_fs_quick {
             now,
             json: p.json,
         })
+    }
+
+    fn prepare(p: super::super::ForkFsQuickArmParams<'_>) -> Result<PreparedFork<'_>> {
+        mvm_client::admission::secrets::validate_secret_sources(p.declared_secrets)?;
+        if !p.declared_secrets.is_empty() {
+            bail!(
+                "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"
+            );
+        }
+        let facts = authenticate_parent(p.store, p.checkpoint)?;
+        validate_drop(&facts.plan, &[], p.allow_secret_drop)?;
+        prepare_common(&p, facts)
+    }
+
+    fn effective_child_bindings(
+        service: &mvm_client::secret::SecretService,
+        tenant: &str,
+        declared: &[mvm_core::plan::SecretBinding],
+    ) -> Result<Vec<mvm_core::plan::SecretBinding>> {
+        use mvm_core::crypto::secret_binding::{SecretApproval, plan_binding_hosts};
+        use mvm_core::plan::SecretSource;
+
+        mvm_client::admission::secrets::validate_secret_sources(declared)?;
+        let mut effective = Vec::with_capacity(declared.len());
+        for binding in declared {
+            let SecretSource::Keystore { address } = &binding.source else {
+                unreachable!("sources validated before metadata access");
+            };
+            // Keep canonical get ok/miss/err auditing. This is metadata only;
+            // no value is revealed and no substitution placeholder is minted.
+            let stored = service
+                .metadata(tenant, address)?
+                .context("fork secret is missing")?
+                .binding
+                .context("fork secret binding is missing")?;
+            if !stored.inject.admits(stored.auth_type) {
+                bail!("fork secret injection mode is incompatible with its authentication type");
+            }
+            let destinations = plan_binding_hosts(binding, address, &stored)?;
+            if destinations.is_empty() {
+                // [] means dynamic stored policy, not a pinned deny-all. All
+                // supported fork bindings are destination-governed credentials.
+                bail!("strict fork requires a nonempty effective secret destination set");
+            }
+            let mut bound = binding.clone();
+            bound.destinations = destinations;
+            bound.approval_required |= stored.approve == SecretApproval::Ask;
+            effective.push(bound);
+        }
+        Ok(effective)
+    }
+
+    /// Prepared ordinary source facts and metadata, not native boot authority.
+    /// Fields cannot be manufactured by the command adapter.
+    pub(in crate::commands::vm::checkpoint) struct PreparedBootFork<'a> {
+        common: PreparedFork<'a>,
+        child_tenant: String,
+        effective: Vec<mvm_core::plan::SecretBinding>,
+        service: Option<mvm_client::secret::SecretService>,
+    }
+
+    impl<'a> PreparedBootFork<'a> {
+        pub(in crate::commands::vm::checkpoint) fn prepare(
+            p: &super::super::ForkFsQuickArmParams<'a>,
+        ) -> Result<Self> {
+            mvm_client::admission::secrets::validate_secret_sources(p.declared_secrets)?;
+            let facts = authenticate_parent(p.store, p.checkpoint)?;
+            validate_drop(&facts.plan, p.declared_secrets, p.allow_secret_drop)?;
+            // Destination and existing issuer prerequisites precede constructing
+            // the metadata service, which may initialize/audit infrastructure.
+            let mut common = prepare_common(p, facts)?;
+            common.emitter = common.emitter.with_receipts();
+            let child_tenant = super::super::super::tenant_resolution::resolve_tenant(None);
+            let service = if p.declared_secrets.is_empty() {
+                None
+            } else {
+                Some(mvm_client::secret::SecretService::local()?)
+            };
+            let effective = match &service {
+                Some(service) => {
+                    effective_child_bindings(service, &child_tenant, p.declared_secrets)?
+                }
+                None => Vec::new(),
+            };
+            Ok(Self {
+                common,
+                child_tenant,
+                effective,
+                service,
+            })
+        }
+
+        fn revalidate(&self) -> Result<()> {
+            if let Some(service) = &self.service {
+                let current =
+                    effective_child_bindings(service, &self.child_tenant, &self.effective)?;
+                if current != self.effective {
+                    bail!(
+                        "fork secret policy changed after preparation; refusing stale signed bindings"
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn materialize(&self) -> Result<CheckpointMeta> {
+            self.revalidate()?;
+            self.common.materialize()
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn publish(
+            &self,
+            child: &CheckpointMeta,
+        ) -> Result<()> {
+            let bindings = self
+                .effective
+                .iter()
+                .map(
+                    |binding| mvm_hostd::audit::bind::CheckpointForkSecretBinding {
+                        name: binding.name.clone(),
+                        allowed_hosts: binding.destinations.clone(),
+                    },
+                )
+                .collect::<Vec<_>>();
+            self.common.publish_bindings(child, &bindings)
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn parent_plan(&self) -> &ExecutionPlan {
+            &self.common.plan
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn parent_meta(&self) -> &CheckpointMeta {
+            &self.common.parent
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn child_name(&self) -> &str {
+            &self.common.name
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn destination(&self) -> &Path {
+            &self.common.destination
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn child_tenant(&self) -> &str {
+            &self.child_tenant
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn bindings(
+            &self,
+        ) -> &[mvm_core::plan::SecretBinding] {
+            &self.effective
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn validate_admitted_plan(
+            &self,
+            child: &ExecutionPlan,
+        ) -> Result<()> {
+            if child.tenant.0 != self.child_tenant
+                || child.workload.0 != self.common.name
+                || child.secrets != self.effective
+            {
+                bail!("admitted child does not retain the prepared fork secret bindings");
+            }
+            // Never silently strengthen/mutate an already signed child plan.
+            // Per-use SecretUse approval remains the live endpoint's job.
+            self.revalidate()
+        }
+
+        pub(in crate::commands::vm::checkpoint) fn retained_error(
+            &self,
+            error: anyhow::Error,
+        ) -> anyhow::Error {
+            error.context(format!(
+                "fork materialized at {}; checkpoint {} retained at {}; child boot failed",
+                self.common.destination.display(),
+                self.common.child_id.as_str(),
+                self.common.store.dir_for(&self.common.child_id).display()
+            ))
+        }
     }
 
     impl PreparedFork<'_> {
@@ -400,6 +618,14 @@ mod strict_fs_quick {
         }
 
         fn publish(&self, child: &CheckpointMeta) -> Result<()> {
+            self.publish_bindings(child, &[])
+        }
+
+        fn publish_bindings(
+            &self,
+            child: &CheckpointMeta,
+            bindings: &[mvm_hostd::audit::bind::CheckpointForkSecretBinding],
+        ) -> Result<()> {
             let publication = (|| -> Result<()> {
                 if child.id != self.child_id
                     || child.vm_name != self.name
@@ -417,7 +643,7 @@ mod strict_fs_quick {
                     &self.parent.id,
                     child,
                     &self.name,
-                    &[],
+                    bindings,
                 )
             })();
             publication.with_context(|| format!(
@@ -630,6 +856,570 @@ mod strict_fs_quick {
             let mut result = std::collections::BTreeMap::new();
             walk(root, root, &mut result);
             result
+        }
+
+        mod boot_preflight {
+            use super::*;
+            use mvm_client::secret::{SecretService, SecretValueInput};
+            use mvm_contract::ir::{AuthType, InjectionMode, Sigv4Params};
+            use mvm_core::crypto::secret_binding::{
+                BindingStore, FileBindingStore, SecretApproval, SecretBindingMeta,
+            };
+            use mvm_core::crypto::secret_store::{
+                BACKEND_ENV, FileSecretStore, default_secrets_dir,
+            };
+            use std::sync::Arc;
+
+            fn fixture(parent_secrets: Vec<SecretBinding>) -> Fixture {
+                let mut fixture = Fixture::new(parent_secrets);
+                fixture._env.set(BACKEND_ENV, "file");
+                fixture._env.set("MVM_TENANT", "local");
+                fixture
+            }
+
+            fn binding() -> SecretBinding {
+                secret(SecretSource::Keystore {
+                    address: "api".into(),
+                })
+            }
+
+            fn metadata(auth: AuthType, inject: InjectionMode) -> SecretBindingMeta {
+                SecretBindingMeta {
+                    auth_type: auth,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: (auth == AuthType::Sigv4).then(|| Sigv4Params {
+                        access_key_id: "AKIAIOSFODNN7EXAMPLE".into(),
+                        region: "us-east-1".into(),
+                        service: "s3".into(),
+                    }),
+                    inject,
+                    provider: None,
+                    approve: SecretApproval::Never,
+                    oauth: None,
+                }
+            }
+
+            fn seed_secret(fixture: &Fixture) -> SecretService {
+                // An explicit file-backed TEST fixture: never the OS keychain.
+                // Preparation only lists metadata; it never decrypts this value.
+                let service = SecretService::builder()
+                    .store(Arc::new(FileSecretStore::with_dir(
+                        default_secrets_dir().unwrap(),
+                    )))
+                    .bindings(Arc::new(FileBindingStore::default_location().unwrap()))
+                    .machines_root(fixture.home.path().join("machines"))
+                    .audit(mvm_client::secret::audit::SecretAudit::with_path(
+                        fixture.home.path().join("fixture-secret-audit.jsonl"),
+                    ))
+                    .build()
+                    .unwrap();
+                service
+                    .put(
+                        "local",
+                        "api",
+                        SecretValueInput::new("synthetic-fixture".into()),
+                    )
+                    .unwrap();
+                service
+            }
+
+            fn store_metadata(meta: &SecretBindingMeta) {
+                FileBindingStore::default_location()
+                    .unwrap()
+                    .put("local", "api", meta)
+                    .unwrap();
+            }
+
+            fn prepare_boot<'a>(
+                fixture: &'a Fixture,
+                declared: &'a [SecretBinding],
+                allow_drop: bool,
+            ) -> Result<PreparedBootFork<'a>> {
+                let mut params = fixture.params(allow_drop);
+                params.boot = true;
+                params.declared_secrets = declared;
+                PreparedBootFork::prepare(&params)
+            }
+
+            fn preparation_error(result: Result<PreparedBootFork<'_>>) -> anyhow::Error {
+                match result {
+                    Ok(_) => panic!("expected preparation refusal"),
+                    Err(error) => error,
+                }
+            }
+
+            fn invoke_boot(fixture: &Fixture, declare_api: bool, allow_drop: bool) -> Result<()> {
+                let mut args = vec![
+                    "mvmctl",
+                    "machine",
+                    "checkpoint",
+                    "fork",
+                    "parent",
+                    "--new-id",
+                    "childvm",
+                    "--boot",
+                    "--hypervisor",
+                    "docker",
+                ];
+                // Canonical unconditional Docker refusal is a safety stop if a
+                // policy regression reaches boot. Unknown names are NOT safe
+                // sentinels: the selector permits them. No backend is created.
+                if declare_api {
+                    args.extend(["--secret", "TOKEN=api"]);
+                }
+                if allow_drop {
+                    args.push("--allow-secret-drop");
+                }
+                let cli = crate::commands::Cli::try_parse_from(args)?;
+                let _ = fixture;
+                cli.command
+                    .clone()
+                    .run(&cli, &mvm_core::user_config::MvmConfig::default())
+            }
+
+            fn no_child(fixture: &Fixture) {
+                assert!(
+                    std::fs::symlink_metadata(fixture.home.path().join("vms/childvm")).is_err()
+                );
+                for entry in std::fs::read_dir(fixture.store.root()).unwrap() {
+                    let entry = entry.unwrap();
+                    if entry.file_type().unwrap().is_dir() {
+                        let name = entry.file_name();
+                        let name = name.to_str().unwrap();
+                        assert!(name == "parent" || name.starts_with('.'), "{name}");
+                    }
+                }
+            }
+
+            #[test]
+            fn actual_cli_unknown_original_refuses_even_allow_drop_before_service() {
+                for kind in 0..3 {
+                    let fixture = fixture(Vec::new());
+                    match kind {
+                        0 => std::fs::remove_file(fixture.plan_path()).unwrap(),
+                        1 => {
+                            let mut other = fixture.plan.clone();
+                            other.resources.cpus += 1;
+                            other.plan_id = mvm_core::plan::compute_plan_id(&other);
+                            fixture.persist_plan(&other);
+                        }
+                        _ => fixture.emit_creation(&fixture.plan, &fixture.parent),
+                    }
+                    let before = snapshot(fixture.home.path());
+                    let error = invoke_boot(&fixture, true, true).unwrap_err();
+                    assert!(
+                        format!("{error:#}").contains(match kind {
+                            0 => "required existing fork authority file",
+                            1 => "does not match authenticated original",
+                            _ => "duplicate or conflicting",
+                        }),
+                        "{error:#}"
+                    );
+                    assert_eq!(before, snapshot(fixture.home.path()));
+                    no_child(&fixture);
+                }
+            }
+
+            #[test]
+            fn original_drop_gate_precedes_metadata_and_allows_explicit_omission_only() {
+                let fixture = fixture(vec![binding()]);
+                let before = snapshot(fixture.home.path());
+                let error = invoke_boot(&fixture, false, false).unwrap_err();
+                assert!(format!("{error:#}").contains("would drop parent secret bindings"));
+                assert_eq!(before, snapshot(fixture.home.path()));
+                let prepared = prepare_boot(&fixture, &[], true).unwrap();
+                assert!(prepared.bindings().is_empty());
+                assert!(prepared.service.is_none());
+                no_child(&fixture);
+            }
+
+            #[test]
+            fn destination_and_existing_issuer_refuse_before_metadata_service() {
+                for kind in 0..3 {
+                    let fixture = fixture(Vec::new());
+                    match kind {
+                        0 => std::fs::create_dir(fixture.home.path().join("vms/childvm")).unwrap(),
+                        1 => symlink(
+                            fixture.home.path().join("missing"),
+                            fixture.home.path().join("vms/childvm"),
+                        )
+                        .unwrap(),
+                        _ => write_private(
+                            &fixture.home.path().join("keys/host-signer.ed25519"),
+                            &[41; 32],
+                        ),
+                    }
+                    let before = snapshot(fixture.home.path());
+                    let error = invoke_boot(&fixture, true, true).unwrap_err();
+                    assert!(
+                        format!("{error:#}").contains(if kind < 2 {
+                            "occupied"
+                        } else {
+                            "signing authority"
+                        }),
+                        "{error:#}"
+                    );
+                    assert_eq!(before, snapshot(fixture.home.path()));
+                }
+            }
+
+            #[test]
+            fn all_four_approval_pairs_remain_per_use_not_copy_consent() {
+                for requested in [false, true] {
+                    for ask in [false, true] {
+                        let fixture = fixture(Vec::new());
+                        let service = seed_secret(&fixture);
+                        let mut stored = metadata(AuthType::Bearer, InjectionMode::Header);
+                        stored.approve = if ask {
+                            SecretApproval::Ask
+                        } else {
+                            SecretApproval::Never
+                        };
+                        store_metadata(&stored);
+                        let mut declaration = binding();
+                        declaration.approval_required = requested;
+                        let declared = [declaration];
+                        let audit_path = fixture.home.path().join("fixture-secret-audit.jsonl");
+                        let before = std::fs::read_to_string(&audit_path)
+                            .unwrap()
+                            .lines()
+                            .count();
+                        let effective =
+                            effective_child_bindings(&service, "local", &declared).unwrap();
+                        assert_eq!(
+                            std::fs::read_to_string(audit_path).unwrap().lines().count(),
+                            before + 1
+                        );
+                        let prepared = prepare_boot(&fixture, &declared, false).unwrap();
+                        assert_eq!(prepared.bindings(), effective);
+                        assert_eq!(prepared.bindings()[0].approval_required, requested || ask);
+                        assert_eq!(prepared.bindings()[0].destinations, ["api.example.com"]);
+                        no_child(&fixture);
+                    }
+                }
+            }
+
+            #[test]
+            fn every_legal_auth_injection_pair_requires_a_nonempty_effective_host_set() {
+                let mut legal = 0;
+                for auth in [
+                    AuthType::Sigv4,
+                    AuthType::Hmac,
+                    AuthType::Bearer,
+                    AuthType::Basic,
+                ] {
+                    for inject in [
+                        InjectionMode::Header,
+                        InjectionMode::QueryParam,
+                        InjectionMode::UrlPath,
+                        InjectionMode::BasicAuth,
+                    ] {
+                        if !inject.admits(auth) {
+                            continue;
+                        }
+                        legal += 1;
+                        let fixture = fixture(Vec::new());
+                        let _service = seed_secret(&fixture);
+                        let mut stored = metadata(auth, inject);
+                        stored.allowed_hosts.clear();
+                        store_metadata(&stored);
+                        let declared = [binding()];
+                        let error = preparation_error(prepare_boot(&fixture, &declared, false));
+                        assert!(
+                            format!("{error:#}").contains("nonempty effective"),
+                            "{error:#}"
+                        );
+                        no_child(&fixture);
+                        stored.allowed_hosts.push("api.example.com".into());
+                        store_metadata(&stored);
+                        let prepared = prepare_boot(&fixture, &declared, false).unwrap();
+                        assert_eq!(prepared.bindings()[0].destinations, ["api.example.com"]);
+                        no_child(&fixture);
+                    }
+                }
+                assert_eq!(legal, 9);
+            }
+
+            #[test]
+            fn missing_secret_binding_and_incompatible_injection_leave_no_child() {
+                for kind in 0..3 {
+                    let fixture = fixture(Vec::new());
+                    if kind != 0 {
+                        let _service = seed_secret(&fixture);
+                        if kind == 2 {
+                            store_metadata(&metadata(AuthType::Bearer, InjectionMode::BasicAuth));
+                        }
+                    }
+                    let error = invoke_boot(&fixture, true, false).unwrap_err();
+                    let message = format!("{error:#}");
+                    assert!(
+                        message.contains(match kind {
+                            0 => "fork secret is missing",
+                            1 => "fork secret binding is missing",
+                            _ => "injection mode is incompatible",
+                        }),
+                        "{message}"
+                    );
+                    // Canonical metadata get miss/ok auditing may write here.
+                    // No claim of zero filesystem effects after metadata access.
+                    no_child(&fixture);
+                }
+            }
+
+            #[test]
+            fn destination_widening_refuses_at_actual_fork_entry_before_copy() {
+                let fixture = fixture(Vec::new());
+                let _service = seed_secret(&fixture);
+                store_metadata(&metadata(AuthType::Bearer, InjectionMode::Header));
+                let mut declaration = binding();
+                declaration.destinations = vec!["evil.example.com".into()];
+                let declared = [declaration];
+                let error = crate::commands::vm::checkpoint::fork(
+                    crate::commands::vm::checkpoint::ForkCmdParams {
+                        id: "parent",
+                        new_id: Some("childvm".into()),
+                        boot: true,
+                        hypervisor: "docker",
+                        cpus: None,
+                        memory: None,
+                        declared_secrets: &declared,
+                        allow_secret_drop: false,
+                        json: true,
+                        intent: crate::commands::vm::checkpoint::ForkIntent::Ordinary,
+                    },
+                )
+                .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("outside that allow-list"),
+                    "{error:#}"
+                );
+                no_child(&fixture);
+            }
+
+            #[test]
+            fn captured_original_settings_survive_mutable_plan_replacement() {
+                let mut fixture = fixture(Vec::new());
+                fixture.plan.resources.cpus = 3;
+                fixture.plan.resources.mem_mib = 640;
+                fixture.plan.network_mode = mvm_contract::plan::NetworkMode::HostVsockProxy;
+                fixture.plan.agent_verbs = Some(serde_json::from_str("[\"ping\"]").unwrap());
+                fixture.plan.plan_id = mvm_core::plan::compute_plan_id(&fixture.plan);
+                fixture.persist_plan(&fixture.plan);
+                std::fs::remove_file(fixture.home.path().join("audit/local.jsonl")).unwrap();
+                fixture.emit_creation(&fixture.plan, &fixture.parent);
+                let prepared = prepare_boot(&fixture, &[], false).unwrap();
+                write_private(
+                    &fixture.plan_path(),
+                    b"replacement is not original authority",
+                );
+                assert_eq!(prepared.parent_plan().resources.cpus, 3);
+                assert_eq!(prepared.parent_plan().resources.mem_mib, 640);
+                assert_eq!(
+                    prepared.parent_plan().network_mode,
+                    fixture.plan.network_mode
+                );
+                assert_eq!(prepared.parent_plan().agent_verbs, fixture.plan.agent_verbs);
+                assert!(
+                    mvm_client::admission::InheritedBundle::from_parent_plan(
+                        prepared.parent_plan()
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                no_child(&fixture);
+            }
+
+            #[test]
+            fn metadata_drift_revalidates_before_copy_and_cannot_erase_signed_ask() {
+                for kind in 0..5 {
+                    let fixture = fixture(Vec::new());
+                    let service = seed_secret(&fixture);
+                    let mut stored = metadata(AuthType::Bearer, InjectionMode::Header);
+                    store_metadata(&stored);
+                    let mut declaration = binding();
+                    declaration.approval_required = kind == 0;
+                    let declared = [declaration];
+                    let prepared = prepare_boot(&fixture, &declared, false).unwrap();
+                    match kind {
+                        0 => {
+                            stored.allowed_hosts.push("new.example.com".into());
+                            store_metadata(&stored);
+                            prepared.revalidate().unwrap();
+                            assert!(prepared.bindings()[0].approval_required);
+                            assert_eq!(prepared.bindings()[0].destinations, ["api.example.com"]);
+                        }
+                        1 => {
+                            stored.approve = SecretApproval::Ask;
+                            store_metadata(&stored);
+                            assert!(prepared.materialize().is_err());
+                        }
+                        2 => {
+                            stored.allowed_hosts = vec!["different.example.com".into()];
+                            store_metadata(&stored);
+                            assert!(prepared.materialize().is_err());
+                        }
+                        3 => {
+                            service.unbind("local", "api").unwrap();
+                            assert!(prepared.materialize().is_err());
+                        }
+                        _ => {
+                            stored.inject = InjectionMode::BasicAuth;
+                            store_metadata(&stored);
+                            assert!(prepared.materialize().is_err());
+                        }
+                    }
+                    no_child(&fixture);
+                }
+            }
+
+            #[test]
+            fn admitted_child_must_retain_exact_effective_bindings_and_identity() {
+                let fixture = fixture(Vec::new());
+                let _service = seed_secret(&fixture);
+                let mut stored = metadata(AuthType::Bearer, InjectionMode::Header);
+                stored.approve = SecretApproval::Ask;
+                store_metadata(&stored);
+                let declared = [binding()];
+                let prepared = prepare_boot(&fixture, &declared, false).unwrap();
+                // Comparison data only, NOT an AdmittedPlan or boot permit.
+                // Production passes the canonical admission owner's plan.
+                let mut child = fixture.plan.clone();
+                child.workload.0 = prepared.child_name().into();
+                child.tenant.0 = prepared.child_tenant().into();
+                child.secrets = prepared.bindings().to_vec();
+                prepared.validate_admitted_plan(&child).unwrap();
+                for kind in 0..4 {
+                    let mut changed = child.clone();
+                    match kind {
+                        0 => changed.secrets[0].approval_required = false,
+                        1 => changed.secrets[0].destinations.clear(),
+                        2 => changed.tenant.0 = "different".into(),
+                        _ => changed.workload.0 = "different".into(),
+                    }
+                    assert!(prepared.validate_admitted_plan(&changed).is_err());
+                }
+                no_child(&fixture);
+            }
+
+            #[test]
+            fn selected_child_tenant_is_captured_once_not_inherited_or_reread() {
+                let mut fixture = fixture(Vec::new());
+                fixture.plan.tenant.0 = "parenttenant".into();
+                fixture.plan.plan_id = mvm_core::plan::compute_plan_id(&fixture.plan);
+                fixture.persist_plan(&fixture.plan);
+                std::fs::remove_file(fixture.home.path().join("audit/local.jsonl")).unwrap();
+                fixture.emit_creation(&fixture.plan, &fixture.parent);
+                let _service = seed_secret(&fixture);
+                store_metadata(&metadata(AuthType::Bearer, InjectionMode::Header));
+                let declared = [binding()];
+                let params = super::super::super::super::ForkFsQuickArmParams {
+                    store: &fixture.store,
+                    checkpoint: &fixture.parent.id,
+                    new_id: Some("childvm".into()),
+                    boot: true,
+                    hypervisor: "docker",
+                    cpus_override: None,
+                    memory_override: None,
+                    declared_secrets: &declared,
+                    allow_secret_drop: false,
+                    json: true,
+                };
+                let prepared = PreparedBootFork::prepare(&params).unwrap();
+                assert_eq!(prepared.parent_plan().tenant.0, "parenttenant");
+                assert_eq!(prepared.child_tenant(), "local");
+                // The prepared service and tenant, not mutable global selection,
+                // govern all later metadata revalidation.
+                fixture._env.set("MVM_TENANT", "different");
+                prepared.revalidate().unwrap();
+                no_child(&fixture);
+            }
+
+            #[test]
+            fn audit_failure_before_copy_refuses_and_publication_failure_retains_artifacts() {
+                let fixture = fixture(Vec::new());
+                let chain = fixture.home.path().join("audit/local.jsonl");
+                let original = std::fs::read(&chain).unwrap();
+                std::fs::remove_file(&chain).unwrap();
+                std::fs::create_dir(&chain).unwrap();
+                let before = snapshot(fixture.home.path());
+                assert!(invoke_boot(&fixture, false, false).is_err());
+                assert_eq!(before, snapshot(fixture.home.path()));
+                no_child(&fixture);
+                std::fs::remove_dir(&chain).unwrap();
+                write_private(&chain, &original);
+                let prepared = prepare_boot(&fixture, &[], false).unwrap();
+                let child = prepared.materialize().unwrap();
+                std::fs::remove_file(&chain).unwrap();
+                std::fs::create_dir(&chain).unwrap();
+                let error = prepared.publish(&child).unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains("lineage publication failed"));
+                assert!(message.contains(&prepared.destination().display().to_string()));
+                assert_eq!(fixture.store.read_meta(&child.id).unwrap(), child);
+                assert_eq!(
+                    std::fs::read(prepared.destination().join("rootfs.ext4")).unwrap(),
+                    b"fake-ext4-bytes"
+                );
+                // No boot routine is called; production propagates this error
+                // before its call to boot_forked_child, with no fake rollback.
+            }
+
+            #[test]
+            fn signed_fork_audit_uses_the_same_effective_vector_not_later_widening() {
+                let fixture = fixture(Vec::new());
+                let _service = seed_secret(&fixture);
+                let mut stored = metadata(AuthType::Bearer, InjectionMode::Header);
+                store_metadata(&stored);
+                let declared = [binding()];
+                let prepared = prepare_boot(&fixture, &declared, false).unwrap();
+                stored.allowed_hosts.push("later.example.com".into());
+                store_metadata(&stored);
+                let child = prepared.materialize().unwrap();
+                prepared.publish(&child).unwrap();
+                let keys = LocalTranscriptStore::open(fixture.home.path()).unwrap();
+                let history = mvm_core::audit_verify::set::read_verified_history(
+                    &fixture.home.path().join("audit"),
+                    "local",
+                    &keys.existing_host_public_key().unwrap(),
+                )
+                .unwrap();
+                let entry = history
+                    .segments
+                    .iter()
+                    .flat_map(|segment| segment.entries.as_ref().unwrap())
+                    .find(|entry| entry.event == "checkpoint.forked")
+                    .expect("authenticated fork event");
+                let bindings: serde_json::Value =
+                    serde_json::from_str(entry.labels.get("secret_bindings").unwrap()).unwrap();
+                assert_eq!(
+                    bindings,
+                    serde_json::json!([{
+                        "name": prepared.bindings()[0].name,
+                        "allowed_hosts": prepared.bindings()[0].destinations,
+                    }])
+                );
+                assert!(!bindings.to_string().contains("later.example.com"));
+                // This is a filesystem copy and signed audit proof only,
+                // never a native boot, approval-consumption or execution proof.
+            }
+
+            #[test]
+            fn boot_metadata_fifo_refuses_before_class_dispatch() {
+                let fixture = fixture(Vec::new());
+                let path = fixture.store.dir_for(&fixture.parent.id).join("meta.json");
+                std::fs::remove_file(&path).unwrap();
+                assert!(
+                    std::process::Command::new("mkfifo")
+                        .arg(&path)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+                let before = snapshot(fixture.home.path());
+                assert!(invoke_boot(&fixture, false, false).is_err());
+                assert_eq!(before, snapshot(fixture.home.path()));
+                no_child(&fixture);
+            }
         }
 
         #[test]
@@ -905,6 +1695,24 @@ mod strict_fs_quick {
                     .any(|entry| entry.event == "checkpoint.created")
             );
             fixture.assert_refused_unchanged(true, "pruned history");
+            let before_boot = snapshot(fixture.home.path());
+            let error = crate::commands::vm::checkpoint::fork(
+                crate::commands::vm::checkpoint::ForkCmdParams {
+                    id: "parent",
+                    new_id: Some("childvm".into()),
+                    boot: true,
+                    hypervisor: "docker",
+                    cpus: None,
+                    memory: None,
+                    declared_secrets: &[],
+                    allow_secret_drop: true,
+                    json: true,
+                    intent: crate::commands::vm::checkpoint::ForkIntent::Ordinary,
+                },
+            )
+            .unwrap_err();
+            assert!(format!("{error:#}").contains("pruned history"), "{error:#}");
+            assert_eq!(before_boot, snapshot(fixture.home.path()));
         }
 
         #[test]
@@ -1240,8 +2048,7 @@ mod strict_fs_quick {
             parent.meta_digest = parent.compute_meta_digest();
             fixture.store.write_meta(&parent).unwrap();
             let before = snapshot(fixture.home.path());
-            let classified =
-                super::super::read_unbooted_fork_parent(&fixture.store, &parent.id).unwrap();
+            let classified = super::super::read_fork_parent(&fixture.store, &parent.id).unwrap();
             assert_eq!(classified, parent);
             assert_eq!(before, snapshot(fixture.home.path()));
         }
