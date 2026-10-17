@@ -216,16 +216,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notary=()
-          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
-            notary=(--notary-report "${RUNNER_TEMP}/pypi-notarization.json")
-          fi
           wheels=(dist/*.whl)
           [[ "${#wheels[@]}" -eq 1 ]]
-          python3 scripts/release/verify_macos_package.py \
-            --archive "${wheels[0]}" --sdk-layout \
-            --producer-report "${RUNNER_TEMP}/pypi-producer-signing.json" \
-            "${notary[@]}" --report "${RUNNER_TEMP}/pypi-final-package.json"
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive "${wheels[0]}" --sdk-layout
+            --producer-report "${RUNNER_TEMP}/pypi-producer-signing.json"
+            --report "${RUNNER_TEMP}/pypi-final-package.json")
+          if [[ "${{ !inputs.dry_run || github.ref_type == 'tag' }}" == true ]]; then
+            cmd+=(--notary-report "${RUNNER_TEMP}/pypi-notarization.json")
+          fi
+          "${cmd[@]}"
 
       - name: Retain final macOS wheel inspection
         if: ${{ always() && runner.os == 'macOS' }}
