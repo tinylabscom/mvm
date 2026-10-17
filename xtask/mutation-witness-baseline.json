@@ -751,6 +751,11 @@
       "reason": "committed aggregates persisted MachineCharge records from disk; the aggregation logic is covered by integration tests that write and read back real records."
     },
     {
+      "file": "crates/mvm-hostd/src/audit/session.rs",
+      "mutant": "replace match guard !chain.has_sealed_segments() with false in crate::audit::emitter::AuditEmitter::decide_seal_over_cached_prefix",
+      "reason": "Provably equivalent in output: the guard only chooses between answering GENESIS from the cached prefix and returning None, after which decide_seal_from_genesis reads the whole chain and computes the identical seal (the doc comment on that pair states they are the same seal). Only the amount of disk read differs."
+    },
+    {
       "file": "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs",
       "mutant": "replace confine_endpoint_without_lsm -> Result<()> with Ok(())",
       "reason": "This is the macOS/Windows compatibility stub: those hosts have no Landlock or seccomp confinement to witness. The distinct function name keeps this exception from masking mutations of the Linux fail-closed confine_endpoint implementation."
