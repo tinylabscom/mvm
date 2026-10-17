@@ -135,6 +135,13 @@ pub(in crate::commands) enum CheckpointCmd {
     /// Pass `--boot` to admit and launch the child immediately.
     /// vm_full forks always auto-boot as part of the fork; `--boot` is
     /// accepted there but has no extra effect.
+    ///
+    /// Unbooted fs_quick copies require complete, unpruned signed original
+    /// lineage and a matching content-addressed parent plan (at most 4 MiB).
+    /// Unknown parent secret policy refuses even with --allow-secret-drop.
+    /// Without --boot, metadata classification also requires private 0600
+    /// records and refuses oversized historical records; valid vm_full records
+    /// still use the existing arm. No permissions are repaired.
     Fork {
         /// Parent checkpoint id.
         id: String,
@@ -853,7 +860,11 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     // Pick the fork arm by the parent's class: vm_full carries memory and must
     // restore through the vm_full fork arm (which auto-boots the child); fs_quick
     // is a rootfs-only clone that the operator can optionally boot with `--boot`.
-    let parent = store.read_meta(&checkpoint)?;
+    let parent = if boot {
+        store.read_meta(&checkpoint)?
+    } else {
+        lineage::read_unbooted_fork_parent(&store, &checkpoint)?
+    };
     if intent == ForkIntent::Replay && parent.class != CheckpointClass::VmFull {
         bail!("machine replay requires a vm_full checkpoint");
     }
@@ -918,6 +929,9 @@ struct ForkFsQuickArmParams<'a> {
 /// materialized rootfs without clobbering it (the no-clobber seam in
 /// `prepare_instance_rootfs` returns early when source == instance path).
 fn fork_fs_quick_arm(p: ForkFsQuickArmParams<'_>) -> Result<()> {
+    if !p.boot {
+        return lineage::fork_fs_quick_unbooted(p);
+    }
     if !p.boot && !p.declared_secrets.is_empty() {
         bail!(
             "--secret requires --boot for an fs_quick fork because an unbooted clone has no child plan"

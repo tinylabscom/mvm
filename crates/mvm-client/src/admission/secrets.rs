@@ -76,8 +76,11 @@ impl ResolvedPlanSecrets {
     }
 }
 
+/// Validate supported references without reading secret metadata or values.
+///
+/// This is intent validation, not approval or secret-use authorization.
 /// Unsupported sources refuse before any metadata lookup or host-side effect.
-fn validate_secret_sources(bindings: &[SecretBinding]) -> Result<()> {
+pub fn validate_secret_sources(bindings: &[SecretBinding]) -> Result<()> {
     for binding in bindings {
         if !matches!(binding.source, SecretSource::Keystore { .. }) {
             anyhow::bail!(
