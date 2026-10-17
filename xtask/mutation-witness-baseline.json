@@ -731,6 +731,21 @@
       "reason": "provably equivalent: `ClientOperationCapabilities::builder` returns `ClientOperationCapabilitiesBuilder::default()` directly, so the mutant evaluates the identical expression. No test can distinguish the two, while the adjacent builder test asserts that `build` preserves every enabled operation."
     },
     {
+      "file": "crates/mvm-core/src/plan/bundle.rs",
+      "mutant": "replace || with && in verify_canonical_plan_bundle",
+      "reason": "Needs a PreparedCanonicalLinux owner, which can only be built from the bytes of the actual pinned public kernel (prepare checks the signed root's digest, so no fixture can stand in). Its witnesses are the genuine-kernel tests, which are #[ignore]d and need MVM_TEST_CANONICAL_KERNEL; the mutation lane has no such kernel."
+    },
+    {
+      "file": "crates/mvm-core/src/plan/bundle.rs",
+      "mutant": "delete ! in verify_canonical_plan_bundle",
+      "reason": "Needs a PreparedCanonicalLinux owner, which can only be built from the bytes of the actual pinned public kernel (prepare checks the signed root's digest, so no fixture can stand in). Its witnesses are the genuine-kernel tests, which are #[ignore]d and need MVM_TEST_CANONICAL_KERNEL; the mutation lane has no such kernel."
+    },
+    {
+      "file": "crates/mvm-core/src/plan/bundle.rs",
+      "mutant": "replace != with == in verify_canonical_plan_bundle",
+      "reason": "Needs a PreparedCanonicalLinux owner, which can only be built from the bytes of the actual pinned public kernel (prepare checks the signed root's digest, so no fixture can stand in). Its witnesses are the genuine-kernel tests, which are #[ignore]d and need MVM_TEST_CANONICAL_KERNEL; the mutation lane has no such kernel."
+    },
+    {
       "file": "crates/mvm-core/src/plan/synthesis.rs",
       "mutant": "replace SynthesisInput<'a>::builder -> SynthesisInputBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SynthesisInput::builder` is a one-line alias for `SynthesisInputBuilder::new()`, and this file's `impl Default for SynthesisInputBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."

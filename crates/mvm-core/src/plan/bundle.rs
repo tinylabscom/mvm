@@ -1779,6 +1779,90 @@ mod tests {
         );
     }
 
+    /// A CLI-assets bundle names its kernel by role: the verifier must pair the
+    /// image set's kernel member with the bundle's `Kernel`-role artifact, not
+    /// with whichever artifact happens to come first.
+    #[test]
+    fn cli_boot_assets_pair_the_image_set_kernel_with_the_kernel_role_artifact() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let arch = GuestArch::Aarch64;
+        let kernel_member = select_cli_boot_kernel(&image_set, arch).unwrap();
+        let kernel_name = kernel_member.artifacts[0].name.as_str().to_string();
+        let kernel_bytes = bytes
+            .iter()
+            .find(|(name, _)| *name == kernel_name)
+            .map(|(_, bytes)| bytes.clone())
+            .expect("the kernel artifact's bytes");
+        let image_manifest = serde_json::to_vec(&image_set).unwrap();
+
+        let runtime_names = [
+            "runtime.tar.gz",
+            "runtime.sha256",
+            "runtime.bundle",
+            "runtime.sha256.bundle",
+            "overlay",
+            "overlay.verity",
+        ];
+        let mut artifacts = vec![art(
+            "image-set.json",
+            ArtifactRole::Other,
+            "artifacts/image-set.json",
+            &image_manifest,
+        )];
+        let mut payload = vec![("artifacts/image-set.json".to_string(), image_manifest)];
+        for name in runtime_names {
+            let body = format!("runtime bytes {name}").into_bytes();
+            artifacts.push(art(
+                name,
+                ArtifactRole::Other,
+                &format!("artifacts/{name}"),
+                &body,
+            ));
+            payload.push((format!("artifacts/{name}"), body));
+        }
+        let initrd = b"initramfs bytes".to_vec();
+        artifacts.push(art(
+            "initrd",
+            ArtifactRole::Initrd,
+            "artifacts/initrd",
+            &initrd,
+        ));
+        payload.push(("artifacts/initrd".to_string(), initrd));
+        artifacts.push(art(
+            &kernel_name,
+            ArtifactRole::Kernel,
+            &format!("artifacts/{kernel_name}"),
+            &kernel_bytes,
+        ));
+        payload.push((format!("artifacts/{kernel_name}"), kernel_bytes));
+
+        let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.schema_version = 6;
+        manifest.arch = arch.to_string();
+        manifest.members = vec![BundleMember::EmbeddedCliBootAssets(EmbeddedCliBootAssets {
+            manifest_artifact: "image-set.json".into(),
+            version: "0.24.0".into(),
+            arch: arch.to_string(),
+            archive_artifact: "runtime.tar.gz".into(),
+            checksum_artifact: "runtime.sha256".into(),
+            signature_bundle_artifact: "runtime.bundle".into(),
+            checksum_signature_bundle_artifact: "runtime.sha256.bundle".into(),
+            overlay_artifact: "overlay".into(),
+            overlay_verity_artifact: "overlay.verity".into(),
+            initramfs_artifact: "initrd".into(),
+            overlay_roothash: "a".repeat(64),
+            protocol_version: 2,
+            min_supported_protocol_version: 2,
+        })];
+        let archive = write_bundle(&manifest, &sk, payload).unwrap();
+
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).unwrap();
+        let boot = verified.boot_assets.expect("CLI boot assets verified");
+        assert_eq!(boot.image_set.artifact_paths.len(), 1);
+        assert!(boot.image_set.artifact_paths.contains_key(&kernel_name));
+    }
+
     #[test]
     fn schema4_file_plan_artifact_pins_the_original_signed_archive() {
         let sk = fresh_key();
