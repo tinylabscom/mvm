@@ -599,7 +599,13 @@ jobs:
           - mvm-agentd
           - mvm-backends
           - mvm-build
-          - mvm-cli
+          # Two, because one job could not finish the package: on 2026-10-17
+          # the single shard spent its whole 315-minute step on the first
+          # 55 mutants of image/pull_core.rs (each re-runs the 480 s crate
+          # suite) and never reached the other three surface files. Packing
+          # is by mutant count, so pull_core.rs gets a shard to itself.
+          - mvm-cli/1of2
+          - mvm-cli/2of2
           - mvm-client
           - mvm-core
           - mvm-fs
