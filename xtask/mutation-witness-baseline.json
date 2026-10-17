@@ -603,7 +603,7 @@
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
       "mutant": "replace | with ^ in claim_hvf_launch",
-      "reason": "HVF supervisor control (flock, readiness polling, snapshot request/publish, pause/resume) needs a live macOS Hypervisor.framework supervisor; it is exercised by the HVF warm-claim and snapshot BDD scenarios, not by Linux unit tests."
+      "reason": "Provably equivalent: `libc::LOCK_EX | libc::LOCK_NB` combines two distinct single-bit flags (2 and 4), so `|` and `^` give the same value."
     },
     {
       "file": "crates/mvm-backends/src/driver/hvf.rs",
@@ -683,12 +683,7 @@
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
       "mutant": "replace <impl VmmDriver for LibkrunDriver>::is_available -> Result<bool> with Ok(false)",
-      "reason": "is_available probes the host environment for libkrun support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace <impl VmmDriver for LibkrunDriver>::is_available -> Result<bool> with Ok(true)",
-      "reason": "is_available probes the host environment for libkrun support; mutating the probe result only changes how the environment is reported, and the real gate is the subsequent backend selection path."
+      "reason": "Equivalent on a host without libkrun: the binding already reports false, so forcing false changes nothing. The true replacement is caught."
     },
     {
       "file": "crates/mvm-backends/src/driver/libkrun.rs",
@@ -696,149 +691,19 @@
       "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
     },
     {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((None, Default::default()))",
-      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(\"xyzzy\".into()), Default::default()))",
-      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
-    },
-    {
-      "file": "crates/mvm-backends/src/driver/libkrun.rs",
-      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(String::new()), Default::default()))",
-      "reason": "map_kernel_for_test is a test-only mapping helper; its correctness is exercised by backend test fixtures."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "delete ! in FcForkRestorer::prepare_fork_load",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "delete ! in install",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace && with || in FcForkRestorer::prepare_fork_load",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace && with || in has_base_assets",
-      "reason": "has_base_assets combines two environment probes for Firecracker base assets. Mutating the combiner only changes which probe is consulted; the downstream install step still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace && with || in install",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace <impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl>::pause -> Result<()> with Ok(())",
-      "reason": "Firecracker pause/resume full-control operations require a live Firecracker instance and are covered by live Firecracker snapshot BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace <impl mvm_vmm::checkpoint::VmFullControl for FcVmFullControl>::resume -> Result<()> with Ok(())",
-      "reason": "Firecracker pause/resume full-control operations require a live Firecracker instance and are covered by live Firecracker snapshot BDD scenarios."
-    },
-    {
       "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace == with != in is_firecracker_pid_running",
-      "reason": "Firecracker process-state probes report the existing VM lifecycle; the real gate is the in-process control path, and the correct state transitions are covered by live Firecracker BDD scenarios."
+      "reason": "Only compiled on non-Linux hosts (the Linux build reads /proc directly), so the Linux mutation lane never builds the mutated code; it is covered on macOS by the shell-probe tests, not by this lane."
     },
     {
       "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace == with != in is_vm_running",
-      "reason": "Firecracker process-state probes report the existing VM lifecycle; the real gate is the in-process control path, and the correct state transitions are covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_base_assets -> Result<bool> with Ok(false)",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_base_assets -> Result<bool> with Ok(true)",
-      "reason": "Firecracker environment-probe and install-path combiners only change which probe is consulted; the downstream install step still verifies actual files and is covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_kernel -> Result<bool> with Ok(false)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_kernel -> Result<bool> with Ok(true)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_squashfs -> Result<bool> with Ok(false)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace has_squashfs -> Result<bool> with Ok(true)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace is_installed -> Result<bool> with Ok(false)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace is_installed -> Result<bool> with Ok(true)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace is_running -> Result<bool> with Ok(false)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace is_running -> Result<bool> with Ok(true)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace jailer_is_installed -> Result<bool> with Ok(false)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace jailer_is_installed -> Result<bool> with Ok(true)",
-      "reason": "This function probes the builder VM for a Firecracker asset. Mutating the probe result only changes how the environment is reported, not a security decision; the real gate is the subsequent install/download path which still verifies actual files."
+      "reason": "Only compiled on non-Linux hosts (the Linux build reads /proc directly), so the Linux mutation lane never builds the mutated code; it is covered on macOS by the shell-probe tests, not by this lane."
     },
     {
       "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace observe_process -> Result<ProcessView> with Ok(Default::default())",
-      "reason": "valid only while ProcessView lacks a Default derive: with no Default, this mutant cannot compile against the Linux implementation, so the surviving form is the non-Linux probe stub (#[cfg(not(target_os = \"linux\"))], which shells out to the builder VM) — it is not compiled on the Linux mutation host, so no test there can distinguish it. The Linux implementation is `observe_process_at`, witnessed directly against fixture /proc directories; the shared function name means this single entry covers the stub without masking mutations of the Linux path."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace prepare_rootfs -> Result<()> with Ok(())",
-      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace validate_rootfs_squashfs -> Result<bool> with Ok(false)",
-      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace validate_rootfs_squashfs -> Result<bool> with Ok(true)",
-      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
-    },
-    {
-      "file": "crates/mvm-backends/src/fc/host.rs",
-      "mutant": "replace write_state -> Result<()> with Ok(())",
-      "reason": "Firecracker rootfs and state operations require a live Firecracker/jailer environment and are covered by live Firecracker BDD scenarios."
+      "reason": "Only compiled on non-Linux hosts (the Linux build reads /proc directly), so the Linux mutation lane never builds the mutated code; it is covered on macOS by the shell-probe tests, not by this lane."
     },
     {
       "file": "crates/mvm-compiler/src/deps_audit.rs",
