@@ -19,6 +19,24 @@ test("shared navigation makes the blog discoverable", () => {
   assert.match(header, /\{ label: "Blog", href: `\$\{b\}blog\/` \}/);
 });
 
+test("use cases are discoverable and have complete workflow content", () => {
+  const header = readFileSync(join(publicRoot, "src/overrides/Header.astro"), "utf8");
+  assert.match(header, /\{ label: "Use cases", href: `\$\{b\}use-cases\/` \}/);
+  const files = markdownFiles(join(publicRoot, "src/content/use-cases"));
+  assert.ok(files.length >= 4);
+  for (const file of files) {
+    const source = readFileSync(file, "utf8");
+    for (const heading of ["The situation", "A workflow with mvm", "What your team gains", "What to plan for"]) {
+      assert.ok(source.includes(`## ${heading}`), `${file}: ${heading}`);
+    }
+    const guide = source.match(/^guide: (\/.+\/)$/m)?.[1];
+    assert.ok(guide, `${file}: guide link`);
+    assert.ok(markdownFiles(join(publicRoot, "src/content/docs")).some(
+      path => path.replace(/\.mdx?$/, "").endsWith(guide.slice(0, -1)),
+    ), `${file}: guide exists`);
+  }
+});
+
 for (const [label, relativePath] of [
   ["blog", "src/layouts/BlogLayout.astro"],
   ["pricing", "src/pages/pricing.astro"],
