@@ -154,6 +154,138 @@ fn synthetic_expectations(f: &Fixture) -> AuthenticatedBootImageExpectations {
         .unwrap()
 }
 
+fn capture_from_fixture(
+    f: &Fixture,
+    reader: impl Read,
+) -> Result<AuthenticatedBootImageExpectations> {
+    f.contract.capture_image_expectations(
+        &f.plan,
+        &f.config,
+        GuestArch::X86_64,
+        BackendKind::Firecracker,
+        reader,
+    )
+}
+
+#[test]
+fn synthetic_capture_reader_binds_signed_bytes_and_rejects_length_or_digest_changes() {
+    let f = fixture(GuestArch::X86_64);
+    let bytes = format!("{}\n", "a".repeat(64)).into_bytes();
+    let captured = capture_from_fixture(&f, bytes.as_slice()).unwrap();
+    assert_eq!(captured.root_hash(), "a".repeat(64));
+    for role in [
+        BootImageAsset::Rootfs,
+        BootImageAsset::Verity,
+        BootImageAsset::Metadata,
+        BootImageAsset::RootHash,
+    ] {
+        let old = synthetic_expectations(&f);
+        assert_eq!(captured.expected_size(role), old.expected_size(role));
+        assert_eq!(captured.expected_sha256(role), old.expected_sha256(role));
+    }
+    let mut changed = bytes.clone();
+    changed[0] = b'b';
+    let mut extra = bytes.clone();
+    extra.push(0);
+    for invalid in [&[][..], &bytes[..64], changed.as_slice(), extra.as_slice()] {
+        assert!(capture_from_fixture(&f, invalid).is_err());
+    }
+    let mut endless = std::io::repeat(b'a');
+    assert!(capture_from_fixture(&f, &mut endless).is_err());
+    // Bounded signed size + 1: an endless untrusted source is never drained.
+    struct CountReader(usize);
+    impl Read for CountReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            out.fill(b'a');
+            self.0 += out.len();
+            Ok(out.len())
+        }
+    }
+    let mut reader = CountReader(0);
+    assert!(capture_from_fixture(&f, &mut reader).is_err());
+    assert_eq!(reader.0, bytes.len() + 1);
+}
+
+#[test]
+fn synthetic_capture_reader_does_not_reopen_replaced_sidecar() {
+    use std::io::{Seek, SeekFrom};
+    let f = fixture(GuestArch::X86_64);
+    let path = f._directory.path().join("rootfs.roothash");
+    let mut held = std::fs::File::open(&path).unwrap();
+    let moved = f._directory.path().join("held-original");
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::write(&path, format!("{}\n", "b".repeat(64))).unwrap();
+    assert_eq!(
+        capture_from_fixture(&f, &mut held).unwrap().root_hash(),
+        "a".repeat(64)
+    );
+    assert!(
+        f.contract
+            .image_expectations(
+                &f.plan,
+                &f.config,
+                GuestArch::X86_64,
+                BackendKind::Firecracker,
+            )
+            .is_err()
+    );
+    std::fs::write(moved, format!("{}\n", "b".repeat(64))).unwrap();
+    held.seek(SeekFrom::Start(0)).unwrap();
+    assert!(capture_from_fixture(&f, held).is_err());
+    // Holding the original readonly descriptor is not immutable-byte custody.
+}
+
+#[test]
+fn synthetic_capture_reader_preserves_original_plan_config_and_platform_checks() {
+    let mut f = fixture(GuestArch::X86_64);
+    let bytes = format!("{}\n", "a".repeat(64));
+    f.config.roothash = Some("b".repeat(64));
+    assert!(capture_from_fixture(&f, bytes.as_bytes()).is_err());
+    f.config.roothash = None;
+    assert!(capture_from_fixture(&f, bytes.as_bytes()).is_err());
+    f.config.roothash = Some("a".repeat(64));
+    f.plan.image.sha256 = "0".repeat(64);
+    assert!(capture_from_fixture(&f, bytes.as_bytes()).is_err());
+    f.plan.image.sha256 = f.contract.rootfs_sha256().as_str().to_owned();
+    for (arch, backend) in [
+        (GuestArch::Aarch64, BackendKind::Firecracker),
+        (GuestArch::X86_64, BackendKind::Libkrun),
+    ] {
+        assert!(
+            f.contract
+                .capture_image_expectations(&f.plan, &f.config, arch, backend, bytes.as_bytes(),)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn synthetic_capture_reader_requires_whole_member_origin_and_canonical_hash() {
+    use std::io::{Cursor, Seek, SeekFrom};
+    let mut f = fixture(GuestArch::X86_64);
+    let bytes = format!("{}\n", "a".repeat(64));
+    let mut reader = Cursor::new(bytes.as_bytes());
+    reader.seek(SeekFrom::Start(1)).unwrap();
+    assert!(capture_from_fixture(&f, &mut reader).is_err());
+    assert_eq!(reader.position(), bytes.len() as u64);
+    reader.seek(SeekFrom::Start(0)).unwrap();
+    assert!(capture_from_fixture(&f, reader).is_ok());
+    // Even a synthetic signed declaration of noncanonical bytes cannot mint.
+    for invalid in [
+        format!("{}\n", "A".repeat(64)),
+        format!("{}\n", "g".repeat(64)),
+        "a".repeat(63),
+        "a".repeat(65),
+    ] {
+        f.contract.image.assets.roothash.size = invalid.len() as u64;
+        f.contract.image.assets.roothash.sha256 = Sha256Hex::from_bytes(invalid.as_bytes());
+        f.config.roothash = Some(invalid.trim().to_owned());
+        assert!(capture_from_fixture(&f, invalid.as_bytes()).is_err());
+    }
+    f.contract.image.assets.roothash.size = 129;
+    assert!(capture_from_fixture(&f, &[][..]).is_err());
+}
+
 #[test]
 fn synthetic_expectations_verify_each_original_role_and_reject_mutation() {
     let f = fixture(GuestArch::X86_64);

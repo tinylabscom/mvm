@@ -201,6 +201,33 @@ impl BuiltPackBootContract {
             &directory.join("rootfs.roothash"),
             &self.image.assets.roothash,
         )?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    /// Capture signed image facts from an untrusted, already-held hash reader.
+    ///
+    /// Reads from the reader's CURRENT position, bounded by signed size + 1.
+    /// The caller must supply the whole member from offset zero (for a shared
+    /// file, use positional reads). This does not rewind, freeze, or retain the
+    /// reader and confers neither descriptor custody nor launch admission.
+    pub fn capture_image_expectations(
+        &self,
+        plan: &ExecutionPlan,
+        config: &VmStartConfig,
+        arch: GuestArch,
+        backend: BackendKind,
+        root_hash_reader: impl Read,
+    ) -> Result<AuthenticatedBootImageExpectations> {
+        self.verify_plan(plan, arch, backend)?;
+        let captured = decode_roothash(root_hash_reader, &self.image.assets.roothash)?;
+        self.bind_captured_hash(config, &captured)
+    }
+
+    fn bind_captured_hash(
+        &self,
+        config: &VmStartConfig,
+        captured: &str,
+    ) -> Result<AuthenticatedBootImageExpectations> {
         let root_hash = captured.trim();
         ensure!(
             root_hash.len() == 64
@@ -405,9 +432,17 @@ fn read_roothash(
     asset: &crate::registry_pack_image::BuiltImageAsset,
 ) -> Result<String> {
     ensure!(asset.size <= 128, "oversized built image roothash");
-    let mut bytes = Vec::new();
     let file = open_regular(path, asset.size)?;
-    file.take(asset.size + 1).read_to_end(&mut bytes)?;
+    decode_roothash(file, asset)
+}
+
+fn decode_roothash(
+    reader: impl Read,
+    asset: &crate::registry_pack_image::BuiltImageAsset,
+) -> Result<String> {
+    ensure!(asset.size <= 128, "oversized built image roothash");
+    let mut bytes = Vec::new();
+    reader.take(asset.size + 1).read_to_end(&mut bytes)?;
     ensure!(
         bytes.len() as u64 == asset.size && Sha256Hex::from_bytes(&bytes) == asset.sha256,
         "built image roothash differs from its signed digest"
