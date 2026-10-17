@@ -271,12 +271,21 @@ fn release_generation(
     );
     let parent = mvm_core::config::mvm_home_strict()?.join("canonical-kernel-generations");
     let generation = parent.join(&record.generation);
-    ensure!(
-        directory_identity(&generation)? == (record.device, record.inode),
-        "kernel generation directory identity changed; retained"
-    );
+    let generation_present = match std::fs::symlink_metadata(&generation) {
+        Ok(_) => {
+            ensure!(
+                directory_identity(&generation)? == (record.device, record.inode),
+                "kernel generation directory identity changed; retained"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
     recheck_exit()?;
-    std::fs::remove_dir_all(&generation)?;
+    if generation_present {
+        std::fs::remove_dir_all(&generation)?;
+    }
     std::fs::remove_file(&path)?;
     Ok(())
 }
@@ -382,6 +391,59 @@ mod tests {
         assert!(directory_identity(&link).is_err());
         std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(directory_identity(&generation).is_err());
+    }
+
+    #[test]
+    fn cleanup_mechanics_retry_partial_removal_and_refuse_replacement_or_corruption() {
+        use mvm_core::protocol::hvf_control::HvfInstance;
+        for case in 0..3 {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            let lease = RuntimeLifecycleLease::acquire("kernel-partial-unit").unwrap();
+            let generation = home
+                .path()
+                .join("canonical-kernel-generations/kernel-partial");
+            mvm_core::config::create_private_dir(&generation).unwrap();
+            let (device, inode) = directory_identity(&generation).unwrap();
+            let instance = HvfInstance {
+                vm_id: "kernel-partial-unit".into(),
+                boot_nonce: [8; 32],
+            };
+            let record = KernelUse {
+                version: 1,
+                vm: instance.vm_id.clone(),
+                generation: "kernel-partial".into(),
+                device,
+                inode,
+                instance: Some(instance.clone()),
+            };
+            let path = lease.canonical_kernel_record();
+            let bytes = serde_json::to_vec(&record).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            match case {
+                0 => {
+                    std::fs::remove_dir_all(&generation).unwrap();
+                    release_generation(&lease, &instance, || Ok(())).unwrap();
+                    assert!(!path.exists());
+                }
+                1 => {
+                    std::fs::rename(&generation, generation.with_extension("held")).unwrap();
+                    mvm_core::config::create_private_dir(&generation).unwrap();
+                    assert!(release_generation(&lease, &instance, || Ok(())).is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert!(generation.exists());
+                }
+                _ => {
+                    std::fs::write(&path, b"corrupt index").unwrap();
+                    assert!(release_generation(&lease, &instance, || Ok(())).is_err());
+                    assert_eq!(std::fs::read(&path).unwrap(), b"corrupt index");
+                    assert!(generation.exists());
+                }
+            }
+            // Resource mechanics only. The closure cannot create an opaque
+            // ConfirmedExit or a native output/receipt completion witness.
+        }
     }
 
     #[test]

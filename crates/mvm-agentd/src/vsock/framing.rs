@@ -221,12 +221,12 @@ impl AuthenticatedSession {
         session_id: &str,
         signing_key: SigningKey,
     ) -> Result<Self> {
-        Self::host_with_peer(stream, session_id, signing_key).map(|(session, _)| session)
+        Self::host_retaining_peer(stream, session_id, signing_key).map(|(session, _)| session)
     }
 
     /// Retain the actual handshake key. This is peer authentication, not a
     /// claim that the transport belongs to a particular native generation.
-    pub fn host_with_peer<S: Read + Write>(
+    pub fn host_retaining_peer<S: Read + Write>(
         stream: &mut S,
         session_id: &str,
         signing_key: SigningKey,
@@ -345,7 +345,7 @@ mod tests {
             }
         });
         let (mut session, key) =
-            AuthenticatedSession::host_with_peer(&mut host, "retained-key", host_key).unwrap();
+            AuthenticatedSession::host_retaining_peer(&mut host, "retained-key", host_key).unwrap();
         assert_eq!(key, expected);
         for value in [1_u32, 2, 3] {
             session.write(&mut host, &value).unwrap();

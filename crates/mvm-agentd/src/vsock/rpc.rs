@@ -1240,7 +1240,7 @@ mod tests {
                     .unwrap();
                 guest.flush().unwrap();
             });
-            let (mut session, key) = AuthenticatedSession::host_with_peer(
+            let (mut session, key) = AuthenticatedSession::host_retaining_peer(
                 &mut host,
                 "retained-entrypoint-test",
                 host_key,
@@ -1303,9 +1303,12 @@ mod tests {
                     session.write(&mut guest, &response).unwrap();
                 }
             });
-            let (mut session, _) =
-                AuthenticatedSession::host_with_peer(&mut host, "retained-negative-test", host_key)
-                    .unwrap();
+            let (mut session, _) = AuthenticatedSession::host_retaining_peer(
+                &mut host,
+                "retained-negative-test",
+                host_key,
+            )
+            .unwrap();
             let mut delivered = 0;
             assert!(
                 send_entrypoint_on_authenticated_session(

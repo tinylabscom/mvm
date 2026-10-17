@@ -122,6 +122,12 @@ impl OwnedClientBoot {
         self.with_original(|_, runtime| runtime.flush())
     }
 
+    pub(crate) fn complete(
+        &mut self,
+    ) -> Result<mvm_runtime::workload_runner::runner::NativeCompletion> {
+        self.with_original(|_, runtime| runtime.complete())
+    }
+
     pub fn stop(&mut self) -> Result<()> {
         self.quiesce()?;
         // Only actual original-owner stop/child-free classification permits
@@ -130,7 +136,7 @@ impl OwnedClientBoot {
         Ok(())
     }
 
-    fn quiesce(&mut self) -> Result<()> {
+    pub(crate) fn quiesce(&mut self) -> Result<()> {
         if let Some(group) = self.custody.as_mut()
             && let Some(runtime) = group.runtime.as_mut()
         {
@@ -586,6 +592,7 @@ pub fn boot_session_vm(
         boot,
         |inputs| {
             admit(inputs)?
+                .map(Box::new)
                 .map(BootAdmission::Legacy)
                 .context("refusing to boot an entrypoint VM without an admitted plan")
         },
@@ -606,7 +613,12 @@ pub fn boot_session_vm_owned(
 ) -> Result<OwnedClientBoot> {
     match boot_session_core(
         boot,
-        |inputs| admission.admit(inputs).map(BootAdmission::Owned),
+        |inputs| {
+            admission
+                .admit(inputs)
+                .map(Box::new)
+                .map(BootAdmission::Owned)
+        },
         pair,
     )? {
         SessionBootResult::Owned(owner) => Ok(owner),
@@ -615,8 +627,8 @@ pub fn boot_session_vm_owned(
 }
 
 enum BootAdmission {
-    Legacy(SessionAuditSubstrate),
-    Owned(super::admission::AdmittedEntrypoint),
+    Legacy(Box<SessionAuditSubstrate>),
+    Owned(Box<super::admission::AdmittedEntrypoint>),
 }
 
 enum SessionBootResult {
@@ -695,8 +707,11 @@ fn boot_session_core(
         runtime_config: Some(&start_config),
     })?;
     let (mut substrate, context) = match admitted {
-        BootAdmission::Legacy(substrate) => (substrate, None),
-        BootAdmission::Owned(admitted) => (admitted.substrate, Some(admitted.context)),
+        BootAdmission::Legacy(substrate) => (*substrate, None),
+        BootAdmission::Owned(admitted) => {
+            let admitted = *admitted;
+            (admitted.substrate, Some(admitted.context))
+        }
     };
     anyhow::ensure!(
         backend.kind() != mvm_core::vm_backend::BackendKind::Hvf || context.is_some(),

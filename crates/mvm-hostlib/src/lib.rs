@@ -74,6 +74,7 @@ mod host_local;
 pub mod image_admin;
 pub mod launch;
 pub mod manifest;
+pub mod owned_context;
 #[cfg(feature = "schema")]
 pub mod registry;
 pub mod status;
@@ -97,7 +98,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// per-machine collector read seam. 7 added built-manifest inspection through
 /// `manifest.list`, `manifest.info`, and `manifest.verify`.
 /// 8 added host-local attestation/revocation data and nonretryable recovery details.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 8;
+/// 9 added caller-owned invocation contexts with independent negotiation.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 9;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 

@@ -480,12 +480,12 @@ pub(crate) fn open_authenticated_session(
 pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Write + Send>(
     stream: &mut S,
 ) -> Result<crate::vsock::AuthenticatedSession> {
-    open_authenticated_session_with_peer(stream).map(|(session, _)| session)
+    open_peer_authenticated_session(stream).map(|(session, _)| session)
 }
 
 /// Establish a session and retain its authenticated peer key. Native transport
 /// ownership must be established independently on the very same stream.
-pub fn open_authenticated_session_with_peer<S: std::io::Read + std::io::Write + Send>(
+pub fn open_peer_authenticated_session<S: std::io::Read + std::io::Write + Send>(
     stream: &mut S,
 ) -> Result<(
     crate::vsock::AuthenticatedSession,
@@ -499,7 +499,7 @@ pub fn open_authenticated_session_with_peer<S: std::io::Read + std::io::Write + 
         .map_err(|_| anyhow::anyhow!("host signer key must be exactly 32 bytes"))?;
     let signing_key = SigningKey::from_bytes(&key_bytes);
     let session_id = format!("vsock-{:032x}", rand::random::<u128>());
-    crate::vsock::AuthenticatedSession::host_with_peer(stream, &session_id, signing_key)
+    crate::vsock::AuthenticatedSession::host_retaining_peer(stream, &session_id, signing_key)
 }
 
 #[cfg(test)]

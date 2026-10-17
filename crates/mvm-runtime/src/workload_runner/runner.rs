@@ -67,7 +67,7 @@ mod sockets;
 mod spawner;
 mod warm_claim;
 
-pub use cold_hvf_channel::{ColdHvfChannel, OwnedRuntimeLaunch};
+pub use cold_hvf_channel::{ColdHvfChannel, NativeCompletion, OwnedRuntimeLaunch};
 
 struct PreparedWorkloadBoot {
     spec: mvm_vmm::driver::spec::VmmSpec,

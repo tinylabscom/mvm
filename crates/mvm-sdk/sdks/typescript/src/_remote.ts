@@ -39,8 +39,8 @@ import {
   PayloadTooLarge,
   RemoteError,
 } from "./_errors/types.js";
-import { call as hostCall } from "./_hostlib.js";
-import { hostSessionFor } from "./_session.js";
+import { NativeContext, OwnedContextFailure } from "./_hostlib.js";
+import { hostContextFor, hostSessionFor } from "./_session.js";
 import { ENTRYPOINT_CALL, SESSION_CALL } from "./hostabi/methods.js";
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
@@ -256,7 +256,31 @@ export function resultFromReply(workloadId: string, reply: unknown): unknown {
 function dispatchHost(workloadId: string, format: string, args: unknown[]): unknown {
   checkFormat(format);
   const [method, request] = hostRequest(workloadId, encodePayload(workloadId, args, {}));
-  return resultFromReply(workloadId, hostCall(method, request));
+  const active = hostContextFor(workloadId);
+  if (active !== null) return resultFromReply(workloadId, active.call(method, request));
+  const context = new NativeContext();
+  let result: unknown;
+  try {
+    result = resultFromReply(workloadId, context.call(method, request));
+  } catch (primary) {
+    if (primary instanceof Error && (primary as { status?: number }).status === 12) {
+      throw primary; // retain the attached context, no automatic stop retry
+    }
+    try {
+      context.close();
+      context.free();
+    } catch (cleanup) {
+      throw new OwnedContextFailure(primary, cleanup, context);
+    }
+    throw primary;
+  }
+  try {
+    context.close();
+    context.free();
+  } catch (cleanup) {
+    throw new OwnedContextFailure(undefined, cleanup, context);
+  }
+  return result;
 }
 
 /** A function that runs inside a workload. */

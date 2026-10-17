@@ -372,8 +372,30 @@ def _result_from_reply(workload_id: str, format: str, reply: Any) -> Any:
 
 def _dispatch_host(workload_id: str, format: str, payload: bytes) -> Any:
     """Run one call in the workload's microVM through the host library."""
+    from mvm._session import _host_context_for
+
     method, request = _host_request(workload_id, payload)
-    return _result_from_reply(workload_id, format, _hostlib.call(method, request))
+    active = _host_context_for(workload_id)
+    if active is not None:
+        return _result_from_reply(workload_id, format, active.call(method, request))
+    context = _hostlib.NativeContext()
+    try:
+        result = _result_from_reply(workload_id, format, context.call(method, request))
+    except BaseException as primary:
+        if getattr(primary, "status", None) == 12:
+            raise  # original context attached; do not automatically retry stop
+        try:
+            context.close()
+            context.free()
+        except BaseException as cleanup:
+            raise _hostlib.OwnedContextFailure(primary, cleanup, context) from None
+        raise
+    try:
+        context.close()
+        context.free()
+    except BaseException as cleanup:
+        raise _hostlib.OwnedContextFailure(None, cleanup, context) from None
+    return result
 
 
 def _round_trip_result(workload_id: str, format: str, result: Any) -> Any:

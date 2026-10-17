@@ -143,6 +143,14 @@ pub(crate) enum PromptAnswer {
 pub(crate) struct LocalEntrypoint;
 
 impl LocalEntrypoint {
+    fn refuse_unowned_native() -> Result<()> {
+        let backend = mvm_client::entrypoint::backend_name_for(None)?;
+        if mvm_client::backend_kind_for(&backend) == mvm_core::vm_backend::BackendKind::Hvf {
+            return Err(mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable.into());
+        }
+        Ok(())
+    }
+
     fn admission(cpus: u32, memory_mib: u32) -> Result<EntrypointAdmission> {
         EntrypointAdmission::builder(mvm_client::entrypoint::backend_name_for(None)?)
             .cpus(cpus)
@@ -157,6 +165,7 @@ impl EntrypointOps for LocalEntrypoint {
     }
 
     fn call(&self, spec: CallSpec) -> Result<CallResult> {
+        Self::refuse_unowned_native()?;
         let mut output = CapturedOutput::default();
         let outcome = mvm_client::entrypoint::run_entrypoint_call(
             EntrypointCall {
@@ -178,6 +187,7 @@ impl EntrypointOps for LocalEntrypoint {
     }
 
     fn start(&self, spec: StartSpec) -> Result<SessionRecord> {
+        Self::refuse_unowned_native()?;
         mvm_client::entrypoint::start_session(
             SessionStart {
                 vm: EntrypointVm {
@@ -201,6 +211,7 @@ impl EntrypointOps for LocalEntrypoint {
         payload: Vec<u8>,
         timeout_secs: u64,
     ) -> Result<CallResult> {
+        Self::refuse_unowned_native()?;
         let (id, record) = mvm_client::entrypoint::require_running_session(id.as_str())?;
         let mut output = CapturedOutput::default();
         let outcome =
@@ -209,6 +220,7 @@ impl EntrypointOps for LocalEntrypoint {
     }
 
     fn stop(&self, id: &SessionId) -> Result<()> {
+        Self::refuse_unowned_native()?;
         mvm_client::entrypoint::kill_session(id.as_str()).map(|_| ())
     }
 
@@ -220,6 +232,7 @@ impl EntrypointOps for LocalEntrypoint {
     /// command line's checkpoint machinery, so a prompt sent from here is
     /// recorded and audited but is not a replayable step.
     fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
+        Self::refuse_unowned_native()?;
         let mut output = CapturedOutput::default();
         Ok(
             match mvm_client::agent_prompt::send_prompt(&prompt, &mut output, None)? {
@@ -632,9 +645,129 @@ fn spec_error(error: anyhow::Error) -> Outcome {
 /// The backend's answer to a well-formed request: an admission refusal, a
 /// boot that failed, an agent that never answered, or a broken stream.
 fn backend_error(error: anyhow::Error) -> Outcome {
+    if error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>() {
+        return Outcome::from(MvmError::Rejected {
+            reason: "native operation is unsupported before verified inputs and an owning lifetime are available".into(),
+        });
+    }
     Outcome::from(MvmError::Backend {
         reason: format!("{error:#}"),
     })
+}
+
+#[derive(Debug)]
+struct OwnedPreparationResponse {
+    _status: i32,
+    _body: Vec<u8>,
+}
+
+impl std::fmt::Display for OwnedPreparationResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("owned entrypoint preparation was refused")
+    }
+}
+impl std::error::Error for OwnedPreparationResponse {}
+
+/// The caller's context has already stored the observer and error aggregate.
+pub(crate) fn run_owned(
+    request: &[u8],
+    operation: &mut mvm_client::entrypoint::call::OwnedTransientResult<CapturedOutput>,
+) -> Outcome {
+    let parsed: EntrypointCallRequest = match serde_json::from_slice(request) {
+        Ok(value) => value,
+        Err(error) => {
+            operation.fail_preparation(error.into());
+            return Outcome::invalid_input("invalid owned entrypoint request");
+        }
+    };
+    if let Err(error) = LocalEntrypoint::refuse_unowned_native() {
+        operation.fail_preparation(error);
+        return owned_projection(operation);
+    }
+    let source = match source_of(parsed.workload.as_deref(), parsed.manifest.as_deref()) {
+        Ok(source) => source,
+        Err(outcome) => {
+            operation.fail_preparation(
+                OwnedPreparationResponse {
+                    _status: outcome.status,
+                    _body: outcome.body.clone(),
+                }
+                .into(),
+            );
+            return outcome;
+        }
+    };
+    let payload = match B64.decode(&parsed.payload_b64) {
+        Ok(payload) => payload,
+        Err(error) => {
+            operation.fail_preparation(error.into());
+            return Outcome::invalid_input("invalid owned entrypoint payload encoding");
+        }
+    };
+    let slot = match LocalEntrypoint.resolve(source) {
+        Ok(slot) => slot,
+        Err(error) => {
+            operation.fail_preparation(error);
+            return owned_projection(operation);
+        }
+    };
+    let cpus = parsed.cpus.unwrap_or_else(mvm_client::default_vcpus);
+    let memory_mib = parsed.memory_mib.unwrap_or(DEFAULT_MEMORY_MIB);
+    let admission = match LocalEntrypoint::admission(cpus, memory_mib) {
+        Ok(admission) => admission,
+        Err(error) => {
+            operation.fail_preparation(error);
+            return owned_projection(operation);
+        }
+    };
+    let _ = operation.run(
+        EntrypointCall {
+            vm: EntrypointVm {
+                slot: &slot,
+                vm_name: SessionVmName::Prefixed("invoke"),
+                cpus,
+                memory_mib,
+                admission,
+            },
+            stdin: CallStdin::for_payload(payload),
+            timeout_secs: parsed.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS),
+            lifecycle: CallLifecycle::Transient,
+        },
+        None,
+    );
+    owned_projection(operation)
+}
+
+pub(crate) fn owned_projection(
+    operation: &mvm_client::entrypoint::call::OwnedTransientResult<CapturedOutput>,
+) -> Outcome {
+    match operation.projection() {
+        Ok((outcome, output)) => Outcome::ok(&EntrypointCallReply::from(CallResult {
+            terminal: outcome.terminal.clone(),
+            output: output.clone(),
+        })),
+        Err(_) => {
+            if let Some(error) = operation.call_error()
+                && error.is::<mvm_client::entrypoint::call::NativeOwnedInvocationUnavailable>()
+            {
+                return Outcome::from(MvmError::Rejected {
+                    reason: "native invocation is unsupported before verified rootfs custody"
+                        .into(),
+                });
+            }
+            if let Some((machine_id, plan_id)) = operation.recovery_details() {
+                return Outcome::from(MvmError::RecoveryRequired {
+                    machine_id,
+                    plan_id,
+                    reason: "original owned cleanup is unresolved".into(),
+                });
+            }
+            Outcome::from(MvmError::Backend {
+                reason: "owned invocation failed; original result and errors remain in its context"
+                    .into(),
+            })
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1376,9 +1376,12 @@ mod tests {
                     &mut { effects },
                 );
             });
-            let (session, key) =
-                AuthenticatedSession::host_with_peer(&mut stream, "production-dispatch", host_key)
-                    .unwrap();
+            let (session, key) = AuthenticatedSession::host_retaining_peer(
+                &mut stream,
+                "production-dispatch",
+                host_key,
+            )
+            .unwrap();
             assert_eq!(key, SigningKey::from_bytes(&[42; 32]).verifying_key());
             Self {
                 stream,
@@ -1771,7 +1774,7 @@ mod tests {
             guest.shutdown(std::net::Shutdown::Both).unwrap();
         });
         let (mut session, _) =
-            AuthenticatedSession::host_with_peer(&mut host, "ack-failure", host_key).unwrap();
+            AuthenticatedSession::host_retaining_peer(&mut host, "ack-failure", host_key).unwrap();
         peer.join().unwrap();
         let descriptor: std::os::fd::OwnedFd = host.into();
         let mut file = std::fs::File::from(descriptor);

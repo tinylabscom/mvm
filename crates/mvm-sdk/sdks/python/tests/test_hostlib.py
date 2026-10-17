@@ -25,6 +25,132 @@ from mvm._errors.types import (
 )
 
 
+def test_context_close_and_free_refusal_hold_original_pointer_and_library(monkeypatch):
+    import ctypes
+
+    class Function:
+        def __init__(self, run):
+            self.run = run
+        def __call__(self, *args):
+            return self.run(*args)
+
+    class Library:
+        def __init__(self):
+            self.buffers = []
+            self.fail_close = True
+            self.mvm_hostlib_free = Function(lambda _out: None)
+            self.mvm_hostlib_context_create = Function(self.create)
+            self.mvm_hostlib_context_call = Function(lambda *args: self.reply(args[-1], 0, {}))
+            self.mvm_hostlib_context_inspect = Function(lambda *args: self.reply(args[-1], 0, {}))
+            self.mvm_hostlib_context_retry_stop = Function(lambda *args: self.reply(args[-1], 0, {}))
+            self.mvm_hostlib_context_close = Function(self.close)
+            self.mvm_hostlib_context_checked_free = Function(self.free)
+        def reply(self, out, status, body):
+            encoded = json.dumps(body).encode()
+            buffer = (ctypes.c_uint8 * len(encoded)).from_buffer_copy(encoded)
+            self.buffers.append(buffer)
+            out._obj.data = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint8))
+            out._obj.len = len(encoded)
+            return status
+        def create(self, _major, _minor, pointer, out):
+            pointer._obj.value = 123  # transport fixture, NOT a native owner/proof
+            return self.reply(out, 0, {})
+        def close(self, _pointer, out):
+            if self.fail_close:
+                return self.reply(out, 5, {"code": "CONFLICT", "message": "fixture", "retryable": False})
+            return self.reply(out, 0, {})
+        def free(self, pointer):
+            if self.fail_close:
+                return 5
+            pointer._obj.value = None
+            return 0
+
+    library = Library()
+    negotiation = []
+    def load(*, negotiate=True):
+        negotiation.append(negotiate)
+        return library
+    monkeypatch.setattr(_hostlib, "_load", load)
+    context = _hostlib.NativeContext()
+    status, body = context._invoke("transport.fixture", b"{}")
+    assert status == 0 and json.loads(body) == {}
+    assert negotiation == [False]
+    with pytest.raises(HostLibraryError):
+        context.close()
+    assert context._pointer.value == 123 and context._library is library
+    with pytest.raises(MvmTransportError):
+        context.free()
+    assert context._pointer.value == 123
+    library.fail_close = False
+    context.close()
+    context.free()
+    assert context._pointer.value is None
+
+
+def test_context_refuses_second_session_start_and_foreign_stop_before_transport(hostlib):
+    sid = "abcdefghijklmnopqrstuvwx"
+    hostlib.reply("session.start", {"session_id": sid})
+    hostlib.reply("session.stop", {})
+    context = _hostlib.NativeContext()
+    context.call("session.start", {"workload": "fixture"})
+    for method, request in [
+        ("session.start", {"workload": "second"}),
+        ("session.stop", {"session_id": "zyxwvutsrqponmlkjihgfedc"}),
+    ]:
+        with pytest.raises(MvmTransportError) as caught:
+            context.call(method, request)
+        assert caught.value.recovery is context
+    assert hostlib.methods == ["session.start"]
+    for cleanup in [context.retry_stop, context.close, context.free]:
+        with pytest.raises(MvmTransportError):
+            cleanup()
+    context.call("session.stop", {"session_id": sid})
+    with pytest.raises(MvmTransportError):
+        context.call("session.start", {"workload": "second"})
+    assert hostlib.methods == ["session.start", "session.stop"]
+    context.close()
+    context.free()
+    # Actual SDK binding state, but the installed recorder created no child.
+
+
+@pytest.mark.parametrize("raw", [
+    b"{}", b'{"session_id":7}', b'{"session_id":null}',
+    b'{"session_id":"NOT-BASE32"}',
+    b'{"session_id":"abcdefghijklmnopqrstuvwx\\n"}',
+    b'{"session_id":"abcdefghijklmnopqrstuvwx","session_id":"abcdefghijklmnopqrstuvwx"}',
+    b'{"session_id":"abcdefghijklmnopqrstuvwx","session_\\u0069d":"abcdefghijklmnopqrstuvwx"}',
+    b'{"private_marker":"must-not-render"}', b"not-json",
+])
+def test_unknown_start_keeps_wire_reply_and_original_error_without_false_free(monkeypatch, raw):
+    calls = []
+
+    def inprocess_transport(method, request):
+        calls.append((method, request))
+        return 0, raw
+
+    monkeypatch.setattr(_hostlib, "_invoke", inprocess_transport)
+    context = _hostlib.NativeContext()
+    with pytest.raises(BaseException) as first:
+        context.call("session.start", {"workload": "fixture"})
+    original = first.value
+    assert original.recovery is context
+    assert context._session_error is original
+    assert context._session_reply_bytes == raw
+    for cleanup in [context.retry_stop, context.close, context.free, context.inspect]:
+        with pytest.raises(MvmTransportError) as refused:
+            cleanup()
+        assert "must-not-render" not in str(refused.value)
+    with pytest.raises(MvmTransportError):
+        context.call("session.start", {"workload": "second"})
+    assert context._session_error is original
+    assert context._session_reply_bytes == raw
+    assert len(calls) == 1
+    assert not context._pointer
+    assert not context._freed
+    # Even a genuine no-C-allocation fixture cannot turn unknown-start policy
+    # into fake native stop evidence or an acknowledged cleanup.
+
+
 def test_the_file_name_follows_the_platform():
     assert _hostlib.library_file_name("darwin") == "libmvm_hostlib.dylib"
     assert _hostlib.library_file_name("linux") == "libmvm_hostlib.so"

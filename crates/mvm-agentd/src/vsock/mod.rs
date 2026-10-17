@@ -44,7 +44,7 @@ pub use api::{
 };
 pub use connection::{
     HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_before,
-    connect_to_port_once, connect_unix_before, open_authenticated_session_with_peer,
+    connect_to_port_once, connect_unix_before, open_peer_authenticated_session,
     run_with_stream_deadline, send_request, send_request_stream, vsock_uds_path,
 };
 pub use framing::{

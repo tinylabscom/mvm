@@ -49,19 +49,31 @@ struct Custody {
     native: Option<ColdHvfOwner>,
     failed_boot: Option<ColdHvfBootFailure>,
     native_exit: Option<mvm_vmm::host::hvf_stop::ConfirmedExit>,
+    entrypoint_terminal: Option<mvm_agentd::vsock::EntrypointEvent>,
     phase: Phase,
     support: Vec<Box<dyn Send>>,
 }
 
 impl Custody {
+    fn cleanup_pending(&self) -> Result<bool> {
+        cleanup_evidence_pending(
+            crate::kernel_custody::has_retained_kernel(&self.preparation._lifecycle),
+            self.preparation
+                .launch
+                .config()
+                .canonical_kernel
+                .as_ref()
+                .map(|kernel| path_entry_exists(kernel.generation_dir()))
+                .unwrap_or(Ok(false)),
+        )
+    }
+
     fn rollback_cleanup_pending(&mut self) -> bool {
         self.failed_boot
             .as_mut()
             .and_then(ColdHvfBootFailure::confirmed_exit)
             .is_some()
-            && cleanup_record_unresolved(crate::kernel_custody::has_retained_kernel(
-                &self.preparation._lifecycle,
-            ))
+            && cleanup_record_unresolved(self.cleanup_pending())
     }
 }
 
@@ -80,6 +92,19 @@ pub struct ColdHvfChannel {
 /// Owning runtime return, not a VM-id DTO or admission permit.
 pub type OwnedRuntimeLaunch = ColdHvfChannel;
 
+/// Actual original exit after protected flush and required kernel cleanup.
+/// Neither a caller result nor a deserialized status can construct this.
+pub struct NativeCompletion {
+    _exit: mvm_vmm::host::hvf_stop::ConfirmedExit,
+    terminal: mvm_agentd::vsock::EntrypointEvent,
+}
+
+impl NativeCompletion {
+    pub fn terminal(&self) -> &mvm_agentd::vsock::EntrypointEvent {
+        &self.terminal
+    }
+}
+
 impl ColdHvfChannel {
     pub(super) fn new(preparation: ColdHvfPreparation) -> Self {
         Self {
@@ -88,6 +113,7 @@ impl ColdHvfChannel {
                 native: None,
                 failed_boot: None,
                 native_exit: None,
+                entrypoint_terminal: None,
                 phase: Phase::Prepared,
                 support: Vec::new(),
             }),
@@ -265,6 +291,7 @@ impl ColdHvfChannel {
             .as_mut()
             .context("native owner missing")?
             .entrypoint(request, on_event)?;
+        custody.entrypoint_terminal = Some(terminal.clone());
         custody.phase = Phase::Dispatched;
         Ok(terminal)
     }
@@ -292,15 +319,41 @@ impl ColdHvfChannel {
     /// The original owner supplies stop/exit/finalization proof. On error the
     /// native stream, session, first guest key and runtime lease remain held.
     pub fn stop(&mut self) -> Result<()> {
+        self.stop_retaining_evidence().map(|_| ())
+    }
+
+    pub fn complete(&mut self) -> Result<NativeCompletion> {
+        let custody = self
+            .custody
+            .as_ref()
+            .context("native completion already consumed")?;
+        anyhow::ensure!(
+            custody.phase == Phase::Flushed && custody.native.is_some(),
+            "native completion requires the original channel's actual terminal and flush ACK"
+        );
+        let terminal = custody
+            .entrypoint_terminal
+            .clone()
+            .context("native completion has no original entrypoint terminal")?;
+        let proof = self
+            .stop_retaining_evidence()?
+            .context("native completion has no original exit proof")?;
+        Ok(NativeCompletion {
+            _exit: proof,
+            terminal,
+        })
+    }
+
+    fn stop_retaining_evidence(
+        &mut self,
+    ) -> Result<Option<mvm_vmm::host::hvf_stop::ConfirmedExit>> {
         let Some(custody) = self.custody.as_mut() else {
             // Only a prior proven stop (or consumed child-free preparation)
             // removes this private aggregate. Never reconstruct an instance.
-            return Ok(());
+            return Ok(None);
         };
-        if custody.native_exit.is_none()
-            && let Some(native) = custody.native.as_mut()
-        {
-            custody.native_exit = Some(native.stop_with_proof()?);
+        if let Some(native) = custody.native.as_mut() {
+            stop_original_once(&mut custody.native_exit, || native.stop_confirmed())?;
         }
         if let Some(failed) = custody.failed_boot.as_mut() {
             failed.retry_stop()?;
@@ -325,14 +378,19 @@ impl ColdHvfChannel {
                 proof,
             )?;
         }
+        anyhow::ensure!(
+            !custody.cleanup_pending()?,
+            "original canonical cleanup remains; retain exit proof and cleanup custody"
+        );
         custody
             .preparation
             .streamer
             .stop(&custody.preparation.launch.config().name);
+        let proof = custody.native_exit.take();
         // Only now may RAII guards reap supporting services and release the
         // lifecycle lease. No native stop is reconstructed from the VM name.
         release_terminal_custody(&mut self.custody);
-        Ok(())
+        Ok(proof)
     }
 }
 
@@ -384,6 +442,27 @@ fn cleanup_record_unresolved(check: Result<bool>) -> bool {
     check.unwrap_or(true)
 }
 
+fn path_entry_exists(path: &std::path::Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn cleanup_evidence_pending(index: Result<bool>, generation: Result<bool>) -> Result<bool> {
+    // Neither absent index nor absent generation is an exit proof. These
+    // observations only bound release AFTER the original proof is retained.
+    Ok(index? || generation?)
+}
+
+fn stop_original_once<T>(exit: &mut Option<T>, stop: impl FnOnce() -> Result<T>) -> Result<()> {
+    if exit.is_none() {
+        *exit = Some(stop()?);
+    }
+    Ok(())
+}
+
 fn try_release_custody<T>(custody: &mut Option<T>, disposition: Abandonment) -> Result<(), ()> {
     match disposition {
         Abandonment::NoNativeChild => {
@@ -418,6 +497,66 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn missing_index_with_remaining_generation_retains_release_and_drop_groups() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Guard(Arc<AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let index = directory.path().join("absent-index");
+        let generation = directory.path().join("original-generation");
+        std::fs::create_dir(&generation).unwrap();
+        let pending = || {
+            cleanup_record_unresolved(cleanup_evidence_pending(
+                path_entry_exists(&index),
+                path_entry_exists(&generation),
+            ))
+        };
+        assert!(pending());
+        let release_drops = Arc::new(AtomicUsize::new(0));
+        let mut group = Some(Guard(Arc::clone(&release_drops)));
+        assert!(try_release_custody(&mut group, Abandonment::TerminalCleanupUnconfirmed,).is_err());
+        assert!(group.is_some());
+        assert_eq!(release_drops.load(Ordering::SeqCst), 0);
+        let abandon_drops = Arc::new(AtomicUsize::new(0));
+        assert!(pending());
+        abandon_custody(
+            Guard(Arc::clone(&abandon_drops)),
+            Abandonment::TerminalCleanupUnconfirmed,
+        );
+        assert_eq!(abandon_drops.load(Ordering::SeqCst), 0);
+        assert!(generation.is_dir());
+        assert!(!index.exists());
+        // Same production release/Drop policy with real record mechanics,
+        // not an instantiated ConfirmedRollback/ConfirmedExit or native VM.
+        drop(group);
+        assert_eq!(release_drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn exited_cleanup_retry_does_not_dispatch_stop_again_without_faking_exit() {
+        let mut marker = None;
+        let mut stops = 0;
+        stop_original_once(&mut marker, || {
+            stops += 1;
+            Ok(())
+        })
+        .unwrap();
+        let cleanup: Result<()> = Err(anyhow::anyhow!("local cleanup failure"));
+        assert!(cleanup.is_err());
+        stop_original_once(&mut marker, || -> Result<()> {
+            panic!("cached outcome must prevent another stop")
+        })
+        .unwrap();
+        assert_eq!(stops, 1);
+        // Unit marker exercises actual cache policy, not native exit evidence.
+        // NativeCompletion still requires the original opaque driver proof.
+    }
 
     #[test]
     fn consuming_release_retains_original_group_for_pending_or_unreadable_cleanup() {
@@ -460,7 +599,7 @@ mod tests {
         // Pure empty-state coverage, not a fabricated ConfirmedExit. The
         // running production path empties custody only after original stop.
         let mut channel = ColdHvfChannel { custody: None };
-        let rollback: Result<()> = (|| channel.stop())();
+        let rollback: Result<()> = channel.stop();
         rollback.unwrap();
         channel.stop().unwrap();
         assert!(channel.custody.is_none());

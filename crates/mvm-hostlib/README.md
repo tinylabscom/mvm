@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.8.
+   fields. The ABI is 1.9.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -40,11 +40,103 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    strings from the typed error. Existing variants omit `details`.
 
 The same-major negotiation accepts a requested minor no newer than the library.
-Negotiation is process-global; the last requesting binding never changes an
+Legacy-call negotiation is process-global; the last requesting binding never changes an
 operation's status. Older bindings may expose status 12 as a generic failure
 without typed details, but do not retry it. New bindings validate and expose
 immutable typed recovery details. Those values are metadata, not ownership,
 callbacks, or a recovery operation.
+
+### Caller-owned contexts
+
+ABI 1.9 adds `mvm_hostlib_context_create`, `context_call`, `context_inspect`,
+`context_retry_stop`, `context_close`, and `context_checked_free` (each with
+the `mvm_hostlib_` prefix). Their C declarations and pointer contracts are in
+`include/mvm_hostlib.h`. Creation independently negotiates the requested
+major/minor; the legacy global negotiation latch does not authorize a context.
+Existing ordinary stateless methods, status values 0–12, and buffer layout
+remain compatible.
+
+The caller owns one serial context. Its invocation owns the actual output
+observer before preparation, boot, callbacks, or JSON conversion. Concurrent
+or reentrant use returns a conflict. The caller must exclude every concurrent
+access during checked destruction, including threads about to begin a call;
+a mutex cannot make a dangling pointer safe.
+
+Inspection copies data and has no operational effects. Selectors are
+`0=result`, `1=primary`, `2=flush`, `3=stop`, and `4=cleanup`; other values are
+invalid. For error selectors, success with an empty buffer means no error in
+that slot, **not** successful work or completion. A result can contain a
+nonzero exit or typed entrypoint error even when transport succeeded. Native
+raw output requires the original terminal event, flush acknowledgement,
+original exit proof, and required kernel cleanup—not a caller status.
+
+Explicit close attempts cleanup and retains the entire original group on
+failure. Retry-stop acts only on its held original owner and remaining
+cleanup, never by replaying work or reconnecting by name. Checked-free is
+nonblocking, never stops, and accepts only an empty or successfully closed
+context; failure leaves the pointer intact. Keep the shared-library handle
+strongly held until checked-free succeeds. There is no unconditional
+destructor stop. Abandoning a pointer, interpreter teardown, descriptor close,
+or process exit does not establish native stop or preserve usable recovery.
+
+An ordinary compatibility session has one start attempt per context. The
+context arms its lifetime before dispatch or reply encoding, validates the
+original unique session id, and accepts stop only for that exact binding.
+Second starts, unrelated stops, and duplicate binding fields refuse before
+dispatch. A missing, malformed, failed, or interrupted start leaves an
+unknown-start lifetime; it cannot be closed, freed, or reported stopped just
+because no usable id was returned. The original reply/error remains private.
+This is ordinary session identity/lifetime retention, **not** native generation
+custody or a native terminal proof. Legacy stateless methods remain separate.
+
+The Python and TypeScript SDKs retain the same context and Session on start or
+cleanup failure. Body and cleanup errors remain separately inspectable; neither
+is suppressed or rendered into the aggregate error text. Successful TypeScript
+`Session.id` remains a string; an unbound failed receiver refuses access rather
+than supplying a placeholder id.
+Every failed explicit `Session.retry_stop()` also carries that same receiver,
+original primary error, and actual cleanup error. Its prior cleanup errors stay
+held on the Session. The history has a finite 16-failure budget: exhausting it
+refuses another cleanup **before effects**, without discarding earlier errors.
+Keep the unresolved owner; budget exhaustion is not stop or recovery evidence.
+Successful cleanup remains idempotent and does not redispatch stop.
+
+Python asynchronous entry retains its original worker task before waiting.
+Cancelling entry does not stop that thread. The raised `CancelledError` subclass
+retains the original cancellation as `primary_error` and cause, plus `session`,
+`recovery`, and the held worker. Keep that receiver and use
+`await error.session.wait_started()` to await **only** its already-held worker,
+then `error.session.retry_stop()` if the original binding became available.
+Cancelling `wait_started()` also leaves the worker held and shielded. Pending
+or unknown starts refuse cleanup/reentry; no retry starts a replacement worker
+or guesses an id. Loop/interpreter/process exit is not successful cleanup.
+
+Python asynchronous exit similarly owns and shields its actual cleanup worker.
+If the exit wait is cancelled, its `CancelledError` subclass keeps the original
+body/primary error, exact cancellation and cause, Session/context, and worker;
+the Session retains the cancellation before surfacing it. Subsequent busy or
+failed retries carry the same receiver and retained cancellation references.
+Use `await error.session.wait_cleanup()` to await **only that held worker**,
+then explicit no-argument `retry_stop()` if its operation failed. This wait
+never retries cleanup or starts another worker. Its historical worker error
+remains observable even if a later explicit retry succeeds.
+
+The finite 16-slot history reserves a worker-outcome slot and a waiter-cancel
+slot atomically **before** scheduling asynchronous cleanup. Further pending
+waits reserve their own cancellation slot before awaiting. Start waits share
+the same bounded machinery. Metadata locks cover only bookkeeping, not FFI,
+awaits, or user code; a separate operation lock serializes actual cleanup.
+Unused reservations are released, never actual errors. Without capacity a new
+await or effect refuses while retaining all original objects. Keep the owning
+Session; do not cancel its worker task directly. Cancelling a waiter, a task
+completion flag, or interpreter exit is not native stop proof.
+
+Managed native positive entry remains unsupported before launch while
+immutable verified rootfs/verity custody is unavailable. A refusal without a
+held owner is nonretryable unsupported, not `RECOVERY_REQUIRED`. Repeated
+native sessions, second-transport stdin, detached ownership, and CLI cases
+without a retained recovery lifetime remain unavailable. Context ownership
+does not waive these restrictions or supply a durable handoff.
 
 The method registry (`src/registry.rs`) is the source of truth: `cargo xtask
 gen-stubs` renders it into `schema/host-abi-v0.json` and
