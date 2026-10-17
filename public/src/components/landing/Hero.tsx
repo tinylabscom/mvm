@@ -65,30 +65,28 @@ export function Hero() {
                 className="max-w-[16rem] sm:max-w-[26rem] lg:max-w-xl lowercase font-display font-semibold leading-[1.05] tracking-[-0.03em] text-title"
                 style={{ fontSize: "clamp(2.5rem, 4.8vw, 3.9rem)" }}
               >
-                Run AI agents in a hardware-isolated{" "}
-                <span className="text-accent-2">sandbox</span>.
+                A new security boundary{" "}
+                <span className="text-accent-2">for AI agents</span>.
               </h1>
             </Reveal>
 
             <Reveal delay={120}>
               <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
-                One command. Their own kernel. No guest network device.
+                Agents decide what to do as they run. That shouldn&rsquo;t
+                mean deciding what they&rsquo;re allowed to do.
               </p>
-              {/* The what-MVM-does callout — this sentence is the pitch, so
-                  it gets an accent rule and emphasized key phrases instead
-                  of reading as body copy. */}
               <p
                 className="text-base leading-relaxed text-body"
                 style={{ marginTop: "1rem" }}
               >
-                Every file, tool, secret, and outbound connection is governed
-                by a signed execution plan. Run agents, customer code, and
-                build jobs without sharing the host kernel.
+                You set what an agent can access. mvm enforces those rules
+                outside the agent, so it can&rsquo;t give itself more access.
+                Each run leaves a record you can check for tampering.
               </p>
               {/* Runs-anywhere facts as badge chips, in the same mono idiom
                   as the credibility row above. */}
               <div className="mt-4 flex flex-wrap gap-2 font-mono text-[11px] lowercase">
-                {["sub-150 ms boot", "on a laptop", "in the cloud", "in a browser"].map(
+                {["open source", "macOS + Linux", "OCI images"].map(
                   (chip) => (
                     <span
                       key={chip}
@@ -102,12 +100,12 @@ export function Hero() {
             </Reveal>
 
             <Reveal delay={320} className="flex flex-wrap items-center gap-4">
-              <a href={`${base}getting-started/quickstart/`}>
-                <Button size="lg">Get Started</Button>
+              <a href="#execution-contract">
+                <Button size="lg">How it works</Button>
               </a>
-              <a href={`${base}getting-started/why-mvm/`}>
+              <a href={`${base}getting-started/quickstart/`}>
                 <Button size="lg" variant="outline">
-                  Why mvm &rarr;
+                  Get started &rarr;
                 </Button>
               </a>
             </Reveal>

@@ -46,6 +46,44 @@ test("homepage content renders immediately without a reveal animation", () => {
   assert.doesNotMatch(styles, /html\.js .*site-reveal|site-reveal-failsafe/);
 });
 
+test("homepage keeps the quickstart before product details and contact", () => {
+  const landing = readFileSync(join(publicRoot, "src/components/landing/Landing.tsx"), "utf8");
+  const sections = ["Hero", "Quickstart", "WhyNow", "ExecutionContract", "RiskControl", "RequestAccess", "Footer"];
+  const positions = sections.map(section => landing.indexOf(`<${section} />`));
+
+  assert.ok(positions.every(position => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
+  assert.doesNotMatch(landing, /<RegulatorsNow\s*\/>/);
+});
+
+test("homepage contact form preserves its endpoint and existing anchor", () => {
+  const source = readFileSync(
+    join(publicRoot, "src/components/landing/RequestAccess.tsx"),
+    "utf8",
+  );
+
+  assert.match(source, /id="request-access"/);
+  assert.match(source, /action="https:\/\/formspree\.io\/f\/xwvyllrp"/);
+  assert.match(source, /method="POST"/);
+  assert.match(source, /name="email"/);
+  assert.match(source, /name="class"/);
+});
+
+test("architecture diagram layers retain their detail notes", () => {
+  const source = readFileSync(
+    join(publicRoot, "src/components/architecture/Architecture.astro"),
+    "utf8",
+  );
+  const targets = [...source.matchAll(/data-note="([^"]+)"/g)].map(match => match[1]);
+
+  assert.ok(targets.length > 0);
+  for (const target of targets) {
+    assert.ok(source.includes(`id="${target}"`), `Missing diagram note: ${target}`);
+  }
+  assert.match(source, /id="stack"/);
+  assert.match(source, /id="company"/);
+});
+
 test("documentation code blocks provide dark and light syntax themes", () => {
   const astroConfig = readFileSync(join(publicRoot, "astro.config.mjs"), "utf8");
 
