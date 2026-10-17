@@ -143,6 +143,152 @@ impl Fixture {
     }
 }
 
+fn synthetic_expectations(f: &Fixture) -> AuthenticatedBootImageExpectations {
+    f.contract
+        .image_expectations(
+            &f.plan,
+            &f.config,
+            GuestArch::X86_64,
+            BackendKind::Firecracker,
+        )
+        .unwrap()
+}
+
+#[test]
+fn synthetic_expectations_verify_each_original_role_and_reject_mutation() {
+    let f = fixture(GuestArch::X86_64);
+    let expectations = synthetic_expectations(&f);
+    for (role, name) in [
+        (BootImageAsset::Rootfs, "rootfs.ext4"),
+        (BootImageAsset::Verity, "rootfs.verity"),
+        (BootImageAsset::Metadata, "mvm-meta.json"),
+        (BootImageAsset::RootHash, "rootfs.roothash"),
+    ] {
+        let bytes = std::fs::read(f._directory.path().join(name)).unwrap();
+        assert_eq!(expectations.expected_size(role), bytes.len() as u64);
+        assert_eq!(
+            expectations.expected_sha256(role),
+            &Sha256Hex::from_bytes(&bytes)
+        );
+        expectations.verify_reader(role, bytes.as_slice()).unwrap();
+        let mut changed = bytes;
+        changed[0] ^= 1;
+        assert!(
+            expectations
+                .verify_reader(role, changed.as_slice())
+                .is_err()
+        );
+    }
+    assert_eq!(expectations.root_hash(), "a".repeat(64));
+    // The fixture directly constructs its contract: synthetic verification
+    // semantics only, not genuine signed-open, admission, or native evidence.
+}
+
+#[test]
+fn synthetic_readers_refuse_truncation_extra_bytes_wrong_role_and_bound_reads() {
+    let f = fixture(GuestArch::X86_64);
+    let expectations = synthetic_expectations(&f);
+    let bytes = std::fs::read(&f.config.rootfs_path).unwrap();
+    assert!(
+        expectations
+            .verify_reader(BootImageAsset::Rootfs, &bytes[..bytes.len() - 1])
+            .is_err()
+    );
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(
+        expectations
+            .verify_reader(BootImageAsset::Rootfs, extra.as_slice())
+            .is_err()
+    );
+    assert!(
+        expectations
+            .verify_reader(BootImageAsset::Verity, bytes.as_slice())
+            .is_err()
+    );
+    let mut endless = std::io::repeat(0);
+    assert!(
+        expectations
+            .verify_reader(BootImageAsset::Rootfs, &mut endless)
+            .is_err()
+    );
+    // A malicious unending reader is bounded by original signed size + 1.
+}
+
+#[test]
+fn synthetic_expectations_bind_original_plan_and_authenticated_captured_hash() {
+    let mut f = fixture(GuestArch::X86_64);
+    let expectations = synthetic_expectations(&f);
+    std::fs::write(f._directory.path().join("rootfs.roothash"), "b".repeat(64)).unwrap();
+    assert_eq!(expectations.root_hash(), "a".repeat(64));
+    assert!(
+        f.contract
+            .image_expectations(
+                &f.plan,
+                &f.config,
+                GuestArch::X86_64,
+                BackendKind::Firecracker,
+            )
+            .is_err()
+    );
+    let hash = format!("{}\n", "a".repeat(64));
+    std::fs::write(f._directory.path().join("rootfs.roothash"), hash).unwrap();
+    f.config.roothash = Some("b".repeat(64));
+    assert!(
+        f.contract
+            .image_expectations(
+                &f.plan,
+                &f.config,
+                GuestArch::X86_64,
+                BackendKind::Firecracker,
+            )
+            .is_err()
+    );
+    f.config.roothash = Some("a".repeat(64));
+    f.plan.image.sha256 = "0".repeat(64);
+    assert!(
+        f.contract
+            .image_expectations(
+                &f.plan,
+                &f.config,
+                GuestArch::X86_64,
+                BackendKind::Firecracker,
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn synthetic_held_reader_survives_path_replacement_but_not_inode_mutation() {
+    use std::io::{Seek, SeekFrom};
+    let f = fixture(GuestArch::X86_64);
+    let expectations = synthetic_expectations(&f);
+    let source = f._directory.path().join("mvm-meta.json");
+    let original = source.with_extension("original");
+    let mut held = std::fs::File::open(&source).unwrap();
+    std::fs::rename(&source, &original).unwrap();
+    std::fs::write(&source, b"replacement").unwrap();
+    expectations
+        .verify_reader(BootImageAsset::Metadata, &mut held)
+        .unwrap();
+    assert!(
+        expectations
+            .verify_reader(
+                BootImageAsset::Metadata,
+                std::fs::File::open(&source).unwrap(),
+            )
+            .is_err()
+    );
+    std::fs::write(&original, b"in-place mutation").unwrap();
+    held.seek(SeekFrom::Start(0)).unwrap();
+    assert!(
+        expectations
+            .verify_reader(BootImageAsset::Metadata, &mut held)
+            .is_err()
+    );
+    // A held readonly original FD is not immutable-byte custody.
+}
+
 #[test]
 fn both_architectures_bind_the_existing_config_to_production_members() {
     for (arch, backend) in [
