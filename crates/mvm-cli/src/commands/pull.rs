@@ -1,4 +1,4 @@
-//! `mvmctl pull` — fetch, verify, install, and pin a signed registry pack.
+//! `mvmctl pull` — install legacy packs or verify application metadata.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
@@ -27,7 +27,27 @@ struct PullJson<'a> {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let summary = pack_registry::pull(&args.reference)?;
+    let outcome = pack_registry::pull(&args.reference)?;
+    let summary = match outcome {
+        pack_registry::PullOutcome::Installed(summary) => summary,
+        pack_registry::PullOutcome::VerifiedApplication(application) => {
+            use mvm_core::registry_pack::AuthenticatedRegistryManifest;
+            if args.json {
+                return crate::json_out::emit_json(&serde_json::json!({
+                    "reference": application.reference().to_string(),
+                    "manifest_sha256": application.manifest_sha256().as_str(),
+                    "status": "verified",
+                    "installed": false
+                }));
+            }
+            println!(
+                "verified {} (manifest {}); application bundle not acquired or installed",
+                application.reference(),
+                application.manifest_sha256().as_str()
+            );
+            return Ok(());
+        }
+    };
     if args.json {
         return crate::json_out::emit_json(&PullJson {
             reference: &summary.reference.to_string(),
