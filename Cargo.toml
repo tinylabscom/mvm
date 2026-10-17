@@ -712,6 +712,12 @@ codegen-units = 16
 # instead of a memory-safety-adjacent surprise.
 overflow-checks = true
 
+# Host build scripts and proc-macros must remain loadable by the compiler.
+# Older LLVM stripping can misalign Mach-O LINKEDIT entries rejected by dyld.
+# This does not disable stripping for the shipped target binaries.
+[profile.release.build-override]
+strip = false
+
 # `release` semantics (no debug assertions, trapping overflow) without paying
 # fat LTO and single-codegen-unit linking on a ~4,350-test suite. This is what
 # the release-profile witness lane builds with; it is not a shipping profile.

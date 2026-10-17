@@ -169,6 +169,7 @@ pub(crate) struct EmbedCache {
     pub graph: build_embed_cache::WorkspaceGraph,
     lockfile: String,
     toolchain_file: String,
+    workspace_manifest: Option<build_embed_cache::WorkspaceManifestDigest>,
     pub root: Option<PathBuf>,
     sources: BTreeMap<String, Vec<(String, String)>>,
     /// Every workspace member a computed key hashed.
@@ -190,6 +191,10 @@ impl EmbedCache {
             toolchain_file: build_embed_cache::hash_file(
                 &workspace_root.join("rust-toolchain.toml"),
             ),
+            // A failed snapshot disables reuse/publication, never supplies an
+            // empty digest. Cache-off callers still build without a cache.
+            workspace_manifest: build_embed_cache::WorkspaceManifestDigest::read(workspace_root)
+                .ok(),
             root,
             sources: BTreeMap::new(),
             watched: BTreeSet::new(),
@@ -217,6 +222,7 @@ impl EmbedCache {
     /// `None` when caching is off or unavailable — callers then build.
     fn key_for(&mut self, request: &KeyRequest<'_>) -> Option<String> {
         self.root.as_ref()?;
+        let workspace_manifest = self.workspace_manifest.clone()?;
         let sources = self.closure_sources(request.package);
         Some(build_embed_cache::artifact_key(
             &build_embed_cache::KeyInputs {
@@ -227,6 +233,7 @@ impl EmbedCache {
                 toolchain: format!("{} rust={}", request.toolchain, self.toolchain_file),
                 flavor: request.flavor.to_string(),
                 lockfile: self.lockfile.clone(),
+                workspace_manifest,
                 sources,
             },
         ))
@@ -511,6 +518,99 @@ fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn root_profile_snapshot_rekeys_every_payload_for_both_architectures() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let binaries = read_manifest(workspace).unwrap();
+        assert_eq!(binaries.len(), 5);
+        for arch in ["aarch64", "x86_64"] {
+            let pin =
+                super::super::embed_toolchain::try_read_pinned_toolchain(workspace, arch).unwrap();
+            for binary in &binaries {
+                let directory = tempfile::tempdir().unwrap();
+                let root = directory.path();
+                let manifest = "[workspace]\n[profile.release]\nstrip = true\n";
+                std::fs::write(root.join("Cargo.toml"), manifest).unwrap();
+                let mut before = EmbedCache::with_root(root, Some(root.join("store")));
+                let key = artifact_key_for(&mut before, binary, &pin).unwrap();
+                assert_eq!(artifact_key_for(&mut before, binary, &pin).unwrap(), key);
+                std::fs::write(
+                    root.join("Cargo.toml"),
+                    format!("{manifest}[profile.release.build-override]\nstrip = false\n"),
+                )
+                .unwrap();
+                // One cache owns one snapshot; callers freeze the remaining
+                // build inputs independently of this cache-key calculation.
+                assert_eq!(artifact_key_for(&mut before, binary, &pin).unwrap(), key);
+                let mut after = EmbedCache::with_root(root, Some(root.join("store")));
+                let changed = artifact_key_for(&mut after, binary, &pin).unwrap();
+                assert_ne!(key, changed, "{} {arch}", binary.name);
+                assert_eq!(artifact_key_for(&mut after, binary, &pin).unwrap(), changed);
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_failure_never_mints_a_reusable_key_and_cache_off_stays_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let request = KeyRequest {
+            package: "mvm-build",
+            binary: "mvm-builderd",
+            features: "",
+            target: "x86_64-unknown-linux-musl",
+            toolchain: "test",
+            flavor: "musl-static",
+        };
+        let mut missing = EmbedCache::with_root(root, Some(root.join("store")));
+        assert!(missing.key_for(&request).is_none());
+        std::fs::create_dir(root.join("Cargo.toml")).unwrap();
+        let mut unreadable = EmbedCache::with_root(root, Some(root.join("store")));
+        assert!(unreadable.key_for(&request).is_none());
+        std::fs::remove_dir(root.join("Cargo.toml")).unwrap();
+        for invalid in ["", "not valid [", "[package]\nname = 'not-a-workspace'\n"] {
+            std::fs::write(root.join("Cargo.toml"), invalid).unwrap();
+            let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
+            assert!(cache.key_for(&request).is_none());
+        }
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let mut off = EmbedCache::with_root(root, None);
+        assert!(off.key_for(&request).is_none());
+        assert!(!root.join("store").exists());
+    }
+
+    #[test]
+    fn payload_key_uses_the_same_manifest_bound_common_writer_in_both_includers() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
+        let request = KeyRequest {
+            package: "mvm-build",
+            binary: "mvm-builderd",
+            features: "",
+            target: "x86_64-unknown-linux-musl",
+            toolchain: "test",
+            flavor: "musl-static",
+        };
+        let expected = build_embed_cache::artifact_key(&build_embed_cache::KeyInputs {
+            package: request.package.into(),
+            binary: request.binary.into(),
+            features: request.features.into(),
+            target: request.target.into(),
+            toolchain: format!("{} rust={}", request.toolchain, cache.toolchain_file),
+            flavor: request.flavor.into(),
+            lockfile: cache.lockfile.clone(),
+            workspace_manifest: build_embed_cache::WorkspaceManifestDigest::read(root).unwrap(),
+            sources: Vec::new(),
+        });
+        assert_eq!(cache.key_for(&request), Some(expected));
+    }
 
     #[test]
     fn nested_rust_env_drops_outer_nightly_flags_and_selects_safe_wrapper() {
