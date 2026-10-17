@@ -189,7 +189,7 @@ fn compare(lhs: &str, comparison: Comparison, rhs: &str) -> Result<bool, MarkerE
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
+enum Lexeme {
     Open,
     Close,
     And,
@@ -201,7 +201,7 @@ enum Token {
     Literal(String),
 }
 
-fn tokenize(text: &str) -> Result<Vec<Token>, MarkerError> {
+fn tokenize(text: &str) -> Result<Vec<Lexeme>, MarkerError> {
     let mut tokens = Vec::new();
     let mut rest = text;
     loop {
@@ -210,13 +210,13 @@ fn tokenize(text: &str) -> Result<Vec<Token>, MarkerError> {
             return Ok(tokens);
         };
         let (token, len) = match first {
-            '(' => (Token::Open, 1),
-            ')' => (Token::Close, 1),
+            '(' => (Lexeme::Open, 1),
+            ')' => (Lexeme::Close, 1),
             '\'' | '"' => {
                 let end = rest[1..]
                     .find(first)
                     .ok_or_else(|| MarkerError::Syntax("unterminated string".to_string()))?;
-                (Token::Literal(rest[1..=end].to_string()), end + 2)
+                (Lexeme::Literal(rest[1..=end].to_string()), end + 2)
             }
             c if c.is_ascii_alphanumeric() || c == '_' => {
                 let len = rest
@@ -224,18 +224,18 @@ fn tokenize(text: &str) -> Result<Vec<Token>, MarkerError> {
                     .unwrap_or(rest.len());
                 let word = &rest[..len];
                 let token = match word {
-                    "and" => Token::And,
-                    "or" => Token::Or,
-                    "not" => Token::Not,
-                    "in" => Token::In,
-                    name => Token::Name(name.to_string()),
+                    "and" => Lexeme::And,
+                    "or" => Lexeme::Or,
+                    "not" => Lexeme::Not,
+                    "in" => Lexeme::In,
+                    name => Lexeme::Name(name.to_string()),
                 };
                 (token, len)
             }
             _ => {
                 let (operator, after) = Operator::split(rest)
                     .ok_or_else(|| MarkerError::Syntax(format!("unexpected {first:?}")))?;
-                (Token::Operator(operator), rest.len() - after.len())
+                (Lexeme::Operator(operator), rest.len() - after.len())
             }
         };
         tokens.push(token);
@@ -259,16 +259,16 @@ fn parse(text: &str) -> Result<Marker, MarkerError> {
 }
 
 struct Parser<'a> {
-    tokens: &'a [Token],
+    tokens: &'a [Lexeme],
     position: usize,
 }
 
 impl Parser<'_> {
-    fn peek(&self) -> Option<&Token> {
+    fn peek(&self) -> Option<&Lexeme> {
         self.tokens.get(self.position)
     }
 
-    fn advance(&mut self) -> Option<&Token> {
+    fn advance(&mut self) -> Option<&Lexeme> {
         let token = self.tokens.get(self.position);
         self.position += 1;
         token
@@ -276,7 +276,7 @@ impl Parser<'_> {
 
     fn or(&mut self) -> Result<Marker, MarkerError> {
         let mut marker = self.and()?;
-        while self.peek() == Some(&Token::Or) {
+        while self.peek() == Some(&Lexeme::Or) {
             self.position += 1;
             marker = Marker::Or(Box::new(marker), Box::new(self.and()?));
         }
@@ -285,7 +285,7 @@ impl Parser<'_> {
 
     fn and(&mut self) -> Result<Marker, MarkerError> {
         let mut marker = self.atom()?;
-        while self.peek() == Some(&Token::And) {
+        while self.peek() == Some(&Lexeme::And) {
             self.position += 1;
             marker = Marker::And(Box::new(marker), Box::new(self.atom()?));
         }
@@ -293,10 +293,10 @@ impl Parser<'_> {
     }
 
     fn atom(&mut self) -> Result<Marker, MarkerError> {
-        if self.peek() == Some(&Token::Open) {
+        if self.peek() == Some(&Lexeme::Open) {
             self.position += 1;
             let marker = self.or()?;
-            if self.advance() != Some(&Token::Close) {
+            if self.advance() != Some(&Lexeme::Close) {
                 return Err(MarkerError::Syntax("unbalanced parenthesis".to_string()));
             }
             return Ok(marker);
@@ -313,8 +313,8 @@ impl Parser<'_> {
 
     fn operand(&mut self) -> Result<Operand, MarkerError> {
         match self.advance() {
-            Some(Token::Name(name)) => Variable::named(name).map(Operand::Variable),
-            Some(Token::Literal(text)) => Ok(Operand::Literal(text.clone())),
+            Some(Lexeme::Name(name)) => Variable::named(name).map(Operand::Variable),
+            Some(Lexeme::Literal(text)) => Ok(Operand::Literal(text.clone())),
             other => Err(MarkerError::Syntax(format!(
                 "expected a variable or a quoted string, found {other:?}"
             ))),
@@ -323,9 +323,9 @@ impl Parser<'_> {
 
     fn comparison(&mut self) -> Result<Comparison, MarkerError> {
         let comparison = match self.advance().cloned() {
-            Some(Token::Operator(operator)) => Some(Comparison::Version(operator)),
-            Some(Token::In) => Some(Comparison::In),
-            Some(Token::Not) => (self.advance() == Some(&Token::In)).then_some(Comparison::NotIn),
+            Some(Lexeme::Operator(operator)) => Some(Comparison::Version(operator)),
+            Some(Lexeme::In) => Some(Comparison::In),
+            Some(Lexeme::Not) => (self.advance() == Some(&Lexeme::In)).then_some(Comparison::NotIn),
             _ => None,
         };
         comparison.ok_or_else(|| MarkerError::Syntax("expected a comparison operator".to_string()))
