@@ -855,6 +855,10 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         json,
         intent,
     } = p;
+    // Whole-list intent validation precedes even ID/store/classification reads
+    // and service construction. Unsupported declarations intentionally win
+    // error precedence; this does not authenticate parent policy or approve use.
+    mvm_client::admission::secrets::validate_secret_sources(declared_secrets)?;
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     // Pick the fork arm by the parent's class: vm_full carries memory and must
@@ -1522,6 +1526,236 @@ mod tests {
             },
             destinations: Vec::new(),
             approval_required: false,
+        }
+    }
+
+    mod declared_source_preflight {
+        use super::*;
+        use std::collections::BTreeMap;
+        use std::path::{Path, PathBuf};
+
+        fn external() -> SecretBinding {
+            SecretBinding {
+                name: "EXTERNAL".into(),
+                source: SecretSource::External {
+                    provider: "unsupported".into(),
+                    path: "reference".into(),
+                },
+                destinations: Vec::new(),
+                approval_required: true,
+            }
+        }
+
+        fn declarations() -> [Vec<SecretBinding>; 3] {
+            [
+                vec![external()],
+                vec![secret_binding("MISSING", "missing"), external()],
+                vec![external(), secret_binding("MISSING", "missing")],
+            ]
+        }
+
+        fn invoke(id: &str, boot: bool, replay: bool, declared: &[SecretBinding]) -> Result<()> {
+            fork(ForkCmdParams {
+                id,
+                new_id: Some("never-created".into()),
+                boot,
+                hypervisor: "firecracker",
+                cpus: None,
+                memory: None,
+                declared_secrets: declared,
+                allow_secret_drop: true,
+                json: true,
+                intent: if replay {
+                    ForkIntent::Replay
+                } else {
+                    ForkIntent::Ordinary
+                },
+            })
+        }
+
+        fn snapshot(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+            fn visit(root: &Path, path: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+                let meta = std::fs::symlink_metadata(path).unwrap();
+                let mut value = Vec::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    value.extend_from_slice(&meta.mode().to_le_bytes());
+                }
+                if meta.is_file() {
+                    value.extend(std::fs::read(path).unwrap());
+                } else if meta.file_type().is_symlink() {
+                    value.extend(
+                        std::fs::read_link(path)
+                            .unwrap()
+                            .as_os_str()
+                            .as_encoded_bytes(),
+                    );
+                }
+                files.insert(path.strip_prefix(root).unwrap().to_owned(), value);
+                if meta.is_dir() {
+                    for entry in std::fs::read_dir(path).unwrap() {
+                        visit(root, &entry.unwrap().path(), files);
+                    }
+                }
+            }
+            let mut files = BTreeMap::new();
+            visit(root, root, &mut files);
+            files
+        }
+
+        #[test]
+        fn unsupported_sources_precede_id_and_missing_or_unusable_root_errors() {
+            for blocked in [false, true] {
+                let mut env = mvm_core::util::test_env::TestEnv::new();
+                let root = tempfile::tempdir().unwrap();
+                let home = root.path().join("home");
+                if blocked {
+                    std::fs::write(&home, b"unusable authority root").unwrap();
+                }
+                env.isolate_mvm_home(&home);
+                for id in ["missing", "../invalid"] {
+                    for boot in [false, true] {
+                        for replay in [false, true] {
+                            for declared in declarations() {
+                                let before = snapshot(root.path());
+                                let error = invoke(id, boot, replay, &declared).unwrap_err();
+                                assert!(
+                                    error.to_string().contains("unsupported secret source"),
+                                    "{error:#}"
+                                );
+                                assert_eq!(before, snapshot(root.path()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn unsupported_class_matrix_never_constructs_secret_service_or_reaches_vm_arms() {
+            for class in [CheckpointClass::FsQuick, CheckpointClass::VmFull] {
+                for boot in [false, true] {
+                    for replay in [false, true] {
+                        for declared in declarations() {
+                            let mut env = mvm_core::util::test_env::TestEnv::new();
+                            let root = tempfile::tempdir().unwrap();
+                            env.isolate_mvm_home(root.path());
+                            let store = CheckpointStore::open();
+                            let id = CheckpointId::new("parent");
+                            mvm_core::config::create_private_dir(store.dir_for(&id)).unwrap();
+                            // Classification data only, not signed authority.
+                            // Every call must refuse before any VM arm is reached.
+                            let meta = CheckpointMeta::builder(id, class, "parentvm").build();
+                            store.write_meta(&meta).unwrap();
+                            let before = snapshot(root.path());
+                            let error = invoke("parent", boot, replay, &declared).unwrap_err();
+                            assert!(
+                                error.to_string().contains("unsupported secret source"),
+                                "{error:#}"
+                            );
+                            assert_eq!(
+                                before,
+                                snapshot(root.path()),
+                                "unsupported declarations must not initialize service state"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn empty_and_keystore_controls_reach_id_validation_without_approval_or_effects() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for declared in [Vec::new(), vec![secret_binding("TOKEN", "address")]] {
+                for boot in [false, true] {
+                    for replay in [false, true] {
+                        let before = snapshot(root.path());
+                        let error = invoke("../invalid", boot, replay, &declared).unwrap_err();
+                        assert!(
+                            error.to_string().contains("invalid checkpoint id"),
+                            "{error:#}"
+                        );
+                        assert_eq!(before, snapshot(root.path()));
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn unsupported_booted_sources_refuse_without_service_initialization() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path());
+            let store = CheckpointStore::open();
+            let id = CheckpointId::new("parent");
+            mvm_core::config::create_private_dir(store.dir_for(&id)).unwrap();
+            // This record only permits classification. No signature, content,
+            // key custody or fake authority is supplied to permit a VM start.
+            let meta = CheckpointMeta::builder(id, CheckpointClass::FsQuick, "parentvm").build();
+            store.write_meta(&meta).unwrap();
+            let before = snapshot(root.path());
+            let error = invoke("parent", true, false, &[external()]).unwrap_err();
+            let after = snapshot(root.path());
+            let created = after
+                .keys()
+                .filter(|path| !before.contains_key(*path))
+                .collect::<Vec<_>>();
+            assert!(
+                error.to_string().contains("unsupported secret source") && before == after,
+                "error: {error:#}; created service paths: {created:?}"
+            );
+        }
+
+        #[test]
+        fn empty_and_keystore_controls_reach_missing_metadata_without_starting() {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for declared in [Vec::new(), vec![secret_binding("TOKEN", "address")]] {
+                for boot in [false, true] {
+                    let before = snapshot(root.path());
+                    let error = invoke("missing", boot, false, &declared).unwrap_err();
+                    assert!(!error.to_string().contains("unsupported secret source"));
+                    assert_eq!(before, snapshot(root.path()));
+                }
+            }
+        }
+
+        #[test]
+        fn parsed_keystore_declaration_reaches_missing_checkpoint_not_approval() {
+            use crate::commands::dispatch::TopLevelCommand as _;
+            use clap::Parser as _;
+
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            let root = tempfile::tempdir().unwrap();
+            env.isolate_mvm_home(root.path().join("missing"));
+            for boot in [false, true] {
+                let mut args = vec![
+                    "mvmctl",
+                    "machine",
+                    "checkpoint",
+                    "fork",
+                    "missing",
+                    "--secret",
+                    "TOKEN=address",
+                ];
+                if boot {
+                    args.push("--boot");
+                }
+                let before = snapshot(root.path());
+                let cli = crate::commands::Cli::try_parse_from(args).unwrap();
+                let error = cli
+                    .command
+                    .clone()
+                    .run(&cli, &mvm_core::user_config::MvmConfig::default())
+                    .unwrap_err();
+                assert!(!error.to_string().contains("unsupported secret source"));
+                assert_eq!(before, snapshot(root.path()));
+            }
         }
     }
 
