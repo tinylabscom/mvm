@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
 use mvm_client::bundle::{
-    BundleExportInputs, HostBundleSigner, PostureInputs, export_bundle_with_signer,
+    BundleExportInputs, HostBundleSigner, PostureInputs, StagedBundle, stage_bundle_with_signer,
 };
 
 use mvm_core::plan::types::{BuildProvenance, InputKind};
@@ -39,8 +39,8 @@ pub(in crate::commands) struct Args {
     /// Template name or 64-char slot hash to export.
     #[arg(value_name = "TEMPLATE")]
     pub template: String,
-    /// Output path for the `.mvmpkg` archive. Parent directory must
-    /// exist; the file is overwritten if it already exists.
+    /// New output path for the `.mvmpkg` archive. Missing parent directories
+    /// are created; existing destinations are refused without overwriting.
     #[arg(long, value_name = "PATH")]
     pub out: PathBuf,
     /// Optional human-readable workload label baked into the
@@ -207,6 +207,13 @@ pub(in crate::commands) fn export_template(
     template: &str,
     export: TemplateExport,
 ) -> Result<mvm_client::bundle::ExportedBundle> {
+    stage_template(template, export)?.publish()
+}
+
+pub(in crate::commands) fn stage_template(
+    template: &str,
+    export: TemplateExport,
+) -> Result<StagedBundle> {
     // ---- 1. Resolve the template's artifact paths ----
     let (spec, vmlinux, initrd, rootfs, _rev) = tmpl::template_artifacts_dispatched(template)
         .with_context(|| {
@@ -240,7 +247,7 @@ pub(in crate::commands) fn export_template(
 
     // ---- 2. Seal, sign under the host key, and write the archive ----
     let signer = HostBundleSigner::load()?;
-    export_bundle_with_signer(
+    stage_bundle_with_signer(
         &BundleExportInputs {
             vmlinux: &vmlinux,
             initrd: initrd.as_deref(),

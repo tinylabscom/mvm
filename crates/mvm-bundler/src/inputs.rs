@@ -73,7 +73,7 @@ pub struct BundleExportInputs<'a> {
     /// descriptor that needs a capability needs a posture beside it.
     pub environment: Option<EnvironmentDescriptor>,
     /// Where the archive is written. Missing parent directories are created;
-    /// an existing file is overwritten.
+    /// publication refuses any existing destination without replacing it.
     pub out: &'a Path,
     /// Where to write a summary of the export, if anywhere.
     pub debug_out: Option<DebugOutput>,

@@ -1,10 +1,11 @@
 //! Reading the artifacts, building the manifest, sealing the archive.
 
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use mvm_core::crypto::image_verify::sha256_file;
+use mvm_core::crypto::image_verify::{sha256_file, sha256_reader};
 use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_MEMBERS_MIN_SCHEMA, BundleArtifact, BundleManifest,
@@ -12,6 +13,7 @@ use mvm_core::plan::bundle::{
     sha256_hex, write_bundle_to,
 };
 use mvm_core::plan::types::BuildProvenance;
+use mvm_core::util::atomic_io::StagedFile;
 
 use crate::debug;
 use crate::inputs::{BundleExportInputs, PostureInputs};
@@ -34,22 +36,122 @@ pub struct ExportedBundle {
     pub key_id: KeyId,
 }
 
+/// A sealed archive owned by this invocation, not yet visible at its final name.
+///
+/// Call [`Self::abort`] when validation fails to observe cleanup failures.
+/// Dropping it also attempts cleanup, but cannot report errors.
+#[derive(Debug)]
+#[must_use]
+pub struct StagedBundle {
+    output: StagedFile,
+    exported: ExportedBundle,
+    summary: Option<PendingSummary>,
+}
+
+#[derive(Debug)]
+struct PendingSummary {
+    path: PathBuf,
+    bytes: Vec<u8>,
+}
+
+impl StagedBundle {
+    /// Parse the actual sealed archive's first member through the owned file.
+    /// The writer puts the manifest first; no artifact payload is scanned.
+    pub fn manifest(&mut self) -> Result<BundleManifest> {
+        use mvm_core::plan::bundle::MANIFEST_FILENAME;
+
+        const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+        let file = self.output.file_mut();
+        file.rewind()
+            .context("rewinding staged bundle for manifest")?;
+        let mut archive = tar::Archive::new(file.take(MAX_MANIFEST_BYTES + 1024));
+        let mut entries = archive
+            .entries()
+            .context("reading staged bundle manifest")?;
+        let mut entry = entries
+            .next()
+            .transpose()
+            .context("reading staged bundle manifest header")?
+            .with_context(|| format!("{MANIFEST_FILENAME} missing from sealed bundle"))?;
+        anyhow::ensure!(
+            entry.path()?.as_ref() == Path::new(MANIFEST_FILENAME),
+            "{MANIFEST_FILENAME} missing from sealed bundle head"
+        );
+        anyhow::ensure!(
+            entry.size() <= MAX_MANIFEST_BYTES,
+            "{MANIFEST_FILENAME} exceeds {MAX_MANIFEST_BYTES}-byte limit"
+        );
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 == entry.size(),
+            "truncated {MANIFEST_FILENAME} in sealed bundle"
+        );
+        serde_json::from_slice(&bytes).context("parsing sealed manifest.json")
+    }
+
+    /// Hash the same owned sealed file used by [`Self::manifest`].
+    pub fn sha256(&mut self) -> Result<String> {
+        let file = self.output.file_mut();
+        file.rewind()
+            .context("rewinding staged bundle for hashing")?;
+        sha256_reader(file).context("hashing staged bundle")
+    }
+
+    /// Publish only to the destination captured from the export inputs.
+    /// An existing destination is never replaced or removed.
+    /// An optional summary is then published create-only; a summary failure
+    /// reports that the archive was published and leaves that archive intact.
+    pub fn publish(mut self) -> Result<ExportedBundle> {
+        if let Err(error) = self.output.publish() {
+            return Err(self.abort(error));
+        }
+        if let Some(summary) = self.summary.take() {
+            write_summary(&summary.path, &summary.bytes).with_context(|| {
+                format!(
+                    "archive was published to {}; debug summary was not published",
+                    self.exported.path.display()
+                )
+            })?;
+        }
+        Ok(self.exported)
+    }
+
+    /// Preserve the original failure while reporting any staging cleanup error.
+    /// This never removes a final pathname, even after publication succeeded.
+    pub fn abort(mut self, error: anyhow::Error) -> anyhow::Error {
+        match self.output.cleanup() {
+            Ok(()) => error,
+            Err(cleanup) => {
+                error.context(format!("owned bundle staging cleanup failed: {cleanup:#}"))
+            }
+        }
+    }
+}
+
 /// Seal the artifacts `inputs` names into a `.mvmpkg` signed by `signer`.
 ///
 /// Nothing is written unless the whole bundle could be built: a rootfs with an
-/// incomplete dm-verity binding or no guest sidecar is refused first. The
-/// debug summary, when asked for, is written after the archive, so a summary
-/// that cannot be written fails the call with the archive already on disk.
-///
-/// Each artifact file is hashed in one streaming pass and copied into the
-/// archive in another, through a fixed buffer, so a multi-GiB rootfs is never
-/// held in memory. Its size is checked against the bundle caps before either.
-/// The archive is written to `<out>.partial`, created only once the manifest
-/// is signed, and renamed into place when complete.
+/// incomplete dm-verity binding or no guest sidecar is refused first.
+/// Manifest, hash and summary-rendering failures happen before publication.
+/// Summary publication follows archive publication and never replaces a file.
 pub fn export_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<ExportedBundle> {
+    stage_bundle_with_signer(inputs, signer)?.publish()
+}
+
+/// Seal an archive privately for validation before exclusive publication.
+///
+/// Each artifact file is hashed in one streaming pass and copied into the
+/// archive in another, through a fixed buffer, so a multi-GiB rootfs is never
+/// held in memory. Its size is checked against the bundle caps before either.
+/// Staging is created only once the manifest is signed.
+pub fn stage_bundle_with_signer(
+    inputs: &BundleExportInputs<'_>,
+    signer: &dyn BundleSigner,
+) -> Result<StagedBundle> {
     refuse_summary_over_archive(inputs)?;
 
     let mut contents = BundleContents::default();
@@ -86,28 +188,42 @@ pub fn export_bundle_with_signer(
         &mut output,
     )
     .context("sealing bundle (manifest + signature + artifacts)");
-    let size_bytes = output.finish(sealed)?;
+    let (output, size_bytes) = output.finish(sealed)?;
+    let mut staged = StagedBundle {
+        output,
+        exported: ExportedBundle {
+            path: inputs.out.to_path_buf(),
+            size_bytes,
+            key_id,
+        },
+        summary: None,
+    };
 
-    if let Some(debug_out) = &inputs.debug_out {
-        let archive_sha256 = sha256_file(inputs.out)
-            .with_context(|| format!("hashing the bundle at {}", inputs.out.display()))?;
-        let summary = debug::render(
-            debug_out.format,
-            inputs.out,
-            debug::ArchiveIdentity {
-                sha256: archive_sha256,
-                size_bytes,
-            },
-            &manifest,
-        )?;
-        write_creating_parent(&debug_out.path, &summary, "bundle debug summary")?;
+    let post_validate = (|| {
+        if let Some(debug_out) = &inputs.debug_out {
+            let archive_sha256 = staged.sha256()?;
+            let manifest = staged.manifest()?;
+            let summary = debug::render(
+                debug_out.format,
+                inputs.out,
+                debug::ArchiveIdentity {
+                    sha256: archive_sha256,
+                    size_bytes,
+                },
+                &manifest,
+            )?;
+            staged.summary = Some(PendingSummary {
+                path: debug_out.path.clone(),
+                bytes: summary,
+            });
+        }
+        Ok(())
+    })();
+    if let Err(error) = post_validate {
+        return Err(staged.abort(error));
     }
 
-    Ok(ExportedBundle {
-        path: inputs.out.to_path_buf(),
-        size_bytes,
-        key_id,
-    })
+    Ok(staged)
 }
 
 /// A summary aimed at the archive's own path would replace the bundle with a
@@ -471,26 +587,22 @@ fn manifest_for(
     }
 }
 
-/// The archive being written, at `<out>.partial` until it is complete.
+/// A lazy private staging writer.
 ///
 /// The file and its parent directories are created on the first byte, which
 /// the archive writer emits only after the manifest is validated and signed,
 /// so a refused export leaves nothing on disk. A failed write removes the
-/// partial file; a finished one is renamed over `out`.
+/// private file; a finished one remains private for post-seal validation.
 struct PartialOutput<'a> {
     out: &'a Path,
-    partial: PathBuf,
-    file: Option<std::fs::File>,
+    file: Option<StagedFile>,
     written: u64,
 }
 
 impl<'a> PartialOutput<'a> {
     fn new(out: &'a Path) -> Self {
-        let mut partial = out.as_os_str().to_owned();
-        partial.push(".partial");
         Self {
             out,
-            partial: PathBuf::from(partial),
             file: None,
             written: 0,
         }
@@ -498,32 +610,32 @@ impl<'a> PartialOutput<'a> {
 
     fn open(&mut self) -> std::io::Result<&mut std::fs::File> {
         if self.file.is_none() {
-            if let Some(parent) = self.out.parent()
-                && !parent.as_os_str().is_empty()
-            {
-                std::fs::create_dir_all(parent)?;
-            }
-            self.file = Some(std::fs::File::create(&self.partial)?);
+            self.file = Some(StagedFile::new(self.out).map_err(std::io::Error::other)?);
         }
         self.file
             .as_mut()
+            .map(StagedFile::file_mut)
             .ok_or_else(|| std::io::Error::other("partial bundle file was not opened"))
     }
 
-    /// Promote the archive when `sealed` succeeded; remove it otherwise.
-    /// Returns the archive's size.
-    fn finish(mut self, sealed: Result<()>) -> Result<u64> {
-        let promoted = sealed.and_then(|()| {
+    /// Return the owned sealed file, or explicitly clean up a failed write.
+    fn finish(mut self, sealed: Result<()>) -> Result<(StagedFile, u64)> {
+        let sealed = sealed.and_then(|()| {
             let file = self.open().context("creating the bundle file")?;
-            file.sync_all().context("syncing the bundle file")?;
-            std::fs::rename(&self.partial, self.out)
-                .with_context(|| format!("writing bundle to {}", self.out.display()))
+            file.sync_all().context("syncing the bundle file")
         });
-        if promoted.is_err() && self.file.is_some() {
-            // Best effort: the error being returned is the one that matters.
-            let _ = std::fs::remove_file(&self.partial);
+        if let Err(error) = sealed {
+            return Err(match self.file.as_mut().map(StagedFile::cleanup) {
+                Some(Err(cleanup)) => {
+                    error.context(format!("owned bundle staging cleanup failed: {cleanup:#}"))
+                }
+                Some(Ok(())) | None => error,
+            });
         }
-        promoted.map(|()| self.written)
+        Ok((
+            self.file.context("sealed bundle file was not opened")?,
+            self.written,
+        ))
     }
 }
 
@@ -536,25 +648,29 @@ impl std::io::Write for PartialOutput<'_> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self.file.as_mut() {
-            Some(file) => file.flush(),
+            Some(file) => file.file_mut().flush(),
             None => Ok(()),
         }
     }
 }
 
-fn write_creating_parent(path: &Path, bytes: &[u8], what: &str) -> Result<()> {
+fn write_summary(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating parent dir {}", parent.display()))?;
     }
-    std::fs::write(path, bytes).with_context(|| format!("writing {what} to {}", path.display()))
+    // Let the filesystem decide whether names alias. Exclusive creation also
+    // refuses case-folded names and links without replacing their entries.
+    mvm_core::util::atomic_io::atomic_write_new(path, bytes)
+        .with_context(|| format!("writing bundle debug summary to {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
     fn sidecar_resolves_beside_the_rootfs() {
@@ -621,7 +737,160 @@ mod tests {
 
         assert!(format!("{err:#}").contains("signer refused"));
         assert!(!out.exists());
-        assert!(!dir.path().join("dist").join("app.mvmpkg.partial").exists());
+        assert_eq!(std::fs::read_dir(out.parent().unwrap()).unwrap().count(), 0);
+    }
+
+    fn raw_staged(out: &Path, bytes: &[u8]) -> StagedBundle {
+        let mut output = StagedFile::new(out).unwrap();
+        output.file_mut().write_all(bytes).unwrap();
+        StagedBundle {
+            output,
+            exported: ExportedBundle {
+                path: out.to_path_buf(),
+                size_bytes: bytes.len() as u64,
+                key_id: KeyId("test".into()),
+            },
+            summary: None,
+        }
+    }
+
+    fn archive_entry(path: &str, bytes: &[u8]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder.append_data(&mut header, path, bytes).unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    #[test]
+    fn an_archive_without_a_manifest_is_not_taken_as_sealed() {
+        use mvm_core::plan::bundle::MANIFEST_FILENAME;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bundle");
+        let archive = archive_entry("artifacts/vmlinux", b"k");
+        let mut staged = raw_staged(&out, &archive);
+        let error = staged.manifest().unwrap_err();
+        assert!(error.to_string().contains(MANIFEST_FILENAME));
+        let error = staged.abort(error);
+        assert!(error.to_string().contains(MANIFEST_FILENAME));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn malformed_empty_truncated_and_oversized_manifests_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bundle");
+        for archive in [
+            Vec::new(),
+            archive_entry("manifest.json", b"not JSON"),
+            archive_entry("manifest.json", &vec![b' '; 16 * 1024 * 1024 + 1]),
+        ] {
+            let mut staged = raw_staged(&out, &archive);
+            let error = staged.manifest().unwrap_err();
+            staged.abort(error);
+            assert!(!out.exists());
+        }
+        let mut archive = archive_entry("manifest.json", b"{}");
+        archive.truncate(513);
+        let mut staged = raw_staged(&out, &archive);
+        assert!(staged.manifest().is_err());
+        drop(staged);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn hash_reads_the_owned_file_and_reports_read_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bundle");
+        let mut staged = raw_staged(&out, b"sealed");
+        std::fs::write(&out, b"foreign").unwrap();
+        assert_eq!(staged.sha256().unwrap(), sha256_hex(b"sealed"));
+        assert_eq!(staged.sha256().unwrap(), sha256_hex(b"sealed"));
+        let original = std::mem::replace(
+            staged.output.file_mut(),
+            std::fs::File::open(dir.path()).unwrap(),
+        );
+        assert!(staged.sha256().is_err());
+        *staged.output.file_mut() = original;
+        staged.abort(anyhow::anyhow!("validation failed"));
+        assert_eq!(std::fs::read(&out).unwrap(), b"foreign");
+    }
+
+    #[test]
+    fn abort_and_interrupted_sealing_surface_cleanup_failure_and_preserve_original_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bundle");
+        let staged = raw_staged(&out, b"sealed");
+        let namespace = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(namespace.join("foreign"), b"preserved").unwrap();
+        let error = staged.abort(anyhow::anyhow!("revision validation failed"));
+        assert!(format!("{error:#}").contains("revision validation failed"));
+        assert!(error.to_string().contains("cleanup"));
+        assert_eq!(
+            std::fs::read(namespace.join("foreign")).unwrap(),
+            b"preserved"
+        );
+        assert!(!out.exists());
+
+        let other = dir.path().join("other");
+        let mut output = PartialOutput::new(&other);
+        output.write_all(b"interrupted").unwrap();
+        let namespace = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path != &namespace)
+            .unwrap();
+        std::fs::write(namespace.join("foreign"), b"preserved").unwrap();
+        let error = output
+            .finish(Err(anyhow::anyhow!("write interrupted")))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("write interrupted"));
+        assert!(error.to_string().contains("cleanup"));
+        assert_eq!(
+            std::fs::read(namespace.join("foreign")).unwrap(),
+            b"preserved"
+        );
+        assert!(!other.exists());
+    }
+
+    #[test]
+    fn summary_alias_and_parent_failure_preserve_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bundle");
+        std::fs::write(&archive, b"preserved").unwrap();
+        let alias = dir.path().join(".").join("bundle");
+        assert!(write_summary(&alias, b"summary").is_err());
+        assert_eq!(std::fs::read(&archive).unwrap(), b"preserved");
+        let not_directory = dir.path().join("file");
+        std::fs::write(&not_directory, b"preserved").unwrap();
+        assert!(write_summary(&not_directory.join("summary"), b"summary").is_err());
+        assert_eq!(std::fs::read(&not_directory).unwrap(), b"preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn summary_creation_refuses_links_to_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("bundle");
+        std::fs::write(&archive, b"preserved").unwrap();
+        let symlink = dir.path().join("summary-symlink");
+        std::os::unix::fs::symlink(&archive, &symlink).unwrap();
+        assert!(write_summary(&symlink, b"summary").is_err());
+        assert!(std::fs::symlink_metadata(&symlink).unwrap().is_symlink());
+        let hardlink = dir.path().join("summary-hardlink");
+        std::fs::hard_link(&archive, &hardlink).unwrap();
+        assert!(write_summary(&hardlink, b"summary").is_err());
+        assert_eq!(std::fs::read(&archive).unwrap(), b"preserved");
+        assert_eq!(std::fs::read(&symlink).unwrap(), b"preserved");
+        assert_eq!(std::fs::read(&hardlink).unwrap(), b"preserved");
     }
 
     #[test]

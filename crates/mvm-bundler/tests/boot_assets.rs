@@ -99,6 +99,8 @@ fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_memb
         assert_eq!(boot.image_set.artifact_paths.len(), 1);
         assert_eq!(verified.artifacts["artifacts/boot-image-set.json"], bytes);
         let mut combined = inputs.clone();
+        let combined_out = dir.path().join("portable-with-environment.mvmpkg");
+        combined.out = &combined_out;
         combined.environment = Some(
             serde_json::from_value(serde_json::json!({
                 "descriptor_version": 1, "target": format!("{arch_label}-linux"),
@@ -108,7 +110,7 @@ fn cli_boot_export_preserves_linux_identity_and_refuses_incomplete_or_mixed_memb
         );
         export_bundle_with_signer(&combined, &publisher).unwrap();
         assert_eq!(
-            read_and_verify_bundle(&std::fs::read(&out).unwrap(), &publisher)
+            read_and_verify_bundle(&std::fs::read(&combined_out).unwrap(), &publisher)
                 .unwrap()
                 .manifest
                 .schema_version,

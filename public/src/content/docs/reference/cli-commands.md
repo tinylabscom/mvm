@@ -2090,6 +2090,24 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+Archive output is create-only: `pack build --out`, `bundle export --out` and
+its `artifact pack` alias refuse an existing file, symlink or directory without
+overwriting it. Use a new destination for a rebuild. Archives are written to
+invocation-private staging on the destination filesystem; concurrent attempts
+at the same destination cannot both publish successfully.
+
+`pack build` checks the staged archive's manifest, hash and frozen build identity
+before publishing it. Validation failures discard only that invocation's staging,
+never an archive found later at the requested output path. Cleanup errors are
+reported rather than silently ignored. An input-observation report describes the
+frozen build inputs, not successful archive publication; it can remain if final
+archive publication is refused.
+
+Optional debug summaries are also create-only. Their contents are prepared before
+archive publication, but the summary file is published afterward so an alias can
+never occupy or replace the archive destination. If summary publication fails,
+the error states that the archive was published; the valid archive is retained.
+
 Locked `pack build` inputs never receive the contributor build's automatic
 local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
 commit even when `mvmctl` was compiled from a local checkout. Each invocation owns
