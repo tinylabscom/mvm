@@ -86,7 +86,7 @@ pub fn verify_registry_manifest(
     verify_with(request, check_registry_pack_signature)
 }
 
-fn verify_with(
+pub(super) fn verify_with(
     request: &RegistryPackVerification<'_>,
     check: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryManifest, RegistryPackVerificationError> {
@@ -111,7 +111,7 @@ pub fn adopt_registry_manifest(
     adopt_with(request, check_registry_pack_signature)
 }
 
-fn adopt_with(
+pub(super) fn adopt_with(
     request: &PackAdoption<'_>,
     check: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryManifest, RegistryPackVerificationError> {

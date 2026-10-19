@@ -9,12 +9,14 @@ pub(in crate::commands) fn run(args: UpdateArgs) -> Result<()> {
     let outcome = pack_registry::pull(&args.reference)?;
     let summary = match outcome {
         pack_registry::PullOutcome::Installed(summary) => summary,
-        pack_registry::PullOutcome::VerifiedApplication(application) => {
+        pack_registry::PullOutcome::InstalledApplication(installed) => {
             use mvm_core::registry_pack::AuthenticatedRegistryManifest;
+            let application = installed.application();
             println!(
-                "verified {} (manifest {}); application bundle not acquired or installed",
+                "installed {} (manifest {}, bundle {})",
                 application.reference(),
-                application.manifest_sha256().as_str()
+                application.manifest_sha256().as_str(),
+                installed.bundle().sha256
             );
             return Ok(());
         }

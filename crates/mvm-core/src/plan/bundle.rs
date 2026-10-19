@@ -106,6 +106,7 @@ pub use declarations::{
 };
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
+pub(crate) use stream::HashingWriter;
 pub use stream::{
     BundlePayload, CapturedCanonicalLinuxInputs, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile,
     capture_canonical_linux_inputs, verify_bundle_file, write_bundle_to,
@@ -312,6 +313,12 @@ impl BundleRegistry {
     /// the success — the next install of the same sha will refuse
     /// (or overwrite with `force`) cleanly either way.
     pub fn remove(&self, bundle_sha256: &str) -> anyhow::Result<bool> {
+        if let Err(error) = std::fs::symlink_metadata(&self.root)
+            && error.kind() == std::io::ErrorKind::NotFound
+        {
+            return Ok(false);
+        }
+        let _lease = self.lock_entry(bundle_sha256).map_err(anyhow::Error::msg)?;
         let mut removed_any = false;
 
         let archive = self.archive_path(bundle_sha256);

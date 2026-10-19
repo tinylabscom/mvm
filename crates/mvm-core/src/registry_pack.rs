@@ -1041,6 +1041,7 @@ fn validate_registry_pack_manifest(
 }
 
 pub mod application;
+pub mod application_bundle;
 mod dispatch;
 pub use dispatch::{
     AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,

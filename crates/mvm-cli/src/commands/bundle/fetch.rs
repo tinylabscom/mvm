@@ -28,7 +28,7 @@ use mvm_fs::oci::ImageReference;
 use super::super::Cli;
 use super::registry::{
     REGISTRY_SCHEME, RegistryTransport, admit_registry_source, display_reference,
-    parse_registry_reference, pull_bundle,
+    parse_registry_reference, pull_bundle, pull_bundle_bounded,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -109,7 +109,7 @@ pub(in crate::commands) struct LoadOptions {
 }
 
 /// The archive on disk plus, for a registry source, the digest it came from.
-pub(in crate::commands) struct LoadedBundle {
+pub(crate) struct LoadedBundle {
     archive: ArchiveFile,
     /// Digest-pinned reference the bytes were pulled at. A pull by tag
     /// records here which manifest the tag named at the time.
@@ -147,11 +147,63 @@ pub(in crate::commands) fn load_bundle(source: &str, options: LoadOptions) -> Re
     })
 }
 
+/// Acquire a descriptor's signed byte budget through production transports.
+pub(crate) fn load_application_bundle(
+    application: &mvm_core::registry_pack::VerifiedRegistryApplication,
+) -> Result<LoadedBundle> {
+    let source = application_source(application)?;
+    let bundle = &application.manifest().application.bundle;
+    load_archive_bounded(
+        &source,
+        LoadOptions {
+            allow_http: false,
+            prod: true,
+        },
+        Some(bundle.archive_size),
+        |reference| RegistryTransport::for_reference(reference, false),
+    )
+}
+
+/// Apply source policy even when verified archive bytes are already cached.
+pub(crate) fn admit_application_source(
+    application: &mvm_core::registry_pack::VerifiedRegistryApplication,
+) -> Result<()> {
+    application_source(application).map(|_| ())
+}
+
+fn application_source(
+    application: &mvm_core::registry_pack::VerifiedRegistryApplication,
+) -> Result<BundleSource> {
+    let bundle = &application.manifest().application.bundle;
+    anyhow::ensure!(
+        bundle.archive_size <= super::registry::MAX_BUNDLE_LAYER_BYTES,
+        "application archive exceeds the supported 4 GiB transport bound"
+    );
+    let source = BundleSource::parse(&bundle.source)?;
+    match &source {
+        BundleSource::HttpsUrl(_) => {}
+        BundleSource::Registry(reference) => admit_registry_source(reference, true, false)?,
+        BundleSource::File(_) | BundleSource::HttpUrl(_) => {
+            anyhow::bail!("application sources require HTTPS or digest-pinned OCI");
+        }
+    }
+    Ok(source)
+}
+
 /// Load the archive bytes. `transport_for` is only called for a registry
 /// source, and only after the `--prod` check has passed.
 fn load_archive(
     src: &BundleSource,
     options: LoadOptions,
+    transport_for: impl FnOnce(&ImageReference) -> Result<RegistryTransport>,
+) -> Result<LoadedBundle> {
+    load_archive_bounded(src, options, None, transport_for)
+}
+
+fn load_archive_bounded(
+    src: &BundleSource,
+    options: LoadOptions,
+    max_bytes: Option<u64>,
     transport_for: impl FnOnce(&ImageReference) -> Result<RegistryTransport>,
 ) -> Result<LoadedBundle> {
     if options.prod && options.allow_http {
@@ -168,7 +220,7 @@ fn load_archive(
             );
             ArchiveFile::Local(path.clone())
         }
-        BundleSource::HttpsUrl(url) => download_to_file(url)?,
+        BundleSource::HttpsUrl(url) => download_to_file(url, max_bytes)?,
         BundleSource::HttpUrl(url) => {
             if !options.allow_http {
                 anyhow::bail!(
@@ -183,11 +235,15 @@ fn load_archive(
                  Signature verification still applies; traffic metadata is visible to anyone \
                  on the wire."
             ));
-            download_to_file(url)?
+            download_to_file(url, max_bytes)?
         }
         BundleSource::Registry(reference) => {
             admit_registry_source(reference, options.prod, options.allow_http)?;
-            let pulled = pull_bundle(reference, &transport_for(reference)?)?;
+            let transport = transport_for(reference)?;
+            let pulled = match max_bytes {
+                Some(limit) => pull_bundle_bounded(reference, &transport, limit)?,
+                None => pull_bundle(reference, &transport)?,
+            };
             return Ok(LoadedBundle {
                 archive: spool_to_file(&pulled.bytes)?,
                 resolved: Some(pulled.resolved),
@@ -201,10 +257,13 @@ fn load_archive(
 }
 
 /// Download straight to a temporary file; the archive is never read whole.
-fn download_to_file(url: &str) -> Result<ArchiveFile> {
+fn download_to_file(url: &str, max_bytes: Option<u64>) -> Result<ArchiveFile> {
     let tmp = tempfile::NamedTempFile::new().context("creating temp file for bundle download")?;
-    crate::http::download_file(url, tmp.path())
-        .with_context(|| format!("downloading bundle from {url}"))?;
+    match max_bytes {
+        Some(limit) => crate::http::download_file_bounded(url, tmp.path(), limit),
+        None => crate::http::download_file(url, tmp.path()),
+    }
+    .with_context(|| format!("downloading bundle from {url}"))?;
     Ok(ArchiveFile::Temporary(tmp.into_temp_path()))
 }
 
@@ -652,6 +711,40 @@ mod tests {
             .expect("runtime")
             .block_on(client.push(&reference(registry, selector), kind, bytes))
             .expect("unverified push");
+    }
+
+    #[test]
+    fn bounded_registry_pull_refuses_a_layer_above_the_signed_size() {
+        let registry = MemoryRegistry::start();
+        let publisher = Publisher::trusted(7);
+        let archive = publisher.bundle(b"kernel bytes");
+        let (_, pushed) = publish_bundle(
+            &archive,
+            &reference(&registry, ":bounded"),
+            &http_transport(),
+            &publisher.trust(),
+        )
+        .unwrap();
+        let pinned = format!("@{}", pushed.manifest_digest);
+        let src = source(&registry, &pinned);
+        assert!(
+            load_archive_bounded(
+                &src,
+                LoadOptions::default(),
+                Some(archive.len() as u64 - 1),
+                with_http,
+            )
+            .is_err()
+        );
+        let loaded = load_archive_bounded(
+            &src,
+            LoadOptions::default(),
+            Some(archive.len() as u64),
+            with_http,
+        )
+        .unwrap();
+        assert_eq!(loaded.bytes(), archive);
+        assert_eq!(loaded.resolved, Some(pushed.reference));
     }
 
     #[test]
