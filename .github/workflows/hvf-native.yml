@@ -3,11 +3,16 @@ name: HVF native
 # The only lane that runs HVF code on a host that can boot a guest: no hosted
 # macOS image exposes Hypervisor.framework, so this runs on the self-hosted
 # Apple Silicon runner. It runs the host-side HVF tests of the crates that own
-# the backend, on pull requests that touch them. Tests marked `#[ignore]`
+# the backend. It never runs on a pull request: the runner is a persistent
+# physical machine and the repository is public, so only trusted events may
+# reach it (`tests/github_actions_self_hosted_runner.rs`). It runs on pushes to
+# main that touch those crates, and on demand against any branch:
+# `gh workflow run hvf-native.yml --ref <branch>`. Tests marked `#[ignore]`
 # stay ignored.
 
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - "crates/mvm-hostd/src/supervisor/**"
       - "crates/mvm-runtime/src/backends/hvf/**"
@@ -20,14 +25,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: hvf-native-${{ github.event.pull_request.number || github.ref }}
+  group: hvf-native-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   hvf-native:
     name: HVF host tests (Apple Silicon)
-    # A fork's code never runs on a self-hosted runner.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, macOS, ARM64, m1]
     timeout-minutes: 60
     steps:
