@@ -474,14 +474,16 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     fn write_key_file(dir: &Path, tenant: &str, bytes: &[u8], mode: u32) -> PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(format!("{tenant}.key"));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&path)
-            .unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(mode);
+        #[cfg(not(unix))]
+        assert_eq!(mode, 0o600, "non-Unix fixtures cannot model POSIX modes");
+        let mut f = options.open(&path).unwrap();
         std::io::Write::write_all(&mut f, bytes).unwrap();
         path
     }
@@ -499,6 +501,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_key_provider_reads_0400_key() {
         use secrecy::ExposeSecret;
         let tmp = tempfile::tempdir().unwrap();
@@ -511,6 +514,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_key_provider_rejects_world_readable() {
         // mode 0644 is the canonical "looks fine, isn't" — refuse
         // to read rather than silently expose the key bytes.
