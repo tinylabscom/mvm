@@ -98,14 +98,12 @@ jobs:
               --bundle "${archive}.bundle" \
               "${archive}"
           done
-      - name: Publish rolling source-build assets
+      - name: Publish immutable per-commit source helpers
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release view source-builds >/dev/null 2>&1 ||
-            gh release create source-builds --prerelease \
-              --title "Commit-addressed source helpers" \
-              --notes "Signed host helper bundles keyed by the exact mvm source commit."
-          gh release upload source-builds dist/*.tar.gz dist/*.tar.gz.bundle --clobber
+          python3 scripts/publish-source-host-helpers.py \
+            --repo "${GH_REPO}" --commit "${GITHUB_SHA}" --directory dist

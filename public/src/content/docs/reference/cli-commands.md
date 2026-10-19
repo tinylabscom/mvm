@@ -2434,6 +2434,16 @@ All commands accept these global options:
 
 ## Environment Variables
 
+`MVM_SOURCE_HELPER_BASE_URL` selects the exact base containing the source
+commit's platform archive and matching `.bundle`, with no implicit fallback or
+other probes. Signatures and `SOURCE_COMMIT` remain mandatory. Older fixed-URL
+clients can use it only when matching signed artifacts actually exist there;
+unpublished commits require explicit local build mode or separately authorized
+backfill. By default, current clients use the `source-builds-` plus full-SHA
+prerelease and consult legacy `source-builds` only on archive HTTP 404. See
+[source-build recovery](/contributing/development/).
+`MVM_SKIP_COSIGN_VERIFY` does not authorize installation of source host helpers.
+
 | Variable                                  | Description                                                                                                                                                                                                                                                                                                                                                                                 | Default                          |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
 | `MVM_HOME`                                | The single root for all mvm state (data, cache, config, run, state, share, vms)                                                                                                                                                                                                                                                                                                             | `~/.mvm`                         |
