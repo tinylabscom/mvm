@@ -124,7 +124,7 @@ pub(super) fn install_with_loader(
     let registry = BundleRegistry::new(&store.bundle_root);
     // Retain bundle exclusion through the reference commit, not just extraction.
     // Every cooperating installer and remover takes this same entry lease.
-    let installed = registry.install_file_with_lease(candidate.archive_path(), trust, true)?;
+    let installed = registry.install_leased_file(candidate.archive_path(), trust, true)?;
     sync_bundle_content(&registry, &installed.bundle, application)?;
     let descriptor_root = publish_descriptor(&store.descriptor_cache_root, application)?;
     authenticate(application, &lock, &load_policy()?, check_signature)?;

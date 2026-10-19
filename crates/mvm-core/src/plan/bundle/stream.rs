@@ -626,11 +626,11 @@ impl BundleRegistry {
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<InstalledBundle, BundleInstallError> {
-        self.install_file_with_lease(archive, trust, force)
+        self.install_leased_file(archive, trust, force)
             .map(|installed| installed.bundle)
     }
 
-    pub(crate) fn install_file_with_lease(
+    pub(crate) fn install_leased_file(
         &self,
         archive: &Path,
         trust: &dyn TrustStore,
