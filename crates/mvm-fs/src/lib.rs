@@ -49,6 +49,7 @@ pub mod oci_to_rootfs;
 pub mod os_inventory;
 pub mod output;
 pub mod overlay;
+#[cfg(unix)]
 pub mod ownership;
 pub mod parallel;
 mod path_guard;

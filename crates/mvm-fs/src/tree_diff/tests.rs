@@ -267,13 +267,13 @@ mod images {
             }
         );
     }
+}
 
-    #[test]
-    fn a_file_that_is_not_an_image_is_unreadable_not_empty() {
-        let root = tempfile::tempdir().unwrap();
-        let junk = root.path().join("junk.ext4");
-        std::fs::write(&junk, b"not an image").unwrap();
-        let err = diff_images(&junk, &junk, DiffLimits::default()).unwrap_err();
-        assert!(matches!(err, TreeDiffError::Unreadable { .. }), "{err}");
-    }
+#[test]
+fn a_file_that_is_not_an_image_is_unreadable_not_empty() {
+    let root = tempfile::tempdir().unwrap();
+    let junk = root.path().join("junk.ext4");
+    std::fs::write(&junk, b"not an image").unwrap();
+    let err = diff_images(&junk, &junk, DiffLimits::default()).unwrap_err();
+    assert!(matches!(err, TreeDiffError::Unreadable { .. }), "{err}");
 }
