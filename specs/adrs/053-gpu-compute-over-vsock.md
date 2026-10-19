@@ -67,7 +67,9 @@ on the host.
    pass `--gpu` carry no GPU channel, no endpoint process, and no shim
    libraries; and a `--gpu` launch on a GPU-less host still boots and
    answers — the stub device reports itself as a stub by name, and
-   `--backend native` refuses outright when no driver library exists. CI
+   `--backend native` refuses outright when no driver library exists and
+   stops serving if driver initialization fails for a later connection; it
+   never substitutes stub results for an explicit native request. CI
    and every development host exercise the whole plane GPU-free today.
 3. **Guest handles are opaque `u64`s minted by the endpoint.** Contexts,
    device pointers, modules, and functions leave the host only as numbers;

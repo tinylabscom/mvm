@@ -555,37 +555,7 @@ impl PublishedImageSet {
 /// Check the root marker against the authenticated Linux-base declaration.
 /// Legacy sets predate this marker; their retired guest range is not runtime evidence.
 /// Reads the ext4 directly: no mount, extraction or guest symlink resolution.
-pub fn verify_base_image_contract(
-    image: &Path,
-    compatibility: &mvm_core::image_set::ImageSetCompatibility,
-) -> Result<()> {
-    let Some(version) = compatibility.base_image_contract else {
-        return Ok(());
-    };
-    if version != mvm_core::image_set::BaseImageContract::LINUX_LAYER {
-        bail!("unsupported base-image contract {version}");
-    }
-    let tree = mvm_fs::tree_diff::Ext4Tree::open(image)
-        .context("open authenticated base root filesystem")?;
-    let marker = tree
-        .read_regular_file_no_symlinks(
-            mvm_core::image_set::BASE_IMAGE_CONTRACT_MARKER.trim_start_matches('/'),
-            16,
-        )
-        .context("read base-image contract marker without symlinks")?;
-    if marker != format!("{version}\n").as_bytes() {
-        bail!("base-image contract marker does not match authenticated declaration {version}");
-    }
-    let filesystem = ext4_view::Ext4::load_from_path(image)
-        .context("read base-image contract marker metadata")?;
-    let metadata = filesystem
-        .symlink_metadata(mvm_core::image_set::BASE_IMAGE_CONTRACT_MARKER)
-        .context("read base-image contract marker mode")?;
-    if u32::from(metadata.mode()) & 0o7777 != 0o444 {
-        bail!("base-image contract marker must have exact mode 0444");
-    }
-    Ok(())
-}
+pub use crate::base_image_contract::verify_base_image_contract;
 
 /// Recheck an installed workload against the pinned authenticated root without
 /// acquiring anything. Historical caches retain their legacy boot behavior.

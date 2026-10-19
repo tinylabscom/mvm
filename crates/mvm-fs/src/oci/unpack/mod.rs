@@ -637,13 +637,10 @@ pub enum UnpackError {
 /// their own stricter rules on top — an OCI layer legitimately carries `./`
 /// prefixes and trailing slashes, which a workload's output does not.
 pub(crate) fn escaping_path_refusal(raw_path: &[u8]) -> Option<RefusalReason> {
-    if raw_path.first() == Some(&b'/') {
-        return Some(RefusalReason::AbsolutePath);
-    }
-    if raw_path.split(|b| *b == b'/').any(|seg| seg == b"..") {
-        return Some(RefusalReason::TraversalSegment);
-    }
-    None
+    crate::path_guard::escaping_path_refusal(raw_path).map(|reason| match reason {
+        crate::path_guard::PathEscape::Absolute => RefusalReason::AbsolutePath,
+        crate::path_guard::PathEscape::Traversal => RefusalReason::TraversalSegment,
+    })
 }
 
 /// Unpack a single layer tarball under `output_root`, applying the

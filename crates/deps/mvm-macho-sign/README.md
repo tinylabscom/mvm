@@ -14,6 +14,8 @@ Thin and universal binaries are supported within the checked layout limits.
 The library refuses layouts without existing signature space or unused
 load-command room; it does not relink or shift existing executable data.
 Malformed inputs and layout refusals return errors rather than partial output.
+File-backed sections must fit their containing segment's file range, not merely
+the enclosing binary. Zero-fill section types do not claim file bytes.
 
 This crate does not read or publish executable files, launch processes, use
 signing keys, perform CMS cryptography, contact a network, or notarize code.

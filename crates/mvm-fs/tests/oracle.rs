@@ -436,6 +436,7 @@ fn root_owned_image_bytes_are_pinned() {
 /// The content fingerprint of a root-owned tree is pinned for the same reason:
 /// a cache keyed on it must keep hitting for trees that carry no owners.
 #[test]
+#[cfg(unix)]
 fn root_owned_fingerprint_is_pinned() {
     assert_eq!(
         mvm_fs::rootfs::fingerprint_ext4_nodes(&root_owned_fixture()).unwrap(),
@@ -505,6 +506,7 @@ fn owners_round_trip_through_real_reader() {
     assert_eq!(Owner::new(root.uid, root.gid), Owner::ROOT);
 }
 
+#[cfg(unix)]
 fn owned_header(path: &str, kind: tar::EntryType, owner: Owner, body_len: u64) -> tar::Header {
     let mut header = tar::Header::new_gnu();
     header.set_path(path).unwrap();
@@ -523,6 +525,7 @@ fn owned_header(path: &str, kind: tar::EntryType, owner: Owner, body_len: u64) -
 /// A service layer as a container image ships one: the data directory and
 /// its contents owned by the service account, under parents the stream never
 /// lists.
+#[cfg(unix)]
 fn service_layer(svc: Owner, wide: Owner) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     builder
@@ -546,6 +549,7 @@ fn service_layer(svc: Owner, wide: Owner) -> Vec<u8> {
     builder.into_inner().unwrap()
 }
 
+#[cfg(unix)]
 fn materialize_layer(layer: &[u8]) -> Vec<u8> {
     use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
     use mvm_fs::ownership::OwnerTable;
@@ -564,6 +568,7 @@ fn materialize_layer(layer: &[u8]) -> Vec<u8> {
 /// by whoever ran it. The owners in the layer's tar headers still have to be
 /// the owners inside the image.
 #[test]
+#[cfg(unix)]
 fn layer_owners_survive_unpack_and_materialize() {
     let svc = Owner::new(999, 999);
     let wide = Owner::new(100_000, 100_001);
@@ -582,6 +587,7 @@ fn layer_owners_survive_unpack_and_materialize() {
 
 /// A layer that names the files the runtime injects after the layers are
 /// stacked, claiming each for an account of its own.
+#[cfg(unix)]
 fn hostile_layer(attacker: Owner) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for path in [
@@ -606,6 +612,7 @@ fn hostile_layer(attacker: Owner) -> Vec<u8> {
 /// resolving its uid through an image-owned account database is the elevation
 /// path a sealed rootfs exists to close.
 #[test]
+#[cfg(unix)]
 fn a_layer_cannot_own_the_files_the_runtime_injects() {
     use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
     use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
@@ -654,6 +661,7 @@ fn a_layer_cannot_own_the_files_the_runtime_injects() {
     );
 }
 
+#[cfg(unix)]
 fn link_header(path: &str, kind: tar::EntryType, target: &str, owner: Owner) -> tar::Header {
     let mut header = owned_header(path, kind, owner, 0);
     header.set_link_name(target).unwrap();
@@ -661,6 +669,7 @@ fn link_header(path: &str, kind: tar::EntryType, target: &str, owner: Owner) -> 
     header
 }
 
+#[cfg(unix)]
 fn layer_of(entries: Vec<tar::Header>) -> Vec<u8> {
     let mut builder = tar::Builder::new(Vec::new());
     for header in entries {
@@ -677,6 +686,7 @@ fn layer_of(entries: Vec<tar::Header>) -> Vec<u8> {
 /// `/etc`, which a layer re-declared too — while the image's own link keeps
 /// the owner its layer gave it.
 #[test]
+#[cfg(unix)]
 fn no_stacking_of_layers_can_own_a_claimed_path() {
     use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
     use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
@@ -747,6 +757,7 @@ fn no_stacking_of_layers_can_own_a_claimed_path() {
 /// Ownership is content, not host state: the same layer materializes to the
 /// same bytes every time.
 #[test]
+#[cfg(unix)]
 fn owned_layer_materializes_deterministically() {
     let layer = service_layer(Owner::new(999, 999), Owner::new(100_000, 100_001));
     assert_eq!(materialize_layer(&layer), materialize_layer(&layer));
@@ -756,6 +767,7 @@ fn owned_layer_materializes_deterministically() {
 /// otherwise a root-owned image built earlier would be reused for a tree that
 /// now declares a service account.
 #[test]
+#[cfg(unix)]
 fn changing_only_an_owner_changes_the_fingerprint() {
     use mvm_fs::rootfs::fingerprint_ext4_nodes;
 

@@ -56,7 +56,8 @@ use anyhow::{Context, Result};
 use mvm_core::action::ActionCacheRecord;
 use sha2::{Digest, Sha256};
 
-use super::BuildMode;
+#[cfg(unix)]
+use crate::pipeline::BuildMode;
 
 /// Which tree a walk is covering. The mvm workspace is the one
 /// `nix/lib/workspace-filter.nix` governs, so only that walk applies the
@@ -66,6 +67,7 @@ use super::BuildMode;
 enum TreeScope {
     /// An arbitrary user project directory. Walk everything, minus
     /// [`EXCLUDED_BASENAMES`].
+    #[cfg(unix)]
     UserFlake,
     /// The mvm workspace root. Walk only [`INCLUDED_TOP_LEVEL`].
     MvmWorkspace,
@@ -139,6 +141,7 @@ pub(crate) const EXCLUDED_BASENAMES: &[&str] = &[
 /// case (the user flake pins `mvm` to a published ref, recorded in its
 /// own `flake.lock`, so the user flake hash alone covers it).
 #[tracing::instrument(skip_all, fields(user_flake = %user_flake.display(), mode = ?mode))]
+#[cfg(unix)]
 pub fn workload_build_fingerprint(
     user_flake: &Path,
     profile: Option<&str>,
@@ -289,6 +292,7 @@ fn is_safe_component(s: &str) -> bool {
 /// Stable tag for a [`BuildMode`] discriminant. A dev image and a prod
 /// image of the same source are different nix outputs, so they must not
 /// share a fingerprint.
+#[cfg(unix)]
 fn build_mode_tag(mode: BuildMode) -> &'static str {
     match mode {
         BuildMode::Dev => "dev",
@@ -298,6 +302,7 @@ fn build_mode_tag(mode: BuildMode) -> &'static str {
 
 /// Fold one length-delimited, domain-tagged field into the hasher so two
 /// fields can never run together ambiguously.
+#[cfg(unix)]
 fn fold_field(hasher: &mut Sha256, tag: &str, value: &[u8]) {
     hasher.update(tag.as_bytes());
     hasher.update(b"\0");
@@ -345,6 +350,7 @@ fn hash_source_tree(root: &Path, scope: TreeScope) -> Result<String> {
 fn walk_source_files_sorted(root: &Path, scope: TreeScope) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     match scope {
+        #[cfg(unix)]
         TreeScope::UserFlake => collect_files(root, &mut out)?,
         TreeScope::MvmWorkspace => {
             // Keep the "a missing root is an error, never a silent empty
@@ -394,6 +400,24 @@ fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 #[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_digest_refuses_missing_inputs_and_tracks_source_not_cache() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(mvm_workspace_source_digest(&root.path().join("missing")).is_err());
+        std::fs::create_dir_all(root.path().join("src/target")).unwrap();
+        std::fs::write(root.path().join("src/lib.rs"), b"source").unwrap();
+        let before = mvm_workspace_source_digest(root.path()).unwrap();
+        std::fs::write(root.path().join("src/target/object"), b"cache").unwrap();
+        assert_eq!(mvm_workspace_source_digest(root.path()).unwrap(), before);
+        std::fs::write(root.path().join("src/lib.rs"), b"changed").unwrap();
+        assert_ne!(mvm_workspace_source_digest(root.path()).unwrap(), before);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

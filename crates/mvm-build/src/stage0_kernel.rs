@@ -209,21 +209,7 @@ pub fn resolve_bootstrap_kernel(
 }
 
 /// Compatibility range compiled into the host and builder cache implementation.
-pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocolSupport {
-    // Unit tests exercise the locked set as an mvmctl with its boot payload
-    // registered. A separate negative test supplies the payload-less range.
-    #[cfg(test)]
-    let builder_boot_abi = crate::builder_boot::payload_supported_abis();
-    #[cfg(not(test))]
-    let builder_boot_abi = crate::builder_boot::supported_image_abis();
-    mvm_core::image_set::HostProtocolSupport {
-        base_image_contract: mvm_core::image_set::BaseImageContractRange::SUPPORTED,
-        builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
-        // Payload ABIs only when this process can hand a builder the payload;
-        // an image with no builder binaries of its own is unbootable without.
-        builder_boot_abi,
-    }
-}
+pub use crate::image_protocol::current_image_set_protocol_support;
 
 /// Refuse the locked set before any member acquisition when protocols diverge.
 pub fn ensure_locked_image_set_compatible() -> Result<(), Stage0KernelError> {

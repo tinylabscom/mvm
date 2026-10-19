@@ -6,7 +6,7 @@
 //! is not redundant decoration: it is what keeps a future change to how names
 //! are joined from quietly reopening an escape the first one closed.
 
-use crate::oci::unpack::{RefusalReason, escaping_path_refusal};
+use crate::path_guard::{PathEscape, escaping_path_refusal};
 
 use super::{MAX_DEPTH, MAX_PATH_BYTES, OutputRefusal};
 
@@ -99,8 +99,8 @@ pub fn validate_name(raw: &[u8]) -> Result<&str, OutputRefusal> {
 pub fn validate_relative_path(raw: &[u8]) -> Result<(), OutputRefusal> {
     if let Some(reason) = escaping_path_refusal(raw) {
         let rule = match reason {
-            RefusalReason::AbsolutePath => PathRule::Absolute,
-            _ => PathRule::Traversal,
+            PathEscape::Absolute => PathRule::Absolute,
+            PathEscape::Traversal => PathRule::Traversal,
         };
         return Err(refuse(raw, rule));
     }

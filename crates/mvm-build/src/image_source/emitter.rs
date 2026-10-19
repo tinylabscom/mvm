@@ -113,7 +113,7 @@ fn inspect_roots(
             ));
         };
         let path = staging.join(root.name.as_str());
-        crate::published_image_set::verify_base_image_contract(&path, compatibility)
+        crate::base_image_contract::verify_base_image_contract(&path, compatibility)
             .map_err(|error| refused(format!("{error:#}")))?;
     }
     Ok(())

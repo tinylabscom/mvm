@@ -31,7 +31,7 @@ name: Security lane watch
 # was invisible in the YAML and no assertion on the workflow text would
 # have found it.
 #
-# Failure opens or updates one tracking issue; a clean run closes it. The
+# Failure opens or updates one tracking issue; a clean run comments on it; a pull request closes it. The
 # issue is the enforcement surface, not a merge block: these lanes do not
 # run on PRs, so there is nothing to block.
 
@@ -42,7 +42,7 @@ on:
 
 permissions:
   contents: read
-  issues: write # opens/updates/closes the tracking issue
+  issues: write # opens/updates the tracking issue; a pull request closes it
   actions: read # reads the watched run's per-job conclusions
 
 concurrency:
@@ -66,7 +66,7 @@ jobs:
       # run's ref, so the verdict logic is always the reviewed copy.
       - uses: actions/checkout@v6
 
-      - name: Collect failing jobs and open, update, or close the tracking issue
+      - name: Collect failing jobs and open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -125,10 +125,9 @@ jobs:
             if [ -n "$EXISTING" ]; then
               # Backticks here are markdown, not command substitution; %s carries the values.
               # shellcheck disable=SC2016
-              printf '%s run [%s](%s) on `%s` is green again — closing.\n' \
+              printf '%s run [%s](%s) on `%s` is green again. Close this issue with a pull request.\n' \
                 "$WATCHED" "$RUN_ID" "$RUN_URL" "$HEAD_SHA" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
-              gh issue close "$EXISTING" --repo "$REPO"
             fi
             echo "$WATCHED run $RUN_ID: all jobs green."
             exit 0

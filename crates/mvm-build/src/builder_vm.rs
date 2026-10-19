@@ -1379,26 +1379,9 @@ pub use mvm_vmm::host::runtime_meta::admit_runtime_overlay_contract;
 // never touched.
 // ──────────────────────────────────────────────────────────────────
 
-/// job. Devices appear after the builder VM's persistent Nix-store
-/// disk; the first extra disk here is `/dev/vdc` in the guest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderExtraDisk {
-    pub id: String,
-    pub path: PathBuf,
-    pub read_only: bool,
-}
-
-/// Generic builder-VM shell job.
-///
-/// This is intentionally narrower than [`BuilderJob`]: it is for
-/// in-tree infrastructure commands that need the Linux builder
-/// boundary but do not produce Nix build artifacts. The OCI image
-/// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
-/// into a writable virtio-blk image.
-/// The minimum builder image cache contract this host reads. A newer contract
-/// remains compatible when it still declares every capability this host
-/// requires; only older contracts are refused.
-pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 5;
+pub use crate::builder_contract::{
+    BUILDER_VM_CACHE_CONTRACT_VERSION, BuilderExtraDisk, BuilderShellJob,
+};
 
 /// Default vCPU count for a builder VM.
 pub const DEFAULT_VCPUS: u8 = 4;
@@ -1454,14 +1437,6 @@ impl BuilderVmImage {
             entry_path: entry_path.into(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderShellJob {
-    pub work_dir: PathBuf,
-    pub artifact_out: PathBuf,
-    pub script: String,
-    pub extra_disks: Vec<BuilderExtraDisk>,
 }
 
 /// Result metadata from a one-shot builder shell job.

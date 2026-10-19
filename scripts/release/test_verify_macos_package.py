@@ -3,11 +3,15 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
+import re
 import struct
+import subprocess
 import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -228,6 +232,50 @@ class PackageTests(unittest.TestCase):
         self.assertLess(npm.index("Inspect actual packed Darwin npm bytes"),
                         npm.index("Install and load on"))
         self.assertIn("needs: [build, smoke]", npm)
+
+    def test_package_inspection_optional_notary_arguments_under_nounset(self):
+        root = Path(__file__).resolve().parents[2]
+        for workflow, step in [
+            ("release.yml", "Inspect final macOS package bytes"),
+            ("publish-pypi.yml", "Inspect final macOS wheel bytes"),
+            ("publish-npm.yml", "Inspect actual packed Darwin npm bytes"),
+        ]:
+            source = (root / ".github/workflows" / workflow).read_text()
+            block = source.split(f"      - name: {step}\n", 1)[1]
+            body = block.split("        run: |\n", 1)[1].split("\n      - ", 1)[0]
+            for signed in [False, True]:
+                with self.subTest(workflow=workflow, signed=signed):
+                    script = re.sub(r"\$\{\{.*?\}\}", str(signed).lower(),
+                                    textwrap.dedent(body))
+                    recorder = self.root / "python3"
+                    recorder.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV_LOG"\n')
+                    recorder.chmod(0o700)
+                    log = self.root / "argv"
+                    env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}",
+                               RUNNER_TEMP=str(self.root / "runner temp"),
+                               GITHUB_REF_TYPE="tag" if signed else "branch",
+                               ARGV_LOG=str(log))
+                    subprocess.run(["/bin/bash", "-c", script], env=env,
+                                   cwd=self.root, check=True, capture_output=True)
+                    args = log.read_text().splitlines()
+                    self.assertNotIn("", args)
+                    self.assertEqual(args.count("--notary-report"), int(signed))
+                    self.assertIn("--producer-report", args)
+                    self.assertIn("--report", args)
+                    if signed:
+                        report = args[args.index("--notary-report") + 1]
+                        self.assertTrue(report.endswith("-notarization.json"))
+
+    def test_documented_surface_uses_supported_python_in_both_live_jobs(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / ".github/workflows/e2e-docs.yml").read_text()
+        for job in ["e2e-docs-linux", "e2e-docs-macos"]:
+            body = re.split(r"\n  [a-z][a-z0-9-]*:\n",
+                            source.split(f"\n  {job}:\n", 1)[1], maxsplit=1)[0]
+            self.assertIn('python-version: "3.12"', body, job)
+            self.assertIn("uses: actions/setup-python@v5", body, job)
+            self.assertLess(body.index("uses: actions/setup-python@v5"),
+                            body.index("just e2e::docs"), job)
 
 
 if __name__ == "__main__":

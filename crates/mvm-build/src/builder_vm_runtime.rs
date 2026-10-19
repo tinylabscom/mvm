@@ -394,37 +394,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// to it (reachable beside cmd.sh in the `/job` virtio-fs share).
 const STAGED_MVM_SRC_SUBDIR: &str = "mvm-src";
 
-/// Basenames pruned when staging the mvm-workspace snapshot — build
-/// artifacts + VCS/tooling scratch that must never enter the agent's `src`
-/// closure (they bloat it and break the source hash / caching; the Swift
-/// `.build` dirs alone are multi-GB). Kept aligned with
-/// `nix/lib/workspace-filter.nix`.
-const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
-    "target",
-    ".build",
-    "node_modules",
-    ".direnv",
-    ".cargo",
-    "dist",
-    ".astro",
-    "dev-prebuilt",
-    ".mvm-ci",
-    ".mvm-test",
-    "graphify-out",
-    ".ur-seed-result",
-    "nixos.qcow2",
-    ".git",
-    ".claude",
-    ".worktrees",
-    ".playwright-mcp",
-    "keys",
-    "result",
-    "__pycache__",
-    ".venv",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-];
+pub(crate) use crate::source_copy::copy_dir_filtered;
 
 /// Stage an allowlisted, filtered copy of the mvm workspace into `mvm_src`:
 /// only the cargo tree — root `Cargo.{toml,lock}` + `src` + `crates` +
@@ -450,36 +420,6 @@ fn stage_filtered_workspace(workspace: &Path, mvm_src: &Path) -> std::io::Result
         }
         let to = mvm_src.join(item);
         if from.is_dir() {
-            copy_dir_filtered(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Recursive copy that prunes `WORKSPACE_SNAPSHOT_SKIP` basenames (and
-/// `result-*` symlinks) at any depth. `pub(crate)` so the disk-transport
-/// `work` input staging (`libkrun_builder`) can reuse this exclusion
-/// instead of forking a second skip list.
-pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let raw = entry.file_name();
-        let name = raw.to_string_lossy();
-        if WORKSPACE_SNAPSHOT_SKIP.contains(&name.as_ref()) || name.starts_with("result-") {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&raw);
-        let file_type = entry.file_type()?;
-        if file_type.is_symlink() {
-            // Copied as a link. `fs::copy` follows it, which read whatever the
-            // link named on the host — for an image tree, a link such as
-            // `../../../.ssh/id_ed25519` carried a host file into the guest.
-            std::os::unix::fs::symlink(std::fs::read_link(&from)?, &to)?;
-        } else if file_type.is_dir() {
             copy_dir_filtered(&from, &to)?;
         } else {
             std::fs::copy(&from, &to)?;

@@ -741,33 +741,37 @@ fn prepare_source_host_binaries(
     install_dir: &Path,
     tmp_dir: &Path,
 ) -> Result<()> {
+    let commit = validate_source_helper_identity(commit, "false")?;
     let archive_name = format!("mvm-host-helpers-{commit}-{target}.tar.gz");
-    let base_url = std::env::var(SOURCE_HELPER_BASE_URL_ENV).unwrap_or_else(|_| {
-        format!(
-            "{}/{GITHUB_REPO}/releases/download/{SOURCE_HELPER_RELEASE}",
-            github_download_base()
-        )
-    });
     let archive_path = tmp_dir.join(&archive_name);
-    download_release_asset(&format!("{base_url}/{archive_name}"), &archive_path).with_context(
-        || {
-            format!(
-                "no published host helpers match source commit {commit}; wait for the main-branch \
+    let base_url = download_source_helper_archive(
+        &commit,
+        &archive_name,
+        &archive_path,
+        &github_download_base(),
+        std::env::var(SOURCE_HELPER_BASE_URL_ENV).ok().as_deref(),
+    )
+    .with_context(|| {
+        format!(
+            "no published host helpers match source commit {commit}; wait for the main-branch \
                  source-helper workflow or explicitly compile local helpers with \
                  `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
-            )
-        },
-    )?;
-    mvm_build::release_signature::verify_release_archive_signature(
+        )
+    })?;
+    let proof = mvm_build::release_signature::verify_release_archive_signature(
         &mvm_build::release_signature::ReleaseSignatureRequest {
             base_url: &base_url,
             asset: &archive_name,
             archive_path: &archive_path,
-            version: commit,
+            version: &commit,
             train: mvm_build::release_signature::ReleaseTrain::SourceHelpers,
         },
     )
     .context("verify the source helper bundle")?;
+    anyhow::ensure!(
+        proof.is_some(),
+        "source host helpers require a verified signature; signature bypass is not supported"
+    );
     let output = run_host(
         "tar",
         &[
@@ -786,7 +790,7 @@ fn prepare_source_host_binaries(
         "failed to extract source host helpers"
     );
     let extracted = tmp_dir.join(format!("mvm-host-helpers-{commit}-{target}"));
-    validate_source_helper_bundle(&extracted, commit)?;
+    validate_source_helper_bundle(&extracted, &commit)?;
     install_release_host_binaries(&extracted, install_dir, false)?;
     sign_installed_binaries(cfg!(target_os = "macos"), || {
         let targets = mvm_runtime::codesign::collect_sign_targets();
@@ -798,6 +802,36 @@ fn prepare_source_host_binaries(
     )
     .context("record installed source-helper commit")?;
     Ok(())
+}
+
+fn download_source_helper_archive(
+    commit: &str,
+    archive_name: &str,
+    archive_path: &Path,
+    github_base: &str,
+    explicit_base: Option<&str>,
+) -> Result<String> {
+    let commit = validate_source_helper_identity(commit, "false")?;
+    let release_base = format!("{github_base}/{GITHUB_REPO}/releases/download");
+    let primary = explicit_base
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("{release_base}/{SOURCE_HELPER_RELEASE}-{commit}"));
+    let destination = archive_path
+        .to_str()
+        .context("helper archive path is not UTF-8")?;
+    if crate::commands::env::artifact_verify::download_file_or_missing(
+        &format!("{primary}/{archive_name}"),
+        destination,
+    )? {
+        return Ok(primary);
+    }
+    anyhow::ensure!(
+        explicit_base.is_none(),
+        "source helper archive missing at explicit base"
+    );
+    let legacy = format!("{release_base}/{SOURCE_HELPER_RELEASE}");
+    download_release_asset(&format!("{legacy}/{archive_name}"), archive_path)?;
+    Ok(legacy)
 }
 
 fn source_helper_marker_matches(install_dir: &Path, expected_commit: &str) -> bool {
@@ -1910,6 +1944,243 @@ mod tests {
             assert!(hint.contains("vmlinux-x86_64-builder"), "{hint}");
             assert!(hint.contains("--source compile"), "{hint}");
         }
+    }
+
+    fn source_helper_server(statuses: Vec<u16>) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for status in statuses.into_iter().chain(std::iter::repeat(200)) {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut byte = [0];
+                while !request.ends_with(b"\r\n\r\n") {
+                    if stream.read(&mut byte).unwrap() == 0 {
+                        break;
+                    }
+                    request.push(byte[0]);
+                }
+                if request.is_empty() {
+                    break;
+                }
+                send.send(String::from_utf8(request).unwrap()).unwrap();
+                write!(stream, "HTTP/1.1 {status} Response\r\nContent-Length: 7\r\nConnection: close\r\n\r\narchive").unwrap();
+            }
+        });
+        (base, receive)
+    }
+
+    fn stop_source_helper_server(base: &str) {
+        drop(std::net::TcpStream::connect(base.strip_prefix("http://").unwrap()).unwrap());
+    }
+
+    #[test]
+    fn source_helper_routing_uses_new_tag_then_only_archive_404_falls_back() {
+        let commit = "a".repeat(40);
+        let archive = format!("mvm-host-helpers-{commit}-test.tar.gz");
+        for (statuses, override_base, legacy) in [
+            (vec![200], false, false),
+            (vec![404, 200], false, true),
+            (vec![200], true, false),
+        ] {
+            let (base, requests) = source_helper_server(statuses);
+            let explicit = format!("{base}/exact");
+            let tmp = tempfile::tempdir().unwrap();
+            let selected = super::download_source_helper_archive(
+                &commit,
+                &archive,
+                &tmp.path().join("archive"),
+                &base,
+                override_base.then_some(explicit.as_str()),
+            )
+            .unwrap();
+            stop_source_helper_server(&base);
+            let primary = if override_base {
+                explicit
+            } else {
+                format!("{base}/tinylabscom/mvm/releases/download/source-builds-{commit}")
+            };
+            assert!(
+                requests
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap()
+                    .starts_with(&format!(
+                        "GET {}/{}",
+                        primary.strip_prefix(&base).unwrap(),
+                        archive
+                    ))
+            );
+            if legacy {
+                assert_eq!(
+                    selected,
+                    format!("{base}/tinylabscom/mvm/releases/download/source-builds")
+                );
+                assert!(
+                    requests
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap()
+                        .contains(&format!("/source-builds/{archive} "))
+                );
+            } else {
+                assert_eq!(selected, primary);
+            }
+            assert_eq!(
+                std::fs::read(tmp.path().join("archive")).unwrap(),
+                b"archive"
+            );
+        }
+    }
+
+    #[test]
+    fn source_helper_non_404_and_explicit_missing_never_fall_back() {
+        for (status, explicit) in [(401, false), (403, false), (500, false), (404, true)] {
+            let (base, requests) = source_helper_server(vec![status]);
+            let tmp = tempfile::tempdir().unwrap();
+            assert!(
+                super::download_source_helper_archive(
+                    &"a".repeat(40),
+                    "archive",
+                    &tmp.path().join("archive"),
+                    &base,
+                    explicit.then_some(base.as_str()),
+                )
+                .is_err()
+            );
+            stop_source_helper_server(&base);
+            requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(
+                requests
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn source_helper_invalid_commit_and_transport_failure_are_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        for commit in ["main".to_owned(), "A".repeat(40), "a".repeat(40)] {
+            assert!(
+                super::download_source_helper_archive(
+                    &commit,
+                    "archive",
+                    &tmp.path().join("archive"),
+                    "http://127.0.0.1:0",
+                    None,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn source_helper_missing_or_malformed_signature_never_falls_back_or_installs() {
+        use mvm_core::util::test_env::TestEnv;
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        env.remove(super::SOURCE_HELPER_BASE_URL_ENV);
+        for (status, legacy) in [(404, false), (200, false), (404, true), (200, true)] {
+            let statuses = if legacy {
+                vec![404, 200, status]
+            } else {
+                vec![200, status]
+            };
+            let (base, requests) = source_helper_server(statuses);
+            env.set("MVM_UPDATE_DOWNLOAD_URL", &base);
+            let tmp = tempfile::tempdir().unwrap();
+            let install = tempfile::tempdir().unwrap();
+            let error = super::prepare_source_host_binaries(
+                &"a".repeat(40),
+                "test",
+                install.path(),
+                tmp.path(),
+            )
+            .unwrap_err();
+            stop_source_helper_server(&base);
+            assert!(format!("{error:#}").contains("verify the source helper bundle"));
+            let archive = requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            if legacy {
+                let fallback = requests
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                assert!(fallback.contains("/source-builds/mvm-host-helpers-"));
+            }
+            let signature = requests
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(archive.contains(&format!("/source-builds-{}/", "a".repeat(40))));
+            assert!(signature.contains(".tar.gz.bundle "));
+            assert_eq!(signature.contains("/source-builds/"), legacy);
+            assert!(
+                requests
+                    .recv_timeout(std::time::Duration::from_secs(1))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn source_helper_signature_bypass_cannot_install() {
+        use mvm_core::util::test_env::TestEnv;
+        let mut env = TestEnv::new();
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let (base, requests) = source_helper_server(vec![200]);
+        env.set(super::SOURCE_HELPER_BASE_URL_ENV, &base);
+        let tmp = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        let error = super::prepare_source_host_binaries(
+            &"a".repeat(40),
+            "test",
+            install.path(),
+            tmp.path(),
+        )
+        .unwrap_err();
+        stop_source_helper_server(&base);
+        assert!(format!("{error:#}").contains("signature bypass is not supported"));
+        requests
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            requests
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn source_helper_tampered_archive_and_foreign_signature_are_refused() {
+        use mvm_core::util::test_env::TestEnv;
+        let mut env = TestEnv::new();
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let tmp = tempfile::tempdir().unwrap();
+        let commit = "a".repeat(40);
+        let name = format!("mvm-host-helpers-{commit}-test.tar.gz");
+        std::fs::write(tmp.path().join(&name), b"tampered archive").unwrap();
+        let (_, bundle) = signed_fixture();
+        std::fs::write(tmp.path().join(format!("{name}.bundle")), bundle).unwrap();
+        env.set(
+            super::SOURCE_HELPER_BASE_URL_ENV,
+            format!("file://{}", tmp.path().display()),
+        );
+        let staging = tempfile::tempdir().unwrap();
+        let install = tempfile::tempdir().unwrap();
+        assert!(
+            super::prepare_source_host_binaries(&commit, "test", install.path(), staging.path(),)
+                .is_err()
+        );
+        assert_eq!(std::fs::read_dir(install.path()).unwrap().count(), 0);
     }
 
     // --- release-fetch seam tests ---

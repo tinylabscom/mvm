@@ -520,6 +520,22 @@ fn every_signed_release_blob_uses_the_one_bundle_format() {
 }
 
 #[test]
+fn source_helper_publication_is_commit_addressed_and_immutable() {
+    let workflow = fs::read_to_string(".github/workflows/source-host-helpers.yml").unwrap();
+    assert!(workflow.contains("source-host-helpers-${{ github.sha }}"));
+    assert!(workflow.contains("--commit \"${GITHUB_SHA}\""));
+    assert!(workflow.contains("scripts/publish-source-host-helpers.py"));
+    assert!(!workflow.contains("--clobber"));
+    let publisher = fs::read_to_string("scripts/publish-source-host-helpers.py").unwrap();
+    assert!(publisher.contains("tag = f\"source-builds-{commit}\""));
+    assert!(publisher.contains("\"target_commitish\": commit"));
+    assert!(publisher.contains("\"prerelease\": True"));
+    assert!(publisher.contains("\"make_latest\": \"false\""));
+    let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+    assert!(ci.contains("python3 scripts/test_publish_source_host_helpers.py"));
+}
+
+#[test]
 fn sign_blob_invocations_include_single_line_and_final_continuation_flags() {
     let workflow = "run: |\n  cosign sign-blob --yes --bundle a.bundle a\n  cosign sign-blob \\\n    --yes \\\n    --bundle b.bundle b --new-bundle-format\n  echo done\n";
     let invocations = sign_blob_invocations(workflow);

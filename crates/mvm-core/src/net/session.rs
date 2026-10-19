@@ -1051,11 +1051,10 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
-    fn pair() -> (
-        std::os::unix::net::UnixStream,
-        std::os::unix::net::UnixStream,
-    ) {
-        let (a, b) = std::os::unix::net::UnixStream::pair().unwrap();
+    fn pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let a = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (b, _) = listener.accept().unwrap();
         a.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         b.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         (a, b)

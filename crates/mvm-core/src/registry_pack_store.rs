@@ -929,7 +929,6 @@ mod tests {
         PackAdoption, REGISTRY_PACK_MANIFEST_SCHEMA_VERSION, RegistryPackFile,
         RegistryPackManifest, RegistryPackPublisher,
     };
-    #[cfg(unix)]
     use chrono::TimeZone;
 
     const PROFILE: &[u8] = b"[tools]\nallow = [\"git\"]\n";

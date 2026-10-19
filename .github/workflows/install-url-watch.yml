@@ -28,7 +28,7 @@ jobs:
           INSTALL_URL: https://runmvm.com/install.sh
         run: sh ./scripts/check-published-installer.sh "$INSTALL_URL"
 
-      - name: Open, update, or close the tracking issue
+      - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -42,8 +42,8 @@ jobs:
 
           if [ "$STATUS" = "success" ]; then
             if [ -n "$existing" ]; then
-              gh issue close "$existing" --repo "$REPO" \
-                --comment "The published installer is healthy again. Watcher run: $RUN_URL"
+              gh issue comment "$existing" --repo "$REPO" \
+                --body "The published installer is healthy again. Watcher run: $RUN_URL Close this issue with a pull request."
             fi
             exit 0
           fi

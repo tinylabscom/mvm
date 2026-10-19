@@ -544,6 +544,7 @@ fn check_record_manifest(
 
 /// Reuse the original cache record's full target and manifest binding when
 /// its verified entry is retained beside an installed workload.
+#[cfg(unix)]
 pub(crate) fn verify_local_cache_entry_record(
     bytes: &[u8],
     key: &LocalImageCacheKey,
@@ -635,7 +636,7 @@ fn set_file_names(set: &LocalImageSet) -> BTreeSet<String> {
 /// one named for anything else is still a file that is not part of the set.
 ///
 /// [`sha256_file_cached`]: mvm_core::crypto::image_verify::sha256_file_cached
-/// [`extracted_elf_files`]: mvm_vmm::host::fc_kernel::extracted_elf_files
+/// [`extracted_elf_files`]: mvm_core::kernel_format::extracted_elf_files
 fn without_launch_derived_files(
     present: BTreeSet<String>,
     expected: &BTreeSet<String>,
@@ -653,7 +654,7 @@ fn without_launch_derived_files(
 
 fn launch_derived_files(file: &Path) -> impl Iterator<Item = PathBuf> {
     std::iter::once(sha256_cache_path(file))
-        .chain(mvm_vmm::host::fc_kernel::extracted_elf_files(file))
+        .chain(mvm_core::kernel_format::extracted_elf_files(file))
 }
 
 fn check_exact_contents(
