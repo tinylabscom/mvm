@@ -17,8 +17,10 @@ use tempfile::TempDir;
 use mvm_client::registry_pack_local::profile_pack_dependencies;
 use mvm_core::packs::Sha256Hex;
 use mvm_core::registry_pack::{
-    InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
-    RegistryPackVerification, VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
+    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackReference,
+    RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
+    VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_manifest,
+    verify_registry_manifest,
 };
 use mvm_core::registry_pack_store::{
     PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
@@ -361,12 +363,29 @@ pub struct PullSummary {
     pub refreshed: bool,
 }
 
-/// Fetch, verify, install, and pin a pack and its signed profile dependencies.
+/// Applications are a metadata handoff, never an installed payload.
+#[derive(Debug)]
+pub enum PullOutcome {
+    Installed(PullSummary),
+    VerifiedApplication(Box<VerifiedRegistryApplication>),
+}
+
+impl PullOutcome {
+    fn reference(&self) -> &PackReference {
+        match self {
+            Self::Installed(summary) => &summary.reference,
+            Self::VerifiedApplication(application) => application.reference(),
+        }
+    }
+}
+
+/// Authenticate a manifest; install legacy packs and their signed dependencies.
 ///
 /// A pack whose coordinate is already pinned is re-verified lock-first
 /// (digest drift refuses); a new pack is adopted signature-first. The pin is
-/// written only after installation succeeds.
-pub fn pull(reference_arg: &str) -> Result<PullSummary> {
+/// written only after installation succeeds. Applications return verified
+/// metadata without acquiring a bundle, installing files, or writing a new pin.
+pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
     let requested: PackReference = reference_arg
         .parse()
         .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
@@ -439,9 +458,9 @@ fn pull_with_dependencies<F>(
     seen: &mut BTreeMap<String, PackReference>,
     active: &mut Vec<PackReference>,
     pull_pack: &mut F,
-) -> Result<Option<PullSummary>>
+) -> Result<Option<PullOutcome>>
 where
-    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(PullSummary, Vec<PackReference>)>,
+    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(PullOutcome, Vec<PackReference>)>,
 {
     let entry = index
         .iter()
@@ -462,9 +481,13 @@ where
     }
     active.push(reference.clone());
     let (summary, dependencies) = pull_pack(config, &reference)?;
+    if active.len() > 1 && matches!(summary, PullOutcome::VerifiedApplication(_)) {
+        bail!("application {reference} cannot satisfy a signed policy-pack dependency");
+    }
     for dependency in dependencies {
-        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack)
-            .with_context(|| format!("pulling dependency {dependency} of {}", summary.reference))?;
+        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack).with_context(
+            || format!("pulling dependency {dependency} of {}", summary.reference()),
+        )?;
     }
     active.pop();
     Ok(Some(summary))
@@ -474,7 +497,7 @@ fn pull_one(
     config: &PackRegistryConfig,
     reference: &PackReference,
     advertised_digest: &Sha256Hex,
-) -> Result<(PullSummary, Vec<PackReference>)> {
+) -> Result<(PullOutcome, Vec<PackReference>)> {
     let fetched = download_pack(config, reference)?;
     let actual = Sha256Hex::from_bytes(&fetched.manifest_bytes);
     if &actual != advertised_digest {
@@ -504,7 +527,7 @@ fn pull_one(
     // (that is what `pack registry update` relies on).
     let pinned = lock.pins().iter().any(|pin| pin.reference() == reference);
 
-    let verified: VerifiedRegistryPack = if pinned {
+    let verified = if pinned {
         let request = RegistryPackVerification::new(
             reference,
             &fetched.manifest_bytes,
@@ -512,14 +535,26 @@ fn pull_one(
             &lock,
             &policy,
         );
-        verify_registry_pack(&request)?
+        verify_registry_manifest(&request)?
     } else {
-        adopt_registry_pack(&PackAdoption {
+        adopt_registry_manifest(&PackAdoption {
             requested: reference,
             manifest_bytes: &fetched.manifest_bytes,
             signature_bundle: &fetched.signature_bundle,
             publisher_policy: &policy,
         })?
+    };
+    let verified = match verified {
+        VerifiedRegistryManifest::Application(application) => {
+            check_registry_pack_revocations_if_configured(&application)?;
+            // Persist a pin only after acquisition succeeds. The handoff retains
+            // authenticated bytes and digest for that later transaction.
+            return Ok((
+                PullOutcome::VerifiedApplication(Box::new(application)),
+                Vec::new(),
+            ));
+        }
+        VerifiedRegistryManifest::Legacy(legacy) => legacy,
     };
     check_registry_pack_revocations_if_configured(&verified)?;
     with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
@@ -550,13 +585,13 @@ fn pull_one(
     let files = verified.payload_files().len();
     let dependencies = declared_pack_dependencies(&installed, &verified)?;
     Ok((
-        PullSummary {
+        PullOutcome::Installed(PullSummary {
             reference: verified.manifest().reference.clone(),
             manifest_sha256: verified.manifest_sha256().as_str().to_string(),
             files,
             installed_root: installed.root().to_path_buf(),
             refreshed: pinned,
-        },
+        }),
         dependencies,
     ))
 }
@@ -1108,13 +1143,13 @@ mod tests {
         assert_eq!(visited, ["agent/root@1.0.0", "runtime/node@1.0.0"]);
     }
 
-    fn summary(reference: &PackReference) -> PullSummary {
-        PullSummary {
+    fn summary(reference: &PackReference) -> PullOutcome {
+        PullOutcome::Installed(PullSummary {
             reference: reference.clone(),
             manifest_sha256: String::new(),
             files: 0,
             installed_root: PathBuf::new(),
             refreshed: false,
-        }
+        })
     }
 }

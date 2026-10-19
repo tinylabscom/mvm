@@ -1446,7 +1446,7 @@ mod tests {
         let mutation = job_block(&workflow, "mutation-witnesses");
         let install = concat!(
             "      - name: Install mvm-cli embedded-host toolchain\n",
-            "        if: matrix.package == 'mvm-cli'\n",
+            "        if: startsWith(matrix.package, 'mvm-cli')\n",
             "        uses: ./.github/actions/install-zigbuild",
         );
         assert!(

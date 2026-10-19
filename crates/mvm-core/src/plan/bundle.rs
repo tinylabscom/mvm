@@ -661,21 +661,30 @@ pub fn verify_canonical_plan_bundle(
     host: &crate::image_set::HostProtocolSupport,
 ) -> Result<VerifiedBundle, PlanBundleError> {
     verify_plan_bundle_checked(pin, resolver, trust, |verified| {
-        if !verified
-            .manifest
-            .members
-            .iter()
-            .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)))
-            || owner.pin() != pin
-        {
-            return Err(PlanBundleError::CanonicalKernelBinding(
-                "owner does not bind this canonical bundle".into(),
-            ));
-        }
+        owner_binds_canonical_bundle(&verified.manifest, owner.pin(), pin)?;
         owner
             .verify_config(config, backend, host)
             .map_err(|error| PlanBundleError::CanonicalKernelBinding(error.to_string()))
     })
+}
+
+/// The canonical owner must have been prepared from this very bundle, and the
+/// bundle must declare the canonical proof the owner was prepared from.
+fn owner_binds_canonical_bundle(
+    manifest: &BundleManifest,
+    owner_pin: &PlanArtifact,
+    pin: &PlanArtifact,
+) -> Result<(), PlanBundleError> {
+    let declares_proof = manifest
+        .members
+        .iter()
+        .any(|member| matches!(member, BundleMember::CanonicalLinuxProof(_)));
+    if !declares_proof || owner_pin != pin {
+        return Err(PlanBundleError::CanonicalKernelBinding(
+            "owner does not bind this canonical bundle".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn verify_plan_bundle_checked(
@@ -1861,6 +1870,33 @@ mod tests {
         let boot = verified.boot_assets.expect("CLI boot assets verified");
         assert_eq!(boot.image_set.artifact_paths.len(), 1);
         assert!(boot.image_set.artifact_paths.contains_key(&kernel_name));
+    }
+
+    #[test]
+    fn a_canonical_owner_binds_only_the_bundle_it_was_prepared_from() {
+        let sk = fresh_key();
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
+        let pin = |sha: &str| PlanArtifact::new(sha.repeat(64), &[7u8; 64], key_id.clone());
+        let mut with_proof = make_manifest(key_id.clone(), Vec::new());
+        with_proof.members = vec![BundleMember::CanonicalLinuxProof(CanonicalLinuxProof {
+            manifest_artifact: "linux.json".into(),
+            signature_bundle_artifact: "linux.bundle".into(),
+            revocation_document_artifact: "revocations.json".into(),
+            revocation_signature_bundle_artifact: "revocations.bundle".into(),
+        })];
+        let without_proof = make_manifest(key_id.clone(), Vec::new());
+
+        owner_binds_canonical_bundle(&with_proof, &pin("a"), &pin("a")).unwrap();
+        for (manifest, owner, bundle) in [
+            (&with_proof, "a", "b"),
+            (&without_proof, "a", "a"),
+            (&without_proof, "a", "b"),
+        ] {
+            assert!(matches!(
+                owner_binds_canonical_bundle(manifest, &pin(owner), &pin(bundle)),
+                Err(PlanBundleError::CanonicalKernelBinding(_))
+            ));
+        }
     }
 
     #[test]

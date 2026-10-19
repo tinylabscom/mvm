@@ -171,7 +171,7 @@ fn emit_observed(
     let before = identity().map_err(refused)?;
     super::read_contract_source(&request.images_root.join(super::BUILDER_BOOT_ABI_FILE))?;
     let boot_abi = super::checkout_builder_boot_abi(request.images_root)?;
-    let compatibility = ImageSetCompatibility {
+    let mut compatibility = ImageSetCompatibility {
         guest_agent_protocol: None,
         builder_cache_contract: request.builder_cache_contract,
         builder_boot_abi: Some(boot_abi),
@@ -257,10 +257,13 @@ fn emit_observed(
         .iter()
         .any(|m| matches!(m.role, ImageSetRole::WorkloadRootfs(_)))
     {
-        let source = super::read_contract_source(
-            &request.images_root.join(super::BASE_IMAGE_CONTRACT_FILE),
-        )?;
-        if source.trim() != "1" {
+        let declaration = request.images_root.join(super::BASE_IMAGE_CONTRACT_FILE);
+        // A checkout older than the declaration carries no workload root to
+        // contradict, so the set records none and is read as the legacy contract.
+        if matches!(std::fs::symlink_metadata(&declaration), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+        {
+            compatibility.base_image_contract = None;
+        } else if super::read_contract_source(&declaration)?.trim() != "1" {
             return Err(refused("unsupported source base-image contract"));
         }
     }
@@ -523,6 +526,25 @@ mod tests {
         assert!(manifest.producer.local_checkouts().unwrap().mvm.is_none());
         assert!(manifest.mvm_source_commit.is_none());
         assert!(manifest.compatibility.guest_agent_protocol.is_none());
+    }
+
+    #[test]
+    fn a_partial_set_from_a_checkout_without_a_declaration_records_none() {
+        let fixture = Fixture::new();
+        std::fs::write(fixture.temp.path().join("built/metadata.json"), b"{}").unwrap();
+        std::fs::remove_file(
+            fixture
+                .temp
+                .path()
+                .join("images/images/base-image-contract.nix"),
+        )
+        .unwrap();
+        fixture.emit(&PARTIAL_CONTRACT, |_, _| {}).unwrap();
+        let manifest: ImageSetManifest = serde_json::from_slice(
+            &std::fs::read(fixture.temp.path().join("set/image-set.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.compatibility.base_image_contract, None);
     }
 
     #[test]
