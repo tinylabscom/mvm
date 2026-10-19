@@ -103,6 +103,7 @@ mod stream;
 mod verify_error;
 pub use declarations::{
     BundleSizeBudget, forbidden_capabilities, unbound_environment_secret_slots,
+    unsupported_environment_requirements,
 };
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;

@@ -4,6 +4,7 @@ use anyhow::Result;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::plan::bundle::{
     BundleManifest, forbidden_capabilities, unbound_environment_secret_slots,
+    unsupported_environment_requirements,
 };
 
 /// A verified plan refused by its authenticated bundle environment, for auditing.
@@ -29,6 +30,18 @@ pub(super) fn verify_environment(plan: &ExecutionPlan, manifest: &BundleManifest
     let Some(environment) = manifest.environment() else {
         return Ok(());
     };
+    let unsupported = unsupported_environment_requirements(environment);
+    if !unsupported.is_empty() {
+        return Err(BundleEnvironmentRefused {
+            plan: Box::new(plan.clone()),
+            reason: format!(
+                "this host cannot enforce the signed environment requirements {}; \
+                 use an environment whose requirements this host supports",
+                unsupported.join(", ")
+            ),
+        }
+        .into());
+    }
     let unbound = unbound_environment_secret_slots(environment, &plan.secrets);
     if !unbound.is_empty() {
         return Err(BundleEnvironmentRefused {
