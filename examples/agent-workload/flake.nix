@@ -44,7 +44,7 @@
               mode = "0755";
             };
             vcpus = 2;
-            memory_mib = 2048;
+            memory_mib = 4096;
           };
         }
       );
