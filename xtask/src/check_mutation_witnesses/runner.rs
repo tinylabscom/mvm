@@ -19,6 +19,7 @@ pub(crate) fn run_mutants_over(
     workspace: &Path,
     surface: &[SurfaceFile],
     pinned: &str,
+    slice: Option<(usize, usize)>,
 ) -> Result<PathBuf> {
     ensure_cargo_mutants(pinned)?;
     let out_root = new_run_root(&std::env::temp_dir())?;
@@ -38,7 +39,7 @@ pub(crate) fn run_mutants_over(
             file.claims
         );
         let out_dir = file_output_dir(&out_root, &file.path);
-        run_mutants_for_file(workspace, file, &out_dir, &isolation, pinned)?;
+        run_mutants_for_file(workspace, file, &out_dir, &isolation, pinned, slice)?;
     }
     Ok(out_root)
 }
@@ -300,6 +301,7 @@ fn run_mutants_for_file(
     out_dir: &Path,
     isolation: &MutationIsolation,
     pinned: &str,
+    slice: Option<(usize, usize)>,
 ) -> Result<()> {
     if !file.features.is_empty() {
         eprintln!("      features {}", file.features.join(","));
@@ -311,6 +313,12 @@ fn run_mutants_for_file(
         );
     }
     let mut cmd = mutants_command_for(workspace, file);
+    if let Some((index, total)) = slice {
+        // Round-robin, not consecutive ranges: neighbouring mutants share
+        // code and so cost alike, and a range parks the slow ones together.
+        cmd.args(["--shard", &format!("{index}/{total}")])
+            .args(["--sharding", "round-robin"]);
+    }
     cmd.args(["--test-tool", "nextest"])
         .args([
             "--timeout-multiplier",

@@ -9,6 +9,7 @@ impl std::fmt::Display for ShardSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.shard {
             None => write!(f, "{}", self.package),
+            Some((i, n)) if self.by_mutant => write!(f, "{}/m{i}of{n}", self.package),
             Some((i, n)) => write!(f, "{}/{i}of{n}", self.package),
         }
     }
@@ -38,9 +39,16 @@ pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<Stri
     }
     let mut errors = Vec::new();
     let mut declared: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    let mut kinds: BTreeMap<String, BTreeSet<bool>> = BTreeMap::new();
     for raw in &entries {
         match parse_shard_spec(raw) {
             Ok(spec) => {
+                if spec.shard.is_some() {
+                    kinds
+                        .entry(spec.package.clone())
+                        .or_default()
+                        .insert(spec.by_mutant);
+                }
                 let slot = declared.entry(spec.package).or_default();
                 if let Some(pair) = spec.shard {
                     slot.push(pair);
@@ -66,6 +74,15 @@ pub fn check_shard_matrix(workspace: &Path, surface: &[SurfaceFile]) -> Vec<Stri
             errors.push(format!(
                 "{SECURITY_WORKFLOW_REL} declares a mutation shard for {pkg}, which owns no \
                  surface file; the shard would fail on an empty surface"
+            ));
+        }
+    }
+
+    for (pkg, seen) in &kinds {
+        if seen.len() > 1 {
+            errors.push(format!(
+                "{SECURITY_WORKFLOW_REL} cuts {pkg} both by file and by mutant; the two splits \
+                 overlap, so work would run twice and the totals could not be checked"
             ));
         }
     }
@@ -158,10 +175,15 @@ pub fn parse_shard_spec(raw: &str) -> Result<ShardSpec> {
         return Ok(ShardSpec {
             package: raw.to_string(),
             shard: None,
+            by_mutant: false,
         });
     };
     let Some((index, total)) = shard.split_once("of") else {
         bail!("malformed shard {raw:?}: expected <package>/<index>of<total>, e.g. mvm-hostd/1of2");
+    };
+    let (by_mutant, index) = match index.strip_prefix('m') {
+        Some(rest) => (true, rest),
+        None => (false, index),
     };
     let index: usize = index
         .parse()
@@ -175,6 +197,7 @@ pub fn parse_shard_spec(raw: &str) -> Result<ShardSpec> {
     Ok(ShardSpec {
         package: package.to_string(),
         shard: Some((index, total)),
+        by_mutant,
     })
 }
 
@@ -239,6 +262,11 @@ fn for_shard_by_weight(
     let Some((index, total)) = spec.shard else {
         return Ok(owned);
     };
+    // A mutant slice runs every file; the slice is applied per file when the
+    // mutator is invoked, so no file is withheld from any shard here.
+    if spec.by_mutant {
+        return Ok(owned);
+    }
 
     // Heaviest file onto the lightest shard, ties by path then by shard
     // index, so the assignment is a pure function of the surface.
@@ -308,6 +336,43 @@ jobs:
   later-job:
     name: after
 ";
+
+    #[test]
+    fn a_mutant_slice_spec_parses_prints_and_keeps_every_file() {
+        let spec = parse_shard_spec("mvm-cli/m2of4").unwrap();
+        assert_eq!(spec.shard, Some((2, 4)));
+        assert!(spec.by_mutant);
+        assert_eq!(spec.to_string(), "mvm-cli/m2of4");
+        assert!(!parse_shard_spec("mvm-cli/2of4").unwrap().by_mutant);
+        assert!(parse_shard_spec("mvm-cli/m0of4").is_err());
+        assert!(parse_shard_spec("mvm-cli/mxof4").is_err());
+
+        let surface = vec![
+            surface("crates/mvm-cli/src/a.rs", vec![1]),
+            surface("crates/mvm-cli/src/b.rs", vec![1]),
+        ];
+        let files = for_shard_by_weight(&surface, Some(&spec), &|_| Ok(1)).unwrap();
+        assert_eq!(files.len(), 2, "a mutant slice withholds no file");
+    }
+
+    #[test]
+    fn cutting_one_package_both_ways_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            dir.path().join(SECURITY_WORKFLOW_REL),
+            "jobs:\n  mutation-witnesses:\n    strategy:\n      matrix:\n        package:\n          - mvm-cli/m1of2\n          - mvm-cli/2of2\n",
+        )
+        .unwrap();
+        let errors = check_shard_matrix(dir.path(), &[surface("crates/mvm-cli/src/a.rs", vec![1])]);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("both by file and by mutant")),
+            "{errors:?}"
+        );
+    }
 
     #[test]
     fn a_comment_between_entries_does_not_truncate_the_matrix() {
@@ -393,6 +458,7 @@ jobs:
             Some(&ShardSpec {
                 package: "mvm-cli".to_string(),
                 shard: None,
+                by_mutant: false,
             }),
         );
         assert_eq!(cli.len(), 2);
@@ -404,6 +470,7 @@ jobs:
                 Some(&ShardSpec {
                     package: "mvm-hostd".to_string(),
                     shard: None,
+                    by_mutant: false,
                 })
             )
             .len(),
@@ -420,6 +487,7 @@ jobs:
                 Some(&ShardSpec {
                     package: "mvm-sdk".to_string(),
                     shard: None,
+                    by_mutant: false,
                 })
             )
             .is_empty()
@@ -442,6 +510,7 @@ jobs:
             let spec = ShardSpec {
                 package: (*p).to_string(),
                 shard: None,
+                by_mutant: false,
             };
             for f in even(&surface, Some(&spec)) {
                 seen.push(f.path);
@@ -459,7 +528,8 @@ jobs:
             parse_shard_spec("mvm-hostd").unwrap(),
             ShardSpec {
                 package: "mvm-hostd".to_string(),
-                shard: None
+                shard: None,
+                by_mutant: false,
             }
         );
         let sharded = parse_shard_spec("mvm-hostd/2of3").unwrap();
@@ -570,6 +640,7 @@ jobs:
             let spec = ShardSpec {
                 package: "mvm-hostd".to_string(),
                 shard: Some((index, total)),
+                by_mutant: false,
             };
             let files =
                 for_shard_by_weight(&surface, Some(&spec), &|f| Ok(cost[f.path.as_str()])).unwrap();
