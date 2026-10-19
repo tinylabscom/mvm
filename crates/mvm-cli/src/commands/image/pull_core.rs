@@ -1192,12 +1192,31 @@ mod tests {
     /// launch that follows may spawn a builder VM of its own.
     #[test]
     fn the_pre_builder_sweep_runs_the_orphan_reaper() {
+        if !crate::test_boot_payload::in_payload_capable_test_process(
+            module_path!(),
+            "the_pre_builder_sweep_runs_the_orphan_reaper",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
         assert!(!crate::commands::env::builder_vm::before_spawn_sweep_has_run());
         sweep_before_builder_vm();
         assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+    }
+
+    #[test]
+    fn pre_builder_sweep_witness_is_isolated_from_an_already_completed_parent() {
+        let home = tempfile::tempdir().expect("tempdir");
+        {
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            sweep_before_builder_vm();
+            assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        }
+
+        the_pre_builder_sweep_runs_the_orphan_reaper();
     }
 
     fn prod_fixture() -> ProdFixture {
