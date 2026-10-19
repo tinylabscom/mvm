@@ -94,6 +94,7 @@ fn agent_workload_documents_and_live_tests_the_secure_run() {
     assert!(readme.contains("--from-workload-ir examples/agent-workload/workload.json"));
     assert!(readme.contains("secret.substituted"));
     assert!(readme.contains("trust audit verify"));
+    assert!(readme.contains("trust audit verify \"$SESSION_ID\" --json"));
     assert!(
         !readme
             .lines()

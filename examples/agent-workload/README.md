@@ -86,6 +86,14 @@ records before removing task-local state. A successful offline smoke proves
 startup and placeholder provisioning only: it proves neither a real model
 response nor allow/deny network enforcement.
 
+For a session-specific verdict, read the identifier from that run's output
+or signed session records, then supply it explicitly:
+
+```bash
+read -r SESSION_ID
+test -n "$SESSION_ID" && mvmctl trust audit verify "$SESSION_ID" --json
+```
+
 ## Portable artifact prerequisite
 
 A source-flake smoke is not an installable application archive. Portable
