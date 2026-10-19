@@ -183,6 +183,93 @@ fn malformed_truncated_and_fat_alignment_inputs_refuse_without_panicking() {
     }
 }
 #[test]
+fn file_backed_sections_must_stay_within_their_segment() {
+    for little in [true, false] {
+        for wide in [true, false] {
+            let original = fixture(little, wide, 0x000e_0000);
+            assert!(slices(&original).is_ok());
+            let header = if wide { 32 } else { 28 };
+            let segment = if wide { 72 } else { 56 };
+            let section = header + segment;
+            let offset_field = section + if wide { 48 } else { 40 };
+            let length_field = section + if wide { 40 } else { 36 };
+            for (offset, length) in [(4096u32, 2u64), (4095, 3), (512, u64::MAX)] {
+                let mut bad = original.clone();
+                let offset = if little {
+                    offset.to_le_bytes()
+                } else {
+                    offset.to_be_bytes()
+                };
+                bad[offset_field..offset_field + 4].copy_from_slice(&offset);
+                let length = if little {
+                    length.to_le_bytes()
+                } else {
+                    length.to_be_bytes()
+                };
+                if wide {
+                    bad[length_field..length_field + 8].copy_from_slice(&length);
+                } else {
+                    let length = if little { &length[..4] } else { &length[4..] };
+                    bad[length_field..length_field + 4].copy_from_slice(length);
+                }
+                assert!(
+                    slices(&bad).is_err(),
+                    "file-backed section escapes __TEXT: little={little}, wide={wide}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn section_segment_boundaries_and_zero_fill_are_distinct() {
+    for little in [true, false] {
+        for wide in [true, false] {
+            let original = fixture(little, wide, 0x000e_0000);
+            let header = if wide { 32 } else { 28 };
+            let segment = if wide { 72 } else { 56 };
+            let section = header + segment;
+            let write_word = |bytes: &mut [u8], at, value: u32| {
+                let value = if little {
+                    value.to_le_bytes()
+                } else {
+                    value.to_be_bytes()
+                };
+                bytes[at..at + 4].copy_from_slice(&value);
+            };
+            let mut bounded = original.clone();
+            if wide {
+                let encode = |value: u64| {
+                    if little {
+                        value.to_le_bytes()
+                    } else {
+                        value.to_be_bytes()
+                    }
+                };
+                bounded[header + 40..header + 48].copy_from_slice(&encode(512));
+                bounded[header + 48..header + 56].copy_from_slice(&encode(4));
+            } else {
+                write_word(&mut bounded, header + 32, 512);
+                write_word(&mut bounded, header + 36, 4);
+            }
+            assert!(slices(&bounded).is_ok(), "exact segment boundary");
+            write_word(&mut bounded, section + if wide { 48 } else { 40 }, 511);
+            assert!(slices(&bounded).is_err(), "section begins before segment");
+            for kind in [1, 0xc, 0x12] {
+                let mut zero_fill = original.clone();
+                write_word(
+                    &mut zero_fill,
+                    section + if wide { 48 } else { 40 },
+                    u32::MAX,
+                );
+                write_word(&mut zero_fill, section + if wide { 64 } else { 56 }, kind);
+                assert!(slices(&zero_fill).is_ok(), "zero-fill type {kind:#x}");
+            }
+        }
+    }
+}
+
+#[test]
 fn library_emits_matching_encodings_without_executable_flags() {
     let mut bytes = fixture(true, true, 0x000e_0000);
     bytes[12..16].copy_from_slice(&6u32.to_le_bytes());
