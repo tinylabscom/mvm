@@ -326,9 +326,7 @@ mod tests {
         )
         .expect_err("initialization error must stop the listener");
         assert_eq!(error.to_string(), "native backend unavailable");
-        client
-            .set_nonblocking(true)
-            .expect("bounded read");
+        client.set_nonblocking(true).expect("bounded read");
         assert_eq!(client.read(&mut [0_u8; 1]).expect("closed stream"), 0);
     }
 
