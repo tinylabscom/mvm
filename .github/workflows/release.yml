@@ -524,15 +524,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          notary=()
+          cmd=(python3 scripts/release/verify_macos_package.py
+            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz
+            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory
+            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json"
+            --report "${RUNNER_TEMP}/macos-final-package.json")
           if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
-            notary=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
+            cmd+=(--notary-report "${RUNNER_TEMP}/macos-notarization.json")
           fi
-          python3 scripts/release/verify_macos_package.py \
-            --archive staging/mvmctl-aarch64-apple-darwin.tar.gz \
-            --envelope mvmctl-aarch64-apple-darwin --require-cli-inventory \
-            --producer-report "${RUNNER_TEMP}/macos-producer-signing.json" \
-            "${notary[@]}" --report "${RUNNER_TEMP}/macos-final-package.json"
+          "${cmd[@]}"
 
       - name: Retain final macOS package inspection
         if: ${{ always() && matrix.target == 'aarch64-apple-darwin' }}
