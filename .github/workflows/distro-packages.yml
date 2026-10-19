@@ -49,6 +49,9 @@ on:
       - tests/test_published_installed_boot.py
       - .github/workflows/first-run-smoke.yml
       - .github/workflows/release.yml
+      - .github/workflows/pack-signing-smoke.yml
+      - scripts/locked-image-tag.sh
+      - crates/mvm-core/images.lock
       - scripts/release/**
       - nix/packaging/aur/**
       - nix/packaging/nixpkgs/**

@@ -125,6 +125,7 @@ jobs:
           workflow=".github/workflows/pack-signing-smoke.yml"
           cp smoke/inputs/vmlinux smoke/image-set/vmlinux
           kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
+          builder_cache_contract="$(scripts/locked-image-tag.sh compatibility builder_cache_contract)"
           cat > smoke/image-set.json <<JSON
           {
             "schema_version": 2,
@@ -137,7 +138,7 @@ jobs:
               "source_commit": "${GITHUB_SHA}"
             },
             "mvm_source_commit": "${GITHUB_SHA}",
-            "compatibility": {"builder_cache_contract": 1},
+            "compatibility": {"builder_cache_contract": ${builder_cache_contract}},
             "nix_inputs": {
               "flake_locks": [{"reference": "smoke", "lock_hash": "${kernel_sha}"}],
               "source_revisions": []
