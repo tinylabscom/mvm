@@ -50,9 +50,7 @@ export function Quickstart() {
           <Reveal>
             <Eyebrow>Quickstart</Eyebrow>
             <h2 className="max-w-sm lowercase font-display tracking-tight text-2xl font-semibold leading-tight text-title sm:text-3xl">
-              one command.
-              <br />
-              one private kernel.
+              Run your first microVM.
             </h2>
             {/* Inline margins, not mt-*: Starlight's unlayered stylesheet
                 beats layered utilities on this page (see Positioning.tsx). */}
@@ -60,9 +58,9 @@ export function Quickstart() {
               className="max-w-sm text-base leading-relaxed text-body"
               style={{ marginTop: "1.5rem" }}
             >
-              Install mvm, then run an OCI image in a transient microVM.
-              Networking is denied by default, and the machine is removed when
-              the command exits.
+              Install mvm, then try the command shown here to run an OCI image
+              in a temporary microVM. Networking is denied by default. This
+              command removes the machine when it exits.
             </p>
             <a
               href={`${base}getting-started/quickstart/`}

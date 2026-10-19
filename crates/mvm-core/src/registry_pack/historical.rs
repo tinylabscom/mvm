@@ -54,7 +54,7 @@ pub(super) fn enforce_legacy_manifest_policy(
     Ok(verified)
 }
 
-fn check_legacy_manifest_policy(
+pub(super) fn check_legacy_manifest_policy(
     policy: &RegistryPackPublisherPolicy,
     verified_identity: &str,
     reference: &PackReference,
