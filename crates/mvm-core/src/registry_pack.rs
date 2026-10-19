@@ -1041,6 +1041,11 @@ fn validate_registry_pack_manifest(
 }
 
 pub mod application;
+mod dispatch;
+pub use dispatch::{
+    AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,
+    adopt_registry_manifest, verify_registry_manifest,
+};
 mod built_image;
 mod install;
 pub mod local_input;
@@ -1478,7 +1483,7 @@ mod tests {
         PackPin::new(reference(value), Sha256Hex::from_bytes(bytes)).unwrap()
     }
 
-    fn publisher_policy() -> RegistryPackPublisherPolicy {
+    pub(super) fn publisher_policy() -> RegistryPackPublisherPolicy {
         RegistryPackPublisherPolicy::new(vec![
             RegistryPackPublisher::new(
                 "runtime",
@@ -1519,7 +1524,7 @@ mod tests {
         }
     }
 
-    fn accept_signature(
+    pub(super) fn accept_signature(
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &KeylessTrust,
@@ -1530,7 +1535,7 @@ mod tests {
         })
     }
 
-    fn reject_signature(
+    pub(super) fn reject_signature(
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &KeylessTrust,

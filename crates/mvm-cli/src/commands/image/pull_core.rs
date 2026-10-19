@@ -1192,11 +1192,33 @@ mod tests {
     /// launch that follows may spawn a builder VM of its own.
     #[test]
     fn the_pre_builder_sweep_runs_the_orphan_reaper() {
+        if !crate::test_boot_payload::in_fresh_test_process(
+            module_path!(),
+            "the_pre_builder_sweep_runs_the_orphan_reaper",
+        ) {
+            return;
+        }
         let home = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
         assert!(!crate::commands::env::builder_vm::before_spawn_sweep_has_run());
         sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+    }
+
+    #[test]
+    fn a_prior_parent_sweep_does_not_contaminate_the_cold_sweep_witness() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        drop(env);
+
+        the_pre_builder_sweep_runs_the_orphan_reaper();
+
         assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
     }
 
