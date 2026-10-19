@@ -283,6 +283,18 @@ jobs:
       # `xtask check-per-vm-host-binaries-sync` fails the build if the two
       # drift. Add a binary there, not here.
       #
+      # Profile: these stay on `--release` (panic=unwind), NOT `release-min`
+      # (panic=abort). mvm-hostd's observer pipeline, signer fan-out and
+      # audit mirror, the gpu shim core, and mvm-hostlib's C ABI all contain a
+      # fault with `catch_unwind`; under abort a panic inside the in-process
+      # SDK library would kill the Python/Node host that loaded it, and a
+      # daemon fault would take down the process instead of failing one call.
+      # Panic strategy is profile-wide, so these cannot share compiled deps
+      # with mvmctl; the daemons and gpu endpoint share one invocation (one
+      # feature set), and mvm-hostlib stays separate because
+      # `mvm-client/release-channel` would otherwise change mvm-hostd's
+      # mvm-build features.
+      #
       # Apple Silicon macOS additionally gets the native HVF supervisor. The
       # optional libkrun integration is not part of standard release artifacts.
       - name: Build per-VM host binaries
@@ -298,13 +310,12 @@ jobs:
           fi
           # Ships on every target — see the note above.
           if [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]]; then
-            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd \
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
               --bin mvm-host-agent \
               --bin mvm-signer-helper \
               --bin mvm-network-endpoint \
               --bin mvm-broker \
-              --bin mvm-audit-signer
-            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-audit-signer \
               --bin mvm-gpu-endpoint
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
@@ -320,13 +331,12 @@ jobs:
             cp "target/${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}/release/libmvm_hostlib.so" \
               "target/${BUILD_TARGET}/release/libmvm_hostlib.so"
           else
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd -p mvm-gpu \
               --bin mvm-host-agent \
               --bin mvm-signer-helper \
               --bin mvm-network-endpoint \
               --bin mvm-broker \
-              --bin mvm-audit-signer
-            cargo build --release --target "${BUILD_TARGET}" -p mvm-gpu \
+              --bin mvm-audit-signer \
               --bin mvm-gpu-endpoint
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib \
               --features mvm-client/release-channel
