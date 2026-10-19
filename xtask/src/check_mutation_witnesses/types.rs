@@ -170,6 +170,13 @@ pub struct ShardSpec {
     pub package: String,
     /// `(index, total)`, one-based, or `None` for the whole package.
     pub shard: Option<(usize, usize)>,
+    /// Whether the shard is a slice of every file's mutants (`mvm-cli/m1of4`)
+    /// rather than a share of the package's files (`mvm-hostd/1of8`).
+    ///
+    /// File packing cannot split a file, so one file whose mutants outlast the
+    /// step limit needs the slice form: every shard runs every surface file,
+    /// each taking its round-robin share of that file's mutants.
+    pub by_mutant: bool,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

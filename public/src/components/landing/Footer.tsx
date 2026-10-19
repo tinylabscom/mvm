@@ -6,6 +6,7 @@ const linkGroups = [
   {
     title: "Docs",
     links: [
+      { label: "Use cases", href: "/use-cases/" },
       { label: "Quickstart", href: "/getting-started/quickstart/" },
       { label: "Nix for mvm", href: "/getting-started/nix-for-mvm/" },
       { label: "Architecture", href: "/architecture/overview/" },

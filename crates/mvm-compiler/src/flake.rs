@@ -71,6 +71,7 @@ pub(crate) fn render_flake_nix_at_url(
           version = "0";
           src = ./src;
           nodejs = pkgs.nodejs_22;
+          nativeBuildInputs = buildTools pkgs;
           npmDeps = pkgs.importNpmLock {{ npmRoot = ./src; }};
           npmConfigHook = pkgs.importNpmLock.npmConfigHook;
           # No transpile step — Node strips TS types at import (>=22.18). The
@@ -93,6 +94,59 @@ pub(crate) fn render_flake_nix_at_url(
             cp -R . $out/
           '';
         }};
+      # A pack's own build inputs, when it has any, live in ./pack-build.json;
+      # absent means none. Its `python` member is a uv lockfile already
+      # resolved for this target: the interpreter attribute and one wheel per
+      # package, each pinned by sha256. Every wheel is a fixed-output fetch in
+      # the builder VM and the set is installed into one store path at build
+      # time, so the image carries the installed packages and the guest runs
+      # no installer and needs no network. Native wheels are patched against
+      # the closure; a library the closure lacks fails the build.
+      packBuild =
+        if builtins.pathExists ./pack-build.json
+        then builtins.fromJSON (builtins.readFile ./pack-build.json)
+        else {{ }};
+      pythonWheels = packBuild.python or null;
+      # Build-scoped packages exist only for the derivations that install a
+      # pack's dependencies; they are never in the image or its closure.
+      buildTools = pkgs: map (name: pkgs.${{name}}) (packBuild.build_packages or [ ]);
+      mkPythonDeps = pkgs:
+        if pythonWheels == null then null
+        else
+          let
+            python = pkgs.${{pythonWheels.interpreter}};
+            wheels = map (wheel: {{
+              inherit (wheel) filename;
+              src = pkgs.fetchurl {{
+                name = wheel.filename;
+                inherit (wheel) url sha256;
+              }};
+            }}) pythonWheels.wheels;
+            # The installer reads the distribution and version from the
+            # filename, so each wheel is copied out of its hash-prefixed store
+            # path under its own name first.
+            install = wheel: ''
+              cp ${{wheel.src}} "$TMPDIR/wheels/"${{shellQuote wheel.filename}}
+              PYTHONPATH=${{python.pkgs.installer}}/${{python.sitePackages}} \
+                ${{python.interpreter}} -m installer --prefix "$out" \
+                --compile-bytecode 0 "$TMPDIR/wheels/"${{shellQuote wheel.filename}}
+            '';
+          in
+          pkgs.stdenv.mkDerivation {{
+            pname = "${{launch.workload_id}}-python-deps";
+            version = "0";
+            dontUnpack = true;
+            dontStrip = true;
+            nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;
+            buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$TMPDIR/wheels" "$out"
+              ${{pkgs.lib.concatMapStrings install wheels}}
+              runHook postInstall
+            '';
+            passthru = {{ inherit python; }};
+          }};
       buildEntrypoint = pkgs:
         pkgs.writeShellScript "${{launch.workload_id}}-entrypoint" ''
           set -eu
@@ -140,6 +194,13 @@ pub(crate) fn render_flake_nix_at_url(
         let
           pkgs = nixpkgs.legacyPackages.${{system}};
           appPkg = mkAppPkg pkgs;
+          pythonDeps = mkPythonDeps pkgs;
+          pythonDepsPackages = pkgs.lib.optional (pythonDeps != null) pythonDeps;
+          # Locked Python dependencies are found through PYTHONPATH; the
+          # application itself runs from its working directory.
+          pythonEnv = pkgs.lib.optionalString (pythonDeps != null) ''
+            export PYTHONPATH=${{pythonDeps}}/${{pythonDeps.python.sitePackages}}''${{PYTHONPATH:+:$PYTHONPATH}}
+          '';
           imagePackages =
             if launch.image.kind == "nix_packages"
             then map (name: pkgs.${{name}}) launch.image.packages
@@ -159,7 +220,8 @@ pub(crate) fn render_flake_nix_at_url(
           # sealed rootfs is read-only.
           cmdBootScript = pkgs.writeShellScript "${{launch.workload_id}}-boot" ''
             set -eu
-            export PATH=${{pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}}''${{PATH:+:$PATH}}
+            export PATH=${{pkgs.lib.makeBinPath ([ appPkg ] ++ pythonDepsPackages ++ imagePackages)}}''${{PATH:+:$PATH}}
+            ${{pythonEnv}}
             exec ${{buildEntrypoint pkgs}}
           '';
           mkGuestArgs =
@@ -176,7 +238,7 @@ pub(crate) fn render_flake_nix_at_url(
             }}
             else {{
               name = launch.workload_id;
-              packages = [ appPkg ] ++ imagePackages;
+              packages = [ appPkg ] ++ pythonDepsPackages ++ imagePackages;
               uids.entrypoint = 0;
               entrypoint.command = [ "${{cmdBootScript}}" ];
               extraFiles = {{
@@ -347,7 +409,9 @@ mod tests {
     fn a_command_workload_bakes_its_app_tree_and_carries_its_own_path() {
         let s = build_flake_nix(&sample()).unwrap();
         assert!(
-            s.contains("export PATH=${pkgs.lib.makeBinPath ([ appPkg ] ++ imagePackages)}"),
+            s.contains(
+                "export PATH=${pkgs.lib.makeBinPath ([ appPkg ] ++ pythonDepsPackages ++ imagePackages)}"
+            ),
             "the boot script puts the declared packages on its own PATH"
         );
         assert!(
@@ -386,6 +450,61 @@ mod tests {
             s.contains("builtins.pathExists ./src/package-lock.json"),
             "keys off the bundled lockfile"
         );
+    }
+
+    #[test]
+    fn a_pack_build_file_installs_its_locked_wheels_at_build_time() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(s.contains("if builtins.pathExists ./pack-build.json"));
+        assert!(
+            s.contains("else { };"),
+            "an absent pack-build.json means no pack build inputs"
+        );
+        assert!(s.contains("pythonWheels = packBuild.python or null;"));
+        assert!(s.contains("python = pkgs.${pythonWheels.interpreter};"));
+        assert!(
+            s.contains("src = pkgs.fetchurl {")
+                && s.contains("name = wheel.filename;")
+                && s.contains("inherit (wheel) url sha256;"),
+            "each wheel is a fixed-output fetch pinned by its locked sha256"
+        );
+        assert!(
+            s.contains(r#"cp ${wheel.src} "$TMPDIR/wheels/"${shellQuote wheel.filename}"#),
+            "the installer reads the wheel's own filename, not its store path"
+        );
+        assert!(s.contains(
+            "PYTHONPATH=${python.pkgs.installer}/${python.sitePackages} \\\n                ${python.interpreter} -m installer --prefix \"$out\""
+        ));
+        assert!(s.contains("--compile-bytecode 0"));
+        assert!(s.contains("nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;"));
+        assert!(s.contains("buildInputs = [ pkgs.stdenv.cc.cc.lib pkgs.zlib ];"));
+    }
+
+    #[test]
+    fn build_packages_reach_the_install_derivations_and_not_the_image() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(s.contains(
+            "buildTools = pkgs: map (name: pkgs.${name}) (packBuild.build_packages or [ ]);"
+        ));
+        assert!(s.contains("nativeBuildInputs = [ pkgs.autoPatchelfHook ] ++ buildTools pkgs;"));
+        assert!(s.contains("nativeBuildInputs = buildTools pkgs;"));
+        assert!(
+            !s.contains("imagePackages = buildTools"),
+            "the image package list never reads the build set"
+        );
+    }
+
+    #[test]
+    fn a_command_workload_finds_its_locked_python_packages() {
+        let s = build_flake_nix(&sample()).unwrap();
+        assert!(
+            s.contains("pythonDepsPackages = pkgs.lib.optional (pythonDeps != null) pythonDeps;")
+        );
+        assert!(s.contains(
+            "export PYTHONPATH=${pythonDeps}/${pythonDeps.python.sitePackages}''${PYTHONPATH:+:$PYTHONPATH}"
+        ));
+        assert!(s.contains("${pythonEnv}\n            exec ${buildEntrypoint pkgs}"));
+        assert!(s.contains("packages = [ appPkg ] ++ pythonDepsPackages ++ imagePackages;"));
     }
 
     #[test]

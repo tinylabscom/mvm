@@ -150,7 +150,7 @@ fn compile_archive_with_mvm_url(
         .tempdir_in(out.parent().unwrap_or_else(|| Path::new(".")))
         .map_err(CompileError::Staging)?;
     let staging_dir = tempdir.path().join("artifact");
-    compile_with_mvm_url(workload, &staging_dir, manifest_dir, mvm_url)?;
+    compile_with_mvm_url(workload, &staging_dir, manifest_dir, mvm_url, &[])?;
     archive_dir(&staging_dir, out).map_err(CompileError::Archive)?;
     Ok(())
 }
@@ -161,7 +161,7 @@ fn compile_archive_with_mvm_url(
 /// copying the source tree into `<staging>/src/` before publishing. `path` in
 /// the IR is interpreted relative to `manifest_dir`, or absolute.
 pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(), CompileError> {
-    compile_with_mvm_url(workload, out, manifest_dir, &resolved_mvm_flake_url())
+    compile_with_mvm_url(workload, out, manifest_dir, &resolved_mvm_flake_url(), &[])
 }
 
 /// Compile a publishable image with an explicit, immutable mvm input.
@@ -174,7 +174,27 @@ pub fn compile_pinned(
     manifest_dir: &Path,
     revision: &PinnedMvmRevision,
 ) -> Result<(), CompileError> {
-    compile_with_mvm_url(workload, out, manifest_dir, &revision.flake_url())
+    compile_pinned_with(workload, out, manifest_dir, revision, &[])
+}
+
+/// A generated file published at the artifact root beside `flake.nix`. The
+/// name is a bare filename the caller owns; it must not be one the compiler
+/// writes itself.
+pub(crate) struct GeneratedFile<'a> {
+    pub name: &'a str,
+    pub contents: String,
+}
+
+/// [`compile_pinned`], also publishing `extra` in the same atomic step: they
+/// are staged with the rest of the artifact, so a failure writes none of it.
+pub(crate) fn compile_pinned_with(
+    workload: &Workload,
+    out: &Path,
+    manifest_dir: &Path,
+    revision: &PinnedMvmRevision,
+    extra: &[GeneratedFile<'_>],
+) -> Result<(), CompileError> {
+    compile_with_mvm_url(workload, out, manifest_dir, &revision.flake_url(), extra)
 }
 
 fn compile_with_mvm_url(
@@ -182,6 +202,7 @@ fn compile_with_mvm_url(
     out: &Path,
     manifest_dir: &Path,
     mvm_url: &str,
+    extra: &[GeneratedFile<'_>],
 ) -> Result<(), CompileError> {
     // Fail closed before any staging/IO. Every SDK
     // artifact is sealed by construction, so an app with no declared
@@ -316,6 +337,9 @@ fn compile_with_mvm_url(
         // this file, so it cannot reach the guest.
         let workload_json = serde_json::to_string(workload).map_err(CompileError::Render)?;
         write_lf(&staging.join("workload.json"), &workload_json)?;
+        for file in extra {
+            write_lf(&staging.join(file.name), &file.contents)?;
+        }
         // The rendered flake references
         // `mvm.lib.<system>.mk<Lang>FunctionService` directly. The
         // factories live in mvm; mvmforge does not bundle local

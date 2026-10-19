@@ -4,6 +4,18 @@ import { docsSchema } from "@astrojs/starlight/schema";
 import { docsLoader } from "@astrojs/starlight/loaders";
 
 export const collections = {
+  useCases: defineCollection({
+    loader: glob({ pattern: "**/*.md", base: "./src/content/use-cases" }),
+    schema: z.object({
+      title: z.string(),
+      description: z.string(),
+      team: z.string(),
+      outcome: z.string(),
+      order: z.number(),
+      guide: z.string().startsWith("/"),
+      guideLabel: z.string(),
+    }),
+  }),
   docs: defineCollection({
     loader: docsLoader(),
     schema: docsSchema(),
