@@ -684,6 +684,8 @@ mod tests {
         let overlay = producer.path().join("overlay.tar.gz");
         let initramfs = producer.path().join("initramfs.tar.gz");
         let archive = producer.path().join("bundle.mvmpkg");
+        let legacy_archive = producer.path().join("legacy.mvmpkg");
+        let unsealed_archive = producer.path().join("unsealed.mvmpkg");
         std::fs::write(&kernel, b"synthetic kernel").unwrap();
         std::fs::write(&rootfs, b"synthetic rootfs").unwrap();
         std::fs::write(&initrd, &initrd_bytes).unwrap();
@@ -708,6 +710,7 @@ mod tests {
             initramfs: &initramfs,
         });
         export_bundle_with_signer(&inputs, &publisher).unwrap();
+        let original_archive_bytes = std::fs::read(&archive).unwrap();
         let trust = FsTrustStore::default_path().unwrap();
         std::fs::create_dir_all(trust.root()).unwrap();
         std::fs::write(
@@ -918,8 +921,11 @@ mod tests {
 
         // Legacy bundles still leave runtime selection to their original path.
         inputs.boot_assets = None;
+        inputs.out = &legacy_archive;
         export_bundle_with_signer(&inputs, &publisher).unwrap();
-        let legacy = registry.install_file(&archive, &trust, false).unwrap();
+        let legacy = registry
+            .install_file(&legacy_archive, &trust, false)
+            .unwrap();
         let mut legacy_config = VmStartConfig {
             rootfs_path: legacy
                 .root
@@ -955,11 +961,15 @@ mod tests {
         assert!(legacy_config.runtime_overlay_path.is_none());
         assert!(legacy_config.initrd_path.is_none());
         assert!(legacy_config.bundle_boot_assets.is_none());
+        assert_eq!(std::fs::read(&archive).unwrap(), original_archive_bytes);
 
         inputs.verity_bytes = None;
         inputs.roothash = None;
+        inputs.out = &unsealed_archive;
         export_bundle_with_signer(&inputs, &publisher).unwrap();
-        let unsealed = registry.install_file(&archive, &trust, false).unwrap();
+        let unsealed = registry
+            .install_file(&unsealed_archive, &trust, false)
+            .unwrap();
         let rootfs = unsealed.root.join(
             &unsealed
                 .manifest
@@ -992,6 +1002,7 @@ mod tests {
         assert!(!attach_if_installed_bundle(&mut unsealed_config, "qemu").unwrap());
         assert!(unsealed_config.verity_path.is_none());
         assert!(unsealed_config.roothash.is_none());
+        assert_eq!(std::fs::read(&archive).unwrap(), original_archive_bytes);
     }
 
     #[test]
