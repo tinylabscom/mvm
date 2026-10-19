@@ -595,11 +595,13 @@ mod tests {
     /// Set up a temp runtime dir for the duration of one test. Returns a
     /// guard that resets `MVM_HOME` on drop and holds an exclusive
     /// lock for the duration so parallel tests don't race the env var.
+    #[cfg(unix)]
     struct RuntimeDirGuard {
         _temp: tempfile::TempDir,
         _env: crate::util::test_env::TestEnv,
     }
 
+    #[cfg(unix)]
     fn isolated_runtime_dir() -> RuntimeDirGuard {
         let temp = tempfile::tempdir().expect("tempdir");
         // `TestEnv` serializes env-mutating tests behind a process-wide lock
