@@ -5,6 +5,8 @@
 //! registry-client call goes to a hermetic localhost fixture. They
 //! run in CI in seconds.
 
+#![cfg(unix)]
+
 mod common;
 
 use common::{HermeticRegistry, client_config_for, minimal_image_manifest};

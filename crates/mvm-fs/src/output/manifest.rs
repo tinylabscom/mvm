@@ -280,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn writes_json_once_and_refuses_to_overwrite() {
         let dir_path = tempfile::tempdir().unwrap();
         let path = dir_path.path().join("out.manifest.json");

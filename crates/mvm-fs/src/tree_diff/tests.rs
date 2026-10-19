@@ -204,6 +204,7 @@ fn a_file_turned_directory_is_a_type_change() {
 
 /// The ext4 side end to end: two images built from two directories, read back
 /// by the reader the diff uses in production.
+#[cfg(unix)]
 mod images {
     use super::*;
     use std::path::Path;

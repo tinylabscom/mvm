@@ -112,6 +112,7 @@ impl OutputRefusal {
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn io(context: impl Into<String>, source: std::io::Error) -> Self {
         Self::Io {
             context: context.into(),
