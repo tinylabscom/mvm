@@ -68,10 +68,11 @@ fn aggregate_script() -> String {
 
 /// Fast-gate lanes: they run on a pull request and again in the queue, and
 /// follow the `code` scope on both.
-const GATE_LANES: [&str; 4] = [
+const GATE_LANES: [&str; 5] = [
     "CORE_RESULT",
     "FEATURE_CLIPPY_RESULT",
     "WINDOWS_RESULT",
+    "WINDOWS_IDENTITY_RESULT",
     "WORKSPACE_RESULT",
 ];
 
