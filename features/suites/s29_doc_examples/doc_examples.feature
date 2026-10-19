@@ -24,6 +24,21 @@ Feature: Documented examples work
     When I run mvmctl in the isolated mvm home with "agent-session ls"
     Then the command exits with code 0
 
+  Scenario: a sealed audit fixture has a correlated JSON verdict
+    Given an isolated mvm home
+    And a sealed audit fixture for session "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    When I run mvmctl in the isolated mvm home with "trust audit verify sha256:1111111111111111111111111111111111111111111111111111111111111111 --json"
+    Then the command exits with code 0
+    And the audit session JSON reports "VERIFIED" for "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+  Scenario: a tampered audit fixture is refused in the correlated JSON verdict
+    Given an isolated mvm home
+    And a sealed audit fixture for session "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    When the audit chain is tampered
+    And I run mvmctl in the isolated mvm home with "trust audit verify sha256:1111111111111111111111111111111111111111111111111111111111111111 --json"
+    Then the command exits with code 1
+    And the audit session JSON reports "MISMATCH" for "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
   Scenario: every documented command path carries a verification tier
     Then every documented command path carries a verification tier
 
