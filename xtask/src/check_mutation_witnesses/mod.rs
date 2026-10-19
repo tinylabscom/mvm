@@ -60,6 +60,12 @@ use anyhow::{Result, bail};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// The `(index, total)` share of every file's mutants this shard owns, when it
+/// is a mutant slice rather than a share of the files.
+fn mutant_slice(shard: Option<&ShardSpec>) -> Option<(usize, usize)> {
+    shard.filter(|s| s.by_mutant).and_then(|s| s.shard)
+}
+
 /// Restrict a `--run` to one cargo package.
 ///
 /// The whole surface takes about six hours end to end, and a
@@ -94,7 +100,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         let accepted_misses = if mode == Mode::RewriteBaseline {
             let scoped = carry_scopes_forward(resolved.clone(), previous.as_ref());
             let surface = for_shard(workspace, &scoped, shard, &pinned)?;
-            let out_root = run_mutants_over(workspace, &surface, &pinned)?;
+            let out_root = run_mutants_over(workspace, &surface, &pinned, mutant_slice(shard))?;
             seed_accepted(&observed_misses(&collect_evidence(
                 &out_root, &surface, &pinned,
             )))
@@ -166,7 +172,7 @@ pub fn run(workspace: &Path, mode: Mode, shard: Option<&ShardSpec>) -> Result<()
         // what it left behind.
         let out_root = match &mode {
             Mode::VerifyOutcomes(dir) => dir.clone(),
-            _ => run_mutants_over(workspace, &surface, &pinned)?,
+            _ => run_mutants_over(workspace, &surface, &pinned, mutant_slice(shard))?,
         };
         let verdict = judge_shard(
             &baseline.accepted_misses,

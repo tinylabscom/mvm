@@ -894,6 +894,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror",
+ "toml",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-python",
