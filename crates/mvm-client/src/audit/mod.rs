@@ -47,7 +47,7 @@ pub use event::{
     AuditReadResponse, AuditRefusalKind, AuditSourceId, AuditSourceKind, AuditSourceRefusal,
     DEFAULT_READ_LIMIT, MAX_READ_LIMIT, VerifiedAuditEvent, VerifiedSourceSummary,
 };
-pub use prune::{AuditPruneMode, AuditPruneOutcome, prune_audit};
+pub use prune::{AuditPruneMode, AuditPruneOutcome, AuditPruneRequest, prune_audit};
 pub use sanitize::{MAX_DETAIL_LEN, MAX_FIELD_LEN, REDACTED_PATH, sanitize_free_text};
 
 use std::path::{Path, PathBuf};

@@ -26,6 +26,7 @@ tar = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+mvm-core = { workspace = true, features = ["manifest-verify"] }
 
 [lints]
 workspace = true

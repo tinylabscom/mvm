@@ -87,7 +87,11 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 307 (was 306): the first-party `mvm-compiler` extraction, with no new
 /// third-party dependencies; same reason as the Linux budget below.
-const MACOS_CLOSURE_BUDGET: usize = 307;
+///
+/// 374 (was 307): in-process checkout identity adds the same 64 crates as
+/// Linux, plus the byte-only Mach-O signer, plist and XML parser. Native
+/// verification uses the existing public Security/CoreFoundation dependencies.
+const MACOS_CLOSURE_BUDGET: usize = 374;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -252,7 +256,14 @@ const MACOS_CLOSURE_BUDGET: usize = 307;
 /// 313 (was 312): `mvm-compiler` extracts the workload compiler from `mvm-sdk`
 /// for direct host-tool reuse. All its dependencies were already in the
 /// closure; the sole additional node is this first-party workspace crate.
-pub(crate) const CLOSURE_BUDGET: usize = 313;
+///
+/// 377 (was 313): in-process checkout identity requires Git index, attributes
+/// and ignore handling through gix with only attributes/excludes/sha1 requested.
+/// The measured +64 is 57 new Git support crates and seven previously
+/// all-feature-only crates now reachable by default. No gix default, basic,
+/// extras or network-client feature is enabled; the identity path does not
+/// execute commands, filters, hooks, credential helpers or network clients.
+pub(crate) const CLOSURE_BUDGET: usize = 377;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

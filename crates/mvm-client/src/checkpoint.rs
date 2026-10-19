@@ -9,6 +9,8 @@ use anyhow::{Context, Result, bail};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_runtime::checkpoint::{CheckpointStore, checked_workspace_blob_name};
 
+pub mod fs_quick;
+
 /// Read-only access to the local checkpoint catalog and its workspace images.
 pub struct Checkpoints {
     store: CheckpointStore,

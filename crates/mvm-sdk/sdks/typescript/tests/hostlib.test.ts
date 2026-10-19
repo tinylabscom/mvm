@@ -28,6 +28,61 @@ import {
   type InvokeFn,
 } from "../src/_hostlib.js";
 import { MVM_HOSTLIB_PATH_ENV } from "../src/_env/vars.js";
+import { CODE_ERRORS, MachineRecoveryRequiredError } from "../src/_errors/types.js";
+import type { HostLibraryFailure } from "../src/_hostlib.js";
+
+describe("typed recovery error decoding", () => {
+  const details = { machine_id: "machine", plan_id: "plan", reason: "recover" };
+  function failure(status: number, value: unknown): HostLibraryFailure {
+    try {
+      call("machine.inspect", {}, { invoke: () => [status, Buffer.from(JSON.stringify(value))] });
+    } catch (error) {
+      return error as HostLibraryFailure;
+    }
+    throw new Error("nonzero status was not refused");
+  }
+  it("uses the normal generated constructor and a frozen typed details value", () => {
+    const error = failure(12, { code: "RECOVERY_REQUIRED", message: "context", retryable: false, details });
+    expect(error).toBeInstanceOf(MachineRecoveryRequiredError);
+    expect(error.message).toBe("context");
+    expect(error.retryable).toBe(false);
+    expect(error.details).toEqual(details);
+    expect(Object.isFrozen(error.details)).toBe(true);
+    expect(Reflect.set(error.details!, "machine_id", "replacement")).toBe(false);
+    expect(Reflect.set(error, "details", {})).toBe(false);
+  });
+  it.each([null, [], "private-marker", {}, { machine_id: "m" },
+    { ...details, reason: 7 }, { ...details, extra: "private-marker" }].map(value => ({ value })))(
+    "refuses malformed details without retaining payloads: $value", ({ value }) => {
+      const error = failure(12, { code: "RECOVERY_REQUIRED", message: "private-marker", retryable: false, details: value });
+      expect(error).toBeInstanceOf(HostLibraryError);
+      expect(error).not.toBeInstanceOf(MachineRecoveryRequiredError);
+      expect(error.retryable).toBe(false);
+      expect(error.details).toBeUndefined();
+      expect(String(error)).not.toContain("private-marker");
+      expect(JSON.stringify(error)).not.toContain("private-marker");
+    },
+  );
+  it.each([
+    [12, "UNAVAILABLE", true], [7, "RECOVERY_REQUIRED", false],
+    [12, "RECOVERY_REQUIRED", true], [12, "RECOVERY_REQUIRED", "false"],
+  ])("rejects status/code/retryability contradictions", (status, code, retryable) => {
+    const error = failure(status as number, { code, message: "private-marker", retryable, details });
+    expect(error.retryable).toBe(false);
+    expect(error.details).toBeUndefined();
+    expect(String(error)).not.toContain("private-marker");
+  });
+  it("the older generic fallback does not invent details or retry", () => {
+    const oldCodes: Record<string, new (message: string) => Error> = { ...CODE_ERRORS };
+    delete oldCodes.RECOVERY_REQUIRED;
+    const Ctor = oldCodes.RECOVERY_REQUIRED ?? HostLibraryError;
+    const error = new Ctor("recover") as HostLibraryFailure;
+    error.retryable = false;
+    expect(error.constructor).toBe(HostLibraryError);
+    expect(error.retryable).toBe(false);
+    expect(error.details).toBeUndefined();
+  });
+});
 import {
   MachineNotFoundError,
   MachineSpecError,

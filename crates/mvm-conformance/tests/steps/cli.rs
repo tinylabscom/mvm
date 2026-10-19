@@ -21,7 +21,11 @@ use mvm_conformance::IsolatedHome;
 /// binaries built alongside `mvmctl` are visible during live boots.
 pub(crate) fn mvmctl_command() -> Command {
     let bin_path = mvmctl_path();
-    let mut cmd = Command::new(&bin_path);
+    command_for_binary(&bin_path)
+}
+
+pub(crate) fn command_for_binary(bin_path: &Path) -> Command {
+    let mut cmd = Command::new(bin_path);
     if let Some(bin_dir) = bin_path.parent() {
         let mut path = bin_dir.as_os_str().to_os_string();
         path.push(":");
@@ -158,6 +162,18 @@ fn scratch_working_directory(world: &mut CliWorld) {
     world.scratch_dir = Some(tempfile::tempdir().expect("create scratch working directory"));
 }
 
+/// Seed the isolated home with the live suite's verified kernel and source-built
+/// guest runtime, so a verb that needs the runtime reads it from the home
+/// instead of fetching a release asset a development build has no release for.
+#[given(expr = "the isolated mvm home is prepared for live launches")]
+fn isolated_home_prepared_for_live_launches(world: &mut CliWorld) {
+    let home = world
+        .isolated_home
+        .as_ref()
+        .expect("`Given an isolated mvm home` must run before this step");
+    super::live_home::prepare_live_home(home.path());
+}
+
 #[when(expr = "I run mvmctl in the scratch directory with {string}")]
 fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
     let scratch = world
@@ -168,12 +184,15 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    let output = mvmctl_command()
+    let mut command = mvmctl_command();
+    command
         .args(mvm_conformance::doc_examples::tokenize(&args))
         .current_dir(scratch.path())
-        .isolated_home(home.path())
-        .output()
-        .expect("failed to spawn mvmctl");
+        .isolated_home(home.path());
+    if super::live_home::is_prepared_live_home(home.path()) {
+        super::live_home::use_seeded_runtime(&mut command);
+    }
+    let output = command.output().expect("failed to spawn mvmctl");
     world.last_run = Some(output);
 }
 

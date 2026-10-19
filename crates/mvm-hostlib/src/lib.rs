@@ -65,10 +65,13 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod approval;
+pub mod attestation;
 pub mod dispatch;
 mod embedder;
 pub mod entrypoint;
 pub mod guest;
+mod host_local;
+pub mod image_admin;
 pub mod launch;
 pub mod manifest;
 #[cfg(feature = "schema")]
@@ -93,7 +96,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// `machine.set_ttl`. 6 added `telemetry.status` and `telemetry.records`, the
 /// per-machine collector read seam. 7 added built-manifest inspection through
 /// `manifest.list`, `manifest.info`, and `manifest.verify`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 7;
+/// 8 added host-local attestation/revocation data and nonretryable recovery details.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 8;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -295,6 +299,12 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     let Ok(method) = std::str::from_utf8(method) else {
         return Outcome::invalid_input("method is not valid UTF-8");
     };
+    if attestation::is_known(method) {
+        return attestation::dispatch(method, request);
+    }
+    if image_admin::is_known(method) {
+        return image_admin::dispatch(method, request);
+    }
     if manifest::is_known(method) {
         return manifest::dispatch(method, request);
     }
@@ -558,6 +568,81 @@ mod tests {
             serde_json::from_slice::<serde_json::Value>(&outcome.body).unwrap(),
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn host_local_routes_require_negotiation_without_constructing_services() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        for method in attestation::METHODS.iter().chain(image_admin::METHODS) {
+            assert_eq!(
+                handle(false, method.as_bytes(), b"{}", &Untouched).status,
+                9
+            );
+            assert_eq!(
+                handle(true, method.as_bytes(), b"null", &Untouched).status,
+                8
+            );
+        }
+        assert_eq!(
+            handle(true, attestation::EXPORT.as_bytes(), b"{}", &Untouched).status,
+            0
+        );
+        assert_eq!(
+            handle(true, attestation::STATUS.as_bytes(), b"{}", &Untouched).status,
+            0
+        );
+        assert_eq!(
+            handle(true, image_admin::STATUS.as_bytes(), b"{}", &Untouched).status,
+            3
+        );
+        assert_eq!(
+            handle(
+                true,
+                attestation::VERIFY.as_bytes(),
+                br#"{"report_path":"absent","trust":{"kind":"self_identity"}}"#,
+                &Untouched
+            )
+            .status,
+            3
+        );
+        assert_eq!(
+            handle(
+                true,
+                image_admin::UPDATE.as_bytes(),
+                br#"{"document_path":"absent","bundle_path":"absent"}"#,
+                &Untouched
+            )
+            .status,
+            3
+        );
+    }
+
+    #[test]
+    fn recovery_status_and_c_buffer_do_not_depend_on_last_negotiated_minor() {
+        assert_eq!((MVM_HOSTLIB_ABI_MAJOR, MVM_HOSTLIB_ABI_MINOR), (1, 8));
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 7), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 8), 1);
+        assert_eq!(mvm_hostlib_abi_is_compatible(1, 9), 0);
+        for minor in [7, 8, 7] {
+            assert_eq!(mvm_hostlib_abi_is_compatible(1, minor), 1);
+            let outcome = Outcome::from(mvm_core::client::MvmError::RecoveryRequired {
+                machine_id: "machine".into(),
+                plan_id: "plan".into(),
+                reason: "recover".into(),
+            });
+            assert_eq!(outcome.status, 12);
+            let buffer = into_c_buf(outcome.body);
+            // SAFETY: the live buffer is owned here and read before its one paired free.
+            let value: serde_json::Value =
+                serde_json::from_slice(unsafe { slice::from_raw_parts(buffer.data, buffer.len) })
+                    .unwrap();
+            assert_eq!(value["details"]["machine_id"], "machine");
+            assert_eq!(value["retryable"], false);
+            // SAFETY: this is the exact unfreed buffer returned by into_c_buf.
+            unsafe { mvm_hostlib_free(buffer) };
+        }
     }
 
     #[test]

@@ -24,6 +24,13 @@ const ROOTFS_NAME: &str = "rootfs.ext4";
 const INITRD_NAME: &str = "initrd";
 const VERITY_NAME: &str = "rootfs.verity";
 const BOOT_MANIFEST_NAME: &str = "boot-image-set.json";
+const LINUX_SIGNATURE_NAME: &str = "boot-image-set.json.bundle";
+const REVOCATIONS_NAME: &str = "image-set-revocations.json";
+const REVOCATIONS_SIGNATURE_NAME: &str = "image-set-revocations.json.bundle";
+
+#[cfg(test)]
+#[path = "export/canonical_tests.rs"]
+mod canonical_tests;
 
 /// A bundle that was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -152,7 +159,33 @@ pub fn stage_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
 ) -> Result<StagedBundle> {
+    stage_bundle_at(inputs, signer, Utc::now())
+}
+
+#[cfg(test)]
+fn export_bundle_at(
+    inputs: &BundleExportInputs<'_>,
+    signer: &dyn BundleSigner,
+    now: chrono::DateTime<Utc>,
+) -> Result<ExportedBundle> {
+    stage_bundle_at(inputs, signer, now)?.publish()
+}
+
+fn stage_bundle_at(
+    inputs: &BundleExportInputs<'_>,
+    signer: &dyn BundleSigner,
+    now: chrono::DateTime<Utc>,
+) -> Result<StagedBundle> {
     refuse_summary_over_archive(inputs)?;
+    anyhow::ensure!(
+        inputs.boot_assets.is_none() || inputs.cli_boot_assets.is_none(),
+        "cannot mix CLI and legacy boot assets"
+    );
+    anyhow::ensure!(
+        inputs.canonical_linux_proof.is_none()
+            || (inputs.cli_boot_assets.is_some() && inputs.boot_assets.is_none()),
+        "canonical Linux proof requires one selected CLI boot closure"
+    );
 
     let mut contents = BundleContents::default();
     contents.push_file(KERNEL_NAME, ArtifactRole::Kernel, "kernel", inputs.vmlinux)?;
@@ -175,6 +208,13 @@ pub fn stage_bundle_with_signer(
             "cannot mix CLI and legacy boot assets"
         );
         contents.push_cli_boot_assets(boot, inputs.arch_label)?;
+    }
+    if let Some(proof) = &inputs.canonical_linux_proof {
+        let boot = inputs
+            .cli_boot_assets
+            .as_ref()
+            .context("canonical Linux proof requires the selected CLI boot closure")?;
+        contents.push_canonical_linux_proof(proof, boot, now)?;
     }
 
     let key_id = signer.key_id();
@@ -257,6 +297,49 @@ struct BundleContents {
 }
 
 impl BundleContents {
+    fn push_canonical_linux_proof(
+        &mut self,
+        proof: &crate::CanonicalLinuxProofInputs<'_>,
+        boot: &crate::CliBootAssetsInputs<'_>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<()> {
+        use mvm_core::image_set::{ImageSetRequirement, ImageSetVerification, image_train_lock};
+        anyhow::ensure!(
+            proof.root.manifest_bytes() == boot.manifest_bytes
+                && proof.root.root().manifest_sha256() == boot.manifest_sha256,
+            "canonical publisher proof differs from the selected Linux boot manifest"
+        );
+        let feed = mvm_core::image_set_revocation::verify_image_set_revocations(
+            proof.revocations.document(),
+            proof.revocations.signature_bundle(),
+            now,
+            None,
+        )?;
+        let requirement = ImageSetRequirement::current_train();
+        let request = ImageSetVerification::new(
+            proof.root.manifest_bytes(),
+            proof.root.signature_bundle(),
+            &image_train_lock().image_set,
+            Path::new(""),
+        )
+        .require(&requirement)
+        .with_revocations(&feed);
+        mvm_core::image_set::verify_image_set_root(&request)?;
+        // The CLI closure check above already binds the actual kernel inventory
+        // to this SAME Linux manifest. Preserve originals, never reserialize.
+        for (name, bytes) in [
+            (LINUX_SIGNATURE_NAME, proof.root.signature_bundle()),
+            (REVOCATIONS_NAME, proof.revocations.document()),
+            (
+                REVOCATIONS_SIGNATURE_NAME,
+                proof.revocations.signature_bundle(),
+            ),
+        ] {
+            self.push(name, ArtifactRole::Other, bytes.to_vec())?;
+        }
+        Ok(())
+    }
+
     fn push_boot_assets(&mut self, boot: &crate::BootAssetsInputs<'_>, arch: &str) -> Result<()> {
         use mvm_core::arch::GuestArch;
         use mvm_core::image_set::ImageSetManifest;
@@ -495,6 +578,16 @@ fn declarations_for(
     if let Some(boot) = &inputs.cli_boot_assets {
         members.push(BundleMember::EmbeddedCliBootAssets(boot.runtime.clone()));
     }
+    if inputs.canonical_linux_proof.is_some() {
+        members.push(BundleMember::CanonicalLinuxProof(
+            mvm_core::plan::bundle::CanonicalLinuxProof {
+                manifest_artifact: BOOT_MANIFEST_NAME.into(),
+                signature_bundle_artifact: LINUX_SIGNATURE_NAME.into(),
+                revocation_document_artifact: REVOCATIONS_NAME.into(),
+                revocation_signature_bundle_artifact: REVOCATIONS_SIGNATURE_NAME.into(),
+            },
+        ));
+    }
     if inputs.boot_assets.is_some() {
         members.push(BundleMember::EmbeddedBootAssets {
             manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
@@ -526,7 +619,8 @@ fn declarations_for(
 /// The lowest schema that carries every member this export seals, so a
 /// bundle stays readable by the oldest reader that understands it: 3 for
 /// plain declarations, 4 for historical boot assets, 5 for an environment
-/// descriptor, and 6 for a portable CLI-runtime closure.
+/// descriptor, 6 for a portable CLI-runtime closure, and 7 for canonical
+/// Linux publisher/revocation evidence.
 fn schema_for(members: &[BundleMember]) -> u32 {
     members
         .iter()
@@ -754,6 +848,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_destination_created_after_staging_is_preserved_and_our_staging_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("app.mvmpkg");
+        let staged = raw_staged(&out, b"mine");
+        std::fs::write(&out, b"theirs").unwrap();
+
+        staged.publish().unwrap_err();
+
+        assert_eq!(std::fs::read(&out).unwrap(), b"theirs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn abort_preserves_the_failure_and_foreign_destination_and_removes_only_our_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("app.mvmpkg");
+        let staged = raw_staged(&out, b"mine");
+        std::fs::write(&out, b"theirs").unwrap();
+
+        let error = staged.abort(anyhow::anyhow!("hash failed"));
+
+        assert_eq!(error.to_string(), "hash failed");
+        assert_eq!(std::fs::read(&out).unwrap(), b"theirs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     fn archive_entry(path: &str, bytes: &[u8]) -> Vec<u8> {
         let mut builder = tar::Builder::new(Vec::new());
         let mut header = tar::Header::new_gnu();
@@ -891,6 +1012,40 @@ mod tests {
         assert_eq!(std::fs::read(&archive).unwrap(), b"preserved");
         assert_eq!(std::fs::read(&symlink).unwrap(), b"preserved");
         assert_eq!(std::fs::read(&hardlink).unwrap(), b"preserved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_exports_to_one_destination_stage_in_distinct_files() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("app.mvmpkg");
+        let mut first = PartialOutput::new(&out);
+        let mut second = PartialOutput::new(&out);
+        first.write_all(b"first").unwrap();
+        second.write_all(b"second").unwrap();
+        let first_identity = first.open().unwrap().metadata().unwrap();
+        let second_identity = second.open().unwrap().metadata().unwrap();
+        assert_ne!(
+            (first_identity.dev(), first_identity.ino()),
+            (second_identity.dev(), second_identity.ino()),
+        );
+        assert!(!out.exists());
+
+        // One invocation failing removes only its own staging file.
+        second
+            .finish(Err(anyhow::anyhow!("signer refused")))
+            .unwrap_err();
+        let (mut owned, size) = first.finish(Ok(())).unwrap();
+        assert_eq!(size, 5);
+        owned.file_mut().rewind().unwrap();
+        let mut bytes = Vec::new();
+        owned.file_mut().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"first");
+        owned.publish().unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"first");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

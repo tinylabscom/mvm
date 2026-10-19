@@ -267,6 +267,22 @@ fn check_reply(status: i32, bytes: &[u8]) -> Result<(), Error> {
 mod tests {
     use super::*;
     #[test]
+    fn the_older_binding_retains_unknown_recovery_status_as_opaque_failure() {
+        assert_eq!((ABI_MAJOR, ABI_MINOR), (1, 7));
+        let Err(Error::Native { status, details }) = check_reply(
+            12,
+            br#"{"code":"RECOVERY_REQUIRED","message":"recover","retryable":false,"details":{"machine_id":"private-machine","plan_id":"private-plan","reason":"private-reason"}}"#,
+        ) else {
+            panic!("nonzero status must remain an error")
+        };
+        assert_eq!(status, 12);
+        assert_eq!(details.code.as_deref(), Some("RECOVERY_REQUIRED"));
+        assert_eq!(details.retryable, Some(false));
+        assert_eq!(details.body["details"]["machine_id"], "private-machine");
+        assert!(!format!("{details:?}").contains("private-"));
+    }
+
+    #[test]
     fn status_and_json_are_not_client_policy() {
         assert!(check_reply(0, b"null").is_ok());
         assert!(matches!(

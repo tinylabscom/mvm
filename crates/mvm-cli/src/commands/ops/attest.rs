@@ -1,58 +1,21 @@
-//! `mvmctl attest` subcommand handlers.
+//! `mvmctl trust attest` formatting and file-output adapters.
 //!
-//! Two verbs:
+//! Verification, bounded input reads, key loading and redacted diagnostics
+//! belong to the client facade. Explicit public-key trust does not resolve or
+//! initialize the verifier's local identity. Default/self trust, export and
+//! status retain their documented identity initialization behavior.
 //!
-//! - `mvmctl attest export [--output FILE]`
-//!   Generates a fresh attestation report signed by the host identity
-//!   key (creating one if none exists) and writes JSON to `FILE` or
-//!   stdout. The report carries the boot measurement, a fresh random
-//!   nonce, the identity public key, and an optional hardware
-//!   measurement when the caller folds one in. `export` does not, so
-//!   its reports carry `hw_measurement: None`.
-//!
-//! - `mvmctl attest verify <REPORT> [--trust KEYFILE] [--trust-self]`
-//!   Reads `REPORT` (file path), validates the Ed25519 signature
-//!   against either an explicit `KEYFILE` (32-byte raw public key) or
-//!   the host's own identity public key (`--trust-self`), and prints
-//!   a one-line OK summary on success. Returns nonzero on signature,
-//!   parse, or schema failure.
-//!
-//! The CLI surface is intentionally narrow — programmatic verifiers
-//! (mvmd, customer auditors) consume `mvm_core::crypto::attestation`
-//! directly. This module is the operator-facing path: "did this host
-//! just sign a report I can show someone?"
-//!
-//! ## Why an explicit boot-measurement placeholder
-//!
-//! Boot attestation (via dm-verity root hash) is sequenced *after*
-//! runtime identity in the current implementation order — the
-//! identity-key plumbing
-//! has to exist before there's anywhere to put the boot hash. v0 fills
-//! `boot_measurement` with a deterministic placeholder string
-//! (`PLACEHOLDER_BOOT_MEASUREMENT`) and warns the operator that the
-//! real measurement pipeline is pending. The format stays stable
-//! across the transition: future builds replace the placeholder with
-//! the live dm-verity hash without changing the report schema.
+//! The current report has a zero boot measurement and no hardware measurement;
+//! it is not evidence of native boot attestation or workload execution.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use std::path::PathBuf;
 
-use ed25519_dalek::VerifyingKey;
-
-use mvm_core::crypto::attestation::{
-    AttestationBody, AttestationReport, IdentityKey, identity, sign_report, verify_report,
-};
+use mvm_client::attestation::{self, Trust};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-
-/// Placeholder boot measurement until the dm-verity root hash is
-/// wired in. SHA-256-shaped (64 hex chars) so downstream
-/// verifiers see a well-formed value and can detect-and-warn against
-/// it the same way they would a stale measurement.
-pub const PLACEHOLDER_BOOT_MEASUREMENT: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -87,21 +50,19 @@ pub(in crate::commands) enum AttestAction {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let dir = identity::default_identity_dir().context("resolving identity dir")?;
     match args.action {
-        AttestAction::Export { output } => export_at(&dir, output),
+        AttestAction::Export { output } => export(output),
         AttestAction::Verify {
             report,
             trust,
             trust_self,
-        } => verify_at(&dir, report, trust, trust_self),
-        AttestAction::Status => status_at(&dir),
+        } => verify(report, trust, trust_self),
+        AttestAction::Status => status(),
     }
 }
 
-fn export_at(identity_dir: &std::path::Path, output: Option<PathBuf>) -> Result<()> {
-    let key = identity::load_or_init_at(identity_dir).context("loading host identity key")?;
-    let report = build_report(&key);
+fn export(output: Option<PathBuf>) -> Result<()> {
+    let report = attestation::export()?;
     let json =
         serde_json::to_string_pretty(&report).context("serializing attestation report to JSON")?;
 
@@ -118,40 +79,18 @@ fn export_at(identity_dir: &std::path::Path, output: Option<PathBuf>) -> Result<
     Ok(())
 }
 
-fn verify_at(
-    identity_dir: &std::path::Path,
-    report_path: PathBuf,
-    trust: Option<PathBuf>,
-    _trust_self: bool,
-) -> Result<()> {
-    let bytes = std::fs::read(&report_path)
-        .with_context(|| format!("reading {}", report_path.display()))?;
-    let report: AttestationReport = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "parsing {} as JSON attestation report",
-            report_path.display()
-        )
-    })?;
-
-    let signer_id = report.0.signer_id.clone();
-
-    // Resolve the trusted key. `--trust FILE` and `--trust-self` are
-    // mutually exclusive via Clap's `conflicts_with`. If neither is
-    // set we default to self — this is the right behavior for the
-    // "smoke-test my own host" path; programmatic verifiers (mvmd,
-    // customer auditors) should always pass an explicit `--trust`
-    // so a misconfigured host can't self-validate against a key it
-    // also produced.
-    let (trusted_key, source_label): (VerifyingKey, String) = if let Some(path) = trust {
-        let pk = load_pubkey_file(&path)?;
-        (pk, format!("file {}", path.display()))
+fn verify(report_path: PathBuf, trust: Option<PathBuf>, _trust_self: bool) -> Result<()> {
+    // Preserve the operator-facing default while passing an explicit trust
+    // decision into the facade. The key-file branch never resolves identity.
+    let (trust, source_label) = if let Some(path) = trust {
+        let label = format!("file {}", path.display());
+        (Trust::PublicKeyFile(path), label)
     } else {
-        let key = identity::load_or_init_at(identity_dir).context("loading host identity key")?;
-        (key.verifying, "self".to_string())
+        (Trust::SelfIdentity, "self".to_string())
     };
-
-    let trusted = [(signer_id.as_str(), &trusted_key)];
-    let body = verify_report(&report, &trusted).map_err(|e| anyhow::anyhow!("verify: {e}"))?;
+    let verified = attestation::verify(&report_path, trust)?;
+    let signer_id = verified.signer_id;
+    let body = verified.body;
 
     println!("OK  signer_id={signer_id}  trusted_by={source_label}");
     println!(
@@ -167,72 +106,173 @@ fn verify_at(
     Ok(())
 }
 
-fn status_at(identity_dir: &std::path::Path) -> Result<()> {
-    let key = identity::load_or_init_at(identity_dir).context("loading host identity key")?;
-    let pubkey_hex = hex_lower(&key.verifying.to_bytes());
-    println!("identity.signer_id   = {}", identity::identity_signer_id());
-    println!("identity.pubkey_hex  = {pubkey_hex}");
-    println!("identity.secret_path = {}", key.secret_path.display());
-    println!("identity.public_path = {}", key.public_path.display());
+fn status() -> Result<()> {
+    let status = attestation::status()?;
+    println!("identity.signer_id   = {}", status.signer_id);
+    println!("identity.pubkey_hex  = {}", status.pubkey_hex);
+    println!("identity.secret_path = {}", status.secret_path.display());
+    println!("identity.public_path = {}", status.public_path.display());
     println!();
     println!("hardware providers:");
-    let kind = mvm_core::crypto::attestation::HwProviderKind::Tpm2;
-    let state = if kind.compiled_in() {
-        "compiled"
-    } else {
-        "not compiled (rebuild with feature flag to enable)"
-    };
-    println!(
-        "  {:<8} feature={:<22}  {state}",
-        kind.as_str(),
-        kind.cargo_feature()
-    );
-    Ok(())
-}
-
-fn build_report(key: &IdentityKey) -> AttestationReport {
-    let body = AttestationBody::new(PLACEHOLDER_BOOT_MEASUREMENT, &key.verifying, None);
-    sign_report(&body, &key.signing, &identity::identity_signer_id())
-}
-
-fn load_pubkey_file(path: &std::path::Path) -> Result<VerifyingKey> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if bytes.len() != mvm_core::crypto::attestation::KEY_BYTES {
-        bail!(
-            "{} is {} bytes; expected a {}-byte raw Ed25519 public key",
-            path.display(),
-            bytes.len(),
-            mvm_core::crypto::attestation::KEY_BYTES
+    for provider in status.providers {
+        let state = if provider.compiled {
+            "compiled"
+        } else {
+            "not compiled (rebuild with feature flag to enable)"
+        };
+        println!(
+            "  {:<8} feature={:<22}  {state}",
+            provider.name, provider.feature
         );
     }
-    let array: [u8; 32] = bytes.as_slice().try_into().expect("len-checked above");
-    VerifyingKey::from_bytes(&array)
-        .with_context(|| format!("parsing {} as Ed25519 public key", path.display()))
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::crypto::attestation::SCHEMA_VERSION;
-    use rand::Rng;
+    use crate::commands::dispatch::TopLevelCommand;
+    use clap::Parser;
+    use mvm_client::attestation::PLACEHOLDER_BOOT_MEASUREMENT;
+    use mvm_core::crypto::attestation::{
+        AttestationBody, AttestationReport, IdentityKey, SCHEMA_VERSION, identity, sign_report,
+        verify_report,
+    };
+
+    fn invoke(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<()> {
+        let cli = Cli::try_parse_from(
+            ["mvmctl".into(), "trust".into(), "attest".into()]
+                .into_iter()
+                .chain(args),
+        )?;
+        cli.command.clone().run(&cli, &MvmConfig::default())
+    }
+
+    fn signed_fixture() -> (tempfile::TempDir, IdentityKey, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let key = identity::load_or_init_at(&root.path().join("producer")).unwrap();
+        let body = AttestationBody::new(
+            mvm_client::attestation::PLACEHOLDER_BOOT_MEASUREMENT,
+            &key.verifying,
+            None,
+        );
+        let report = sign_report(&body, &key.signing, &identity::identity_signer_id());
+        let path = root.path().join("report.json");
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        (root, key, path)
+    }
+
+    fn verify_explicit(report: &std::path::Path, public: &std::path::Path) -> Result<()> {
+        invoke([
+            "verify".into(),
+            report.as_os_str().into(),
+            "--trust".into(),
+            public.as_os_str().into(),
+        ])
+    }
+
+    fn assert_redacted(error: anyhow::Error, marker: &str) {
+        for diagnostic in [
+            format!("{error}"),
+            format!("{error:#}"),
+            format!("{error:?}"),
+            format!("{error:#?}"),
+        ] {
+            assert!(!diagnostic.contains(marker), "{diagnostic}");
+        }
+        for source in error.chain() {
+            assert!(!format!("{source} {source:?}").contains(marker));
+        }
+        let contextual = error.context("command adapter verification refused");
+        assert!(!format!("{contextual:#} {contextual:#?}").contains(marker));
+    }
+
+    #[test]
+    fn cli_adapter_explicit_trust_does_not_require_local_identity_location() {
+        let (_producer, key, report) = signed_fixture();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.remove("HOME");
+        env.remove("MVM_HOME");
+        verify_explicit(&report, &key.public_path).unwrap();
+    }
+
+    #[test]
+    fn cli_adapter_refuses_oversized_valid_json_before_identity_effects() {
+        let (_producer, key, report) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let mut bytes = vec![b' '; mvm_client::attestation::MAX_REPORT_BYTES + 1];
+        bytes.extend(std::fs::read(&report).unwrap());
+        std::fs::write(&report, bytes).unwrap();
+        assert!(verify_explicit(&report, &key.public_path).is_err());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cli_adapter_outer_parse_diagnostics_do_not_echo_payload() {
+        let (_producer, key, report) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let marker = "private-cli-outer-payload-must-not-escape";
+        std::fs::write(&report, format!(r#"{{"payload":"{marker}"}}"#)).unwrap();
+        assert_redacted(
+            verify_explicit(&report, &key.public_path).unwrap_err(),
+            marker,
+        );
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cli_adapter_authenticated_inner_parse_diagnostics_do_not_echo_payload() {
+        use ed25519_dalek::Signer;
+        let (_producer, key, report_path) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let original = std::fs::read(&report_path).unwrap();
+        let marker = "private-cli-authenticated-body-must-not-escape";
+        for field in ["schema_version", "hw_measurement"] {
+            let mut report: AttestationReport = serde_json::from_slice(&original).unwrap();
+            let mut body: serde_json::Value = serde_json::from_slice(&report.0.payload).unwrap();
+            body[field] = serde_json::json!(marker);
+            report.0.payload = serde_json::to_vec(&body).unwrap();
+            report.0.signature = key.signing.sign(&report.0.payload).to_bytes().to_vec();
+            assert!(matches!(
+                verify_report(&report, &[(report.0.signer_id.as_str(), &key.verifying)]),
+                Err(mvm_core::crypto::attestation::AttestationError::Parse(_))
+            ));
+            std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
+            assert_redacted(
+                verify_explicit(&report_path, &key.public_path).unwrap_err(),
+                marker,
+            );
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        }
+    }
 
     #[test]
     fn export_then_verify_self_round_trips_through_disk() {
-        let identity_dir = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
         let report_dir = tempfile::tempdir().unwrap();
         let report_path = report_dir.path().join("report.json");
 
-        export_at(identity_dir.path(), Some(report_path.clone())).expect("export");
-        verify_at(identity_dir.path(), report_path.clone(), None, true)
-            .expect("verify --trust-self");
+        invoke([
+            "export".into(),
+            "--output".into(),
+            report_path.as_os_str().into(),
+        ])
+        .unwrap();
+        invoke(["verify".into(), report_path.as_os_str().into()]).unwrap();
+        invoke([
+            "verify".into(),
+            report_path.as_os_str().into(),
+            "--trust-self".into(),
+        ])
+        .unwrap();
 
         let bytes = std::fs::read(&report_path).unwrap();
         let report: AttestationReport = serde_json::from_slice(&bytes).unwrap();
@@ -245,10 +285,10 @@ mod tests {
 
     #[test]
     fn verify_fails_on_tampered_payload() {
-        let identity_dir = tempfile::tempdir().unwrap();
-        let report_dir = tempfile::tempdir().unwrap();
-        let report_path = report_dir.path().join("report.json");
-        export_at(identity_dir.path(), Some(report_path.clone())).expect("export");
+        let (_producer, key, report_path) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
 
         // Flip one byte inside the payload. The envelope sig must
         // refuse on verify.
@@ -257,50 +297,117 @@ mod tests {
         report.0.payload[0] ^= 0x01;
         std::fs::write(&report_path, serde_json::to_vec(&report).unwrap()).unwrap();
 
-        let err = verify_at(identity_dir.path(), report_path, None, true)
+        let err = verify_explicit(&report_path, &key.public_path)
             .expect_err("must refuse tampered report");
         let msg = err.to_string();
         assert!(msg.contains("verify"), "error mentions verify: {msg}");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn verify_fails_when_trust_file_is_wrong_key() {
-        let identity_dir = tempfile::tempdir().unwrap();
-        let report_dir = tempfile::tempdir().unwrap();
-        let report_path = report_dir.path().join("report.json");
-        export_at(identity_dir.path(), Some(report_path.clone())).expect("export");
-
-        let other = {
-            let mut __ed_seed = [0u8; 32];
-            rand::rng().fill_bytes(&mut __ed_seed);
-            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
-        }
-        .verifying_key();
-        let trust_path = report_dir.path().join("trust.pub");
+        let (producer, _key, report_path) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let other = ed25519_dalek::SigningKey::from_bytes(&[23; 32]).verifying_key();
+        let trust_path = producer.path().join("trust.pub");
         std::fs::write(&trust_path, other.to_bytes()).unwrap();
 
-        let err = verify_at(identity_dir.path(), report_path, Some(trust_path), false)
+        let err = verify_explicit(&report_path, &trust_path)
             .expect_err("must refuse with wrong trust key");
         let msg = err.to_string();
         assert!(msg.contains("verify"), "error mentions verify: {msg}");
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
     }
 
     #[test]
     fn load_pubkey_file_refuses_wrong_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bad.pub");
-        std::fs::write(&path, [0u8; 16]).unwrap();
-        let err = load_pubkey_file(&path).expect_err("must refuse");
-        assert!(err.to_string().contains("16 bytes"), "{err}");
+        let (producer, _key, report) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let path = producer.path().join("bad.pub");
+        for length in [16, 33, 1024 * 1024] {
+            std::fs::write(&path, vec![0u8; length]).unwrap();
+            assert!(verify_explicit(&report, &path).is_err());
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        }
     }
 
     #[test]
     fn status_runs_against_fresh_identity_dir() {
-        // Smoke: status prints; we just assert it produces no error
-        // when the identity is auto-initialised. Stdout content is
-        // not asserted here — that's the operator-facing surface,
-        // not a contract.
-        let identity_dir = tempfile::tempdir().unwrap();
-        status_at(identity_dir.path()).expect("status");
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        invoke(["status".into()]).unwrap();
+        let identity_dir = identity::default_identity_dir().unwrap();
+        assert!(identity_dir.join(identity::SECRET_FILENAME).is_file());
+        assert!(identity_dir.join(identity::PUBLIC_FILENAME).is_file());
+    }
+
+    #[test]
+    fn cli_adapter_valid_explicit_trust_is_read_only_and_future_schema_refuses() {
+        let (_producer, key, path) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        verify_explicit(&path, &key.public_path).unwrap();
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        let report: AttestationReport =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let mut body: AttestationBody = serde_json::from_slice(&report.0.payload).unwrap();
+        body.schema_version = SCHEMA_VERSION + 1;
+        let report = sign_report(&body, &key.signing, &identity::identity_signer_id());
+        std::fs::write(&path, serde_json::to_vec(&report).unwrap()).unwrap();
+        let error = verify_explicit(&path, &key.public_path).unwrap_err();
+        assert!(format!("{error:#}").contains("schema"));
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cli_adapter_trust_flags_remain_mutually_exclusive() {
+        let (_producer, key, report) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let error = invoke([
+            "verify".into(),
+            report.as_os_str().into(),
+            "--trust".into(),
+            key.public_path.as_os_str().into(),
+            "--trust-self".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<clap::Error>().unwrap().kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_adapter_nonregular_report_refuses_without_blocking_or_identity_effects() {
+        let (producer, key, report) = signed_fixture();
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        std::fs::remove_file(&report).unwrap();
+        std::fs::create_dir(&report).unwrap();
+        assert!(verify_explicit(&report, &key.public_path).is_err());
+        std::fs::remove_dir(&report).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&report)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(verify_explicit(&report, &key.public_path).is_err());
+        let alias = producer.path().join("report-link");
+        std::os::unix::fs::symlink(&report, &alias).unwrap();
+        assert!(verify_explicit(&alias, &key.public_path).is_err());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
     }
 }

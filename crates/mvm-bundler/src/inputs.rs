@@ -29,6 +29,15 @@ pub struct CliBootAssetsInputs<'a> {
     pub artifacts: &'a [(&'a str, &'a Path)],
 }
 
+/// Original canonical publisher evidence, captured by the existing verifiers.
+/// These owned proof objects cannot be replaced by caller-authored flags or
+/// parsed JSON. Freshness is checked again at export and consumer admission.
+#[derive(Debug, Clone)]
+pub struct CanonicalLinuxProofInputs<'a> {
+    pub root: &'a mvm_core::image_set::RetainedImageSetRootProof,
+    pub revocations: &'a mvm_core::image_set_revocation::RetainedImageSetRevocationProof,
+}
+
 /// Everything one export reads.
 ///
 /// The verity pair is taken as the caller found it rather than as one value:
@@ -38,6 +47,7 @@ pub struct CliBootAssetsInputs<'a> {
 pub struct BundleExportInputs<'a> {
     pub boot_assets: Option<BootAssetsInputs<'a>>,
     pub cli_boot_assets: Option<CliBootAssetsInputs<'a>>,
+    pub canonical_linux_proof: Option<CanonicalLinuxProofInputs<'a>>,
     /// Path to the kernel image.
     pub vmlinux: &'a str,
     /// Path to the initrd, when the template boots with one.
@@ -85,6 +95,7 @@ impl<'a> BundleExportInputs<'a> {
         Self {
             boot_assets: None,
             cli_boot_assets: None,
+            canonical_linux_proof: None,
             vmlinux,
             initrd: None,
             rootfs,

@@ -599,7 +599,17 @@ jobs:
           - mvm-agentd
           - mvm-backends
           - mvm-build
-          - mvm-cli
+          # Four mutant slices, not file shards. File packing cannot split a
+          # file, and two of this package's files (update.rs, 99 mutants;
+          # parse.rs, 71) each outlast the 315-minute step on their own,
+          # because every mutant re-runs the crate suite (about eight minutes
+          # of baseline plus a rebuild). Each slice below runs every surface
+          # file, taking a round-robin quarter of its mutants, so no file is
+          # withheld and none is run twice.
+          - mvm-cli/m1of4
+          - mvm-cli/m2of4
+          - mvm-cli/m3of4
+          - mvm-cli/m4of4
           - mvm-client
           - mvm-core
           - mvm-fs
@@ -669,7 +679,7 @@ jobs:
           cargo install --locked "cargo-mutants@${CARGO_MUTANTS_VERSION}" cargo-nextest
 
       - name: Install mvm-cli embedded-host toolchain
-        if: matrix.package == 'mvm-cli'
+        if: startsWith(matrix.package, 'mvm-cli')
         uses: ./.github/actions/install-zigbuild
 
       - name: Mutate this package's claim surface and ratchet survivors

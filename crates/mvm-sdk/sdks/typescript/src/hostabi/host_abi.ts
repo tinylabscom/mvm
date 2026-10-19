@@ -5,6 +5,14 @@
 * and run json-schema-to-typescript to regenerate this file.
 */
 
+export type AttestationTrust = ({
+kind: AttestationSelfIdentityKind
+} | {
+kind: AttestationPublicKeyFileKind
+path: string
+})
+export type AttestationSelfIdentityKind = "self_identity"
+export type AttestationPublicKeyFileKind = "public_key_file"
 /**
  * Kind of agent-side error reported via `EntrypointEvent::Error`.
  *
@@ -99,6 +107,9 @@ export type RunMode = ("transient" | "persistent")
 export type ManifestListReply = SlotRow[]
 
 export interface HostAbi {
+attestation_export: AttestationExport
+attestation_status: AttestationStatus
+attestation_verify: AttestationVerify
 backend_capabilities: BackendCapabilities
 entrypoint_call: EntrypointCall
 guest_cp: GuestCp
@@ -118,6 +129,8 @@ guest_proc_stream_close: GuestProcStreamClose
 guest_proc_stream_next: GuestProcStreamNext
 guest_proc_stream_open: GuestProcStreamOpen
 guest_proc_wait: GuestProcWait
+image_revocations_status: ImageRevocationsStatus
+image_revocations_update: ImageRevocationsUpdate
 machine_create: MachineCreate
 machine_exec: MachineExec
 machine_inspect: MachineInspect
@@ -145,6 +158,61 @@ session_start: SessionStart
 session_stop: SessionStop
 telemetry_records: TelemetryRecords
 telemetry_status: TelemetryStatus
+}
+export interface AttestationExport {
+reply: AttestationReportData
+request: AttestationEmpty
+}
+export interface AttestationReportData {
+payload: number[]
+signature: number[]
+signer_id: string
+}
+export interface AttestationEmpty {
+
+}
+export interface AttestationStatus {
+reply: AttestationStatusData
+request: AttestationEmpty1
+}
+export interface AttestationStatusData {
+providers: AttestationProviderData[]
+pubkey_hex: string
+public_path: string
+secret_path: string
+signer_id: string
+}
+export interface AttestationProviderData {
+compiled: boolean
+feature: string
+name: string
+}
+export interface AttestationEmpty1 {
+
+}
+export interface AttestationVerify {
+reply: AttestationVerificationData
+request: AttestationVerifyRequest
+}
+export interface AttestationVerificationData {
+body: AttestationBodyData
+signer_id: string
+trust: AttestationTrust
+}
+export interface AttestationBodyData {
+boot_measurement: string
+hw_measurement?: (HardwareMeasurementData | null)
+identity_pubkey_hex: string
+nonce_hex: string
+schema_version: number
+}
+export interface HardwareMeasurementData {
+measurement_hex: string
+provider: string
+}
+export interface AttestationVerifyRequest {
+report_path: string
+trust: AttestationTrust
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -506,6 +574,34 @@ export interface WaitRequest {
 id: string
 timeout_secs?: (number | null)
 token: string
+}
+export interface ImageRevocationsStatus {
+reply: StatusReport
+request: ImageRevocationsEmpty
+}
+export interface StatusReport {
+entries: number
+issued_at: string
+not_after: string
+publication: number
+sha256: string
+signer_identity: string
+}
+export interface ImageRevocationsEmpty {
+
+}
+export interface ImageRevocationsUpdate {
+reply: CheckpointReport
+request: UpdateRequest
+}
+export interface CheckpointReport {
+issued_at: string
+publication: number
+sha256: string
+}
+export interface UpdateRequest {
+bundle_path: string
+document_path: string
 }
 export interface MachineCreate {
 reply: MachineState

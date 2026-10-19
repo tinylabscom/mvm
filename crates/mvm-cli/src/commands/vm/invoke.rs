@@ -104,6 +104,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// Explicit hypervisor/backend selector passed through from `--hypervisor`.
     /// When `None` the platform-default auto-selection is used.
     pub hypervisor: Option<String>,
+    /// Same producer-owned release closure used for health and export.
+    pub portable_boot_assets:
+        Option<std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>>,
 }
 
 /// How a call's stdin is supplied.
@@ -276,6 +279,7 @@ pub(in crate::commands) fn boot_entrypoint(call: EntrypointCall) -> Result<i32> 
                     cpus: call.cpus,
                     memory_mib: call.memory_mib,
                     admission,
+                    portable_boot_assets: call.portable_boot_assets.as_deref(),
                 },
                 stdin: call.stdin.into_call_stdin(),
                 timeout_secs: call.timeout,
@@ -1974,6 +1978,7 @@ mod streamed_stdin_tests {
             review_source: ReviewSource::admitted_elsewhere(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
+            portable_boot_assets: None,
         }
     }
 

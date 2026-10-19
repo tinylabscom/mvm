@@ -31,27 +31,14 @@ fn just_module(name: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
-/// The draft API rehearsal path remains separate from default validation.
+/// Manual validation cannot issue tag-bound proof or create a release.
 ///
-/// Every release defect found while cutting v0.18.0-rc.1 lived in the publish
-/// job, and the publish job used to be unreachable except by a tag push: the
-/// dry run stopped after `build`. So each attempt surfaced exactly one defect,
-/// at roughly two and a half hours per discovery, four times over — a missing
-/// cross-compile target, an incomplete boot image, a transient 403, and a
-/// duplicate asset name that 422'd *after* the release had been created.
-///
-/// An explicit draft rehearsal reaches `gh release create`, so those
-/// same failures surface in minutes. The draft is deleted afterwards, and
-/// `always()` on the cleanup matters: a create that succeeds and then fails
-/// uploading leaves a draft behind, which is exactly the case that produced the
-/// 422.
-///
-/// What a dry run cannot prove is asserted here too, by requiring the signing
-/// and attestation steps to stay tag-only: their keyless identity pins
-/// `refs/tags/*`, which a dispatch cannot mint. Pretending otherwise would make
-/// a green dry run mean more than it does.
+/// Candidate proof requires the real tag-push identity and successful input
+/// validation. A dispatch, even with dry_run=false, cannot enter publication.
+/// Existing defensive draft cleanup remains checked, but is unreachable from
+/// that manual route; it is not evidence of a successful signing rehearsal.
 #[test]
-fn an_explicit_draft_rehearsal_retains_the_scratch_release_path() {
+fn manual_rehearsal_cannot_reach_tag_bound_publication() {
     let workflow = release_workflow();
 
     let release = workflow
@@ -63,10 +50,12 @@ fn an_explicit_draft_rehearsal_retains_the_scratch_release_path() {
         .find(|line| line.trim_start().starts_with("if:"))
         .expect("release job has an explicit condition");
     assert!(
-        condition.contains(
-            "(github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))"
-        ),
-        "default manual validation must not reach release creation"
+        condition.contains("github.event_name == 'push'")
+            && condition.contains("github.ref_type == 'tag'")
+            && condition.contains("needs.runtime-proof-candidate.result == 'success'")
+            && !condition.contains("workflow_dispatch")
+            && !condition.contains("inputs.dry_run"),
+        "no manual validation, including dry_run=false, may reach release creation"
     );
 
     let create = workflow
@@ -729,11 +718,9 @@ fn the_cli_release_carries_no_image() {
     );
 }
 
-/// The guest runtime ships with every CLI release the way a tarball does:
-/// built by the guest-bins workflow before publication, required by the
-/// publish job, held to the tag's version, signed with the tarballs and with
-/// its digest sidecar, listed in the signed checksum manifest, covered by
-/// build provenance and attached with its bundles.
+/// The guest runtime is built and validated before tag-bound proof issuance.
+/// Publication retains that exact quartet, lists its checksum, and attests
+/// its archive without issuing replacement signatures.
 #[test]
 fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
     let workflow = release_workflow();
@@ -747,13 +734,13 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
     assert!(
         lane.contains("  workflow_call:\n")
             && lane.contains("build guest-bins --out dist")
-            && lane.contains("name: mvm-guest-bins\n"),
+            && lane.contains("name: mvm-guest-bins-attempt-${{ github.run_attempt }}"),
         "guest-bins.yml must be callable and upload the archive under the name the release reads"
     );
 
     let release = job_block(&workflow, "release");
     assert!(
-        release.contains("guest-runtime, release-archive-smoke")
+        release.contains("guest-runtime, runtime-proof-candidate, release-archive-smoke")
             && release.contains("needs.guest-runtime.result == 'success'"),
         "publication must wait for the guest runtime build and require it to succeed"
     );
@@ -774,12 +761,23 @@ fn the_cli_release_ships_its_guest_runtime_signed_and_listed() {
         .split("done")
         .next()
         .expect("the signing loop is non-empty");
-    for blob in [
-        "artifacts/*.tar.gz",
-        "artifacts/mvm-guest-bins-v*.tar.gz.sha256",
-    ] {
-        assert!(sign_loop.contains(blob), "{blob} must be cosign-signed");
-    }
+    assert!(sign_loop.contains("artifacts/*.tar.gz"));
+    assert!(
+        sign_loop.contains(
+            r#"if [[ "$blob" == "artifacts/mvm-guest-bins-${GITHUB_REF_NAME}.tar.gz" ]]; then"#
+        ) && sign_loop.contains("continue")
+            && !sign_loop.contains("artifacts/mvm-guest-bins-v*.tar.gz.sha256"),
+        "the retained runtime quartet must never be re-signed by the final collector"
+    );
+    let candidate = job_block(&workflow, "runtime-proof-candidate");
+    assert!(
+        candidate.contains("stage-signing")
+            && candidate.contains("seal-candidate")
+            && candidate.contains("cosign sign-blob")
+            && release.contains("collect-release")
+            && release.contains("verify-collected"),
+        "the tag-bound producer signs once; publication verifies and retains those exact subjects"
+    );
     let assets = workflow
         .split("assets=(")
         .nth(1)
@@ -827,11 +825,14 @@ fn the_archive_smoke_pairs_mvmctl_with_its_unpublished_guest_runtime() {
     let lane = fs::read_to_string(".github/workflows/release-archive-smoke.yml")
         .expect("release-archive-smoke.yml");
     let smoke = job_block(&lane, "release-archive-smoke");
-    assert_eq!(
-        smoke.matches("name: mvm-guest-bins\n").count(),
-        2,
-        "both download paths must fetch the guest runtime the release run built"
-    );
+    for attempt in ["github.run_attempt", "inputs.run_attempt"] {
+        assert!(
+            smoke.contains(&format!(
+                "name: mvm-guest-bins-attempt-${{{{ {attempt} }}}}"
+            )),
+            "each download path must bind the runtime to its explicit producer attempt"
+        );
+    }
     assert!(
         smoke.contains(r#"sha256sum --check "${runtimes[0]}.sha256""#)
             && smoke
@@ -1648,13 +1649,14 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
         smoke.contains("runs-on: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
         "the archive must boot through KVM on a hosted runner"
     );
-    assert_eq!(
-        smoke
-            .matches("name: mvmctl-x86_64-unknown-linux-gnu\n")
-            .count(),
-        2,
-        "both download paths must fetch the x86_64 Linux archive"
-    );
+    for attempt in ["github.run_attempt", "inputs.run_attempt"] {
+        assert!(
+            smoke.contains(&format!(
+                "name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{{{ {attempt} }}}}"
+            )),
+            "each download path must bind the Linux archive to its explicit producer attempt"
+        );
+    }
     assert!(
         smoke.contains("sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256"),
         "the archive must be the one the build recorded a checksum for"

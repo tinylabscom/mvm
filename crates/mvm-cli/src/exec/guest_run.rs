@@ -80,8 +80,10 @@ pub(super) fn run_in_guest(
     // Establishing the channel the command goes out on — the dispatch cost,
     // distinct from how long the command itself then runs in the guest.
     sub.start(SubPhase::FirstDispatch);
-    let transport = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = vsock_transport::for_vm(vm_name)
+        .and_then(|transport| transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT))
+        .with_context(|| format!("opening the first dispatch channel to guest '{vm_name}'"))
+        .inspect_err(|_| emit_guest_console_diagnostic(vm_name))?;
     sub.finish(SubPhase::FirstDispatch);
     // The last host-side point before the command is written to the guest:
     // a launch already over its startup ceiling is refused here, with the

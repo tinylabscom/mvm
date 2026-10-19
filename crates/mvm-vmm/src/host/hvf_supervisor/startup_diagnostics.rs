@@ -247,7 +247,6 @@ mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
     use std::time::Duration;
-    use wait_timeout::ChildExt;
 
     const FAKE_CHILD: &str = "MVM_HVF_DIAGNOSTICS_TEST_CHILD";
     const FAKE_TEST: &str = "host::hvf_supervisor::startup_diagnostics::tests::fake_helper";
@@ -268,11 +267,12 @@ mod tests {
         }
 
         fn wait(&mut self) -> ExitStatus {
-            let status = self
-                .child
-                .wait_timeout(FIXTURE_TIMEOUT)
-                .expect("wait for diagnostic fixture")
-                .expect("diagnostic fixture must exit within its deadline");
+            let status = crate::host::process_exit::wait_for_test_child(
+                &mut self.child,
+                std::time::Instant::now() + FIXTURE_TIMEOUT,
+            )
+            .expect("wait for diagnostic fixture")
+            .expect("diagnostic fixture must exit within its deadline");
             self.reaped = true;
             status
         }
@@ -282,7 +282,10 @@ mod tests {
         fn drop(&mut self) {
             if !self.reaped {
                 let _ = self.child.kill();
-                let _ = self.child.wait_timeout(FIXTURE_TIMEOUT);
+                let _ = crate::host::process_exit::wait_for_test_child(
+                    &mut self.child,
+                    std::time::Instant::now() + FIXTURE_TIMEOUT,
+                );
             }
         }
     }

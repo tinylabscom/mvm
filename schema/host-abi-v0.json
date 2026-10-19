@@ -18,6 +18,217 @@
       ],
       "type": "object"
     },
+    "AttestationBodyData": {
+      "additionalProperties": false,
+      "properties": {
+        "boot_measurement": {
+          "type": "string"
+        },
+        "hw_measurement": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HardwareMeasurementData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "identity_pubkey_hex": {
+          "type": "string"
+        },
+        "nonce_hex": {
+          "type": "string"
+        },
+        "schema_version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "boot_measurement",
+        "identity_pubkey_hex",
+        "nonce_hex",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "AttestationExportReply": {
+      "additionalProperties": false,
+      "properties": {
+        "payload": {
+          "items": {
+            "format": "uint8",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "signature": {
+          "items": {
+            "format": "uint8",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "signer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "payload",
+        "signature",
+        "signer_id"
+      ],
+      "title": "AttestationReportData",
+      "type": "object"
+    },
+    "AttestationExportRequest": {
+      "additionalProperties": false,
+      "title": "AttestationEmpty",
+      "type": "object"
+    },
+    "AttestationProviderData": {
+      "additionalProperties": false,
+      "properties": {
+        "compiled": {
+          "type": "boolean"
+        },
+        "feature": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "compiled",
+        "feature",
+        "name"
+      ],
+      "type": "object"
+    },
+    "AttestationPublicKeyFileKind": {
+      "enum": [
+        "public_key_file"
+      ],
+      "type": "string"
+    },
+    "AttestationSelfIdentityKind": {
+      "enum": [
+        "self_identity"
+      ],
+      "type": "string"
+    },
+    "AttestationStatusReply": {
+      "additionalProperties": false,
+      "properties": {
+        "providers": {
+          "items": {
+            "$ref": "#/definitions/AttestationProviderData"
+          },
+          "type": "array"
+        },
+        "pubkey_hex": {
+          "type": "string"
+        },
+        "public_path": {
+          "type": "string"
+        },
+        "secret_path": {
+          "type": "string"
+        },
+        "signer_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providers",
+        "pubkey_hex",
+        "public_path",
+        "secret_path",
+        "signer_id"
+      ],
+      "title": "AttestationStatusData",
+      "type": "object"
+    },
+    "AttestationStatusRequest": {
+      "additionalProperties": false,
+      "title": "AttestationEmpty",
+      "type": "object"
+    },
+    "AttestationTrust": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/definitions/AttestationSelfIdentityKind"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "$ref": "#/definitions/AttestationPublicKeyFileKind"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AttestationVerifyReply": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "$ref": "#/definitions/AttestationBodyData"
+        },
+        "signer_id": {
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/definitions/AttestationTrust"
+        }
+      },
+      "required": [
+        "body",
+        "signer_id",
+        "trust"
+      ],
+      "title": "AttestationVerificationData",
+      "type": "object"
+    },
+    "AttestationVerifyRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "report_path": {
+          "type": "string"
+        },
+        "trust": {
+          "$ref": "#/definitions/AttestationTrust"
+        }
+      },
+      "required": [
+        "report_path",
+        "trust"
+      ],
+      "title": "AttestationVerifyRequest",
+      "type": "object"
+    },
     "BackendCapabilitiesReply": {
       "description": "Opaque report; the shape is owned by the capability negotiation module.",
       "type": "object"
@@ -933,6 +1144,104 @@
         "token"
       ],
       "title": "WaitRequest",
+      "type": "object"
+    },
+    "HardwareMeasurementData": {
+      "additionalProperties": false,
+      "properties": {
+        "measurement_hex": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "measurement_hex",
+        "provider"
+      ],
+      "type": "object"
+    },
+    "ImageRevocationsStatusReply": {
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "format": "uint",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "issued_at": {
+          "type": "string"
+        },
+        "not_after": {
+          "type": "string"
+        },
+        "publication": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "signer_identity": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entries",
+        "issued_at",
+        "not_after",
+        "publication",
+        "sha256",
+        "signer_identity"
+      ],
+      "title": "StatusReport",
+      "type": "object"
+    },
+    "ImageRevocationsStatusRequest": {
+      "additionalProperties": false,
+      "title": "ImageRevocationsEmpty",
+      "type": "object"
+    },
+    "ImageRevocationsUpdateReply": {
+      "additionalProperties": false,
+      "properties": {
+        "issued_at": {
+          "type": "string"
+        },
+        "publication": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "issued_at",
+        "publication",
+        "sha256"
+      ],
+      "title": "CheckpointReport",
+      "type": "object"
+    },
+    "ImageRevocationsUpdateRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "bundle_path": {
+          "type": "string"
+        },
+        "document_path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bundle_path",
+        "document_path"
+      ],
+      "title": "UpdateRequest",
       "type": "object"
     },
     "InstanceReadiness": {
@@ -3431,6 +3740,57 @@
     }
   },
   "properties": {
+    "attestation_export": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AttestationExportReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AttestationExportRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AttestationExport",
+      "type": "object"
+    },
+    "attestation_status": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AttestationStatusReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AttestationStatusRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AttestationStatus",
+      "type": "object"
+    },
+    "attestation_verify": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/AttestationVerifyReply"
+        },
+        "request": {
+          "$ref": "#/definitions/AttestationVerifyRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "AttestationVerify",
+      "type": "object"
+    },
     "backend_capabilities": {
       "additionalProperties": false,
       "properties": {
@@ -3752,6 +4112,40 @@
         "reply"
       ],
       "title": "GuestProcWait",
+      "type": "object"
+    },
+    "image_revocations_status": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ImageRevocationsStatusReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ImageRevocationsStatusRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ImageRevocationsStatus",
+      "type": "object"
+    },
+    "image_revocations_update": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ImageRevocationsUpdateReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ImageRevocationsUpdateRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ImageRevocationsUpdate",
       "type": "object"
     },
     "machine_create": {
@@ -4215,6 +4609,11 @@
     }
   },
   "required": [
+    "attestation_export",
+    "attestation_verify",
+    "attestation_status",
+    "image_revocations_update",
+    "image_revocations_status",
     "manifest_info",
     "manifest_list",
     "manifest_verify",

@@ -1188,6 +1188,18 @@ mod tests {
         );
     }
 
+    /// The pre-materialization sweep must actually run the orphan reaper: the
+    /// launch that follows may spawn a builder VM of its own.
+    #[test]
+    fn the_pre_builder_sweep_runs_the_orphan_reaper() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        assert!(!crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+        sweep_before_builder_vm();
+        assert!(crate::commands::env::builder_vm::before_spawn_sweep_has_run());
+    }
+
     fn prod_fixture() -> ProdFixture {
         prod_fixture_with(true)
     }

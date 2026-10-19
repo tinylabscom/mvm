@@ -127,6 +127,12 @@ export class HostLibraryEmbedderError extends HostLibraryError {}
 /** A fault inside the host library itself. */
 export class HostLibraryInternalError extends HostLibraryError {}
 
+/**
+ * The machine requires explicit recovery; details carry
+ * machine_id, plan_id and reason. Not retryable.
+ */
+export class MachineRecoveryRequiredError extends HostLibraryError {}
+
 /** The success status; any other value is a failure. */
 export const STATUS_OK = 0;
 
@@ -158,4 +164,5 @@ export const CODE_ERRORS: Record<string, new (msg: string) => Error> = {
   "ABI_NOT_NEGOTIATED": HostLibraryAbiError,
   "EMBEDDER": HostLibraryEmbedderError,
   "INTERNAL": HostLibraryInternalError,
+  "RECOVERY_REQUIRED": MachineRecoveryRequiredError,
 };

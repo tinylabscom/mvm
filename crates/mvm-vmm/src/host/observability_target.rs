@@ -212,6 +212,7 @@ mod tests {
             template_id: None,
             rootfs_path: "/tmp/rootfs.ext4".to_string(),
             kernel_path: None,
+            kernel_read_sha256: None,
             initrd_path: None,
             verity_path: None,
             roothash: None,

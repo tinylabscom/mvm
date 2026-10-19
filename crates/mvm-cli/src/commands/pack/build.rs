@@ -94,6 +94,13 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         )
     })?;
     let compiled = tree_digest(&artifact)?;
+    let health_backend = mvm_client::entrypoint::backend_name_for(args.hypervisor.as_deref())?;
+    require_descriptor_health_backend(&health_backend)?;
+    // Validate the frozen lock before any acquisition. Capture once before
+    // builder/health effects; never build a runtime or substitute host caches.
+    let portable = std::sync::Arc::new(
+        mvm_client::portable_boot_assets::PreparedPortableBootAssets::acquire(GuestArch::host())?,
+    );
 
     // ---- 2. Build the flake into a template slot in the builder VM ----
     eprintln!("building {} in the builder VM", pack_ref(&lock));
@@ -103,7 +110,22 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     }
     let owned = crate::commands::build::build::FrozenFlakeSlot::build(inputs)
         .context("building the compiled pack")?;
-    let slot = owned.slot_hash();
+    let label = format!(
+        "{}; {}",
+        mvm_core::manifest::slot_dir(owned.slot_hash()),
+        portable
+            .retention_paths()
+            .map(|p| p.display().to_string())
+            .join("; "),
+    );
+    let producer = HealthInputRetention::new(
+        ProducerInputs {
+            build: owned,
+            boot: portable,
+        },
+        label,
+    );
+    let slot = producer.build.slot_hash();
     // A pack ships sealed: its rootfs gets the dm-verity pair here, before the
     // health boot, so the boot checks it and the archive carries it.
     seal_template_rootfs(slot)?.context(
@@ -114,6 +136,9 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     // runs and what a launch of the archive is measured against.
     let image_argv = template_entrypoint(slot)?;
     let built = SlotDigests::read(slot)?;
+    let expected_export = built
+        .clone()
+        .selecting_initrd(producer.boot.initramfs_path())?;
     if built.missing("verity") {
         bail!("the built pack has no dm-verity hash tree beside its rootfs; nothing was signed");
     }
@@ -123,15 +148,22 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         "health check: booting {} and running its entrypoint",
         pack_ref(&lock)
     );
-    owned.verify_revision()?;
-    let exit_code = boot_entrypoint(health_call(slot, &loaded.spec, &args))
-        .context("booting the built pack for its health check")?;
+    producer.build.verify_revision()?;
+    let mut health = health_call(slot, &loaded.spec, &args);
+    health.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
+    // An error/panic does not prove no VM can still read these inputs.
+    // This API returns a workload status, not an opaque generation-exit proof;
+    // retain conservatively even after an acknowledged stop.
+    producer.retain();
+    let exit_code =
+        boot_entrypoint(health).context("booting the built pack for its health check")?;
     if exit_code != 0 {
         bail!("health check failed: the entrypoint exited {exit_code}; nothing was signed");
     }
 
     // ---- 4. Nothing may change between the health check and signing ----
-    owned.verify_revision()?;
+    producer.build.verify_revision()?;
+    producer.boot.verify_integrity()?;
     let checked = SlotDigests::read(slot)?;
     if checked != built {
         bail!(
@@ -141,27 +173,29 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     }
 
     // ---- 5. Seal and sign under the host key ----
-    owned.verify_revision()?;
-    let mut staged = stage_template(
-        slot,
-        pack_export(&args.out, &loaded.spec, &lock, image_argv)?,
-    )?;
+    producer.build.verify_revision()?;
+    let mut export = pack_export(&args.out, &loaded.spec, &lock, image_argv)?;
+    export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
+    let mut staged = stage_template(slot, export)?;
     // The exporter re-read the slot's files; what it sealed must be what the
-    // health check booted. Validate the owned staging file before publication.
+    // health check booted. Read and hash the same owned file before publication.
     let validation = (|| -> Result<String> {
-        owned
+        producer
+            .build
             .verify_revision()
             .context("private build revision changed during export; archive not published")?;
-        let sealed = SlotDigests::sealed(&staged.manifest()?);
-        if sealed != checked {
+        producer.boot.verify_integrity()?;
+        let sealed = SlotDigests::from_manifest(&staged.manifest()?);
+        if sealed != expected_export {
             bail!(
                 "the sealed archive differs from the health-checked build ({}); \
                  archive not published",
-                checked.changed(&sealed).join(", ")
+                expected_export.changed(&sealed).join(", ")
             );
         }
         let digest = staged.sha256()?;
-        owned
+        producer
+            .build
             .verify_revision()
             .context("private build revision changed during validation; archive not published")?;
         if let (Some(report), Some(destination)) = (observation, &args.input_observation) {
@@ -190,6 +224,60 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
         exported.key_id.0
     );
     Ok(())
+}
+
+fn require_descriptor_health_backend(backend: &str) -> Result<()> {
+    anyhow::ensure!(
+        backend == "hvf" || (cfg!(target_os = "linux") && backend == "firecracker"),
+        "portable pack health requires HVF or same-host Linux Firecracker kernel descriptors"
+    );
+    Ok(())
+}
+
+struct ProducerInputs {
+    build: crate::commands::build::build::FrozenFlakeSlot,
+    boot: std::sync::Arc<mvm_client::portable_boot_assets::PreparedPortableBootAssets>,
+}
+
+/// Retaining input bytes is a one-way resource decision, not VM/exit authority.
+/// An acknowledged stop alone never authorizes their deletion.
+struct HealthInputRetention<T> {
+    value: Option<T>,
+    retain: std::cell::Cell<bool>,
+    label: String,
+}
+
+impl<T> HealthInputRetention<T> {
+    fn new(value: T, label: String) -> Self {
+        Self {
+            value: Some(value),
+            retain: std::cell::Cell::new(false),
+            label,
+        }
+    }
+    fn retain(&self) {
+        self.retain.set(true);
+    }
+}
+
+impl<T> std::ops::Deref for HealthInputRetention<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.value
+            .as_ref()
+            .expect("health input owner lives until Drop")
+    }
+}
+
+impl<T> Drop for HealthInputRetention<T> {
+    fn drop(&mut self) {
+        if self.retain.get()
+            && let Some(value) = self.value.take()
+        {
+            tracing::warn!(inputs = %self.label, "retaining producer inputs: deletion requires independently confirmed absence of native readers");
+            std::mem::forget(value);
+        }
+    }
 }
 
 /// The builder produces images for this host's architecture; a spec that
@@ -240,6 +328,7 @@ fn health_call(slot: &str, spec: &PackSpec, args: &BuildArgs) -> EntrypointCall 
         review_source: ReviewSource::Unavailable(NoManifest::NotNamed),
         network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         hypervisor: args.hypervisor.clone(),
+        portable_boot_assets: None,
     }
 }
 
@@ -303,12 +392,24 @@ fn lock_digest(lock: &PackLock) -> Result<String> {
 }
 
 /// Digests of the artifacts a slot's current revision points at.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct SlotDigests {
     files: Vec<(&'static str, Option<String>)>,
 }
 
 impl SlotDigests {
+    /// Health selects the retained release initramfs, not an unused factory
+    /// stage-1 initrd. The unchanged build slot is checked separately.
+    fn selecting_initrd(mut self, path: &Path) -> Result<Self> {
+        let digest = file_sha256(path)?;
+        for (name, value) in &mut self.files {
+            if *name == "initrd" {
+                *value = Some(digest.clone());
+            }
+        }
+        Ok(self)
+    }
+
     fn read(slot: &str) -> Result<Self> {
         let digests = template_artifact_digests(slot)?;
         Ok(Self::from_digests(
@@ -320,7 +421,7 @@ impl SlotDigests {
     }
 
     /// The same digests, as the manifest of a sealed archive records them.
-    fn sealed(manifest: &BundleManifest) -> Self {
+    fn from_manifest(manifest: &BundleManifest) -> Self {
         let digest = |role: ArtifactRole| {
             manifest
                 .artifacts
@@ -369,9 +470,94 @@ impl SlotDigests {
     }
 }
 
+fn file_sha256(path: &Path) -> Result<String> {
+    mvm_core::crypto::image_verify::sha256_file(path)
+        .with_context(|| format!("hashing {}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_backend_requires_an_actual_same_host_descriptor_route() {
+        assert!(require_descriptor_health_backend("hvf").is_ok());
+        assert_eq!(
+            require_descriptor_health_backend("firecracker").is_ok(),
+            cfg!(target_os = "linux")
+        );
+        for backend in ["qemu", "libkrun", "mock", "docker", "unknown"] {
+            assert!(require_descriptor_health_backend(backend).is_err());
+        }
+    }
+
+    #[test]
+    fn health_input_retention_survives_error_and_unwind_without_claiming_exit() {
+        struct Probe(std::rc::Rc<std::cell::Cell<usize>>);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+        let dropped = std::rc::Rc::new(std::cell::Cell::new(0));
+        drop(HealthInputRetention::new(
+            Probe(dropped.clone()),
+            "never-started".into(),
+        ));
+        assert_eq!(dropped.get(), 1);
+        {
+            let inputs = HealthInputRetention::new(Probe(dropped.clone()), "health-attempt".into());
+            inputs.retain();
+            // A returned status/error is not independent kernel-exit evidence.
+        }
+        assert_eq!(dropped.get(), 1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let inputs = HealthInputRetention::new(Probe(dropped.clone()), "unwinding".into());
+            inputs.retain();
+            panic!("unit health failure");
+        }));
+        assert!(result.is_err());
+        assert_eq!(dropped.get(), 1);
+    }
+
+    #[test]
+    fn selected_release_initrd_is_the_export_expectation_not_unused_factory_initrd() {
+        let directory = tempfile::tempdir().unwrap();
+        let initrd = directory.path().join("release-initrd");
+        fs::write(&initrd, b"health-selected initrd").unwrap();
+        let source = || {
+            SlotDigests::from_digests(
+                Some("kernel".into()),
+                Some("factory-initrd".into()),
+                Some("rootfs".into()),
+                Some("verity".into()),
+            )
+        };
+        let expected = source().selecting_initrd(&initrd).unwrap();
+        assert_eq!(source().changed(&expected), vec!["initrd"]);
+        let actual = SlotDigests::from_digests(
+            Some("kernel".into()),
+            Some(file_sha256(&initrd).unwrap()),
+            Some("rootfs".into()),
+            Some("verity".into()),
+        );
+        assert_eq!(expected, actual);
+        fs::write(&initrd, b"substituted after health").unwrap();
+        assert_eq!(
+            expected.changed(&source().selecting_initrd(&initrd).unwrap()),
+            vec!["initrd"],
+        );
+    }
+
+    #[test]
+    fn missing_selected_initrd_is_not_silently_omitted() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(
+            SlotDigests::from_digests(Some("kernel".into()), None, Some("rootfs".into()), None,)
+                .selecting_initrd(&directory.path().join("missing"))
+                .is_err()
+        );
+    }
 
     #[test]
     fn input_observation_is_explicit_and_never_clobbers_existing_output() {
@@ -493,7 +679,7 @@ mod tests {
             verity: None,
             resources: None,
         };
-        let sealed = SlotDigests::sealed(&manifest);
+        let sealed = SlotDigests::from_manifest(&manifest);
         let expected = SlotDigests::from_digests(
             Some("b".repeat(64)),
             None,
@@ -506,11 +692,11 @@ mod tests {
 
         manifest.artifacts[0].sha256 = "d".repeat(64);
         assert_eq!(
-            sealed.changed(&SlotDigests::sealed(&manifest)),
+            sealed.changed(&SlotDigests::from_manifest(&manifest)),
             vec!["rootfs"]
         );
         manifest.artifacts.clear();
-        let missing = SlotDigests::sealed(&manifest);
+        let missing = SlotDigests::from_manifest(&manifest);
         for name in ["kernel", "initrd", "rootfs", "verity"] {
             assert!(missing.missing(name), "{name}");
         }

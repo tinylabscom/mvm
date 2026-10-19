@@ -25,6 +25,36 @@ pub const PRIVATE_DIR_MODE: u32 = 0o700;
 /// Mode of a file holding a secret.
 pub const PRIVATE_FILE_MODE: u32 = 0o600;
 
+/// Require metadata owned by the current effective user.
+///
+/// This checks ownership only. Callers must separately validate the opened
+/// object, its type, links and permissions; it does not bind a path to a handle.
+#[cfg(unix)]
+pub fn require_current_owner(metadata: &Metadata) -> io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    require_owner_uid(metadata.uid(), rustix::process::geteuid().as_raw())
+}
+
+#[cfg(unix)]
+fn require_owner_uid(actual: u32, expected: u32) -> io::Result<()> {
+    if actual != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "object is not owned by the current effective user",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse ownership validation on hosts without the supported Unix model.
+#[cfg(not(unix))]
+pub fn require_current_owner(_metadata: &Metadata) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "effective-user ownership validation is unsupported on this host",
+    ))
+}
+
 /// The error every function in this module returns on a host without Unix
 /// permission bits. `subject` names what was being made private, so the
 /// refusal says which file or directory was not written.
@@ -212,6 +242,31 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn ownership_predicate_accepts_owned_file_and_directory_without_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = tempfile::NamedTempFile::new_in(directory.path()).unwrap();
+        for path in [directory.path(), file.path()] {
+            let before = std::fs::metadata(path).unwrap();
+            require_current_owner(&before).unwrap();
+            assert_eq!(mode(path), before.permissions().mode() & 0o777);
+        }
+    }
+
+    #[test]
+    fn ownership_predicate_refuses_different_uid_with_static_diagnostic() {
+        for (actual, expected) in [(0, 1), (1, 0), (u32::MAX, 0)] {
+            let error = require_owner_uid(actual, expected).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                error.to_string(),
+                "object is not owned by the current effective user"
+            );
+        }
+        require_owner_uid(0, 0).unwrap();
+        require_owner_uid(u32::MAX, u32::MAX).unwrap();
     }
 
     #[test]

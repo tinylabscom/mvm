@@ -5,8 +5,6 @@
 //! come from the signed CLI release and travel with their original proofs. Neither
 //! the OCI materializer nor the builder receives the caller's signing key.
 
-mod assets;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -17,11 +15,9 @@ use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 use mvm_fs::oci::ImageReference;
 
-use crate::bundle::{
-    BundleExportInputs, BundleSigner, DebugOutput, PostureInputs, export_bundle_with_signer,
-};
+use crate::bundle::{BundleExportInputs, BundleSigner, DebugOutput, PostureInputs};
 use crate::local::oci::{OciMaterialization, OciMaterializeRequest, materialize_oci_image};
-use assets::{BootAssets, utf8};
+use crate::portable_boot_assets::{PreparedPortableBootAssets as BootAssets, utf8};
 
 /// OCI input and host-side package destination.
 #[derive(Debug, Clone)]
@@ -176,7 +172,6 @@ pub fn export_materialized_oci_bundle(
     }
     let verity = read_verity(directory, request.production)?;
     let arch = request.arch.to_string();
-    let set = assets.image_set.member_cache();
     let mut inputs = BundleExportInputs::new(
         utf8(&assets.kernel)?,
         utf8(rootfs)?,
@@ -197,42 +192,6 @@ pub fn export_materialized_oci_bundle(
         builder_id: None,
         artifacts: Default::default(),
     });
-    let runtime_artifacts = [
-        (
-            assets.runtime.archive_artifact.as_str(),
-            assets.release_proof.archive.as_path(),
-        ),
-        (
-            assets.runtime.checksum_artifact.as_str(),
-            assets.release_proof.checksum.as_path(),
-        ),
-        (
-            assets.runtime.signature_bundle_artifact.as_str(),
-            assets.release_proof.signature_bundle.as_path(),
-        ),
-        (
-            assets.runtime.checksum_signature_bundle_artifact.as_str(),
-            assets.checksum_signature_bundle.as_path(),
-        ),
-        (
-            assets.runtime.overlay_artifact.as_str(),
-            assets.runtime_overlay.as_path(),
-        ),
-        (
-            assets.runtime.overlay_verity_artifact.as_str(),
-            assets.runtime_overlay_verity.as_path(),
-        ),
-        (
-            assets.runtime.initramfs_artifact.as_str(),
-            assets.initrd.as_path(),
-        ),
-    ];
-    inputs.cli_boot_assets = Some(mvm_bundler::CliBootAssetsInputs {
-        manifest_bytes: assets.image_set.manifest_bytes(),
-        manifest_sha256: set.root(),
-        runtime: &assets.runtime,
-        artifacts: &runtime_artifacts,
-    });
     if let Some((bytes, roothash)) = &verity {
         inputs = inputs.verity(bytes, roothash);
     }
@@ -242,7 +201,7 @@ pub fn export_materialized_oci_bundle(
     if let Some(debug) = &request.debug_out {
         inputs = inputs.debug_out(debug.clone());
     }
-    let exported = export_bundle_with_signer(&inputs, signer)?;
+    let exported = assets.export(&inputs, signer)?;
     materialization.verify_integrity()?;
     assets.verify_integrity()?;
     Ok(OciBundleResult {

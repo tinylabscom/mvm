@@ -35,7 +35,7 @@ pub(crate) use crate::workspace_graph::*;
 /// force a rebuild. `mvm-cli`'s own sources are the motivating exclusion —
 /// it *links* these binaries rather than being linked by them, so its 251
 /// files cannot affect them, yet the old watch list rebuilt on every one.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeyInputs {
     pub package: String,
     pub binary: String,
@@ -48,9 +48,38 @@ pub(crate) struct KeyInputs {
     pub flavor: String,
     /// SHA-256 of `Cargo.lock`.
     pub lockfile: String,
+    /// Snapshot of the workspace manifest, including the host/target profiles.
+    pub workspace_manifest: WorkspaceManifestDigest,
     /// `(workspace-relative path, SHA-256)` for every source file in the
     /// dependency closure, sorted by path.
     pub sources: Vec<(String, String)>,
+}
+
+/// A successfully read and parsed workspace manifest, never an empty sentinel.
+///
+/// This binds the manifest, not all effective Cargo configuration or environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WorkspaceManifestDigest(String);
+
+impl WorkspaceManifestDigest {
+    pub(crate) fn read(root: &Path) -> Result<Self, String> {
+        let path = root.join("Cargo.toml");
+        let bytes =
+            std::fs::read(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        let manifest: toml::Value = text
+            .parse()
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+        if manifest
+            .get("workspace")
+            .and_then(toml::Value::as_table)
+            .is_none()
+        {
+            return Err(format!("{} has no workspace table", path.display()));
+        }
+        Ok(Self(hex(Sha256::digest(&bytes).as_slice())))
+    }
 }
 
 /// The cache key for one artifact.
@@ -66,7 +95,7 @@ pub(crate) fn artifact_key(inputs: &KeyInputs) -> String {
         hasher.update(value.as_bytes());
     };
 
-    field("mvm-embed-cache-v1");
+    field("mvm-embed-cache-v2");
     field(&inputs.package);
     field(&inputs.binary);
     field(&inputs.features);
@@ -74,6 +103,7 @@ pub(crate) fn artifact_key(inputs: &KeyInputs) -> String {
     field(&inputs.toolchain);
     field(&inputs.flavor);
     field(&inputs.lockfile);
+    field(&inputs.workspace_manifest.0);
     for (path, sha) in &inputs.sources {
         field(path);
         field(sha);

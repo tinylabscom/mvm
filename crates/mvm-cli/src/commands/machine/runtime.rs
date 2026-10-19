@@ -547,6 +547,7 @@ fn run_entrypoint_action(
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
+        portable_boot_assets: None,
     };
     if !call.attach {
         return invoke::run_entrypoint(call);

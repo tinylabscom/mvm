@@ -64,6 +64,10 @@ fn cached_compatibility_binding_rejects_mismatching_builder_boot_abi() {
 }
 
 fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
+    contract_root_with_mode(marker, symlink, 0o444)
+}
+
+fn contract_root_with_mode(marker: Option<&[u8]>, symlink: Option<&str>, mode: u16) -> Vec<u8> {
     use mvm_fs::ext4::{Node, Owner};
     let mut nodes = ["/etc", "/etc/mvm"]
         .into_iter()
@@ -77,7 +81,7 @@ fn contract_root(marker: Option<&[u8]>, symlink: Option<&str>) -> Vec<u8> {
     if let Some(bytes) = marker {
         nodes.push(Node::File {
             path: "/etc/mvm/base-image-contract".into(),
-            mode: 0o444,
+            mode,
             data: bytes.to_vec(),
             xattrs: Vec::new(),
             owner: Owner::ROOT,
@@ -308,6 +312,27 @@ fn renamed_ext4_payload_still_requires_the_marker_and_installs_by_authenticated_
             assert!(result.is_err(), "renaming cannot bypass the marker");
             assert!(!installed.path().join("rootfs.ext4").exists());
         }
+    }
+}
+
+#[test]
+fn base_marker_requires_exact_readonly_mode_in_every_admission_path() {
+    let mut compatibility = mvm_core::image_set::image_train_lock()
+        .compatibility
+        .clone();
+    compatibility.base_image_contract = Some(mvm_core::image_set::BaseImageContract::LINUX_LAYER);
+    for mode in [0o444, 0o644, 0o400, 0o4444, 0o2444, 0o1444] {
+        let image = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            image.path(),
+            contract_root_with_mode(Some(b"1\n"), None, mode),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_base_image_contract(image.path(), &compatibility).is_ok(),
+            mode == 0o444,
+            "marker mode {mode:o}"
+        );
     }
 }
 

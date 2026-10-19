@@ -799,28 +799,7 @@ impl FcForkRestorer {
             })?;
         }
 
-        let anchors_path = child_dir.join("device-anchors.json");
-        let anchors: mvm_core::checkpoint::DeviceAnchors =
-            serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
-                format!(
-                    "reading required FC fork device anchors {}",
-                    anchors_path.display()
-                )
-            })?)
-            .with_context(|| {
-                format!(
-                    "parsing required FC fork device anchors {}",
-                    anchors_path.display()
-                )
-            })?;
-        let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
-            .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
-        super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
-        let devices = super::ForkDevices::from_anchors(
-            &anchors,
-            child_dir,
-            std::path::Path::new(&child_vm_dir),
-        )?;
+        let devices = fork_devices_for(child_vm_name, child_dir)?;
         std::fs::create_dir_all(child_dir.join("runtime")).ok();
 
         // The load leaves vCPUs paused, so the no-NIC device-model guard runs
@@ -853,14 +832,38 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        if let Err(error) =
-            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
-        {
+        if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
             let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
             return Err(error);
         }
         Ok(())
     }
+}
+
+/// The child's own devices, from the parent anchors its checkpoint carries.
+pub(crate) fn fork_devices_for(
+    child_vm_name: &str,
+    child_dir: &std::path::Path,
+) -> anyhow::Result<super::ForkDevices> {
+    use anyhow::Context as _;
+    let anchors_path = child_dir.join("device-anchors.json");
+    let anchors: mvm_core::checkpoint::DeviceAnchors =
+        serde_json::from_slice(&std::fs::read(&anchors_path).with_context(|| {
+            format!(
+                "reading required FC fork device anchors {}",
+                anchors_path.display()
+            )
+        })?)
+        .with_context(|| {
+            format!(
+                "parsing required FC fork device anchors {}",
+                anchors_path.display()
+            )
+        })?;
+    let child_vm_dir = super::resolve_running_vm_dir(child_vm_name)
+        .with_context(|| format!("resolving VM dir for child '{child_vm_name}'"))?;
+    super::ensure_fc_sockets_in_state_dir(&child_vm_dir, "a Firecracker fork")?;
+    super::ForkDevices::from_anchors(&anchors, child_dir, std::path::Path::new(&child_vm_dir))
 }
 
 /// The API handle a forked child's snapshot load runs through, carrying the
@@ -926,7 +929,7 @@ pub(crate) fn resume_preloaded_fork_child(
                 reseeded_identity_sha256: None,
             },
         )?;
-        super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        super::runtime_artifacts::verify_restored_layout(io, expected)
     })();
     if let Err(error) = verified {
         let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(io);
@@ -960,9 +963,7 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        if let Err(error) =
-            super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
-        {
+        if let Err(error) = super::runtime_artifacts::verify_restored_layout(&io, expected) {
             let _ =
                 <super::io::FirecrackerIO as mvm_vmm::snapshot::SnapshotIO>::teardown_paused(&io);
             return Err(error);
@@ -992,7 +993,7 @@ impl FcForkRestorer {
         mvm_vmm::snapshot::guarded_fork_load_paused(&io, child_dir).with_context(|| {
             format!("FC warm-restore for forked child '{child_vm_name}' failed")
         })?;
-        let resumed = super::runtime_artifacts::verify_restored_layout(&io.socket_path, &expected)
+        let resumed = super::runtime_artifacts::verify_restored_layout(&io, expected)
             .and_then(|()| mvm_vmm::snapshot::SnapshotIO::resume(&io));
         if resumed.is_err() {
             let _ = mvm_vmm::snapshot::SnapshotIO::teardown_paused(&io);
@@ -1025,6 +1026,169 @@ mod tests {
             );
             assert!(!socket.exists(), "an authentication refusal must tear down");
         }
+    }
+
+    use mvm_vmm::host::shell::mock as shell_mock;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// Install a shell double that records every script and answers each with the
+    /// exit code of the first `(needle, code)` whose needle the script contains
+    /// (0 when none does).
+    fn shell_double(
+        answers: Vec<(&'static str, i32)>,
+    ) -> (shell_mock::MockGuard, Rc<RefCell<Vec<String>>>) {
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&seen);
+        let guard = shell_mock::install_handler(move |script| {
+            recorded.borrow_mut().push(script.to_string());
+            let exit_code = answers
+                .iter()
+                .find(|(needle, _)| script.contains(needle))
+                .map_or(0, |(_, code)| *code);
+            shell_mock::MockResponse {
+                exit_code,
+                stdout: String::new(),
+            }
+        });
+        (guard, seen)
+    }
+
+    #[test]
+    fn each_host_probe_reports_exactly_what_its_shell_probe_answered() {
+        type Probe = fn() -> anyhow::Result<bool>;
+        let probes: [(&str, Probe); 6] = [
+            ("command -v firecracker", super::is_installed),
+            ("vmlinux-", super::has_kernel),
+            ("ubuntu-*.squashfs.upstream >/dev/null", super::has_squashfs),
+            ("command -v jailer", super::jailer_is_installed),
+            ("unsquashfs -l", super::validate_rootfs_squashfs),
+            ("pgrep -x firecracker", super::is_running),
+        ];
+        for (needle, probe) in probes {
+            let (_guard, seen) = shell_double(vec![(needle, 1)]);
+            assert!(!probe().unwrap(), "{needle}: a failing probe is false");
+            assert!(seen.borrow()[0].contains(needle));
+            drop(_guard);
+            let (_guard, _) = shell_double(vec![]);
+            assert!(probe().unwrap(), "{needle}: a passing probe is true");
+        }
+    }
+
+    #[test]
+    fn base_assets_need_both_the_kernel_and_the_squashfs() {
+        for (kernel, squashfs, expected) in
+            [(0, 0, true), (0, 1, false), (1, 0, false), (1, 1, false)]
+        {
+            let (_guard, _) = shell_double(vec![
+                ("vmlinux-", kernel),
+                ("ubuntu-*.squashfs.upstream", squashfs),
+            ]);
+            assert_eq!(super::has_base_assets().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn install_runs_only_the_steps_the_host_is_missing() {
+        // (firecracker present, jailer present) -> what install did.
+        let ran = |fc: i32, jailer: i32| {
+            let (_guard, seen) = shell_double(vec![
+                ("command -v firecracker", fc),
+                ("command -v jailer", jailer),
+            ]);
+            super::install().unwrap();
+            seen.borrow().clone()
+        };
+        let both = ran(0, 0);
+        assert!(both.iter().all(|s| !s.contains("wget")), "{both:?}");
+        assert!(both.iter().any(|s| s.contains("firecracker --version")));
+
+        let jailer_missing = ran(0, 1);
+        assert!(jailer_missing.iter().any(|s| s.contains("jailer-")));
+        assert!(
+            jailer_missing
+                .iter()
+                .all(|s| !s.contains("/usr/local/bin/firecracker")),
+            "{jailer_missing:?}"
+        );
+
+        let nothing = ran(1, 1);
+        assert!(
+            nothing
+                .iter()
+                .any(|s| s.contains("/usr/local/bin/firecracker"))
+        );
+        let no_firecracker = ran(1, 0);
+        assert!(
+            no_firecracker
+                .iter()
+                .any(|s| s.contains("/usr/local/bin/firecracker"))
+        );
+    }
+
+    #[test]
+    fn preparing_the_rootfs_and_writing_state_run_their_scripts() {
+        let (_guard, seen) = shell_double(vec![]);
+        super::prepare_rootfs().unwrap();
+        super::write_state().unwrap();
+        let scripts = seen.borrow();
+        assert!(scripts[0].contains("mkfs.ext4"));
+        assert!(scripts[1].contains(".mvm-state"));
+    }
+
+    #[test]
+    fn a_fork_pause_and_resume_report_a_missing_vm_instead_of_succeeding() {
+        use mvm_vmm::checkpoint::VmFullControl;
+        let _g = mvm_vmm::host::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let control = super::FcVmFullControl::new("no-such-vm");
+        assert!(format!("{:#}", control.pause().unwrap_err()).contains("pausing Firecracker VM"));
+        assert!(format!("{:#}", control.resume().unwrap_err()).contains("resuming Firecracker VM"));
+    }
+
+    /// Firecracker saves `memory.bin`; the loader reads `mem.bin`. The rename
+    /// happens only when the loader's name is free, and never when there is
+    /// nothing to rename.
+    #[test]
+    fn a_fork_load_renames_the_saved_memory_only_when_the_loader_name_is_free() {
+        let load = |child_dir: &std::path::Path| {
+            format!(
+                "{:#}",
+                FcForkRestorer
+                    .prepare_fork_load("child", child_dir, None)
+                    .err()
+                    .expect("the fixture has no device anchors, so the load stops there")
+            )
+        };
+
+        let free = tempfile::tempdir().unwrap();
+        std::fs::write(free.path().join("memory.bin"), b"saved").unwrap();
+        let message = load(free.path());
+        assert!(!message.contains("renaming"), "{message}");
+        assert_eq!(
+            std::fs::read(free.path().join("mem.bin")).unwrap(),
+            b"saved"
+        );
+        assert!(!free.path().join("memory.bin").exists());
+
+        let taken = tempfile::tempdir().unwrap();
+        std::fs::write(taken.path().join("memory.bin"), b"saved").unwrap();
+        std::fs::write(taken.path().join("mem.bin"), b"existing").unwrap();
+        load(taken.path());
+        assert_eq!(
+            std::fs::read(taken.path().join("mem.bin")).unwrap(),
+            b"existing"
+        );
+        assert!(taken.path().join("memory.bin").exists());
+
+        let neither = tempfile::tempdir().unwrap();
+        let message = load(neither.path());
+        assert!(!message.contains("renaming"), "{message}");
+        assert!(!neither.path().join("mem.bin").exists());
     }
 
     /// The direct probe answers exactly what the shell probe it replaced did:

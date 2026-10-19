@@ -566,6 +566,7 @@ The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every
 | `mvmctl build guest-bins` | From a source checkout, build (or reuse from the guest-build cache) every guest artifact mvm owns, for `aarch64` and `x86_64`, and write `mvm-guest-bins-v<version>.tar.gz` and its `.sha256` into the current directory. The archive holds, per architecture: `<arch>/bin/` — `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping`, `mvm-oci-entrypoint` and `mvm-setpriv` as static musl executables (only `mvm-egress-client` and `mvm-addon-dns` are built with `mvm-agentd`'s `addons` feature); `<arch>/initramfs/mvm-guest-agent` — the size-tuned static agent the universal initramfs runs as `/init`; and `<arch>/lib/glibc/` and `<arch>/lib/musl/` — `libmvm_host_services.so`, `libcuda.so.1`, `libcudart.so` and `libnvidia-ml.so.1`, the glibc objects linked against glibc 2.34. `sdk-py/mvm/` carries the in-guest Python SDK once for both architectures. Every executable is checked to be a static ELF for its architecture, and every shared object to be one for its architecture that needs its libc and nothing outside that libc's base libraries, before it is packaged. `manifest.json` records each member's sha256, the workspace version, the producing commit (`source.worktree` is `dirty`, with a fingerprint of the changes, when the tree did not match it), and the guest-source and host-services cdylib source fingerprints; the written archive is re-verified against it before the command reports success. Cross-compiling the glibc objects needs the pinned toolchain's `*-unknown-linux-gnu` targets, which `just payload::toolchain` installs |
 | `mvmctl build guest-bins --out <dir>` | Write the archive and its checksum into `<dir>` (created if missing) |
 | `mvmctl build guest-bins --arch x86_64` | Build only the named architecture; repeat `--arch` for more than one |
+| `mvmctl build guest-bins --check-release-archive <file>` | Read and validate an existing complete archive against this CLI's compiled version using the canonical archive and runtime validators, and print its manifest as JSON. Does not build, fetch, install or boot anything and does not require a source checkout. Refuses `--out` and `--arch`; validates bytes/inventory, not a publisher signature or native execution |
 
 Guest-bins manifest schema 2 also records an `assemblies` declaration per guest
 architecture: assembly format 1, the guest control protocol and its minimum
@@ -575,6 +576,12 @@ computes these from the exact captured archive members before signing; no
 cache fingerprint authenticates them. A producer whose compiled protocol
 source differs from the selected checkout refuses the build: rebuild `mvmctl`
 from that checkout first.
+
+When both guest architectures are selected, `build guest-bins` also runs the
+canonical release-runtime inventory validator before reporting success. A wrong
+version, incomplete required-member inventory or invalid boot assembly refuses
+the build. An explicit single-architecture contributor build remains partial
+and is not a publishable release runtime.
 
 Release runtime verification requires these declarations for both architectures
 and rejects unsupported schemas or assembly formats. Source development
@@ -2062,18 +2069,18 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
 | `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
-| `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. The spec is read as data; no author code runs |
-| `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written |
+| `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. A uv `pyproject.toml` + `uv.lock` at the source root is resolved here for the pack's target and its single `python3NN` runtime package: one sha256-pinned manylinux wheel per runtime dependency, recorded in the lowered workload. Non-registry sources, markers the target does not decide, an unsatisfied `requires-python` and packages without a compatible wheel are refused by name. The spec is read as data; no author code runs |
+| `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written. A pack with uv dependencies also gets `pack-build.json`, the resolved wheel set the flake fetches and installs at build time |
 | `mvmctl pack build SPEC.json --out FILE.mvmpkg --input-observation PATH` | Opt into bounded, unsigned frozen Nix graph diagnostics; publish the no-clobber JSON report only after successful build, health checking and export. Not an admission credential |
 | `mvmctl pack build SPEC.json --out FILE.mvmpkg [--lock FILE] [--health-timeout SECS] [--hypervisor H]` | Compile a locked pack spec, build it in the builder VM, boot its entrypoint as a health check, and seal it into a `.mvmpkg` signed by the host key. The archive carries a sealed-prod posture and a signed environment naming the entrypoint, target and sizing. A stale lock, a non-zero health exit, or any artifact that changes between the health boot and signing is refused, and nothing is signed. Python (`mvm.packs`) and TypeScript (`packs`) write the spec as data |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
-| `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
+| `mvmctl pack pull ns/name[@version] [--json]`             | Fetch and authenticate a registry manifest; install and pin legacy workload packs. Application descriptors return verified metadata only, without downloading or installing the bundle or creating a new pin. JSON reports `status: "verified"` and `installed: false` for applications. Same trust policy and behavior as `mvmctl pull` |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
 | `mvmctl pack registry rm ns/name[@version]`               | Compatibility spelling of `pack rm`                                                                                                                               |
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A registry manifest that is a schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, but nothing is downloaded, installed or newly pinned: text output reads `verified ns/name@version (manifest DIGEST); application bundle not acquired or installed`, and `--json` prints `reference`, `manifest_sha256`, `status: "verified"` and `installed: false`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -2119,6 +2126,32 @@ The disk-input staging filter must preserve every locked file and mode or the
 build is refused. Locked builds do not reuse a resident builder's unrelated
 `/work` or the contributor-source cache. Ordinary contributor builds retain their
 automatic source overrides.
+
+Portable pack production requires the CLI-version-matched signed release runtime
+archive, checksum, and both original signature bundles, plus a current signed
+Linux image-set revocation feed already applied to the producer. A locally built
+Source runtime is not a substitute. Production captures one owned closure before
+builder effects and uses its same verified runtime/initramfs for health and
+export; it refuses a built kernel that differs from the canonical Linux selection.
+The archive retains the original Linux publisher and feed proofs. Consumer
+verification does not build, download, or seed a missing runtime. The canonical
+consumer launch refusal described above remains in force until that launch lane
+is enabled through its separate integration gates. Re-exporting an installed
+bundle with protected boot members is refused rather than silently dropping them.
+Producer health supports HVF's verified kernel descriptor route and same-host
+Linux Firecracker. Firecracker receives a procfs reference to the held unlinked
+descriptor and opens it synchronously during boot configuration, before the
+producer releases that borrow. This route requires an already-loadable ELF or
+arm64 Image; it never extracts a compressed kernel or consults sibling caches.
+Other health backends are refused before runtime acquisition or builder effects.
+A caller-provided kernel continuity digest is not admission or publisher
+authority, and the procfs reference is not an enduring runtime measurement.
+After a producer health attempt, its private build/boot input directories are
+retained on success, failure, and unwind: the health API's workload status and
+stop acknowledgment are not independent evidence that no native reader remains.
+Diagnostics name the retained paths. Remove them only after independently
+confirming the relevant VM has exited; this retention is not a health or cleanup
+receipt.
 
 `pack build --input-observation PATH` explicitly opts into bounded diagnostic
 evidence about the frozen Nix input graph. The builder captures raw flake

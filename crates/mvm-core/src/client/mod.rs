@@ -26,8 +26,8 @@ pub mod mock;
 pub use error::{MvmError, Result};
 
 use dto::{
-    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, PauseOpts,
-    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
+    ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineStartOptions, MachineState,
+    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 
 pub use crate::protocol::telemetry::served::{
@@ -56,6 +56,21 @@ pub trait MvmClient: Send + Sync {
 
     /// Start an already-created (or stopped) machine by id; returns its state.
     async fn start_machine(&self, id: &MachineId) -> Result<MachineState>;
+
+    /// Refuse unsupported requested effects before calling the existing start
+    /// operation. Empty options retain that operation's exact semantics.
+    async fn request_machine_start(
+        &self,
+        id: &MachineId,
+        options: MachineStartOptions,
+    ) -> Result<MachineState> {
+        if options.receipt.is_some() {
+            return Err(MvmError::Rejected {
+                reason: "this provider does not support machine-start receipts".into(),
+            });
+        }
+        self.start_machine(id).await
+    }
 
     /// Stop a machine by id. Idempotent: stopping a stopped machine is `Ok`.
     async fn stop_machine(&self, id: &MachineId) -> Result<()>;
@@ -133,6 +148,65 @@ pub trait MvmClient: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn start_options_default_delegates_and_unsupported_receipt_has_no_start_effect() {
+        let client: Box<dyn MvmClient> = Box::new(mock::MockBackend::default());
+        let created = client
+            .create_machine(MachineSpec::builder("options", "img").unwrap().build())
+            .await
+            .unwrap();
+        for id in [&created.id, &MachineId("missing".into())] {
+            for path in ["/unsupported/receipt.json", ""] {
+                let error = client
+                    .request_machine_start(
+                        id,
+                        MachineStartOptions {
+                            receipt: Some(path.into()),
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(!error.retryable());
+                assert!(matches!(error, MvmError::Rejected { .. }));
+                assert_eq!(
+                    client.inspect_machine(&created.id).await.unwrap().status,
+                    dto::MachineStatus::Stopped
+                );
+            }
+        }
+        assert!(matches!(
+            client
+                .request_machine_start(&MachineId("missing".into()), MachineStartOptions::default())
+                .await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert_eq!(
+            client
+                .request_machine_start(&created.id, MachineStartOptions::default())
+                .await
+                .unwrap()
+                .status,
+            dto::MachineStatus::Running
+        );
+        // A receipt request is not satisfied by an already-running machine.
+        assert!(matches!(
+            client
+                .request_machine_start(
+                    &created.id,
+                    MachineStartOptions {
+                        receipt: Some("/unsupported/receipt.json".into()),
+                    }
+                )
+                .await,
+            Err(MvmError::Rejected { .. })
+        ));
+        client.stop_machine(&created.id).await.unwrap();
+        assert_eq!(
+            client.start_machine(&created.id).await.unwrap().status,
+            dto::MachineStatus::Running
+        );
+    }
 
     // Compile-time proof the trait is object-safe: a `dyn MvmClient` must be
     // constructable, since callers (CLI, studio) hold one behind a box.

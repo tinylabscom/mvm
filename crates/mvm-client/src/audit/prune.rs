@@ -5,17 +5,42 @@ use anyhow::{Context, Result};
 use mvm_core::plan::TenantId;
 use mvm_hostd::audit::{host_keypair, validate_prune_tenant};
 use mvm_hostd::supervisor::{FileAuditSigner, verify_segment_set};
+use serde::{Deserialize, Serialize};
 
 /// Removal requires an explicit commit request; the default only previews.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
 pub enum AuditPruneMode {
     #[default]
     Preview,
     Commit,
 }
 
+/// Configured-host pruning intent. No path, key, or admission override is
+/// accepted. A missing mode previews; deleting evidence requires `commit`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AuditPruneRequest {
+    pub tenant: String,
+    pub through: u64,
+    #[serde(default)]
+    pub mode: AuditPruneMode,
+}
+
+impl AuditPruneRequest {
+    /// Execute the same configured-host operation used by Rust and CLI
+    /// callers. A successful preview never authorizes a later commit.
+    pub fn execute(&self) -> Result<AuditPruneOutcome> {
+        prune_audit(&self.tenant, self.through, self.mode)
+    }
+}
+
 /// Payload-free outcome for CLI, library and other client consumers.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AuditPruneOutcome {
     NothingToPrune {
         floor: u64,

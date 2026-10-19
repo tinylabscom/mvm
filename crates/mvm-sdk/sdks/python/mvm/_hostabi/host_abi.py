@@ -9,6 +9,67 @@ from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
+class AttestationExportReply:
+    payload: List[int]
+    signature: List[int]
+    signer_id: str
+
+
+@dataclass
+class AttestationExportRequest:
+    pass
+
+
+@dataclass
+class AttestationProviderData:
+    compiled: bool
+    feature: str
+    name: str
+
+
+class AttestationPublicKeyFileKind(Enum):
+    public_key_file = 'public_key_file'
+
+
+class AttestationSelfIdentityKind(Enum):
+    self_identity = 'self_identity'
+
+
+@dataclass
+class AttestationStatusReply:
+    providers: List[AttestationProviderData]
+    pubkey_hex: str
+    public_path: str
+    secret_path: str
+    signer_id: str
+
+
+@dataclass
+class AttestationStatusRequest:
+    pass
+
+
+@dataclass
+class AttestationTrust1:
+    kind: AttestationSelfIdentityKind
+
+
+@dataclass
+class AttestationTrust2:
+    kind: AttestationPublicKeyFileKind
+    path: str
+
+
+AttestationTrust = Union[AttestationTrust1, AttestationTrust2]
+
+
+@dataclass
+class AttestationVerifyRequest:
+    report_path: str
+    trust: AttestationTrust
+
+
+@dataclass
 class BackendCapabilitiesReply:
     pass
 
@@ -279,6 +340,40 @@ class GuestProcWaitRequest:
     id: str
     token: str
     timeout_secs: Optional[int] = None
+
+
+@dataclass
+class HardwareMeasurementData:
+    measurement_hex: str
+    provider: str
+
+
+@dataclass
+class ImageRevocationsStatusReply:
+    entries: int
+    issued_at: str
+    not_after: str
+    publication: int
+    sha256: str
+    signer_identity: str
+
+
+@dataclass
+class ImageRevocationsStatusRequest:
+    pass
+
+
+@dataclass
+class ImageRevocationsUpdateReply:
+    issued_at: str
+    publication: int
+    sha256: str
+
+
+@dataclass
+class ImageRevocationsUpdateRequest:
+    bundle_path: str
+    document_path: str
 
 
 class InstanceReadiness1(Enum):
@@ -781,6 +876,18 @@ WaitOutcome = Union[WaitOutcome1, WaitOutcome2, WaitOutcome3]
 
 
 @dataclass
+class AttestationExport:
+    reply: AttestationExportReply
+    request: AttestationExportRequest
+
+
+@dataclass
+class AttestationStatus:
+    reply: AttestationStatusReply
+    request: AttestationStatusRequest
+
+
+@dataclass
 class BackendCapabilities:
     reply: BackendCapabilitiesReply
     request: BackendCapabilitiesRequest
@@ -862,6 +969,18 @@ class GuestProcStreamClose:
 class GuestProcStreamOpen:
     reply: GuestProcStreamOpenReply
     request: GuestProcStreamOpenRequest
+
+
+@dataclass
+class ImageRevocationsStatus:
+    reply: ImageRevocationsStatusReply
+    request: ImageRevocationsStatusRequest
+
+
+@dataclass
+class ImageRevocationsUpdate:
+    reply: ImageRevocationsUpdateReply
+    request: ImageRevocationsUpdateRequest
 
 
 @dataclass
@@ -970,6 +1089,22 @@ class TelemetryStatus:
 class AgentErrorReply:
     kind: RunEntrypointError
     message: str
+
+
+@dataclass
+class AttestationBodyData:
+    boot_measurement: str
+    identity_pubkey_hex: str
+    nonce_hex: str
+    schema_version: int
+    hw_measurement: Optional[HardwareMeasurementData] = None
+
+
+@dataclass
+class AttestationVerifyReply:
+    body: AttestationBodyData
+    signer_id: str
+    trust: AttestationTrust
 
 
 @dataclass
@@ -1206,6 +1341,12 @@ class StreamEvent:
 
 
 @dataclass
+class AttestationVerify:
+    reply: AttestationVerifyReply
+    request: AttestationVerifyRequest
+
+
+@dataclass
 class EntrypointCall:
     reply: EntrypointCallReply
     request: EntrypointCallRequest
@@ -1319,6 +1460,9 @@ class MachineRun:
 
 @dataclass
 class HostAbi:
+    attestation_export: AttestationExport
+    attestation_status: AttestationStatus
+    attestation_verify: AttestationVerify
     backend_capabilities: BackendCapabilities
     entrypoint_call: EntrypointCall
     guest_cp: GuestCp
@@ -1338,6 +1482,8 @@ class HostAbi:
     guest_proc_stream_next: GuestProcStreamNext
     guest_proc_stream_open: GuestProcStreamOpen
     guest_proc_wait: GuestProcWait
+    image_revocations_status: ImageRevocationsStatus
+    image_revocations_update: ImageRevocationsUpdate
     machine_create: MachineCreate
     machine_exec: MachineExec
     machine_inspect: MachineInspect

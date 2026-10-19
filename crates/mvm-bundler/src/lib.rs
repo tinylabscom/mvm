@@ -41,5 +41,8 @@ pub use export::{
     ExportedBundle, StagedBundle, export_bundle_with_signer, guest_sidecar_path,
     stage_bundle_with_signer,
 };
-pub use inputs::{BootAssetsInputs, BundleExportInputs, CliBootAssetsInputs, PostureInputs};
+pub use inputs::{
+    BootAssetsInputs, BundleExportInputs, CanonicalLinuxProofInputs, CliBootAssetsInputs,
+    PostureInputs,
+};
 pub use signer::BundleSigner;

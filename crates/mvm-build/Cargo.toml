@@ -90,6 +90,7 @@ serde_json.workspace = true
 serde_jcs = "0.1"
 # DSSE envelope payloads and signatures are base64 on the wire.
 base64.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
@@ -103,6 +104,7 @@ ed25519-dalek.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+gix = { version = "0.87.1", default-features = false, features = ["attributes", "excludes", "sha1"] }
 tracing.workspace = true
 # `builder_protocol::{HostVmRequest,HostVmResponse}`
 # carry a `JobId(Uuid)` to disambiguate concurrent dispatches over

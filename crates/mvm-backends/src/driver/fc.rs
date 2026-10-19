@@ -32,6 +32,7 @@ use crate::fc::{
     FcCapabilities, FirecrackerGuard, api_put_session, api_session, fc_pid_path,
     firecracker_vsock_uds_path, read_firecracker_pid, start_vm_firecracker_bounded,
 };
+#[cfg(test)]
 use mvm_vmm::driver::spec::KernelImage;
 use mvm_vmm::driver::spec::{BlockDev, VmmSpec, VsockDirection, VsockPort};
 use mvm_vmm::driver::traits::{
@@ -41,6 +42,11 @@ use mvm_vmm::driver::traits::{
 use mvm_vmm::host::boot_config::{
     FcDrive, balloon_body, boot_source_body, logger_body, machine_config_body, vsock_body,
 };
+
+mod kernel;
+#[cfg(all(test, unix))]
+use kernel::fc_descriptor_recipe;
+use kernel::resolve_fc_kernel_path;
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -180,20 +186,6 @@ fn fc_base_bootargs(has_disk: bool) -> String {
         // Verity / initramfs boot: the initramfs PID 1 owns root/init selection,
         // so only the serial-console base is emitted here.
         console.to_string()
-    }
-}
-
-/// Resolve the explicit host kernel path from the spec, rejecting a bundled
-/// kernel. Firecracker has no bundled kernel, so a `Bundled` spec must not
-/// reach the API.
-fn resolve_fc_kernel_path(spec: &VmmSpec) -> Result<PathBuf> {
-    match &spec.kernel {
-        KernelImage::Path(p) => Ok(p.clone()),
-        KernelImage::Bundled => {
-            bail!(
-                "the Firecracker driver requires an explicit kernel Image; VmmSpec.kernel is Bundled"
-            )
-        }
     }
 }
 
@@ -999,7 +991,10 @@ impl VmmDriver for FcDriver {
                 req.child_vm_name
             ))
         })?;
-        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"));
+        let devices = crate::fc::host::fork_devices_for(req.child_vm_name, req.child_dir)
+            .map_err(|error| StandbyError::ClaimFailed(format!("{error:#}")))?;
+        let io = crate::fc::io::FirecrackerIO::new(req.child_dir.join("fc.socket"))
+            .forking_onto(devices);
         crate::fc::host::resume_preloaded_fork_child(
             &io,
             req.child_dir,
@@ -1303,6 +1298,15 @@ impl VmmDriver for FcDriver {
         });
         firecracker_guard.defuse();
         Ok(vm)
+    }
+
+    #[cfg(unix)]
+    fn boot_verified_kernel(
+        &self,
+        spec: &VmmSpec,
+        kernel: &mvm_vmm::host::restore_image::VerifiedRestoreFile,
+    ) -> Result<Box<dyn RunningVm>> {
+        kernel::boot_descriptor(self, spec, kernel)
     }
 
     fn attach(&self, id: &VmId) -> Result<Box<dyn RunningVm>> {
@@ -1787,6 +1791,107 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_recipe_requires_loadable_bytes_without_extracting_siblings() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("held");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = root.path().join("slot-kernel");
+        let spec = spec_with(KernelImage::Path(source.clone()), vec![], vec![]);
+        for bytes in [
+            b"\x7fELF synthetic format fixture".to_vec(),
+            {
+                let mut image = vec![0_u8; 64];
+                image[56..60].copy_from_slice(b"ARM\x64");
+                image
+            },
+            b"compressed or otherwise unsupported kernel".to_vec(),
+        ] {
+            std::fs::write(&source, &bytes).unwrap();
+            let held = mvm_vmm::host::restore_image::VerifiedRestoreFile::prepare(
+                &source,
+                &private,
+                &mvm_core::plan::bundle::sha256_hex(&bytes),
+            )
+            .unwrap();
+            assert_eq!(
+                fc_descriptor_recipe(&spec, &held).is_ok(),
+                mvm_vmm::host::fc_kernel::is_elf(&bytes)
+                    || mvm_vmm::host::fc_kernel::is_arm64_image(&bytes)
+            );
+            assert!(
+                fc_descriptor_recipe(&spec_with(KernelImage::Bundled, vec![], vec![]), &held)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+            assert_eq!(std::fs::read_dir(&private).unwrap().count(), 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descriptor_boot_source_reads_held_bytes_after_slot_replacement() {
+        use std::os::unix::fs::FileExt;
+        use std::os::unix::fs::PermissionsExt;
+
+        // This is a real cross-process procfs read of the boot-source recipe,
+        // not a Firecracker/KVM boot or a publisher signature witness.
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("held");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = root.path().join("slot-kernel");
+        let original = b"\x7fELF immutable producer continuity fixture";
+        std::fs::write(&source, original).unwrap();
+        let spec = spec_with(KernelImage::Path(source.clone()), vec![], vec![]);
+        let held = mvm_vmm::host::restore_image::VerifiedRestoreFile::prepare(
+            &source,
+            &private,
+            &mvm_core::plan::bundle::sha256_hex(original),
+        )
+        .unwrap();
+        let recipe = fc_descriptor_recipe(&spec, &held).unwrap();
+        let path = resolve_fc_kernel_path(&recipe).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        std::fs::write(&source, b"replacement after final verification").unwrap();
+        assert_eq!(
+            mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(&path).unwrap(),
+            path,
+            "descriptor mode must not extract, materialize, or consult a sibling cache"
+        );
+        let puts = fc_config_api_puts(
+            &recipe,
+            path.to_str().unwrap(),
+            "/unused/vsock",
+            "/unused/log",
+            FcCapabilities::default(),
+        );
+        let boot: serde_json::Value =
+            serde_json::from_str(body_for(&puts, "/boot-source")).unwrap();
+        assert_eq!(boot["kernel_image_path"], path.to_str().unwrap());
+        let read = mvm_core::env_hygiene::helper_command("/bin/cat")
+            .arg(boot["kernel_image_path"].as_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(read.status.success());
+        assert_eq!(read.stdout, original);
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(&private).unwrap().count(), 0);
+        // Match BootConfig::new's synchronous open while the borrow is
+        // alive. The native-open file, not the saved procfs name, owns the
+        // bytes after this handoff. FD numbers can be reused after Drop.
+        let native = std::fs::File::open(&path).unwrap();
+        drop(held);
+        let mut consumed = vec![0; original.len()];
+        native.read_exact_at(&mut consumed, 0).unwrap();
+        assert_eq!(consumed, original);
+        // Never reopen `path` here: its validity ended with the borrow.
     }
 
     #[test]

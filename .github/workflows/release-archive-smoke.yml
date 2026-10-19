@@ -30,6 +30,11 @@ on:
         required: false
         type: string
         default: ""
+      run_attempt:
+        description: Exact attempt of the named run; required when run_id is set
+        required: false
+        type: string
+        default: ""
       tag:
         description: Version the archive's mvmctl must report; empty for a dry run
         required: false
@@ -39,6 +44,10 @@ on:
     inputs:
       run_id:
         description: Id of the release workflow run whose build uploaded the archive
+        required: true
+        type: string
+      run_attempt:
+        description: Exact producing attempt of the named release run
         required: true
         type: string
       tag:
@@ -62,6 +71,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Require explicit attempt for a named run
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          RUN_ATTEMPT: ${{ inputs.run_attempt }}
+        run: |
+          if [ -n "$RUN_ID" ]; then
+            [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]] && [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]] || exit 1
+          elif [ -n "$RUN_ATTEMPT" ]; then
+            echo "::error::run_attempt requires run_id" >&2
+            exit 1
+          fi
+
       - name: Grant /dev/kvm access for the job
         run: |
           set -euo pipefail
@@ -78,14 +99,14 @@ jobs:
         if: inputs.run_id == ''
         uses: actions/download-artifact@v8
         with:
-          name: mvmctl-x86_64-unknown-linux-gnu
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-archive
 
       - name: Download the archive the named release run built
         if: inputs.run_id != ''
         uses: actions/download-artifact@v8
         with:
-          name: mvmctl-x86_64-unknown-linux-gnu
+          name: mvmctl-x86_64-unknown-linux-gnu-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/release-archive
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
@@ -94,14 +115,14 @@ jobs:
         if: inputs.run_id == ''
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
 
       - name: Download the guest runtime the named release run built
         if: inputs.run_id != ''
         uses: actions/download-artifact@v8
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-attempt-${{ inputs.run_attempt }}
           path: ${{ runner.temp }}/guest-runtime
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}

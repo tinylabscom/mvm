@@ -1,0 +1,491 @@
+{
+  "version": 1,
+  "producer": {
+    "revision": "f5ed15188114f2e3b7e27717640f0cbd37f53914",
+    "path": "scripts/emit-local-manifest.py",
+    "sha256": "45b93439cdebeba9c2d84749ec7c9afcfbe2c46802a756d84febb8b441583387"
+  },
+  "vectors": [
+    {
+      "head": "0000000000000000000000000000000000000000",
+      "index": [],
+      "working": [],
+      "untracked": [],
+      "output": "f05485947d595bce2f26829620e3dfcdd28c7248b6dc0d20681c1ad2699b1ecb"
+    },
+    {
+      "head": "0000000000000000000000000000000000000000",
+      "index": [],
+      "working": [],
+      "untracked": [
+        [
+          "ff",
+          33188,
+          "00ff0a"
+        ]
+      ],
+      "output": "06e6284c46206320bd0679940642175026ef97888a63afd2e166c5119ad88787"
+    },
+    {
+      "head": "1111111111111111111111111111111111111111",
+      "index": [
+        [
+          "ff",
+          33261,
+          2,
+          7,
+          "2222222222222222222222222222222222222222"
+        ]
+      ],
+      "working": [
+        [
+          "ff",
+          0,
+          ""
+        ]
+      ],
+      "untracked": [
+        [
+          "6c",
+          40960,
+          "ff0a"
+        ]
+      ],
+      "output": "7ff6f04e29602de8984dde4663b9b41edd4b441d37c66e74d0c477d0b175171d"
+    },
+    {
+      "head": "1111111111111111111111111111111111111111",
+      "index": [
+        [
+          "73",
+          57344,
+          0,
+          0,
+          "2222222222222222222222222222222222222222"
+        ]
+      ],
+      "working": [
+        [
+          "73",
+          57344,
+          "222222222222222222222222222222222222222200"
+        ]
+      ],
+      "untracked": [],
+      "output": "e535f6bf8dc4488cf36988106591011f5fdcbe778163423d006fc3bfe62c1cd8"
+    }
+  ],
+  "observation_cases": [
+    {
+      "name": "ignored-files",
+      "unix": false,
+      "linked": false,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ],
+        [
+          "2e67697469676e6f7265",
+          "file",
+          "2a2e6c6f670a216b6565702e6c6f670a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "69676e6f7265642e6c6f67",
+              "file",
+              "69676e6f726564"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "69676e6f7265642e6c6f67",
+              "file",
+              "69676e6f726564206368616e676564"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "6b6565702e6c6f67",
+              "file",
+              "696e636c75646564"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "3b0891381b438f23eedf2f47f913d2ff98b43494",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "3b0891381b438f23eedf2f47f913d2ff98b43494",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "3b0891381b438f23eedf2f47f913d2ff98b43494",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "3b0891381b438f23eedf2f47f913d2ff98b43494",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "e30b4f10cb06c6565591e1462058d5f749bd0dee7002ed201de34fdcad193b0a"
+          }
+        }
+      ]
+    },
+    {
+      "name": "staged-and-unstaged",
+      "unix": false,
+      "linked": false,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "61",
+              "file",
+              "7374616765640a"
+            ]
+          ],
+          "stage": true
+        },
+        {
+          "files": [
+            [
+              "61",
+              "file",
+              "776f726b696e670a"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "61",
+              "file",
+              "626173650a"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "c0efe84fd597d43df9d5a2b8e466181aee1818cacef15690a43e0fc814352827"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "d4e499348bd42b872949d1e77057b16f93031b5ea78f82a0455dce2cb2162e33"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "12bb3a638cef75f4666b81f1633470deb148e5820b7f43e41c1156516ad55bdf"
+          }
+        }
+      ]
+    },
+    {
+      "name": "linked-worktree",
+      "unix": false,
+      "linked": true,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "61",
+              "file",
+              "6c696e6b656420656469740a"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "5504247ef1ffc2b996e290999dfd106d2e2c5d6a14ec1180be6f266f58fced19"
+          }
+        }
+      ]
+    },
+    {
+      "name": "symlink-targets",
+      "unix": true,
+      "linked": false,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "6c696e6b",
+              "symlink",
+              "61"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "6c696e6b",
+              "symlink",
+              "64616e676c696e67"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "4363587fce2a1632bd4e9c82c5e9da230fc2dc5e9c2b732ffbfc930a031ff6f1"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "921a4b9fa9bc97253f4e35bf71d256d425c2e160fce9cce67b699ec387606ee2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "binary-file",
+      "unix": false,
+      "linked": false,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "62696e617279",
+              "file",
+              "00ff0a"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "62696e617279",
+              "file",
+              "00ff0a00"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "36ca876b9dadae8a98ecd2a7b55781070e75efad9624468d42dded9b4b6daa72"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "a68ff37f5a479fb0d52301532dacb58854078234c8ec8d6ed2d13c8c61c6eaa2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "non-utf8-name",
+      "unix": true,
+      "linked": false,
+      "initial": [
+        [
+          "61",
+          "file",
+          "626173650a"
+        ]
+      ],
+      "steps": [
+        {
+          "files": [],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "78ff0a",
+              "file",
+              "00ff0a"
+            ]
+          ],
+          "stage": false
+        },
+        {
+          "files": [
+            [
+              "78ff0a",
+              "file",
+              "ff000a"
+            ]
+          ],
+          "stage": false
+        }
+      ],
+      "expected": [
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "clean"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "fb615f09c2ee8ec690b78a5ee395f5f599ec8bdfbb61ab3533bc5969396b13d0"
+          }
+        },
+        {
+          "commit": "c0defb9bbe5a4685583e2357ca16af4a44960d36",
+          "worktree": {
+            "state": "dirty",
+            "fingerprint_version": 2,
+            "fingerprint": "5ce5e8548679eb66b491002d24295de17daf25ae97c41bbb9bee65cd9a1016de"
+          }
+        }
+      ]
+    }
+  ],
+  "mutation": {
+    "path": "666c616b652e6e6978",
+    "body": "6d75746174696f6e20647572696e6720636f70790a",
+    "after": {
+      "commit": "8256446c406b61ecc32924eed8b309efbd130dde",
+      "worktree": {
+        "state": "dirty",
+        "fingerprint_version": 2,
+        "fingerprint": "71e939b05bcf1bd4d41747332979bc0fc82eca9c365d08f3fa71b7594f4556e3"
+      }
+    }
+  },
+  "repository": {
+    "commit": "d40e7ed3d340d03c7ad6910387c60943c0ff3d0d",
+    "dirty": {
+      "state": "dirty",
+      "fingerprint_version": 2,
+      "fingerprint": "62287e21e3b30dc2978c2e7e05f65e9770e6a641048161493425b0799c734bae"
+    }
+  }
+}
