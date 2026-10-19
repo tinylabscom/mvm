@@ -691,6 +691,21 @@
       "reason": "libkrun VM lifecycle operations are validated by backend-specific integration tests and live libkrun BDD scenarios."
     },
     {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((None, Default::default()))",
+      "reason": "Test-support helper, compiled only under the `test-support` feature, which this lane does not build for mvm-backends, so the mutant is never compiled here. It forwards two fields of relay_libkrun_supervisor_config, whose kernel mapping is asserted directly; the helper's own test runs under `--features test-support`."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(String::new()), Default::default()))",
+      "reason": "Test-support helper, compiled only under the `test-support` feature, which this lane does not build for mvm-backends, so the mutant is never compiled here. It forwards two fields of relay_libkrun_supervisor_config, whose kernel mapping is asserted directly; the helper's own test runs under `--features test-support`."
+    },
+    {
+      "file": "crates/mvm-backends/src/driver/libkrun.rs",
+      "mutant": "replace map_kernel_for_test -> Result<(Option<String>, mvm_core::kernel_format::KernelFormat)> with Ok((Some(\"xyzzy\".into()), Default::default()))",
+      "reason": "Test-support helper, compiled only under the `test-support` feature, which this lane does not build for mvm-backends, so the mutant is never compiled here. It forwards two fields of relay_libkrun_supervisor_config, whose kernel mapping is asserted directly; the helper's own test runs under `--features test-support`."
+    },
+    {
       "file": "crates/mvm-backends/src/fc/host.rs",
       "mutant": "replace == with != in is_firecracker_pid_running",
       "reason": "Only compiled on non-Linux hosts (the Linux build reads /proc directly), so the Linux mutation lane never builds the mutated code; it is covered on macOS by the shell-probe tests, not by this lane."
