@@ -668,6 +668,7 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn mk_value(s: &str) -> SecretBox<String> {
@@ -727,6 +728,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("k");
         fs::write(&path, b"plaintext").unwrap();
+        #[cfg(unix)]
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         let err = store.get("acme", "k").unwrap_err();
         let err = format!("{err:#}");
@@ -737,6 +739,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_store_key_is_created_at_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -750,6 +753,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_store_key_with_loose_permissions_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let key_path = tmp.path().join(FILE_STORE_KEY_FILENAME);
@@ -822,6 +826,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_get_refuses_world_readable() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -900,6 +905,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_put_creates_tenant_dir_at_0700() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());
@@ -913,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_put_creates_secret_at_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp.path());

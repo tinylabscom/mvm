@@ -582,6 +582,7 @@ fn nibble_from(b: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     fn make_snap(dir: &Path) -> SnapshotFiles {
@@ -720,8 +721,11 @@ mod tests {
         let path = tmp.path().join("snapshot.key");
         let key = load_or_init_key(&path).unwrap();
         assert_eq!(key.expose_secret().len(), HMAC_KEY_BYTES);
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "key file must be mode 0600");
+        #[cfg(unix)]
+        {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "key file must be mode 0600");
+        }
     }
 
     #[test]
@@ -738,6 +742,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_load_or_init_tightens_loose_perms() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("snapshot.key");
@@ -755,6 +760,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("snapshot.key");
         std::fs::write(&path, b"short").unwrap();
+        #[cfg(unix)]
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let err = load_or_init_key(&path).unwrap_err();
         assert!(err.to_string().contains("expected 32"));
@@ -933,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_seal_writes_sidecar_mode_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let files = make_snap(tmp.path());
@@ -1108,6 +1115,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_epoch_store_writes_mode_0600() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("epoch");

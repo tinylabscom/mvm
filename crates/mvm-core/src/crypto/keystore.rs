@@ -473,15 +473,15 @@ mod tests {
     // FileKeyProvider
     // ──────────────────────────────────────────────────────────────
 
-    fn write_key_file(dir: &Path, tenant: &str, bytes: &[u8], mode: u32) -> PathBuf {
+    fn write_key_file(dir: &Path, tenant: &str, bytes: &[u8], _mode: u32) -> PathBuf {
+        #[cfg(unix)]
         use std::os::unix::fs::OpenOptionsExt;
         let path = dir.join(format!("{tenant}.key"));
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&path)
-            .unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(_mode);
+        let mut f = options.open(&path).unwrap();
         std::io::Write::write_all(&mut f, bytes).unwrap();
         path
     }
@@ -499,6 +499,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_key_provider_reads_0400_key() {
         use secrecy::ExposeSecret;
         let tmp = tempfile::tempdir().unwrap();
@@ -511,6 +512,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn file_key_provider_rejects_world_readable() {
         // mode 0644 is the canonical "looks fine, isn't" — refuse
         // to read rather than silently expose the key bytes.
@@ -686,10 +688,15 @@ mod tests {
     #[test]
     fn a_key_file_with_an_unsafe_mode_or_length_is_invalid() {
         let tmp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
         write_key_file(tmp.path(), "loose", &[0u8; KEY_SIZE], 0o644);
         write_key_file(tmp.path(), "short", b"short", 0o600);
         let provider = FileKeyProvider::with_dir(tmp.path());
-        for tenant in ["loose", "short"] {
+        for tenant in [
+            #[cfg(unix)]
+            "loose",
+            "short",
+        ] {
             let err = provider.get_data_key(tenant).unwrap_err();
             assert_eq!(
                 KeyLookupFailure::classify(&err),

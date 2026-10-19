@@ -1043,6 +1043,7 @@ mod tests {
     use rand::Rng;
     use serde::Deserialize;
     use std::io::Cursor;
+    #[cfg(unix)]
     use std::time::Duration;
 
     fn test_keypair() -> SigningKey {
@@ -1051,6 +1052,7 @@ mod tests {
         SigningKey::from_bytes(&seed)
     }
 
+    #[cfg(unix)]
     fn pair() -> (
         std::os::unix::net::UnixStream,
         std::os::unix::net::UnixStream,
@@ -1074,6 +1076,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn handshake_host_and_guest_succeed() {
         let (mut host_stream, mut guest_stream) = pair();
         let host_key = test_keypair();
@@ -1383,6 +1386,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn handshake_with_wrong_anchor_fails() {
         let (mut host_stream, mut guest_stream) = pair();
         let host_key = test_keypair();

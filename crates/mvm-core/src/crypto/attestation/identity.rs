@@ -142,6 +142,7 @@ impl IdentityKey {
 mod tests {
     use super::*;
     use rand::Rng as _;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use tempfile::TempDir;
 
@@ -159,12 +160,15 @@ mod tests {
         assert!(secret.exists());
         assert!(public.exists());
 
-        let dmode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
-        let smode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
-        let pmode = std::fs::metadata(&public).unwrap().permissions().mode() & 0o777;
-        assert_eq!(dmode, 0o700, "identity directory must be 0700");
-        assert_eq!(smode, SECRET_MODE, "secret half must be 0600");
-        assert_eq!(pmode, PUBLIC_MODE, "public half must be 0644");
+        #[cfg(unix)]
+        {
+            let dmode = std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777;
+            let smode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+            let pmode = std::fs::metadata(&public).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dmode, 0o700, "identity directory must be 0700");
+            assert_eq!(smode, SECRET_MODE, "secret half must be 0600");
+            assert_eq!(pmode, PUBLIC_MODE, "public half must be 0644");
+        }
     }
 
     #[test]
@@ -180,6 +184,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn refuses_loose_perms_above_0600() {
         let dir = fresh_dir();
         load_or_init_at(dir.path()).expect("init");
@@ -201,8 +206,11 @@ mod tests {
 
         let secret = dir.path().join(SECRET_FILENAME);
         std::fs::write(&secret, [0u8; 16]).unwrap();
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&secret, perms).unwrap();
+        #[cfg(unix)]
+        {
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&secret, perms).unwrap();
+        }
 
         let err = load_or_init_at(dir.path()).expect_err("must refuse");
         assert!(
