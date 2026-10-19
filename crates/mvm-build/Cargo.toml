@@ -66,12 +66,6 @@ mvm-fs.workspace = true
 # Reads a builder image's boot ABI marker off the ext4 image on the host.
 # Already in the closure through mvm-fs.
 ext4-view.workspace = true
-# `install_app_deps` reuses
-# `mvm_compiler::deps_audit::{verify_sealed_volume, VolumeError}`
-# for cache-hit verification. The orchestrator owns cache probes and
-# installation dispatch; compiler audit primitives keep the supervisor
-# and builder VM on the same types.
-mvm-compiler.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
@@ -122,6 +116,8 @@ nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl", "fs"
 [target.'cfg(unix)'.dependencies]
 mvm-agentd.workspace = true
 mvm-vmm.workspace = true
+# App-dependency orchestration shares the compiler's sealed-volume verifier.
+mvm-compiler.workspace = true
 libkrun-sys = { workspace = true, optional = true }
 # `LibkrunNetworkProvider` implements the optional backend's network seam.
 mvm-net = { workspace = true, optional = true }
