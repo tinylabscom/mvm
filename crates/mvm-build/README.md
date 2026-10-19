@@ -46,8 +46,11 @@ provenance so admission can bind the files that are later booted.
 
 ## Features
 
-Builder orchestration and pure ext4 materialization are unconditional library
-capabilities. The remaining opt-ins are `manifest-verify`,
+Repository observation, local manifest production, source/cache primitives and
+read-only ext4 contract validation are platform-neutral library capabilities.
+Builder orchestration, artifact acquisition and VM runtime modules are exposed
+only on Unix hosts; Windows support does not include executing builder jobs.
+Unix public module paths remain unchanged through reexports. The remaining opt-ins are `manifest-verify`,
 `contributor-bootstrap`, and `release-channel`; native libkrun linkage remains
 behind the `libkrun-sys` crate's own feature. Platform-specific operations still
 run only on supported hosts.

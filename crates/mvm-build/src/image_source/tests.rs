@@ -59,6 +59,7 @@ fn the_process_resolver_defaults_to_released_without_an_explicit_selector() {
 }
 
 #[test]
+#[cfg(unix)]
 fn recorded_tier_reads_the_default_image_sidecar_and_fails_closed() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let home = tempfile::tempdir().unwrap();
@@ -92,6 +93,7 @@ fn recorded_tier_reads_the_default_image_sidecar_and_fails_closed() {
 }
 
 #[test]
+#[cfg(unix)]
 fn recorded_tier_reads_the_builder_cache_provenance_and_scopes_to_the_caches() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let home = tempfile::tempdir().unwrap();
