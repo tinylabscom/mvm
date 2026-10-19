@@ -141,7 +141,15 @@ export class Session {
     }
     this.cleanupBusy = true;
     try {
-      if (this.stopPhase === "starting" || this.stopPhase === "unknown") {
+      if (this.stopPhase === "unknown") {
+        // Let the same C allocation decide pre-dispatch release. Neither
+        // the start error nor its wire status authorizes SDK cleanup.
+        this.context.close();
+        this.context.free();
+        this.stopPhase = "closed";
+        return;
+      }
+      if (this.stopPhase === "starting") {
         throw this.startFailure(new MvmTransportError("original session start is not ready for cleanup"));
       }
       if (this.stopPhase === "running") {

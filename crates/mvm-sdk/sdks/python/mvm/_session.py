@@ -339,6 +339,21 @@ class Session:
             self._cleanup_lock.release()
 
     def _stop_original(self) -> None:
+        if (
+            self._host_backed
+            and self._start_phase == "unknown"
+            and (self._start_task is None or self._start_task.done())
+        ):
+            if self._context is None:
+                raise MvmTransportError("session has no original owning context")
+            # Unknown is not proof. Only the original C close can establish
+            # a known pre-dispatch failure; it refuses ambiguous starts.
+            self._context.close()
+            self._context.free()
+            self._stop_phase = "closed"
+            self._start_phase = "finished"
+            self._active = False
+            return
         if self._host_backed and (
             self._start_phase in ("prepared", "starting", "unknown")
             or (self._start_task is not None and not self._start_task.done())

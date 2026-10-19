@@ -13,6 +13,68 @@ import pytest
 import mvm
 from mvm import _hostlib
 
+def test_unknown_session_release_uses_original_context_close_and_checked_free(monkeypatch):
+    import ctypes
+    import json
+
+    monkeypatch.setenv("MVM_NO_VM", "0")
+    methods = []
+    def transport(method, _request):
+        methods.append(method)
+        return 6, json.dumps({
+            "code": "REJECTED", "message": "local fixture", "retryable": False
+        }).encode()
+    monkeypatch.setattr(_hostlib, "_invoke", transport)
+    with pytest.raises(_hostlib.OwnedContextFailure) as caught:
+        with mvm.session("fixture"):
+            pytest.fail("a refused start must not run its body")
+    owner = caught.value.session
+    context = caught.value.recovery
+    primary = caught.value.primary_error
+    calls = []
+    class Library:
+        close_ok = False
+        free_ok = False
+        def mvm_hostlib_context_close(self, _pointer, out):
+            calls.append("close")
+            out._obj.len = 0
+            return 0 if self.close_ok else 5
+        def mvm_hostlib_context_checked_free(self, pointer):
+            calls.append("free")
+            if not self.free_ok:
+                return 5
+            pointer._obj.value = None
+            return 0
+        def mvm_hostlib_free(self, _out):
+            pass
+    # Actual SDK receiver and C outcome adapter, not a native allocation/proof.
+    library = Library()
+    context._pointer = ctypes.c_void_p(123)
+    context._library = library
+    for close_ok in [False, True]:
+        library.close_ok = close_ok
+        with pytest.raises(_hostlib.OwnedContextFailure) as retry:
+            owner.retry_stop()
+        assert retry.value.primary_error is primary
+        assert retry.value.session is owner
+        assert retry.value.recovery is context
+        assert owner._start_phase == "unknown"
+        assert not context._freed
+        assert context._pointer.value == 123
+        assert "local fixture" not in str(retry.value)
+    assert len(owner._cleanup_errors) == 2
+    history = list(owner._cleanup_errors)
+    library.free_ok = True
+    owner.retry_stop()
+    assert owner._start_phase == "finished" and owner._stop_phase == "closed"
+    assert not owner._active and context._pointer.value is None
+    assert owner._start_error is primary
+    assert owner._cleanup_errors == history
+    finished_calls = list(calls)
+    owner.retry_stop()
+    assert calls == finished_calls
+    assert methods == ["session.start"]
+
 def test_actual_session_retains_body_and_cleanup_errors_and_retries_cleanup_only(monkeypatch):
     monkeypatch.setenv("MVM_NO_VM", "0")
     primary = ValueError("body fixture")

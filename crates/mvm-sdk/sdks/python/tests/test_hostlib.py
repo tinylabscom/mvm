@@ -25,7 +25,8 @@ from mvm._errors.types import (
 )
 
 
-def test_context_close_and_free_refusal_hold_original_pointer_and_library(monkeypatch):
+@pytest.mark.parametrize("unknown_start", [False, True])
+def test_context_close_and_free_refusal_hold_original_pointer_and_library(monkeypatch, unknown_start):
     import ctypes
 
     class Function:
@@ -75,9 +76,21 @@ def test_context_close_and_free_refusal_hold_original_pointer_and_library(monkey
     status, body = context._invoke("transport.fixture", b"{}")
     assert status == 0 and json.loads(body) == {}
     assert negotiation == [False]
+    original = None
+    if unknown_start:
+        library.mvm_hostlib_context_call = Function(lambda *args: library.reply(
+            args[-1], 6, {"code": "REJECTED", "message": "local fixture", "retryable": False}
+        ))
+        with pytest.raises(BaseException) as failed:
+            context.call("session.start", {"workload": "fixture"})
+        original = failed.value
+        assert context._session_error is original
     with pytest.raises(HostLibraryError):
         context.close()
     assert context._pointer.value == 123 and context._library is library
+    if unknown_start:
+        assert context._session_phase == "unknown"
+        assert context._session_error is original
     with pytest.raises(MvmTransportError):
         context.free()
     assert context._pointer.value == 123
@@ -85,6 +98,9 @@ def test_context_close_and_free_refusal_hold_original_pointer_and_library(monkey
     context.close()
     context.free()
     assert context._pointer.value is None
+    if unknown_start:
+        assert context._session_phase == "finished"
+        assert context._session_error is original
 
 
 def test_context_refuses_second_session_start_and_foreign_stop_before_transport(hostlib):

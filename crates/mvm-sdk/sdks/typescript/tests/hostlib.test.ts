@@ -34,6 +34,44 @@ import type { HostLibraryFailure } from "../src/_hostlib.js";
 
 describe("caller-owned context transport boundary", () => {
   afterEach(() => setInvokeForTesting(null));
+  it("only clears unknown start after same-slot C close, retaining errors on failure", () => {
+    setInvokeForTesting(() => [6, Buffer.from(JSON.stringify({
+      code: "REJECTED", message: "preparation fixture", retryable: false,
+    }))]);
+    const context = new NativeContext();
+    const slot: unknown[] = [{}];
+    const cleanup = new Error("private cleanup fixture");
+    let release = false;
+    let closes = 0;
+    let frees = 0;
+    // In-process C transport fixture only; real provenance is tested in Rust.
+    const shared = { free: () => {}, koffi: { decode: () => [] } };
+    Object.assign(context, {
+      slot, shared,
+      functions: {
+        close: () => { closes++; if (!release) throw cleanup; return 0; },
+        free: () => { frees++; slot[0] = null; return 0; },
+      },
+    });
+    let original: unknown;
+    try { context.call("session.start", {}); } catch (error) { original = error; }
+    const state = context as unknown as { sessionPhase: string; sessionError: unknown };
+    expect(state.sessionPhase).toBe("unknown");
+    expect(() => context.close()).toThrow(cleanup);
+    expect(state.sessionPhase).toBe("unknown");
+    expect(state.sessionError).toBe(original);
+    expect(() => context.free()).toThrow();
+    expect(frees).toBe(0);
+    release = true;
+    context.close();
+    context.free();
+    expect(state.sessionPhase).toBe("finished");
+    expect(state.sessionError).toBe(original);
+    expect(slot[0]).toBeNull();
+    expect(closes).toBe(2);
+    expect(frees).toBe(1);
+  });
+
   it("retains the actual context on a transport failure and cannot serialize it", () => {
     setInvokeForTesting(() => [5, Buffer.from(JSON.stringify({
       code: "CONFLICT", message: "local fixture", retryable: false,

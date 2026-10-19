@@ -407,6 +407,13 @@ class NativeContext:
         self._control("retry_stop")
 
     def close(self) -> None:
+        if self._session_phase == "unknown" and self._pointer:
+            # Only the actual C allocation can establish that preparation
+            # never dispatched. A recorder/no-allocation reply cannot.
+            self._control("close")
+            self._session_phase = "finished"
+            self._closed = True
+            return
         self._require_session_quiescent()
         self._control("close")
         self._closed = True

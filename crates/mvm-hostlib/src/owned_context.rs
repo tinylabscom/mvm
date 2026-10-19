@@ -81,9 +81,36 @@ impl ContextState {
     }
 
     fn call(&mut self, method: &[u8], request: &[u8]) -> Outcome {
+        if method == crate::entrypoint::SESSION_START.as_bytes() {
+            return self.call_start_using(request, crate::entrypoint::start_owned);
+        }
         self.call_using(method, request, |method, request| {
             crate::handle(true, method, request, &crate::Local)
         })
+    }
+
+    fn call_start_using(
+        &mut self,
+        request: &[u8],
+        start: impl FnOnce(&[u8]) -> crate::entrypoint::OwnedStartAttempt,
+    ) -> Outcome {
+        let mut known_error = None;
+        let outcome = self.call_using(
+            crate::entrypoint::SESSION_START.as_bytes(),
+            request,
+            |_, request| match start(request) {
+                crate::entrypoint::OwnedStartAttempt::KnownNotDispatched { outcome, error } => {
+                    known_error = Some(error);
+                    outcome
+                }
+                crate::entrypoint::OwnedStartAttempt::MayHaveDispatched(outcome) => outcome,
+            },
+        );
+        if let Some(error) = known_error {
+            self.session = SessionLifetime::Finished;
+            self.session_error = Some(error);
+        }
+        outcome
     }
 
     fn call_using(
@@ -769,6 +796,116 @@ mod tests {
         assert_eq!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
         discard(out);
         assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
+    }
+
+    #[test]
+    fn actual_local_start_validation_retains_response_but_can_close_and_free() {
+        let mut pointer = create();
+        let mut out = MvmHostlibBuf::empty();
+        // SAFETY: real C consumer with owned output; invalid JSON cannot boot.
+        let status = unsafe {
+            mvm_hostlib_context_call(
+                pointer,
+                b"session.start".as_ptr(),
+                13,
+                b"{".as_ptr(),
+                1,
+                &mut out,
+            )
+        };
+        assert_ne!(status, 0);
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        // SAFETY: same allocation, exclusive access.
+        assert_eq!(
+            unsafe { mvm_hostlib_context_inspect(pointer, 0, &mut out) },
+            status
+        );
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        assert_eq!(
+            unsafe {
+                access(pointer, &mut out, |state| {
+                    assert!(matches!(state.session, SessionLifetime::Finished));
+                    assert!(state.session_error.is_some());
+                    assert_eq!(state.session_response.as_ref().unwrap().status, status);
+                    empty()
+                })
+            },
+            0
+        );
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        assert_eq!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
+        discard(out);
+        assert_eq!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
+        assert!(pointer.is_null());
+    }
+
+    #[test]
+    fn owned_start_unwind_keeps_unknown_custody_and_original_payload() {
+        let mut pointer = create();
+        let mut out = MvmHostlibBuf::empty();
+        // SAFETY: no-child callback panic passes through the real ABI catcher.
+        assert_eq!(
+            unsafe {
+                access(pointer, &mut out, |state| {
+                    state.call_start_using(b"{}", |_| panic!("original start unwind"))
+                })
+            },
+            MVM_HOSTLIB_INTERNAL
+        );
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        assert_ne!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        assert_eq!(
+            unsafe {
+                access(pointer, &mut out, |state| {
+                    assert!(matches!(state.session, SessionLifetime::UnknownStart));
+                    assert_eq!(
+                        state.panic_payload.as_ref().unwrap().downcast_ref::<&str>(),
+                        Some(&"original start unwind")
+                    );
+                    empty()
+                })
+            },
+            0
+        );
+        discard(out);
+        assert_ne!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
+        // Deliberately retain the ambiguous fixture, never manufacture exit.
+    }
+
+    #[test]
+    fn same_rejection_after_possible_dispatch_cannot_release_unknown_start() {
+        let mut pointer = create();
+        let mut out = MvmHostlibBuf::empty();
+        // This adapter supplies no quiescence proof: a wire rejection alone
+        // must remain ambiguous even when it has the native-refusal status.
+        assert_eq!(
+            unsafe {
+                access(pointer, &mut out, |state| {
+                    state.call_start_using(b"{}", |_| {
+                        crate::entrypoint::OwnedStartAttempt::MayHaveDispatched(Outcome::from(
+                            MvmError::Rejected {
+                                reason: "fixture rejection".into(),
+                            },
+                        ))
+                    })
+                })
+            },
+            crate::status::MVM_HOSTLIB_REJECTED
+        );
+        discard(out);
+        let mut out = MvmHostlibBuf::empty();
+        assert_ne!(unsafe { mvm_hostlib_context_close(pointer, &mut out) }, 0);
+        discard(out);
+        let original = pointer;
+        assert_ne!(unsafe { mvm_hostlib_context_checked_free(&mut pointer) }, 0);
+        assert_eq!(pointer, original);
+        // Deliberately retain the ambiguous no-child fixture, not a native proof.
     }
 
     #[test]

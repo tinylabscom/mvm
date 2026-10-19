@@ -23,6 +23,54 @@ afterEach(() => {
 
 const SID = "abcdefghijklmnopqrstuvwx";
 
+it("unknown start recovery closes the same C slot without Stop and retains failed free", () => {
+  host.on("session.start", failure("REJECTED", "local fixture", { status: 6 }));
+  let caught: unknown;
+  try { session("fixture", () => { throw new Error("body must not run"); }); }
+  catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(OwnedContextFailure);
+  const first = caught as OwnedContextFailure;
+  const owner = first.session as Session;
+  const context = first.recovery;
+  const slot: unknown[] = [{}];
+  const cleanup = new Error("close fixture");
+  let closeOk = false;
+  let freeOk = false;
+  const calls: string[] = [];
+  // C outcome adapter only; actual provenance construction is tested in Rust.
+  Object.assign(context, {
+    slot,
+    shared: { free: () => {}, koffi: { decode: () => [] } },
+    functions: {
+      close: () => { calls.push("close"); if (!closeOk) throw cleanup; return 0; },
+      free: () => { calls.push("free"); if (!freeOk) return 5; slot[0] = null; return 0; },
+    },
+  });
+  for (const allowed of [false, true]) {
+    closeOk = allowed;
+    let retry: unknown;
+    try { owner.retry_stop(); } catch (error) { retry = error; }
+    expect(retry).toBeInstanceOf(OwnedContextFailure);
+    expect((retry as OwnedContextFailure).primary_error).toBe(first.primary_error);
+    expect((retry as OwnedContextFailure).session).toBe(owner);
+    expect((retry as OwnedContextFailure).recovery).toBe(context);
+    expect(String(retry)).not.toContain("local fixture");
+    expect(slot[0]).not.toBeNull();
+  }
+  const state = owner as unknown as { cleanupErrors: unknown[]; stopPhase: string };
+  expect(state.cleanupErrors).toHaveLength(2);
+  const history = [...state.cleanupErrors];
+  freeOk = true;
+  owner.retry_stop();
+  expect(state.stopPhase).toBe("closed");
+  expect(slot[0]).toBeNull();
+  expect(state.cleanupErrors).toEqual(history);
+  const finishedCalls = [...calls];
+  owner.retry_stop();
+  expect(calls).toEqual(finishedCalls);
+  expect(host.methods()).toEqual(["session.start"]);
+});
+
 it("retains body plus cleanup errors and does not stop again after an acknowledged stop", () => {
   host.on("session.start", { session_id: SID, vm_name: "fixture" });
   host.on("session.stop", {});

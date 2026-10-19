@@ -611,6 +611,13 @@ export class NativeContext {
   }
   retry_stop(): void { this.requireSessionQuiescent(); this.control("retryStop"); }
   close(): void {
+    if (this.sessionPhase === "unknown" && this.slot[0] !== null && !this.busy) {
+      // No recorder/DTO can release unknown custody: consult the actual slot.
+      this.control("close");
+      this.sessionPhase = "finished";
+      this.closed = true;
+      return;
+    }
     this.requireSessionQuiescent();
     this.control("close");
     this.closed = true;
