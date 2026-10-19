@@ -295,6 +295,12 @@ fn count_listed_mutants(listing: &str, path: &str) -> u64 {
     u64::try_from(count).unwrap_or(u64::MAX)
 }
 
+/// cargo-mutants numbers its shards from zero (`k` must be less than `n`),
+/// while ours are one-based like every other shard spelling in the lane.
+fn mutator_shard_arg(index: usize, total: usize) -> String {
+    format!("{}/{total}", index - 1)
+}
+
 fn run_mutants_for_file(
     workspace: &Path,
     file: &SurfaceFile,
@@ -316,7 +322,7 @@ fn run_mutants_for_file(
     if let Some((index, total)) = slice {
         // Round-robin, not consecutive ranges: neighbouring mutants share
         // code and so cost alike, and a range parks the slow ones together.
-        cmd.args(["--shard", &format!("{index}/{total}")])
+        cmd.args(["--shard", &mutator_shard_arg(index, total)])
             .args(["--sharding", "round-robin"]);
     }
     cmd.args(["--test-tool", "nextest"])
@@ -460,6 +466,12 @@ pub(crate) fn ensure_cargo_mutants(pinned: &str) -> Result<()> {
 mod isolation_tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn our_one_based_slices_map_onto_the_mutators_zero_based_shards() {
+        let args: Vec<String> = (1..=4).map(|i| mutator_shard_arg(i, 4)).collect();
+        assert_eq!(args, ["0/4", "1/4", "2/4", "3/4"]);
+    }
 
     #[test]
     fn mutation_children_cannot_inherit_fixed_build_paths() {
