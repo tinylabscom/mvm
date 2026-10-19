@@ -167,6 +167,7 @@ $emitterTests = @(
     'supplied_roots_require_exact_bytes_and_mode_without_source_fallback',
     'malformed_root_and_mixed_contracts_refuse_and_cleanup',
     'partial_sets_alone_use_source_compatibility',
+    'a_partial_set_from_a_checkout_without_a_declaration_records_none',
     'copied_bytes_are_inspected_and_original_changes_do_not_change_the_set',
     'post_inspection_staged_mutation_refuses_and_cleans_up',
     'changed_identity_refuses_and_cleans_up'
