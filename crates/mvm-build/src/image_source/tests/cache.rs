@@ -958,6 +958,7 @@ fn an_entry_whose_kernel_a_launch_hashed_still_hits() {
 
 /// An x86_64 bzImage wrapped around an ELF kernel: what a launch has to
 /// extract before its VMM can load it.
+#[cfg(unix)]
 fn fake_bzimage() -> Vec<u8> {
     use std::io::Write;
     let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -970,6 +971,7 @@ fn fake_bzimage() -> Vec<u8> {
 /// The same, for a kernel a launch has to extract in place: the extracted ELF
 /// and its stamp land beside it in the entry.
 #[test]
+#[cfg(unix)]
 fn an_entry_whose_kernel_a_launch_extracted_still_hits() {
     let _env = TestEnv::new();
     let fx = Fixture::new();
