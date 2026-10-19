@@ -2583,7 +2583,7 @@ mod tests {
         let plan_cpus: Option<u32> = Some(2);
         let plan_mem: Option<u32> = Some(512);
 
-        let user_cfg = mvm_core::user_config::load(None);
+        let user_cfg = mvm_core::user_config::MvmConfig::default();
         let final_cpus = flag_cpus.or(plan_cpus).unwrap_or(user_cfg.default_cpus);
         let final_mem_mib = flag_mem
             .map(|s| mvm_core::util::parse_human_size(s).unwrap())
@@ -2591,6 +2591,19 @@ mod tests {
             .unwrap_or(user_cfg.default_memory_mib);
         assert_eq!(final_cpus, 8);
         assert_eq!(final_mem_mib, 1024);
+    }
+
+    #[test]
+    fn resource_shape_flags_override_plan_without_initializing_config() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("missing");
+        env.isolate_mvm_home(&home);
+        assert!(!home.exists());
+
+        resource_shape_flags_override_plan();
+
+        assert!(!home.exists());
     }
 
     // ── boot path: no-clobber property ───────────────────────────────────
