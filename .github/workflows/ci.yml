@@ -170,7 +170,7 @@ jobs:
           # (example and conformance tests), and the flake and deny policy the
           # structure tests parse. Everything else under public/, specs/ and
           # the root markdown still skips the Rust lanes.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|third_party/|examples/|specs/adrs/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$|flake\.(nix|lock)$|deny\.toml$|\.gitignore$|(AGENTS|CLAUDE|README|CONFORMANCE|SECURITY)\.md$|(AGENTS|CLAUDE)\.md\.sigstore\.json$|public/src/content/docs/(reference/performance|security/cve-demonstrations|contributing/development|contributing/ai-coding-workflow)\.md$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|third_party/|examples/|specs/adrs/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/scripts/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$|flake\.(nix|lock)$|deny\.toml$|\.gitignore$|(AGENTS|CLAUDE|README|CONFORMANCE|SECURITY)\.md$|(AGENTS|CLAUDE)\.md\.sigstore\.json$|public/src/content/docs/(reference/performance|security/cve-demonstrations|contributing/development|contributing/ai-coding-workflow)\.md$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -1040,6 +1040,34 @@ jobs:
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-core --features provenance,client,hostd-transport
 
+  test-windows-identity:
+    name: Windows repository identity runtime
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: "false"
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - name: Run supported Windows identity and producer tests
+        shell: pwsh
+        run: ./.github/scripts/run-windows-identity-tests.ps1
+
+      - name: Retain Windows test inventory and results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-identity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mvm-windows-identity
+          if-no-files-found: error
+
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
   # release path calls, gated on the narrower `bdd` scope.
@@ -1070,7 +1098,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-windows-identity, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     runs-on: ubuntu-slim
@@ -1106,6 +1134,7 @@ jobs:
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
           WINDOWS_RESULT: ${{ needs.lint-windows.result }}
+          WINDOWS_IDENTITY_RESULT: ${{ needs.test-windows-identity.result }}
           WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
@@ -1177,6 +1206,7 @@ jobs:
           check "Lint core" "$CORE_RESULT" "$gate_required"
           check "Lint feature combinations" "$FEATURE_CLIPPY_RESULT" "$gate_required"
           check "Windows compile check" "$WINDOWS_RESULT" "$gate_required"
+          check "Windows repository identity runtime" "$WINDOWS_IDENTITY_RESULT" "$gate_required"
           # The hosted suite runs from an archive; the self-hosted one does not.
           check "Build workspace tests" "$WORKSPACE_BUILD_RESULT" "$archive_required"
           check "Test workspace" "$WORKSPACE_RESULT" "$gate_required"
