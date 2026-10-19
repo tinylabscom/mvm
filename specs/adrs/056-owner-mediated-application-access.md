@@ -40,7 +40,7 @@ surface.
 ### Demo boundary
 
 The agent-environment demo may use the existing development-only terminal path,
-labelled development mode. That establishes no sealed production support,
+labelled development mode. That shows no sealed production support,
 production admission or release readiness. Development access is never an
 automatic fallback for a sealed package. Signature verification, package
 integrity, host policy, credential isolation and the sealed-console refusal stay
