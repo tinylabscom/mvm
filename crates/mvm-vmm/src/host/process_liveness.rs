@@ -19,19 +19,43 @@ pub const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.
 /// Whether a process ID currently identifies a live or permission-protected
 /// process.
 pub fn pid_is_alive(pid: i32) -> bool {
+    pid_is_alive_with_probes(
+        pid,
+        |pid| {
+            #[cfg(target_os = "macos")]
+            {
+                macos_process_is_zombie(pid)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = pid;
+                false
+            }
+        },
+        |pid| {
+            // SAFETY: kill with signal 0 performs only a permission/existence
+            // check and never delivers a signal.
+            let result = unsafe { libc::kill(pid, 0) };
+            let error = (result != 0)
+                .then(|| std::io::Error::last_os_error().raw_os_error())
+                .flatten();
+            (result, error)
+        },
+    )
+}
+
+fn pid_is_alive_with_probes(
+    pid: i32,
+    is_zombie: impl FnOnce(i32) -> bool,
+    signal_zero: impl FnOnce(i32) -> (i32, Option<i32>),
+) -> bool {
     if pid <= 1 {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    if macos_process_is_zombie(pid) {
+    if is_zombie(pid) {
         return false;
     }
-    // SAFETY: kill with signal 0 performs only a permission/existence
-    // check and never delivers a signal.
-    let result = unsafe { libc::kill(pid, 0) };
-    let error = (result != 0)
-        .then(|| std::io::Error::last_os_error().raw_os_error())
-        .flatten();
+    let (result, error) = signal_zero(pid);
     kill_zero_reports_alive(result, error)
 }
 
@@ -814,5 +838,89 @@ mod tests {
         assert!(kill_zero_reports_alive(-1, Some(libc::EPERM)));
         assert!(!kill_zero_reports_alive(-1, Some(libc::ESRCH)));
         assert!(!kill_zero_reports_alive(-1, Some(libc::EINVAL)));
+    }
+
+    #[test]
+    fn pid_liveness_reserved_pids_never_reach_probes() {
+        for pid in [-1, 0, 1] {
+            assert!(!pid_is_alive_with_probes(
+                pid,
+                |_| panic!("reserved PID reached zombie probe"),
+                |_| panic!("reserved PID reached signal probe"),
+            ));
+        }
+    }
+
+    #[test]
+    fn pid_liveness_known_zombie_never_reaches_signal_probe() {
+        assert!(!pid_is_alive_with_probes(
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                true
+            },
+            |_| panic!("known zombie reached signal probe"),
+        ));
+    }
+
+    #[test]
+    fn pid_liveness_successful_probe_reports_alive() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        assert!(pid_is_alive_with_probes(
+            42,
+            |_| {
+                calls.borrow_mut().push("zombie");
+                false
+            },
+            |_| {
+                calls.borrow_mut().push("signal");
+                (0, None)
+            },
+        ));
+        assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+    }
+
+    #[test]
+    fn pid_liveness_permission_protected_process_is_alive_with_ordered_probes() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        assert!(pid_is_alive_with_probes(
+            42,
+            |pid| {
+                assert_eq!(pid, 42);
+                calls.borrow_mut().push("zombie");
+                false
+            },
+            |pid| {
+                assert_eq!(pid, 42);
+                calls.borrow_mut().push("signal");
+                (-1, Some(libc::EPERM))
+            },
+        ));
+        assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+    }
+
+    #[test]
+    fn pid_liveness_missing_and_other_errors_preserve_policy() {
+        for error in [
+            Some(libc::ESRCH),
+            Some(libc::EINVAL),
+            Some(libc::EACCES),
+            Some(libc::EIO),
+            None,
+        ] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            assert!(!pid_is_alive_with_probes(
+                42,
+                |_| {
+                    calls.borrow_mut().push("zombie");
+                    false
+                },
+                |_| {
+                    calls.borrow_mut().push("signal");
+                    (-1, error)
+                },
+            ));
+            assert_eq!(calls.into_inner(), vec!["zombie", "signal"]);
+        }
     }
 }

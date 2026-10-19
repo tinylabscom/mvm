@@ -420,45 +420,6 @@ mod reap_orphans_tests {
         let _ = child.wait();
     }
 
-    /// A supervisor owned by another uid — Firecracker under the jailer runs as
-    /// root — must read as alive. `kill(pid, 0)` returns `EPERM` for it, which
-    /// a bare `== 0` check reads as dead, and the reaper would then treat the
-    /// guest's dir as unowned. Skipped where the probe cannot be exercised:
-    /// as root nothing returns `EPERM`, and a host with no other-uid process
-    /// has nothing to point it at.
-    #[test]
-    fn liveness_reports_a_process_owned_by_another_uid_as_alive() {
-        // SAFETY: `getuid` reads the calling process's real uid and cannot fail.
-        if unsafe { libc::getuid() } == 0 {
-            return;
-        }
-        let Some(pid) = first_process_owned_by_another_uid() else {
-            return;
-        };
-        assert!(
-            pid_is_alive(pid),
-            "pid {pid} is running under another uid and must read as alive"
-        );
-    }
-
-    /// A live PID this process may not signal, or `None` if the host has none.
-    fn first_process_owned_by_another_uid() -> Option<i32> {
-        // SAFETY: `getuid` reads the calling process's real uid and cannot fail.
-        let me = unsafe { libc::getuid() };
-        let out = std::process::Command::new("ps")
-            .args(["-axo", "pid=,uid="])
-            .output()
-            .ok()?;
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .find_map(|line| {
-                let mut fields = line.split_whitespace();
-                let pid: i32 = fields.next()?.parse().ok()?;
-                let uid: u32 = fields.next()?.parse().ok()?;
-                (pid > 1 && uid != me).then_some(pid)
-            })
-    }
-
     #[test]
     fn reap_spares_live_qemu_workload_under_launchd() {
         // A workload dir's marker set has to be the same one every other
