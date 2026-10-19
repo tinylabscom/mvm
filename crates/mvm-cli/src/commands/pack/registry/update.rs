@@ -13,10 +13,12 @@ pub(in crate::commands) fn run(args: UpdateArgs) -> Result<()> {
             use mvm_core::registry_pack::AuthenticatedRegistryManifest;
             let application = installed.application();
             println!(
-                "installed {} (manifest {}, bundle {})",
-                application.reference(),
-                application.manifest_sha256().as_str(),
-                installed.bundle().sha256
+                "{}",
+                crate::commands::pull::installed_application_text(
+                    &application.reference().to_string(),
+                    application.manifest_sha256().as_str(),
+                    &installed.bundle().sha256,
+                )
             );
             return Ok(());
         }
