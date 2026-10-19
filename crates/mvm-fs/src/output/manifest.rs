@@ -7,7 +7,9 @@
 //! output digest from ever equalling a digest of some other structure that
 //! happens to hash the same bytes.
 
+#[cfg(unix)]
 use std::io::Write as _;
+#[cfg(unix)]
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +82,7 @@ impl OutputManifest {
     }
 
     /// Write the manifest as JSON at `path`, refusing to replace anything.
+    #[cfg(unix)]
     pub fn write_new(&self, path: &Path) -> Result<(), OutputRefusal> {
         use std::os::unix::fs::OpenOptionsExt as _;
         let body = serde_json::to_vec_pretty(self).map_err(|error| {
