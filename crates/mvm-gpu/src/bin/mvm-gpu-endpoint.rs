@@ -7,6 +7,7 @@
 
 use mvm_gpu::server::{parse_listen_addr, run};
 use mvm_gpu::{GpuBackend, native, stub};
+use std::io;
 use std::process::exit;
 use std::sync::Arc;
 
@@ -65,9 +66,9 @@ fn main() {
         }
     };
 
-    let make_backend: Arc<dyn Fn() -> Box<dyn GpuBackend> + Send + Sync> =
+    let make_backend: Arc<dyn Fn() -> io::Result<Box<dyn GpuBackend>> + Send + Sync> =
         match backend_mode.as_str() {
-            "stub" => Arc::new(move || Box::new(stub_backend(device_ordinal))),
+            "stub" => Arc::new(move || Ok(Box::new(stub_backend(device_ordinal)))),
             "native" => {
                 if native::probe().is_none() {
                     eprintln!("mvm-gpu-endpoint: --backend native but no usable driver library");
@@ -76,19 +77,23 @@ fn main() {
                 // Each connection rebuilds from the loaded driver rather than
                 // sharing one backend: a shared backend would let two guests
                 // share handle tables. cuInit is documented idempotent.
-                Arc::new(move || match native_backend(device_ordinal) {
-                    Some(backend) => Box::new(backend),
-                    None => Box::new(stub_backend(device_ordinal)),
+                Arc::new(move || {
+                    select_backend(
+                        false,
+                        || native_backend(device_ordinal),
+                        || stub_backend(device_ordinal),
+                    )
                 })
             }
             "auto" => match native::probe() {
-                Some(_) => Arc::new(move || match native_backend(device_ordinal) {
-                    Some(backend) => Box::new(backend),
-                    // A driver that vanished between probe and serve answers
-                    // as the stub rather than refusing the guest outright.
-                    None => Box::new(stub_backend(device_ordinal)),
+                Some(_) => Arc::new(move || {
+                    select_backend(
+                        true,
+                        || native_backend(device_ordinal),
+                        || stub_backend(device_ordinal),
+                    )
                 }),
-                None => Arc::new(move || Box::new(stub_backend(device_ordinal))),
+                None => Arc::new(move || Ok(Box::new(stub_backend(device_ordinal)))),
             },
             other => {
                 eprintln!("mvm-gpu-endpoint: unknown --backend {other:?}");
@@ -97,7 +102,10 @@ fn main() {
         };
 
     if let Some(ordinal) = device_ordinal {
-        let mut backend = make_backend();
+        let mut backend = make_backend().unwrap_or_else(|error| {
+            eprintln!("mvm-gpu-endpoint: {error}");
+            exit(1);
+        });
         match mvm_gpu::handle_request(&mut *backend, &mvm_gpu::GpuRequest::DeviceGetCount) {
             mvm_gpu::GpuResponse::DeviceCount { count: 1 } => {}
             mvm_gpu::GpuResponse::Err(error) => {
@@ -141,6 +149,63 @@ fn native_backend(device_ordinal: Option<u32>) -> Option<native::NativeCudaBacke
         Some(ordinal) => backend.with_device_ordinal(ordinal),
         None => backend,
     })
+}
+
+fn select_backend<N: GpuBackend + 'static, S: GpuBackend + 'static>(
+    allow_stub: bool,
+    native: impl FnOnce() -> Option<N>,
+    stub: impl FnOnce() -> S,
+) -> io::Result<Box<dyn GpuBackend>> {
+    if let Some(backend) = native() {
+        Ok(Box::new(backend))
+    } else if allow_stub {
+        Ok(Box::new(stub()))
+    } else {
+        Err(io::Error::other(
+            "--backend native: driver initialization failed; refusing stub fallback",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_native_refuses_lost_driver_without_constructing_stub() {
+        let result = select_backend(
+            false,
+            || None::<stub::StubBackend>,
+            || -> stub::StubBackend { panic!("native must never construct a stub") },
+        );
+        let error = result
+            .err()
+            .expect("native initialization must fail closed");
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert!(error.to_string().contains("--backend native"));
+        assert!(error.to_string().contains("refusing stub fallback"));
+    }
+
+    #[test]
+    fn auto_keeps_gpu_free_stub_fallback() {
+        let mut backend =
+            select_backend(true, || None::<stub::StubBackend>, stub::StubBackend::new)
+                .expect("auto can fall back");
+        assert_eq!(backend.device_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn successful_native_selection_does_not_construct_stub() {
+        for allow_stub in [false, true] {
+            let mut backend = select_backend(
+                allow_stub,
+                || Some(stub::StubBackend::new()),
+                || -> stub::StubBackend { panic!("successful selection must not fall back") },
+            )
+            .expect("selected backend");
+            assert_eq!(backend.device_count().unwrap(), 2);
+        }
+    }
 }
 
 /// One static stop flag + a libc signal arm. Self-contained on purpose:
