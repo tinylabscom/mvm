@@ -274,7 +274,7 @@ PRs merge through the merge queue.
 
 ### Releasing a patch version
 
-Releases use the `release` module's recipes, not a bare `just release`.
+Releases use the `release` module's recipes rather than a top-level recipe.
 You need `git-cliff`, `cargo-nextest`, an authenticated GitHub CLI (`gh`),
 and push access to `origin`.
 
@@ -284,7 +284,6 @@ release from the checkout where you run release operations:
 ```bash
 git switch main
 git pull --ff-only
-just release::version
 # Example: if the current version is 0.24.0, prepare the next patch:
 just release::pr 0.24.1
 ```
