@@ -303,9 +303,12 @@ def validate_unsigned_runtime(source, directory):
 
 def copy_exact_subjects(directory, destination, expected, *, max_bytes=None):
     """Append exact bytes to a caller-owned directory, never overwrite."""
+    # The bound is per subject: the name set is a fixed inventory, so the
+    # aggregate stays bounded, while a staged debug build legitimately sums
+    # past one subject's limit.
     limit = MAX_TRANSFER_BYTES if max_bytes is None else max_bytes
-    total = 0
     for name, expected_digest in expected.items():
+        total = 0
         with (directory / name).open("rb") as reader:
             descriptor = os.open(destination / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             digest = hashlib.sha256()

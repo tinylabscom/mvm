@@ -554,6 +554,19 @@ class CandidateTransportTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "size bound"):
                     candidate.copy_exact_subjects(source, root / "out", {"subject": "a" * 64})
 
+    def test_subject_copy_bound_is_per_subject_not_cumulative(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            (root / "out").mkdir()
+            expected = {}
+            for name in ("one", "two", "three"):
+                (source / name).write_bytes(b"abcd")
+                expected[name] = hashlib.sha256(b"abcd").hexdigest()
+            candidate.copy_exact_subjects(source, root / "out", expected, max_bytes=5)
+            self.assertEqual(sorted(p.name for p in (root / "out").iterdir()), sorted(expected))
+
     def test_signing_job_permissions_and_failure_truth_table(self):
         release = (Path(__file__).resolve().parents[1] / ".github/workflows/release.yml").read_text()
         reader = release.split("\n  runtime-proof-input-check:", 1)[1].split(
