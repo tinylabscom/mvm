@@ -41,9 +41,16 @@ fn check_schema_version(manifest: &ImageSetManifest) -> Result<(), ImageSetError
             manifest.compatibility.base_image_contract.is_none()
         }
         IMAGE_SET_SCHEMA_VERSION => {
-            manifest.compatibility.base_image_contract
-                == Some(super::BaseImageContract::LINUX_LAYER)
-                && manifest.compatibility.guest_agent_protocol.is_none()
+            // A set with no workload root has nothing to declare a contract
+            // for; a source build from an older checkout records none.
+            let declares = match manifest.compatibility.base_image_contract {
+                Some(contract) => contract == super::BaseImageContract::LINUX_LAYER,
+                None => !manifest
+                    .members
+                    .iter()
+                    .any(|m| matches!(m.role, ImageSetRole::WorkloadRootfs(_))),
+            };
+            declares && manifest.compatibility.guest_agent_protocol.is_none()
         }
         _ => {
             return Err(ImageSetError::UnsupportedSchemaVersion {
