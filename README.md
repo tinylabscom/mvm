@@ -272,6 +272,43 @@ recorded reason it cannot run
 ([readme_examples.toml](features/suites/s8_readme_contract/readme_examples.toml)).
 PRs merge through the merge queue.
 
+### Releasing a patch version
+
+Releases use the `release` module's recipes, not a bare `just release`.
+You need `git-cliff`, `cargo-nextest`, an authenticated GitHub CLI (`gh`),
+and push access to `origin`.
+
+Start from an up-to-date `main` with a clean working tree, then prepare the
+release from the checkout where you run release operations:
+
+```bash
+git switch main
+git pull --ff-only
+just release::version
+# Example: if the current version is 0.24.0, prepare the next patch:
+just release::pr 0.24.1
+```
+
+Use the next patch version explicitly, without a `v` prefix. Omitting the
+version (`just release::pr`) lets `git-cliff` choose the next version from
+conventional commits and does **not** guarantee a patch bump.
+
+The recipe runs formatting, Clippy fixes/checks, and workspace tests, creates
+`release/v0.24.1`, updates version pins, lockfiles, and the changelog, then
+reruns workspace tests against the bumped tree. It commits and pushes the
+branch and opens a release PR.
+
+Merge that PR through the merge queue, then publish the tag:
+
+```bash
+just release::tag 0.24.1
+```
+
+The tag recipe fetches `origin/main` and refuses unless it carries the
+requested version. It tags that commit as `v0.24.1` and pushes the tag,
+triggering the release build/publish pipeline. Use the same version for
+both commands; do not tag before the release PR merges.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
