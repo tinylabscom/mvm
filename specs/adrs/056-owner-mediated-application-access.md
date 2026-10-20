@@ -5,11 +5,16 @@ Validation: none
 
 ## Status
 
-**Proposed — draft for owner ratification.** No maintainer has decided this.
-Tracking issue: [#4460](https://github.com/tinylabscom/mvm/issues/4460), which
-records a deferred decision. Nothing here is implemented, and merging this
-document approves no protocol. It adds no claim and promotes none; claims 4, 8,
-12, 15 and 17 keep the wording in ADR-001.
+**Accepted by the owner on 2026-10-20.** The owner took
+[#4460](https://github.com/tinylabscom/mvm/issues/4460) on, which settles that
+option D (a typed, host-mediated message channel) is the chosen direction. The
+protocol, authorization, precedence and lifecycle are specified in
+[owner-mediated application access](../contracts/owner-mediated-application-access.md).
+Acceptance of the direction is not an implementation: the channel does not exist
+yet, no sealed-image witness exists, and the open questions below are answered
+in that contract or remain listed there. It adds no claim and promotes none;
+claims 4, 8, 12, 15 and 17 keep the wording in ADR-001, and every limit recorded
+below stands.
 
 Related context: [#4222](https://github.com/tinylabscom/mvm/issues/4222) and
 [#4227](https://github.com/tinylabscom/mvm/issues/4227).
@@ -93,7 +98,7 @@ it carries no request identity, so replies and cancellation cannot be bound to a
 request. Acceptable as the transport substrate for option D's framing, not as the
 interface.
 
-### D. Typed, host-mediated message channel (recommended)
+### D. Typed, host-mediated message channel (chosen)
 
 The application declares a closed set of operations in its signed bundle. The
 host accepts an owner request, checks it against the signed plan and local
@@ -110,9 +115,9 @@ credentials, which puts authentication state inside the workload trust boundary,
 and a token leaked through a message is a replayable credential. The useful part
 (a per-request nonce) is kept inside option D, verified on the host.
 
-## Decision (recommended: D, over C's framing)
+## Decision (D, over C's framing)
 
-Proposed, for the owner to accept, amend or reject.
+Accepted as the direction; the contract carries the exact fields and bounds.
 
 ### Authority
 
@@ -260,7 +265,7 @@ satisfy this.
 
 ## Consequences
 
-If accepted: a new plan-level declaration, one new agent verb, one gate module
-beside the input gate, five audit event kinds, and the tests above. If rejected:
+Because it is accepted: a new plan-level declaration, one new agent verb, one gate module
+beside the input gate, five audit event kinds, and the tests above. Until it is implemented,
 sealed images stay owner-inaccessible and dev mode stays the only interactive
-path; nothing changes.
+path.
