@@ -45,3 +45,13 @@ language = "rust"
 [[block]]
 classification = "static-only"
 language = "bash"
+
+# Release preparation and publication operate on the real repository and GitHub;
+# they must not run as README examples in the hermetic conformance suite.
+[[block]]
+classification = "static-only"
+language = "bash"
+
+[[block]]
+classification = "static-only"
+language = "bash"
