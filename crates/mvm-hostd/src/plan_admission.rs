@@ -4352,6 +4352,105 @@ mod tests {
     }
 
     #[test]
+    fn direct_and_external_admission_refuse_unenforced_environment_requirements() {
+        use mvm_core::plan::bundle::BundleMember;
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[37; 32]);
+        let arch = mvm_core::arch::GuestArch::host().to_string();
+        let fleet = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
+        let mut config = mvm_core::user_config::load(None);
+        config.trusted_plan_signers = vec![mvm_core::user_config::TrustedPlanSigner {
+            signer_id: "requirements-fleet".into(),
+            ed25519_pubkey_hex: hex::encode(fleet.verifying_key().as_bytes()),
+        }];
+        mvm_core::user_config::save(&config, None).unwrap();
+        for (field, value, refused_field) in [
+            (
+                "entrypoint",
+                serde_json::json!({"argv": ["/usr/bin/agent"], "working_dir": "/workspace"}),
+                "entrypoint.working_dir",
+            ),
+            (
+                "volumes",
+                serde_json::json!([{"name": "workspace", "guest_path": "/workspace"}]),
+                "volumes",
+            ),
+            (
+                "services",
+                serde_json::json!([{"name": "indexer", "argv": ["/usr/bin/indexer"]}]),
+                "services",
+            ),
+        ] {
+            let mut document = serde_json::json!({
+                "descriptor_version": 1,
+                "target": format!("{arch}-linux"),
+                "entrypoint": { "argv": ["/usr/bin/agent"] },
+            });
+            document[field] = value;
+            let mut members = vec![BundleMember::Environment(
+                serde_json::from_value(document).unwrap(),
+            )];
+            if field == "volumes" {
+                let BundleMember::Environment(environment) = &mut members[0] else {
+                    panic!("environment fixture");
+                };
+                environment.capabilities =
+                    vec![mvm_contract::plan::environment::EnvironmentCapability::HostVolumes];
+                members.push(BundleMember::SecurityPosture(
+                    mvm_core::plan::BundleSecurityPosture {
+                        profile: mvm_core::security::AgentProfile::Dev,
+                        verity_protected: false,
+                        requires_auth: true,
+                        allows_volumes: true,
+                        allows_egress: false,
+                    },
+                ));
+            }
+            let (archive, pin) =
+                make_test_bundle_with_members(&sk, b"kernel", b"rootfs", &arch, members);
+            let trust = MapTrust(HashMap::from([(
+                key_id_from_pubkey(&sk.verifying_key()),
+                sk.verifying_key(),
+            )]));
+            let resolver = FixedResolver(archive);
+            let ctx = BundleAdmissionContext {
+                resolver: &resolver,
+                trust: &trust,
+                image: None,
+            };
+            let input = input_with_pin("vm-requirements", &pin);
+            let error = admit_for_run(
+                &input,
+                &SystemClock,
+                &InMemoryNonceLedger::new(),
+                Some(dir.path()),
+                Some(&ctx),
+                RunPosture::without_backend(Variant::Dev),
+            )
+            .expect_err("self-synthesized plans must meet signed requirements");
+            assert!(format!("{error:#}").contains(refused_field), "{error:#}");
+            let signed = sign_plan(
+                &synthesize_plan(&input).unwrap(),
+                &fleet,
+                "requirements-fleet",
+            );
+            let ledger = InMemoryNonceLedger::new();
+            for _ in 0..2 {
+                let error = admit_signed_plan_for_run(
+                    &signed,
+                    &SystemClock,
+                    &ledger,
+                    Some(&ctx),
+                    RunPosture::without_backend(Variant::Dev),
+                )
+                .expect_err("external plans cannot bypass signed requirements");
+                assert!(format!("{error:#}").contains(refused_field), "{error:#}");
+            }
+        }
+    }
+
+    #[test]
     fn direct_host_admission_enforces_signed_environment_slots() {
         use mvm_core::plan::bundle::BundleMember;
         let (_env, _home) = host_with_ceiling(Default::default());

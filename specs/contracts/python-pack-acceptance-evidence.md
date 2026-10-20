@@ -32,3 +32,11 @@ only in the sense of building the compiled pack's image. The end-to-end
 `pack build` witness needs a published `mvm-guest-bins` release asset for the
 running version, and the escape-hatch criterion needs a decision on whether the
 feature is wanted. Until both, the issue stays open.
+
+## Re-run on main
+
+The named tests in the table above were re-run scoped (`mvm-compiler`,
+`mvm-contract`) and pass. Unmet bullets: the escape-hatch criterion (no such
+feature exists; needs an owner decision), and the end-to-end native `pack build`
+witness plus a guest import of the locked wheel (blocked on the
+`mvm-guest-bins` release asset and a native boot).
