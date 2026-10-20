@@ -68,5 +68,35 @@ fn inventory_enforcement_still_compares_exact_known_sets_and_executes_required_s
     assert!(HELPER.contains("if ($Expected -cnotcontains $name)"));
     assert!(HELPER.contains("'--exact', '--test-threads=1', '--nocapture'"));
     assert!(HELPER.contains(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;"));
-    assert!(HELPER.contains("$results.Count -ne 32"));
+    assert!(HELPER.contains("$results.Count -ne 33"));
+}
+
+#[test]
+fn application_reader_refusal_is_an_additive_required_source_bound_witness() {
+    let application = array_entries("applicationTests");
+    assert_eq!(
+        application,
+        [
+            "registry_pack_store::tests::open_application_descriptor_preserves_unsupported_safe_reader_refusal"
+        ]
+    );
+    assert!(HELPER.contains(
+        "Test-Inventory $core 'application-local-reader-refusal' $applicationTests $applicationTests[0]"
+    ));
+    assert!(HELPER.contains("$applicationTests.Count -ne 1"));
+    assert!(HELPER.contains("if ($ignoredNames -ccontains $name)"));
+    let controls = HELPER
+        .split_once("function Control-Hashes {")
+        .unwrap()
+        .1
+        .split_once("function Compile-Test {")
+        .unwrap()
+        .0;
+    assert!(controls.contains("'crates/mvm-core/src/registry_pack_store.rs'"));
+    let original_required = array_entries("gitTests").len()
+        + array_entries("requiredEmitterTests").len()
+        + array_entries("requiredPairTests").len()
+        + array_entries("coreTests").len();
+    assert_eq!(original_required, 32);
+    assert_eq!(original_required + application.len(), 33);
 }
