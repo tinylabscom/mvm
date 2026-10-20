@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use super::Cli;
 use super::host_signer::{host_signer_id, load_or_init};
 
+pub(in crate::commands) mod application_source;
 pub(in crate::commands) mod detect;
 mod image_source;
 pub(in crate::commands) mod positional_source;
@@ -137,6 +138,15 @@ const SOURCES_EXCEPT_RUNTIME_PACK: [&str; 4] = ["image", "manifest", "flake", "d
 const SOURCES_EXCEPT_DEPLOYMENT: [&str; 4] = ["image", "manifest", "flake", "runtime_pack"];
 const SOURCES_EXCEPT_RUNTIME: [&str; 5] =
     ["image", "manifest", "flake", "runtime_pack", "deployment"];
+const SOURCES_EXCEPT_APPLICATION: [&str; 7] = [
+    "image",
+    "manifest",
+    "flake",
+    "runtime_pack",
+    "deployment",
+    "runtime",
+    "source",
+];
 const SOURCES_EXCEPT_POSITIONAL: [&str; 6] = [
     "image",
     "manifest",
@@ -159,6 +169,15 @@ pub(in crate::commands) struct RunArgs {
     /// Boot an OCI image (resolved through the local cache first).
     #[arg(long, value_name = "REF", conflicts_with_all = SOURCES_EXCEPT_IMAGE)]
     pub image: Option<String>,
+    /// Boot an installed application (NAMESPACE/NAME[@VERSION]).
+    #[arg(
+        short = 'a',
+        long = "application",
+        visible_alias = "app",
+        value_name = "REF",
+        conflicts_with_all = SOURCES_EXCEPT_APPLICATION
+    )]
+    pub application: Option<String>,
     /// Build and boot a Nix flake.
     #[arg(long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_FLAKE)]
     pub flake: Option<String>,
@@ -325,7 +344,7 @@ pub(in crate::commands) struct RunArgs {
     /// Require production policy (digest-pinned, verified images).
     #[arg(long = "prod")]
     pub prod: bool,
-    /// Boot this OCI image or signed `.mvmpkg` artifact.
+    /// Boot an OCI image, .mvmpkg artifact, or installed app.
     // Classified by shape, never by probing the filesystem: a path-shaped
     // `.mvmpkg` is an artifact, anything else an image reference. Under
     // `--mode` it names the script instead. See `positional_source`.

@@ -11,10 +11,15 @@ use crate::plan::bundle::{
 };
 
 mod install;
+mod launch;
 #[cfg(test)]
 use install::install_with;
 pub use install::{
     ApplicationInstallStore, InstalledRegistryApplication, install_application_bundle,
+};
+pub use launch::{
+    ApplicationLaunchError, ResolvedApplication, names_installed_application,
+    resolve_installed_application,
 };
 
 /// Resource ceiling shared with the bundle OCI transport.

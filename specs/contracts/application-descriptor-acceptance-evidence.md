@@ -47,7 +47,22 @@ a genuine signed application installed through the CLI, a CLI-level test of
 `application_source`, a process-kill interruption test, and Linux-target runs.
 The issue stays open on those.
 
-## Native boot
+## #4511 — launch installed application references
 
-Nothing here boots an installed application; launching from the installed
-reference is #4511.
+`run` accepts an OCI image, a signed `.mvmpkg` path, or an installed
+application reference, positionally or through `-a`/`--app`/`--application`.
+An installed reference resolves to its bundle SHA-256 and the run continues as
+`--manifest <bundle-sha256>`, the route a `.mvmpkg` takes. The shared limit
+applies: the injected checker stands in for Sigstore.
+
+| Criterion | Evidence | Limit |
+|---|---|---|
+| One deterministic reference-to-installed-bundle mapping, exact version, actionable missing install | `an_installed_reference_resolves_with_or_without_its_exact_version`, `a_missing_or_different_version_names_the_pull_that_fixes_it` (`application_bundle/tests.rs`); `the_flag_never_falls_back_and_names_the_pull` | The lock holds one pin per coordinate, so "latest installed" is that pin; there is no multi-version selection. |
+| Launch through existing verification and admission; recheck linkage, trust, revocation, compatibility | `post_install_tampering_and_withdrawn_trust_refuse_at_launch`, `a_withdrawn_publisher_policy_or_unreadable_revocation_trust_refuses_at_launch`; `the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install` | Revocation is witnessed as an unreadable trust policy failing closed, not a signed feed. Host and backend compatibility stay at the existing admission seam and are not re-tested here. No test boots a VM. |
+| Policy and grants within signed posture; no second launch path | The resolver only sets `--manifest <sha>`; every later step is the `.mvmpkg` path | Witnessed by construction and by the route tests, not by a booted application. |
+| Pull output, info/verify/list/remove/update coherent for applications | Not addressed | **Unmet.** |
+| Application reference, descriptor digest, bundle identity in traceability surfaces | `application_launch` audit entry carries all three; the plan records the bundle SHA-256 | No assertion reads the entry back; the run and plan identifiers are those of the existing plan. **Partly unmet.** |
+| CLI docs, parsing/UX tests | `the_three_spellings_of_the_flag_parse_to_one_field`, `the_flag_conflicts_with_every_other_source`, `oci_references_and_archives_keep_their_route`; `cli-commands.md` | None. |
+| Synthetic local-registry end-to-end | Not addressed | **Unmet.** No catalog-to-launch test. |
+| Negative tests: tampering, trust, policy denial, architecture | Tampering and trust above; architecture is the descriptor/bundle check at install and again at launch | No launch-time policy-denial test beyond the publisher policy. |
+

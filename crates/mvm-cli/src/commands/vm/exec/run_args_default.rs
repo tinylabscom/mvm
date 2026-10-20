@@ -20,6 +20,7 @@ impl Default for RunArgs {
             detected_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
             manifest: None,
             image: None,
+            application: None,
             flake: None,
             flake_profile: None,
             deployment: None,

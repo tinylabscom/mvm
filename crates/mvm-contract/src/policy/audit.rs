@@ -268,6 +268,10 @@ pub enum LocalAuditKind {
     /// and a credential-free URL or path otherwise. Emitted only on the success
     /// arm; verify failures don't reach the emit.
     BundleInstall,
+    /// `mvmctl run <app-ref>` / `--app` — an installed application reference
+    /// was re-verified and resolved to the bundle the launch then boots.
+    /// Detail: `application=<ref>,descriptor_sha256=<64hex>,bundle_sha256=<64hex>`.
+    ApplicationLaunch,
     /// `mvmctl bundle gc <sha>` or `mvmctl bundle gc --all` —
     /// pruned one or more installed bundles from the registry.
     /// Detail: `removed=<count>,shas=<sha1>[,sha2,...]` (truncated
@@ -1297,6 +1301,7 @@ mod tests {
             LocalAuditKind::TrustInstructionsSign,
             // Bundle registry mutations.
             LocalAuditKind::BundleInstall,
+            LocalAuditKind::ApplicationLaunch,
             LocalAuditKind::BundleGc,
             LocalAuditKind::BundlePush,
             LocalAuditKind::PackBuild,
@@ -1364,6 +1369,7 @@ mod tests {
             ),
             // Bundle registry mutations.
             (LocalAuditKind::BundleInstall, "bundle_install"),
+            (LocalAuditKind::ApplicationLaunch, "application_launch"),
             (LocalAuditKind::BundleGc, "bundle_gc"),
             (LocalAuditKind::BundlePush, "bundle_push"),
             (LocalAuditKind::PackBuild, "pack_build"),

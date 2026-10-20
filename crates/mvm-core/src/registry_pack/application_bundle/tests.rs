@@ -4,7 +4,9 @@ use crate::plan::bundle::{
     key_id_from_pubkey, sha256_hex, write_bundle,
 };
 use crate::registry_pack::tests::{accept_signature, publisher_policy};
-use crate::registry_pack::{PackAdoption, VerifiedRegistryApplication, VerifiedRegistryManifest};
+use crate::registry_pack::{
+    PackAdoption, PackReference, VerifiedRegistryApplication, VerifiedRegistryManifest,
+};
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 
@@ -542,4 +544,204 @@ fn bundle_removal_is_excluded_until_application_reference_commit() {
             .len(),
         1
     );
+}
+
+struct Installed {
+    _directory: tempfile::TempDir,
+    _environment: crate::util::test_env::TestEnv,
+    store: ApplicationInstallStore,
+    trust: FsTrustStore,
+    bundle_sha256: String,
+    descriptor_sha256: String,
+}
+
+fn installed() -> Installed {
+    let (directory, bytes, trust, key_id) = fixture();
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &bytes).unwrap();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let verified = verify_application_bundle(&application, &source, &trust).unwrap();
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    install_with(
+        &verified,
+        &store,
+        &publisher_policy(),
+        &trust,
+        accept_signature,
+        crate::registry_pack_store::RegistryPackStoreLease::commit_application_pin,
+    )
+    .unwrap();
+    Installed {
+        bundle_sha256: sha256_hex(&bytes),
+        descriptor_sha256: crate::registry_pack::AuthenticatedRegistryManifest::manifest_sha256(
+            &application,
+        )
+        .as_str()
+        .to_string(),
+        _directory: directory,
+        _environment: environment,
+        store,
+        trust,
+    }
+}
+
+fn resolve(
+    installed: &Installed,
+    reference: &str,
+) -> Result<ResolvedApplication, ApplicationLaunchError> {
+    launch::resolve_with(
+        &reference.parse().unwrap(),
+        &installed.store,
+        &publisher_policy(),
+        &installed.trust,
+        accept_signature,
+    )
+}
+
+#[test]
+fn an_installed_reference_resolves_with_or_without_its_exact_version() {
+    let installed = installed();
+    for reference in ["runtime/python", "runtime/python@1.2.3"] {
+        let resolved = resolve(&installed, reference).unwrap();
+        assert_eq!(resolved.reference.to_string(), "runtime/python@1.2.3");
+        assert_eq!(resolved.bundle_sha256, installed.bundle_sha256);
+        assert_eq!(resolved.descriptor_sha256, installed.descriptor_sha256);
+    }
+    assert!(names_installed_application(
+        &"runtime/python".parse().unwrap(),
+        &installed.store
+    ));
+}
+
+#[test]
+fn a_missing_or_different_version_names_the_pull_that_fixes_it() {
+    let installed = installed();
+    let missing = resolve(&installed, "runtime/other")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        missing.contains("mvmctl pack pull runtime/other"),
+        "{missing}"
+    );
+    assert!(!names_installed_application(
+        &"runtime/other".parse().unwrap(),
+        &installed.store
+    ));
+    let version = resolve(&installed, "runtime/python@9.9.9")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        version.contains("installed at runtime/python@1.2.3"),
+        "{version}"
+    );
+    assert!(
+        version.contains("mvmctl pack pull runtime/python@9.9.9"),
+        "{version}"
+    );
+}
+
+#[test]
+fn post_install_tampering_and_withdrawn_trust_refuse_at_launch() {
+    let installed = installed();
+    let registry = crate::plan::bundle::BundleRegistry::new(&installed.store.bundle_root);
+    let archive = registry.archive_path(&installed.bundle_sha256);
+    let original = std::fs::read(&archive).unwrap();
+
+    let empty = FsTrustStore::new(installed._directory.path().join("withdrawn"));
+    let withdrawn = launch::resolve_with(
+        &"runtime/python".parse().unwrap(),
+        &installed.store,
+        &publisher_policy(),
+        &empty,
+        accept_signature,
+    );
+    assert!(matches!(withdrawn, Err(ApplicationLaunchError::Bundle(_))));
+
+    std::fs::write(&archive, b"poisoned archive").unwrap();
+    assert!(matches!(
+        resolve(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Bundle(_))
+    ));
+    std::fs::write(&archive, &original).unwrap();
+    resolve(&installed, "runtime/python").unwrap();
+
+    std::fs::remove_dir_all(registry.install_dir(&installed.bundle_sha256)).unwrap();
+    assert!(matches!(
+        resolve(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::BundleMissing { .. })
+    ));
+
+    let descriptor = installed
+        .store
+        .descriptor_cache_root
+        .join(&installed.descriptor_sha256)
+        .join("manifest.json");
+    std::fs::write(descriptor, b"poisoned descriptor").unwrap();
+    assert!(matches!(
+        resolve(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Manifest(_))
+    ));
+}
+
+#[test]
+fn a_withdrawn_publisher_policy_or_unreadable_revocation_trust_refuses_at_launch() {
+    let installed = installed();
+    let no_policy = launch::resolve_with(
+        &"runtime/python".parse().unwrap(),
+        &installed.store,
+        &crate::registry_pack::RegistryPackPublisherPolicy::new(Vec::new()).unwrap(),
+        &installed.trust,
+        accept_signature,
+    );
+    assert!(matches!(
+        no_policy,
+        Err(ApplicationLaunchError::Manifest(_))
+    ));
+    let path = crate::config::registry_pack_revocation_trust_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"not a revocation trust policy").unwrap();
+    assert!(matches!(
+        resolve(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Store(_))
+    ));
+}
+
+#[test]
+fn the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install() {
+    let installed = installed();
+    let archive = crate::plan::bundle::BundleRegistry::new(&installed.store.bundle_root)
+        .archive_path(&installed.bundle_sha256);
+    let bytes = std::fs::read(archive).unwrap();
+    let resolved = resolve(&installed, "runtime/python").unwrap();
+    assert_eq!(resolved.bundle_sha256, sha256_hex(&bytes));
+}
+
+#[test]
+fn a_policy_pack_pin_is_not_an_application_and_never_resolves() {
+    let installed = installed();
+    let legacy = br#"{"schema_version":1,"reference":"runtime/policy@1.0.0"}"#;
+    let digest = crate::packs::Sha256Hex::from_bytes(legacy);
+    let reference: PackReference = "runtime/policy@1.0.0".parse().unwrap();
+    let python = crate::registry_pack_store::load_pack_lockfile(&installed.store.lock_path)
+        .unwrap()
+        .pins()
+        .to_vec();
+    let pin = crate::registry_pack::PackPin::new(reference.clone(), digest.clone()).unwrap();
+    crate::registry_pack_store::save_pack_lockfile(
+        &installed.store.lock_path,
+        &crate::registry_pack::PackLockfile::new([python, vec![pin]].concat()).unwrap(),
+    )
+    .unwrap();
+    let directory = installed.store.descriptor_cache_root.join(digest.as_str());
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("manifest.json"), legacy).unwrap();
+    assert!(!names_installed_application(&reference, &installed.store));
+    assert!(resolve(&installed, "runtime/policy").is_err());
+    resolve(&installed, "runtime/python").unwrap();
 }

@@ -724,6 +724,7 @@ it:
 ```sh
 mvmctl run alpine:3.20 -- echo hi          # an OCI image
 mvmctl run ./app.mvmpkg -- python app.py   # a signed bundle
+mvmctl run agent/claude@1.0.1 -- true      # an installed application
 mvmctl run -- npm test                     # infer the runtime from the command
 ```
 
@@ -736,6 +737,22 @@ installed bundle; it is the same run as `--manifest ./app.mvmpkg`. Any other pat
 `--deployment`, and `app.mvmpkg` without a leading `./` is refused rather than
 pulled from a registry. The guest command must follow `--`: a command written
 without it is a parse error.
+
+`run` accepts three inputs: an OCI image reference, a signed `.mvmpkg` path, and
+an installed application reference `NAMESPACE/NAME[@VERSION]`. An application is
+installed with `mvmctl pack pull <ref>`. As a positional, a value is read as an
+application only when it parses as a reference and names an installed
+application; otherwise it is an image or a bundle as before. `-a`, `--app` and
+`--application` are one flag that takes the value strictly as an application
+reference, with no fallback: a missing install is refused and names
+`mvmctl pack pull`. The flag conflicts with `--image`, `--manifest`, `--flake`,
+`--deployment` and a positional source. Without a version the installed version
+is used; with one it must be the installed version. The descriptor, its
+publisher policy and revocations, and the archive under your enrolled keys are
+checked again at launch, and the run then continues as
+`--manifest <bundle-sha256>`, so the signed plan and admit-time bundle
+re-verification are the ones a `.mvmpkg` gets. The resolution is recorded as an
+`application_launch` audit entry (reference, descriptor digest, bundle digest).
 
 Without `-d` or another persistent flag, it is the one-shot sandbox UX: it
 boots a fresh transient microVM, runs one command, and tears the VM down on
@@ -778,6 +795,7 @@ never served from a standby and always boots cold.
 | `mvmctl run -- <cmd>...`                                            | Boot the bundled default microVM image, run `<cmd>`, exit                                                                                                                                                                                                                                                                                                                             |
 | `mvmctl run <image> -- <cmd>...`                                    | Boot an OCI image; the same as `--image <image>`                                                                                                    |
 | `mvmctl run ./app.mvmpkg -- <cmd>...`                               | Verify a signed bundle against the trust store, install it on first use, and boot it                                                                 |
+| `mvmctl run <namespace/name[@version]> -- <cmd>...`                 | Boot an installed application (`mvmctl pack pull` first); `-a`, `--app` and `--application` take the same reference with no fallback to an image |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...`                  | Boot a registered manifest/template instead of the default                                                                                                                                                                                                                                                                                                                            |
 | `mvmctl run --manifest <app.mvmpkg> -- <cmd>...`                    | Verify, install, and boot a signed `.mvmpkg` bundle, as `machine run --manifest <app.mvmpkg>` does |
 | `mvmctl run -- npm test`                                            | Infer the runtime when no source is given (see **Runtime detection** below)                                                                                                                                                                                                                                                                                                           |

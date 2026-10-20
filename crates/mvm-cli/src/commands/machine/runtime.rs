@@ -639,6 +639,7 @@ pub(in crate::commands) fn run_dispatch(
     // Before the `--prod` check below, which asks whether an image was named:
     // a positional image reference is one. An artifact is verified and
     // installed here, and refused under `--prod` before it is.
+    crate::commands::vm::exec::application_source::apply_application_source(&mut args.run)?;
     crate::commands::vm::exec::positional_source::apply_positional_source(&mut args.run)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
