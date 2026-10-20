@@ -6,7 +6,8 @@ name: Pack signing smoke
 # artifacts, signs it with `cosign sign-blob` using this job's own GitHub
 # Actions OIDC identity, then feeds the real bundle through the Rust
 # sigstore-verify stack the pack verifier uses in production. Signs nothing
-# a real user consumes and publishes no artifacts.
+# a real user consumes. The application check emits only allowlisted public
+# synthetic fixture bytes and verification results in logs, never consumer homes.
 #
 # It also runs on release-tag pushes, because that is the only run whose
 # signing identity is tag-bound — and an image lock can name nothing else.
@@ -35,6 +36,7 @@ env:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
@@ -250,3 +252,24 @@ jobs:
             exit 1
           fi
           echo "ok: legacy-format bundle refused, as the release contract requires"
+
+          # Step 7: Real CLI application inspection under explicit synthetic trust.
+          # The Ed25519 author key is enrolled only in a disposable consumer;
+          # the descriptor uses this workflow's existing keyless identity.
+          # Neither the archive nor its single dummy rootfs is executed.
+          # Malformed revocation-trust refusal is not a signed revoked-feed witness.
+          MVM_HOME="$PWD/smoke/application/consumer-home" \
+            cargo run --release -p mvm-core --example application-inspection-fixture \
+            --features manifest-verify -- \
+            --out-dir "$PWD/smoke/application" --identity "${IDENTITY}"
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/application/manifest.sigstore.json \
+            smoke/application/manifest.json
+          python3 scripts/release/check_application_inspection_smoke.py \
+            --cli target/release/mvmctl \
+            --fixture-dir smoke/application \
+            --wrong-signature smoke/pack-manifest.json.bundle \
+            --out-dir smoke/application-results \
+            --source-sha "${GITHUB_SHA}"

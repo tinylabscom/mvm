@@ -18,9 +18,9 @@ use crate::packs::KeylessTrust;
 use crate::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackLockfile, PackPin, PackReference, RegistryPackError,
     RegistryPackInstallError, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
-    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryPack,
-    adopt_registry_pack_with, default_signature_checker, install_registry_pack_at,
-    verify_registry_pack_contents, verify_registry_pack_with,
+    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryManifest,
+    VerifiedRegistryPack, adopt_registry_pack_with, default_signature_checker,
+    install_registry_pack_at, verify_registry_manifest_with, verify_registry_pack_contents,
 };
 use crate::registry_pack_revocation::{
     RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
@@ -772,6 +772,29 @@ pub fn open_installed_registry_pack(
     )
 }
 
+/// Re-open the original descriptor under its exact pin and current trust.
+///
+/// Legacy packs also verify their policy payload. An application result only
+/// authenticates its descriptor: its archive must still be independently
+/// verified against recipient bundle trust before inspection or consumption.
+/// This operation does not download, install, adopt or advance a pin.
+pub fn open_installed_registry_manifest(
+    cache_root: &Path,
+    lock: &PackLockfile,
+    publisher_policy: &RegistryPackPublisherPolicy,
+    requested: &PackReference,
+) -> Result<(InstalledRegistryPack, VerifiedRegistryManifest), RegistryPackStoreError> {
+    open_installed_registry_manifest_with(
+        &OpenInstalledRequest {
+            cache_root,
+            lock,
+            publisher_policy,
+            requested,
+        },
+        default_signature_checker(),
+    )
+}
+
 /// Everything needed to re-open one installed pack.
 pub(crate) struct OpenInstalledRequest<'a> {
     pub cache_root: &'a Path,
@@ -784,6 +807,23 @@ pub(crate) fn open_installed_registry_pack_with(
     request: &OpenInstalledRequest<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<(InstalledRegistryPack, VerifiedRegistryPack), RegistryPackStoreError> {
+    let (installed, verified) = open_installed_registry_manifest_with(request, check_signature)?;
+    match verified {
+        VerifiedRegistryManifest::Legacy(pack) => Ok((installed, pack)),
+        VerifiedRegistryManifest::Application(application) => {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: application.manifest().schema_version,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        }
+    }
+}
+
+pub(crate) fn open_installed_registry_manifest_with(
+    request: &OpenInstalledRequest<'_>,
+    check_signature: RegistryPackSignatureChecker,
+) -> Result<(InstalledRegistryPack, VerifiedRegistryManifest), RegistryPackStoreError> {
     let OpenInstalledRequest {
         cache_root,
         lock,
@@ -820,9 +860,16 @@ pub(crate) fn open_installed_registry_pack_with(
         lock,
         publisher_policy,
     );
-    let verified = verify_registry_pack_with(&verification, check_signature)?;
-    verify_registry_pack_contents(&verified, &installed.payload_root())?;
-    check_registry_pack_revocations_if_configured(&verified)?;
+    let verified = verify_registry_manifest_with(&verification, check_signature)?;
+    match &verified {
+        VerifiedRegistryManifest::Legacy(pack) => {
+            verify_registry_pack_contents(pack, &installed.payload_root())?;
+            check_registry_pack_revocations_if_configured(pack)?;
+        }
+        VerifiedRegistryManifest::Application(application) => {
+            check_registry_pack_revocations_if_configured(application)?;
+        }
+    }
     Ok((installed, verified))
 }
 
@@ -1688,6 +1735,289 @@ mod tests {
         ));
         assert!(!lock_path.exists(), "no lockfile is written on refusal");
         assert!(!cache.exists(), "nothing is installed on refusal");
+    }
+
+    struct ApplicationDescriptorFixture {
+        home: tempfile::TempDir,
+        cache: PathBuf,
+        installed: InstalledRegistryPack,
+        lock: PackLockfile,
+        policy: RegistryPackPublisherPolicy,
+    }
+
+    fn application_descriptor_fixture() -> ApplicationDescriptorFixture {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path().join("registry-packs");
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "kind": "application",
+            "reference": "runtime/python@1.2.3",
+            "description": "Application descriptor unit fixture",
+            "application": {
+                "schema_version": 1,
+                "guest_arch": "x86_64",
+                "bundle": {
+                    "source": "https://example.test/python.mvmpkg",
+                    "archive_sha256": "a".repeat(64),
+                    "archive_size": 42,
+                    "key_id": "b".repeat(32)
+                }
+            }
+        }))
+        .unwrap();
+        let digest = Sha256Hex::from_bytes(&bytes);
+        let installed = InstalledRegistryPack::from_root(cache.join(digest.as_str()));
+        std::fs::create_dir_all(installed.root()).unwrap();
+        std::fs::write(installed.manifest_path(), bytes).unwrap();
+        std::fs::write(installed.signature_path(), b"application-unit-signature").unwrap();
+        let lock = PackLockfile::new(vec![
+            PackPin::new(reference("runtime/python@1.2.3"), digest).unwrap(),
+        ])
+        .unwrap();
+        ApplicationDescriptorFixture {
+            home,
+            cache,
+            installed,
+            lock,
+            policy: publisher_policy(),
+        }
+    }
+
+    // This is the existing injected signature seam, not genuine Sigstore evidence.
+    fn accept_application_signature(
+        payload: &[u8],
+        bundle: &[u8],
+        trust: &crate::packs::KeylessTrust,
+    ) -> Result<crate::crypto::image_verify::VerifiedSigner, RegistryPackVerificationError> {
+        if bundle != b"application-unit-signature" {
+            return reject(payload, bundle, trust);
+        }
+        accept(payload, bundle, trust)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_application_descriptor_is_typed_and_does_not_require_policy_payload() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let request = OpenInstalledRequest {
+            cache_root: &fixture.cache,
+            lock: &fixture.lock,
+            publisher_policy: &fixture.policy,
+            requested: &requested,
+        };
+        let (installed, verified) =
+            open_installed_registry_manifest_with(&request, accept_application_signature).unwrap();
+        assert_eq!(installed.root(), fixture.installed.root());
+        let crate::registry_pack::VerifiedRegistryManifest::Application(application) = verified
+        else {
+            panic!("application descriptor must not become a legacy policy pack");
+        };
+        assert_eq!(
+            application.manifest().reference.to_string(),
+            "runtime/python@1.2.3"
+        );
+        assert!(!installed.payload_root().exists());
+        assert!(matches!(
+            open_installed_registry_pack_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Verification(
+                RegistryPackVerificationError::UnsupportedManifestSchema {
+                    got: 2,
+                    expected: 1
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn open_application_descriptor_refuses_missing_and_wrong_version_pins() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        for requested in [
+            reference("runtime/absent"),
+            reference("runtime/python@9.0.0"),
+        ] {
+            let error = open_installed_registry_manifest_with(
+                &OpenInstalledRequest {
+                    cache_root: &fixture.home.path().join("missing-cache"),
+                    lock: &fixture.lock,
+                    publisher_policy: &fixture.policy,
+                    requested: &requested,
+                },
+                reject,
+            )
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                RegistryPackStoreError::Verification(RegistryPackVerificationError::Lock(
+                    RegistryPackError::UnpinnedPack { .. }
+                        | RegistryPackError::RequestedVersionMismatch { .. }
+                ))
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_application_descriptor_rechecks_original_bytes_and_signature() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let request = OpenInstalledRequest {
+            cache_root: &fixture.cache,
+            lock: &fixture.lock,
+            publisher_policy: &fixture.policy,
+            requested: &requested,
+        };
+        open_installed_registry_manifest_with(&request, accept_application_signature).unwrap();
+        std::fs::write(
+            fixture.installed.signature_path(),
+            b"substituted-unit-signature",
+        )
+        .unwrap();
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Verification(
+                RegistryPackVerificationError::SignatureInvalid(_)
+            ))
+        ));
+        std::fs::write(
+            fixture.installed.signature_path(),
+            b"application-unit-signature",
+        )
+        .unwrap();
+        let mut bytes = std::fs::read(fixture.installed.manifest_path()).unwrap();
+        bytes.push(b' ');
+        std::fs::write(fixture.installed.manifest_path(), &bytes).unwrap();
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, reject),
+            Err(RegistryPackStoreError::Verification(
+                RegistryPackVerificationError::Lock(_)
+            ))
+        ));
+        bytes.pop();
+        std::fs::write(fixture.installed.manifest_path(), bytes).unwrap();
+        std::fs::remove_file(fixture.installed.signature_path()).unwrap();
+        let error = open_installed_registry_manifest_with(&request, accept_application_signature)
+            .unwrap_err();
+        let RegistryPackStoreError::Io { source, .. } = error else {
+            panic!("a missing signature must not fall back to cached authentication");
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_application_descriptor_rechecks_current_publisher_and_revocation_context() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "other",
+                crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut request = OpenInstalledRequest {
+            cache_root: &fixture.cache,
+            lock: &fixture.lock,
+            publisher_policy: &fixture.policy,
+            requested: &requested,
+        };
+        open_installed_registry_manifest_with(&request, accept_application_signature).unwrap();
+        request.publisher_policy = &policy;
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Verification(
+                RegistryPackVerificationError::UntrustedNamespace { .. }
+            ))
+        ));
+        request.publisher_policy = &fixture.policy;
+        let path = crate::config::registry_pack_revocation_trust_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "schema_version = false\n").unwrap();
+        let error = open_installed_registry_manifest_with(&request, accept_application_signature)
+            .unwrap_err();
+        assert!(error.to_string().contains("revocation trust"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_application_descriptor_refuses_linked_or_oversized_sidecars() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let request = OpenInstalledRequest {
+            cache_root: &fixture.cache,
+            lock: &fixture.lock,
+            publisher_policy: &fixture.policy,
+            requested: &requested,
+        };
+        open_installed_registry_manifest_with(&request, accept_application_signature).unwrap();
+        let manifest = fixture.installed.manifest_path();
+        let original = fixture.installed.root().join("original-manifest");
+        std::fs::rename(&manifest, &original).unwrap();
+        std::os::unix::fs::symlink(&original, &manifest).unwrap();
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Io { .. })
+        ));
+        std::fs::remove_file(&manifest).unwrap();
+        std::fs::rename(original, &manifest).unwrap();
+        let alias = fixture.installed.root().join("signature-alias");
+        std::fs::hard_link(fixture.installed.signature_path(), &alias).unwrap();
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Io { .. })
+        ));
+        std::fs::remove_file(alias).unwrap();
+        open_installed_registry_manifest_with(&request, accept_application_signature).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&manifest)
+            .unwrap()
+            .set_len(crate::registry_pack::local_input::MAX_METADATA_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Io { .. })
+        ));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn open_application_descriptor_preserves_unsupported_safe_reader_refusal() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let error = open_installed_registry_manifest_with(
+            &OpenInstalledRequest {
+                cache_root: &fixture.cache,
+                lock: &fixture.lock,
+                publisher_policy: &fixture.policy,
+                requested: &requested,
+            },
+            accept_application_signature,
+        )
+        .unwrap_err();
+        let RegistryPackStoreError::Io { source, .. } = error else {
+            panic!("safe input acquisition must refuse before verification");
+        };
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(
+            source.to_string(),
+            "safe local acquisition requires Unix input handles"
+        );
     }
 
     #[test]

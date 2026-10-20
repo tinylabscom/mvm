@@ -1047,6 +1047,14 @@ pub use dispatch::{
     AuthenticatedRegistryManifest, VerifiedRegistryApplication, VerifiedRegistryManifest,
     adopt_registry_manifest, verify_registry_manifest,
 };
+
+pub(crate) fn verify_registry_manifest_with(
+    request: &RegistryPackVerification<'_>,
+    check_signature: RegistryPackSignatureChecker,
+) -> Result<VerifiedRegistryManifest, RegistryPackVerificationError> {
+    dispatch::verify_with(request, check_signature)
+}
+
 mod built_image;
 mod install;
 pub mod local_input;

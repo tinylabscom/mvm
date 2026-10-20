@@ -2067,8 +2067,8 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack system prune [--keep-recent N] [--dry-run]`   | Reclaim non-active system pack versions beyond the newest N per key                                                                                                |
 | `mvmctl pack system download KIND`                        | Fetch a system pack version into the cache without changing the active one; no system pack class is published yet                                                  |
 | `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
-| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
-| `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
+| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify a pinned registry product. Legacy packs show publisher, policy, image, and payload details; applications show the authenticated descriptor and independently verified local bundle archive identities |
+| `mvmctl pack verify ns/name[@version] [--json]`           | Recheck the exact pin, current publisher and revocation policy, and legacy payload or application bundle archive; report verification scope or fail closed, without fetching or installing |
 | `mvmctl pack lock SPEC.json --mvm-revision COMMIT [--out FILE \| --stdout]` | Resolve an authored `mvm.pack-spec/v1` document against its source tree and write the frozen `pack.lock.json` beside it: spec, source snapshot and lowered-workload digests, compiler version and the pinned mvm commit. A uv `pyproject.toml` + `uv.lock` at the source root is resolved here for the pack's target and its single `python3NN` runtime package: one sha256-pinned manylinux wheel per runtime dependency, recorded in the lowered workload. Non-registry sources, markers the target does not decide, an unsatisfied `requires-python` and packages without a compatible wheel are refused by name. The spec is read as data; no author code runs |
 | `mvmctl pack compile SPEC.json --out DIR [--lock FILE]` | Compile a pack spec into a flake artifact only when its lock still matches; a missing lock or any stale field (named in the error) is refused before anything is written. A pack with uv dependencies also gets `pack-build.json`, the resolved wheel set the flake fetches and installs at build time |
 | `mvmctl pack build SPEC.json --out FILE.mvmpkg --input-observation PATH` | Opt into bounded, unsigned frozen Nix graph diagnostics; publish the no-clobber JSON report only after successful build, health checking and export. Not an admission credential |
@@ -2138,6 +2138,22 @@ hardware power-loss behavior. Installation is not a launch
 grant: host/backend compatibility and current admission checks remain required at
 execution, and application-reference launch is not implemented by this pull path.
 Applications cannot satisfy a policy-pack dependency.
+
+`pack info` and `pack verify` reopen the original application descriptor and
+signature under the current pin, publisher policy, and configured revocation
+context. An unversioned reference selects its pinned version; an explicit
+different version refuses rather than selecting another catalog entry. They
+then check the cached archive's exact size, digest, independent bundle-author
+signature, key ID, and architecture binding through the normal bundle verifier.
+A missing archive refuses with a `pull` hint: inspection never downloads,
+installs, advances a pin, or enrolls a key.
+
+Application JSON has `kind: "application"` and
+`verification_scope: "descriptor_and_bundle_archive"`, with separate descriptor
+and bundle digests. This scope does not certify extracted-file custody, backend
+compatibility, or launch admission. Legacy inspection output is unchanged.
+The canonical safe local descriptor reader is currently Unix-only; unsupported
+platforms fail closed rather than opening unchecked metadata.
 
 Locked `pack build` inputs never receive the contributor build's automatic
 local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
