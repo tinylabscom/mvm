@@ -299,6 +299,54 @@ fn install_commit_is_last_and_failed_commit_leaves_only_complete_unreferenced_co
 }
 
 #[test]
+fn a_staging_dir_left_by_a_killed_install_is_never_runnable_and_the_next_install_repairs_it() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &bytes).unwrap();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let verified = verify_application_bundle(&application, &source, &trust).unwrap();
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    // A SIGKILL between staging and the atomic publish leaves exactly this:
+    // a half-written `<sha>.partial` beside no install directory and no pin.
+    let registry = crate::plan::bundle::BundleRegistry::new(&store.bundle_root);
+    let sha = sha256_hex(&bytes);
+    let staging = registry.root().join(format!("{sha}.partial"));
+    std::fs::create_dir_all(staging.join("artifacts")).unwrap();
+    std::fs::write(staging.join("artifacts/rootfs.ext4"), b"roo").unwrap();
+    assert!(!registry.install_dir(&sha).exists());
+    assert!(!store.lock_path.exists());
+
+    let policy = publisher_policy();
+    let installed = install_with(
+        &verified,
+        &store,
+        &policy,
+        &trust,
+        accept_signature,
+        crate::registry_pack_store::RegistryPackStoreLease::commit_application_pin,
+    )
+    .unwrap();
+    assert!(!staging.exists());
+    assert_eq!(
+        std::fs::read(installed.bundle().root.join("artifacts/rootfs.ext4")).unwrap(),
+        b"rootfs"
+    );
+    assert_eq!(
+        crate::registry_pack_store::load_pack_lockfile(&store.lock_path)
+            .unwrap()
+            .pins()
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn repeated_install_rechecks_trust_and_repairs_poisoned_cache_without_digest_drift() {
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();

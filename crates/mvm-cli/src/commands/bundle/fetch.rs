@@ -175,11 +175,15 @@ fn application_source(
     application: &mvm_core::registry_pack::VerifiedRegistryApplication,
 ) -> Result<BundleSource> {
     let bundle = &application.manifest().application.bundle;
+    admit_application_locator(&bundle.source, bundle.archive_size)
+}
+
+fn admit_application_locator(locator: &str, archive_size: u64) -> Result<BundleSource> {
     anyhow::ensure!(
-        bundle.archive_size <= super::registry::MAX_BUNDLE_LAYER_BYTES,
+        archive_size <= super::registry::MAX_BUNDLE_LAYER_BYTES,
         "application archive exceeds the supported 4 GiB transport bound"
     );
-    let source = BundleSource::parse(&bundle.source)?;
+    let source = BundleSource::parse(locator)?;
     match &source {
         BundleSource::HttpsUrl(_) => {}
         BundleSource::Registry(reference) => admit_registry_source(reference, true, false)?,
@@ -711,6 +715,29 @@ mod tests {
             .expect("runtime")
             .block_on(client.push(&reference(registry, selector), kind, bytes))
             .expect("unverified push");
+    }
+
+    #[test]
+    fn application_locator_enforces_the_size_cap_and_refuses_file_and_http_sources() {
+        let cap = super::super::registry::MAX_BUNDLE_LAYER_BYTES;
+        assert!(admit_application_locator("https://example.test/a.mvmpkg", cap).is_ok());
+        let over = admit_application_locator("https://example.test/a.mvmpkg", cap + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(over.contains("4 GiB"), "{over}");
+        for refused in [
+            "/tmp/a.mvmpkg",
+            "file:///tmp/a.mvmpkg",
+            "http://example.test/a.mvmpkg",
+        ] {
+            let error = admit_application_locator(refused, 1)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("HTTPS or digest-pinned OCI"),
+                "{refused}: {error}"
+            );
+        }
     }
 
     #[test]
