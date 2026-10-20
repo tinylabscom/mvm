@@ -137,6 +137,10 @@ fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
     for file in files {
         let _ = file.into_raw_fd();
     }
+    let identities = fds
+        .iter()
+        .map(|fd| descriptor_identity(*fd))
+        .collect::<Vec<_>>();
     let adopted = adopt_startup_files(&cfg).unwrap();
     assert_eq!(adopted.kernel.as_ref().unwrap().as_raw_fd(), fds[0]);
     for fd in &fds {
@@ -147,10 +151,21 @@ fn startup_adopts_distinct_untrusted_files_once_with_cloexec() {
         );
     }
     drop(adopted);
-    for fd in fds {
-        // SAFETY: query only, with no intervening opens/reuse.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
+    for (fd, before) in fds.into_iter().zip(identities) {
+        // A concurrent test may reuse the number, so closed means either no
+        // descriptor or one that is no longer the file adopted above.
+        // SAFETY: query only.
+        if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 {
+            assert_ne!(descriptor_identity(fd), before, "fd {fd} was not closed");
+        }
     }
+}
+
+fn descriptor_identity(fd: i32) -> Option<(u64, u64)> {
+    // SAFETY: zeroed stat is a valid out-parameter for fstat.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: fstat writes into `st` only.
+    (unsafe { libc::fstat(fd, &mut st) } == 0).then_some((st.st_dev as u64, st.st_ino as u64))
 }
 
 fn isolate() -> (TestEnv, tempfile::TempDir) {
