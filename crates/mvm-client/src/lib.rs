@@ -77,6 +77,7 @@ pub mod portable_boot_assets;
 pub mod profile;
 pub mod readiness;
 pub mod registration;
+pub mod registry_application;
 pub mod registry_pack_local;
 pub mod replay;
 pub mod secret;

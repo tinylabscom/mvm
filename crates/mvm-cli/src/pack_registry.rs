@@ -11,7 +11,6 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
 use tempfile::TempDir;
 
 use mvm_client::registry_pack_local::profile_pack_dependencies;
@@ -25,179 +24,17 @@ use mvm_core::registry_pack_store::{
     load_pack_lockfile, load_publisher_policy_or_official_default, read_pack_policy_document,
 };
 
-/// Environment override for the pack registry base URL.
-pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
-/// Default registry: the mvm-packs repository.
-pub const DEFAULT_PACK_REGISTRY: &str =
-    "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
+pub use mvm_client::registry_application::discovery::{
+    DEFAULT_PACK_REGISTRY, PACK_REGISTRY_ENV, PackIndexEntry, PackIndexVersion, PackRegistryConfig,
+    fetch_index, resolve_version, search_index,
+};
+use mvm_client::registry_application::discovery::{block_on, fetch_bytes};
 
-const PACK_INDEX_SCHEMA_VERSION: u32 = 2;
 const PACKS_DIR: &str = "packs";
 const MANIFEST_FILE: &str = "manifest.json";
 const SIGNATURE_FILE: &str = "manifest.sigstore.json";
 const FILES_DIR: &str = "files";
 const MAX_PACKS_PER_PULL: usize = 128;
-
-/// Registry configuration: one base URL, overridable for tests and mirrors.
-#[derive(Debug, Clone)]
-pub struct PackRegistryConfig {
-    pub registry_url: String,
-}
-
-impl PackRegistryConfig {
-    pub fn load() -> Self {
-        let registry_url = std::env::var(PACK_REGISTRY_ENV)
-            .ok()
-            .unwrap_or_else(|| DEFAULT_PACK_REGISTRY.to_string());
-        Self { registry_url }
-    }
-
-    fn base(&self) -> String {
-        self.registry_url.trim_end_matches('/').to_string()
-    }
-}
-
-/// One pack in the registry index.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PackIndexEntry {
-    pub namespace: String,
-    pub name: String,
-    pub description: String,
-    pub versions: Vec<PackIndexVersion>,
-}
-
-/// Untrusted discovery metadata; the digest does not authorize a publisher.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PackIndexVersion {
-    pub version: String,
-    pub manifest_sha256: Sha256Hex,
-}
-
-impl PackIndexEntry {
-    pub fn coordinate(&self) -> String {
-        format!("{}/{}", self.namespace, self.name)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PackIndexWire {
-    schema_version: u32,
-    packs: Vec<PackIndexEntry>,
-}
-
-/// Fetch and parse the pack index.
-pub fn fetch_index(config: &PackRegistryConfig) -> Result<Vec<PackIndexEntry>> {
-    let url = format!("{}/index.json", config.base());
-    let text = block_on(fetch_text(&url))?;
-    let wire: PackIndexWire =
-        serde_json::from_str(&text).with_context(|| format!("parsing pack index from {url}"))?;
-    if wire.schema_version != PACK_INDEX_SCHEMA_VERSION {
-        bail!(
-            "pack index at {url} has schema version {}, expected {PACK_INDEX_SCHEMA_VERSION}",
-            wire.schema_version
-        );
-    }
-    let mut coordinates = std::collections::BTreeSet::new();
-    for entry in &wire.packs {
-        let coordinate = entry.coordinate();
-        let reference: PackReference = coordinate.parse().context("invalid catalog coordinate")?;
-        if reference.version().is_some()
-            || reference.namespace() != entry.namespace
-            || reference.name() != entry.name
-            || !coordinates.insert(coordinate.clone())
-        {
-            bail!("duplicate or invalid catalog coordinate {coordinate}");
-        }
-        if entry.versions.is_empty() {
-            bail!("pack {coordinate} publishes no versions");
-        }
-        let mut versions = std::collections::BTreeSet::new();
-        for version in &entry.versions {
-            let _: PackReference = format!("{coordinate}@{}", version.version)
-                .parse()
-                .context("invalid catalog version")?;
-            if !versions.insert(&version.version) {
-                bail!("duplicate catalog version {coordinate}@{}", version.version);
-            }
-        }
-    }
-    Ok(wire.packs)
-}
-
-/// Filter index entries by an optional case-insensitive substring over
-/// coordinate and description. No query lists everything.
-pub fn search_index<'a>(
-    index: &'a [PackIndexEntry],
-    query: Option<&str>,
-) -> Vec<&'a PackIndexEntry> {
-    let Some(query) = query.map(str::to_lowercase) else {
-        return index.iter().collect();
-    };
-    index
-        .iter()
-        .filter(|entry| {
-            entry.coordinate().to_lowercase().contains(&query)
-                || entry.description.to_lowercase().contains(&query)
-        })
-        .collect()
-}
-
-/// Pick the exact versioned reference to pull: the requested version must be
-/// published, and an unversioned request takes the highest version.
-pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Result<PackReference> {
-    if entry.namespace != requested.namespace() || entry.name != requested.name() {
-        bail!("catalog coordinate does not match requested pack {requested}");
-    }
-    let versions = &entry.versions;
-    if versions.is_empty() {
-        bail!("pack {} publishes no versions", entry.coordinate());
-    }
-    let released = |spelling: &str| {
-        mvm_core::release_version::ReleaseVersion::parse(
-            spelling,
-            mvm_core::release_version::VersionSyntax::Strict,
-        )
-    };
-    let spelling = match requested.version() {
-        Some(version) => {
-            let spelling = version.to_string();
-            if !versions
-                .iter()
-                .any(|published| published.version == spelling)
-            {
-                bail!(
-                    "pack {} is not published at version {spelling} (published: {})",
-                    entry.coordinate(),
-                    versions
-                        .iter()
-                        .map(|v| v.version.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-            spelling
-        }
-        None => versions
-            .iter()
-            .filter_map(|published| {
-                released(&published.version).map(|version| (version, &published.version))
-            })
-            .max_by(|(a, _), (b, _)| a.cmp(b))
-            .map(|(_, spelling)| spelling.clone())
-            .context("catalog contains no valid published versions")?,
-    };
-    format!("{}@{spelling}", entry.coordinate())
-        .parse()
-        .with_context(|| {
-            format!(
-                "registry listed an invalid version for {}",
-                entry.coordinate()
-            )
-        })
-}
 
 fn pack_url(config: &PackRegistryConfig, reference: &PackReference, leaf: &str) -> String {
     let version = reference
@@ -569,57 +406,6 @@ fn with_built_image_verifier_preflight<T>(
         mvm_core::registry_pack::ensure_built_image_verifier_available()?;
     }
     download_payload()
-}
-
-fn runtime() -> Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("building a runtime for the pack registry fetch")
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    runtime()
-        .expect("building a single-thread runtime for one registry fetch")
-        .block_on(future)
-}
-
-async fn fetch_text(url: &str) -> Result<String> {
-    let bytes = fetch_bytes(url).await?;
-    String::from_utf8(bytes).with_context(|| format!("{url} is not UTF-8 text"))
-}
-
-async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    const MAX_METADATA_BYTES: u64 = 1024 * 1024;
-    if let Some(path) = url.strip_prefix("file://") {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(MAX_METADATA_BYTES + 1)
-            .read_to_end(&mut bytes)?;
-        if u64::try_from(bytes.len())? > MAX_METADATA_BYTES {
-            bail!("pack registry metadata exceeds 1 MiB");
-        }
-        return Ok(bytes);
-    }
-    let client = mvm_http::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .max_response_bytes(MAX_METADATA_BYTES)
-        .build()?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("fetching {url}"))?;
-    let status = response.status();
-    if !status.is_success() {
-        bail!("pack registry returned {} for {url}", status.as_u16());
-    }
-    response
-        .bytes()
-        .await
-        .with_context(|| format!("reading body from {url}"))
-        .map(|b| b.to_vec())
 }
 
 #[cfg(test)]
