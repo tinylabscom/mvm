@@ -584,9 +584,6 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
             failures: Vec::new(),
         });
     }
-    // Fail before spec creation, snapshot-key setup or child creation. A
-    // serialized pool handle and CLI exit cannot be a custody handoff.
-    p.backend.require_owned_warm_receiver()?;
     if !p.backend.capabilities().standby_pool {
         if !unsupported_standby_pool_is_fatal(residency_source()) {
             return Ok(WarmResult {

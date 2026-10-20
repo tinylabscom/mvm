@@ -17,7 +17,8 @@ use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_state_dir};
 use mvm_core::protocol::hvf_control::HvfInstance;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
-    ResourceControls, StandbyError, StandbyHandle, VmCapabilities, VmExitStatus, VmId, VmStatus,
+    ResourceControls, StandbyError, StandbyHandle, StandbyState, VmCapabilities, VmExitStatus,
+    VmId, VmStatus,
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_control_transport as stop_wire;
@@ -113,11 +114,46 @@ impl HvfDriver {
     /// errors retain original native custody for the concrete runtime caller.
     pub fn spawn_standby_parent_owned(
         &self,
-        _req: &StandbyParentSpawn<'_>,
+        req: &StandbyParentSpawn<'_>,
     ) -> Result<StandbyHandle> {
-        // No durable receiver currently holds the original preparation leases.
-        // Refuse before handoff config, child or capture-writer creation.
-        bail!("owned HVF warm launch unavailable: authenticated durable custody receiver required")
+        let handoff = handoff_config(&req.spec.id).context("prepare HVF handoff")?;
+        let vm =
+            boot_with_handoff(req.boot, Some(&handoff), None, None).context("boot HVF standby")?;
+        let state_dir = vm_state_dir(&req.spec.id);
+        let Some(pid) = hvf_backend::read_pid(&state_dir.join(PID_FILE_NAME)) else {
+            let _ = vm.kill();
+            bail!("HVF standby '{}' did not publish a pid", req.spec.id);
+        };
+        let pid = u32::try_from(pid)
+            .map_err(|_| anyhow!("HVF standby '{}' pid is negative", req.spec.id))?;
+        if let Err(error) = wait_for_guest_agent(&state_dir) {
+            let _ = vm.kill();
+            bail!(
+                "HVF standby '{}' guest agent did not become ready: {error}",
+                req.spec.id
+            );
+        }
+        drop(vm);
+        Ok(StandbyHandle {
+            id: req.spec.id.clone(),
+            template_id: req.spec.template_id.clone(),
+            control_socket: state_dir
+                .join("hvf-control.sock")
+                .to_string_lossy()
+                .into_owned(),
+            pid,
+            kernel_sha256: req.spec.kernel_sha256.clone(),
+            vcpus: req.spec.vcpus,
+            mem_mib: req.spec.mem_mib,
+            binding_nonce: req.spec.binding_nonce.clone(),
+            spawned_unix_secs: mvm_core::time::now_unix_secs(),
+            state: StandbyState::Idle,
+            image_sha256: req.spec.image_sha256.clone(),
+            root_strategy: req.spec.root_strategy,
+            parent_checkpoint: None,
+            preloaded_child_vm_name: None,
+            vsock_egress: req.spec.vsock_egress,
+        })
     }
 }
 
@@ -1098,6 +1134,28 @@ fn wait_for_agent_socket(
     }
 }
 
+fn handoff_config(parent_vm_name: &str) -> Result<HandoffConfig> {
+    let identity = mvm_core::crypto::snapshot_sign::host_snapshot_identity()
+        .context("load host identity for HVF handoff")?;
+    let state_dir = vm_state_dir(parent_vm_name);
+    Ok(HandoffConfig {
+        socket: state_dir.join("hvf-handoff.sock"),
+        root: mvm_core::config::vms_dir(),
+        verify_key: hex::encode(identity.verifying.to_bytes()),
+    })
+}
+
+/// How long a factory parent's guest agent has to start answering.
+const STANDBY_AGENT_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Do not capture a factory parent until its guest agent has completed init.
+/// The child resumes from the captured CPU/device state rather than rebooting,
+/// so a parent captured before the agent listener is serving would make every
+/// later post-restore identity handshake impossible.
+fn wait_for_guest_agent(state_dir: &Path) -> Result<()> {
+    wait_for_standby_agent(&hvf_agent_socket(state_dir), STANDBY_AGENT_READY_TIMEOUT)
+}
+
 /// Poll `socket` until a guest agent answers the authenticated readiness probe
 /// in either serving state.
 ///
@@ -1107,7 +1165,6 @@ fn wait_for_agent_socket(
 /// answer is the agent serving, so it counts. Requiring `Pong` instead waits
 /// for a reply the guest cannot give until the caller's next step, and fails
 /// every such parent at the deadline.
-#[cfg(test)]
 fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut attempt = 0u32;
