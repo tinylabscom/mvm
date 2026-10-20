@@ -381,6 +381,26 @@ fn validate_environment(
     Ok(())
 }
 
+/// Signed requirements for which launch admission cannot establish fulfillment.
+///
+/// Keep this rule shared by local and externally signed plan admission. Merely
+/// preserving a declaration in an authenticated manifest does not enforce it.
+pub fn unsupported_environment_requirements(
+    environment: &EnvironmentDescriptor,
+) -> Vec<&'static str> {
+    let mut fields = Vec::new();
+    if environment.entrypoint.working_dir.is_some() {
+        fields.push("entrypoint.working_dir");
+    }
+    if !environment.volumes.is_empty() {
+        fields.push("volumes");
+    }
+    if !environment.services.is_empty() {
+        fields.push("services");
+    }
+    fields
+}
+
 /// Required descriptor slots not bound by the signed plan. This checks names,
 /// not secret values or endpoint substitution, which remain broker-owned.
 pub fn unbound_environment_secret_slots(
@@ -863,6 +883,34 @@ mod tests {
             allows_volumes: true,
             allows_egress: true,
         }
+    }
+
+    #[test]
+    fn unsupported_requirements_are_explicit_and_do_not_change_export_validation() {
+        let mut descriptor = environment(&[]);
+        assert!(unsupported_environment_requirements(&descriptor).is_empty());
+        descriptor.entrypoint.working_dir = Some("/workspace".into());
+        descriptor.volumes = serde_json::from_value(serde_json::json!([
+            { "name": "workspace", "guest_path": "/workspace" }
+        ]))
+        .unwrap();
+        descriptor.capabilities = vec![EnvironmentCapability::HostVolumes];
+        descriptor.services = serde_json::from_value(serde_json::json!([
+            { "name": "indexer", "argv": ["/usr/bin/indexer"] }
+        ]))
+        .unwrap();
+        assert_eq!(
+            unsupported_environment_requirements(&descriptor),
+            vec!["entrypoint.working_dir", "volumes", "services"]
+        );
+        let m = manifest(
+            Vec::new(),
+            vec![
+                BundleMember::SecurityPosture(open_dev_posture()),
+                BundleMember::Environment(descriptor),
+            ],
+        );
+        validate_declarations(&m).expect("requirements stay exportable and inspectable");
     }
 
     #[test]

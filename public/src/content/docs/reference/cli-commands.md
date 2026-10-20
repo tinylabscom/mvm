@@ -1567,6 +1567,14 @@ At launch of an installed bundle:
   not compared, but remains subject to the launch's posture and command rules;
 - a capability beyond a posture the launch is held to refuses the launch.
 
+The current launcher also refuses a nonempty `services` or `volumes` requirement,
+or an `entrypoint.working_dir`. It cannot yet establish the declared application
+processes, match required named mounts, or enforce the declared working
+directory. These fields remain signed, verified and inspectable, but are not
+silently treated as fulfilled. An explicit ad-hoc command does not bypass these
+requirements. A descriptor with those fields absent (or empty lists) keeps the
+entrypoint, secret and posture checks above.
+
 Transient and persistent starts use the same entrypoint checks. Checkpoint and
 fork paths that cannot establish the image entrypoint refuse a descriptor-bearing
 bundle rather than treating failed resolution as an explicit override.
@@ -1574,9 +1582,10 @@ bundle rather than treating failed resolution as an explicit override.
 These refusals are recorded as `plan.failed` with class
 `bundle-environment-refused`. Application `services` are guest processes,
 distinct from the broker's host services named by `--host-service`; they are
-recorded and shown by `bundle fetch` but not yet started by the launcher.
-Volumes are the mount points the workload expects; the launch still attaches
-them with `--volume` under the posture's ceiling.
+recorded and shown by `bundle fetch`, not started as broker services. Passing
+`--host-service` or `--volume` does not prove these signed requirements and does
+not bypass their refusal. Bundles without an environment descriptor retain
+ordinary `--volume` behavior under the posture's ceiling.
 
 `.mvmpkg` is the one extension for a runnable artifact. Being runnable is a
 property of the command, not of the file: the same archive `bundle export`,
