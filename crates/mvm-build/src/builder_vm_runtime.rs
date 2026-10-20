@@ -161,7 +161,6 @@ pub fn builder_store_gc_cap_kib() -> u64 {
     u64::from(gib) * 1024 * 1024
 }
 
-
 /// The cmdline token every Stage 0 boot carries.
 pub fn stage0_store_gc_cmdline_token() -> String {
     format!(
