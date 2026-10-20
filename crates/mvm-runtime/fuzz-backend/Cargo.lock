@@ -2159,13 +2159,13 @@ dependencies = [
  "libc",
  "lzma-rs",
  "mvm-agentd",
+ "mvm-builder-guest",
  "mvm-compiler",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
  "mvm-http",
  "mvm-vmm",
- "nix",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -2178,6 +2178,25 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "mvm-builder-guest"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "mvm-agentd",
+ "mvm-core",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
