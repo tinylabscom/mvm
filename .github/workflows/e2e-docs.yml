@@ -350,11 +350,9 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
+      # No actions/setup-python here: its macOS installer hardcodes the
+      # hosted-image path /Users/runner, which this self-hosted runner's user
+      # cannot create. uv below provisions any interpreter a step asks for.
       - name: Set up uv
         uses: astral-sh/setup-uv@v8.2.0
         with:
