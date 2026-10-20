@@ -27,8 +27,8 @@ use super::cache::{
     CacheLookup, CachedImageSet, EntryContext, ImageBuildRole, ImageBuildTarget, KeyInputs,
     LocalImageCache, LocalImageCacheKey,
 };
-use crate::builder_vm_runtime::copy_dir_filtered;
 use crate::host_payload_manifest::legacy_installed_host_binary_names;
+use crate::source_copy::copy_dir_filtered;
 
 #[path = "emitter.rs"]
 mod emitter;
@@ -595,7 +595,7 @@ fn emit_manifest_into_staging(
             images_root,
             legacy_mvm_root: Some(mvm_root),
             arch,
-            builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+            builder_cache_contract: crate::builder_contract::BUILDER_VM_CACHE_CONTRACT_VERSION,
             built,
             out,
             contract,
@@ -810,6 +810,7 @@ fn seed_local_images_from_default_home(cache: &LocalImageCache) {
 /// builder-vm target: the image-set build runs *inside* a builder, so its
 /// builder image comes from the published bootstrap, never from the pair
 /// being built.
+#[cfg(unix)]
 pub fn build_target_for_pair(
     checkout: &LocalImageCheckout,
     mvm_root: &Path,
@@ -817,7 +818,7 @@ pub fn build_target_for_pair(
     arch: GuestArch,
     cache: &LocalImageCache,
     prepare_builder: &mut dyn FnMut() -> Result<(), String>,
-    run_job: &mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+    run_job: &mut dyn FnMut(&crate::builder_contract::BuilderShellJob) -> Result<(), String>,
 ) -> Result<PairBuild, LocalImageBuildError> {
     build_target_for_pair_with(
         checkout,
@@ -835,20 +836,20 @@ pub fn build_target_for_pair(
 
 /// Admits the build of the named artifact, told the reason its cache entry was
 /// just evicted when one was.
-pub(super) type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
+pub type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
 
 /// The boundaries a pair build crosses once the cache has not answered:
 /// admitting the build to the user, readying the builder, and booting it.
 /// Injected so a test can drive a build with neither a terminal nor a VM.
-pub(super) struct PairBuildHooks<'a> {
-    pub(super) admit: AdmitPairBuild<'a>,
-    pub(super) prepare_builder: &'a mut dyn FnMut() -> Result<(), String>,
-    pub(super) run_job:
-        &'a mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+pub struct PairBuildHooks<'a> {
+    pub admit: AdmitPairBuild<'a>,
+    pub prepare_builder: &'a mut dyn FnMut() -> Result<(), String>,
+    pub run_job: &'a mut dyn FnMut(&crate::builder_contract::BuilderShellJob) -> Result<(), String>,
 }
 
 /// A rebuild after an eviction says why, rather than showing the first-run
 /// notice, which would blame the checkout for the cache's fault.
+#[cfg(unix)]
 fn admit_pair_build(artifact: &str, evicted: Option<&str>) -> Result<(), String> {
     match evicted {
         Some(reason) => mvm_vmm::host::ui::admit_rebuild_after_eviction(artifact, reason),
@@ -857,7 +858,7 @@ fn admit_pair_build(artifact: &str, evicted: Option<&str>) -> Result<(), String>
 }
 
 /// [`build_target_for_pair`] over injected [`PairBuildHooks`].
-pub(super) fn build_target_for_pair_with(
+pub fn build_target_for_pair_with(
     checkout: &LocalImageCheckout,
     mvm_root: &Path,
     target: ImageBuildTarget,
@@ -943,7 +944,7 @@ pub(super) fn build_target_for_pair_with(
         });
     }
 
-    let job = crate::builder_vm::BuilderShellJob {
+    let job = crate::builder_contract::BuilderShellJob {
         work_dir: work,
         artifact_out: out.clone(),
         script: render_build_script(

@@ -806,7 +806,7 @@ mod tests {
         assert!(test.contains(
             "needs: [scope, runners, lint-core, lint-policy, lint-feature-clippy, \
              lint-features, lint-features-test-support, lint-features-embed, lint-windows, \
-             test-workspace-build, test-workspace, test-workspace-extras, \
+             test-windows-identity, test-workspace-build, test-workspace, test-workspace-extras, \
              test-workspace-aarch64, test-linux, \
              test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
              bdd-conformance, boot-latency, nix-flake-check]"

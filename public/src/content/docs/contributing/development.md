@@ -145,11 +145,33 @@ just check::run -- machine run --image alpine -- uname -a
 just release-build
 ```
 
-CI publishes signed host-helper bundles for each `main` commit. A clean checkout
-of one of those commits downloads the exact bundle during bootstrap. Dirty
+CI publishes signed host-helper bundles for each `main` commit in the prerelease
+`source-builds-` followed by its full 40-character commit SHA. A clean checkout
+downloads that exact bundle during bootstrap. Only an archive HTTP 404 triggers
+a lookup in the preserved legacy `source-builds` release; signature, authorization
+and network failures never trigger fallback. Both locations require the same
+source-workflow signature and matching `SOURCE_COMMIT` before installation. Dirty
 checkouts and commits not yet published from `main` have no remote artifact by
 construction; explicitly opt into local compilation with
 `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`.
+
+Already-built binaries that still use the legacy URL do not discover the new
+tags automatically. If matching signed artifacts actually exist in a per-commit
+release, select that exact base explicitly:
+
+```bash
+commit=$(git rev-parse HEAD)
+MVM_SOURCE_HELPER_BASE_URL="https://github.com/tinylabscom/mvm/releases/download/source-builds-${commit}" mvmctl bootstrap
+```
+
+The binary must have been built cleanly from that same commit, and the base must
+contain both its platform archive and matching `.bundle`. This override does not
+bypass verification and makes no implicit probes of other locations. It cannot
+recover an unpublished commit: for example, commit
+`8be5cece93ccc01d0cfc4a8759d9dc2df146db91` had no published helpers when the
+legacy release filled. Use the explicit local build mode above, or request a
+separately authorized historical backfill. Rerunning that commit's frozen old
+workflow still targets the full legacy release and is not a migration.
 
 Source guest-runtime caches are keyed by the source fingerprint, version and
 guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy

@@ -29,6 +29,12 @@ use super::{
 /// is JSON naming a handful of artifacts; anything near this size is not one.
 pub const MAX_IMAGE_SET_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Keep cooperating bundle removal excluded through a caller's reference commit.
+pub(crate) struct BundleInstallLease {
+    pub(crate) bundle: InstalledBundle,
+    _lease: File,
+}
+
 /// Where verified artifact bytes can be read back from, by archive-relative
 /// path: memory for a bundle verified from bytes, a staging directory for one
 /// verified from a file.
@@ -85,14 +91,14 @@ impl ArtifactSource for StagedArtifacts<'_> {
 }
 
 /// A writer that hashes and counts what passes through it.
-struct HashingWriter<W> {
+pub(crate) struct HashingWriter<W> {
     inner: W,
     hasher: Sha256,
     written: u64,
 }
 
 impl<W: Write> HashingWriter<W> {
-    fn new(inner: W) -> Self {
+    pub(crate) fn new(inner: W) -> Self {
         Self {
             inner,
             hasher: Sha256::new(),
@@ -100,7 +106,7 @@ impl<W: Write> HashingWriter<W> {
         }
     }
 
-    fn finish(self) -> (u64, String) {
+    pub(crate) fn finish(self) -> (u64, String) {
         (self.written, hex::encode(self.hasher.finalize()))
     }
 }
@@ -620,11 +626,24 @@ impl BundleRegistry {
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<InstalledBundle, BundleInstallError> {
+        self.install_leased_file(archive, trust, force)
+            .map(|installed| installed.bundle)
+    }
+
+    pub(crate) fn install_leased_file(
+        &self,
+        archive: &Path,
+        trust: &dyn TrustStore,
+        force: bool,
+    ) -> Result<BundleInstallLease, BundleInstallError> {
         let sha = archive_sha256(archive).map_err(BundleInstallError::Verify)?;
         let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
             reason,
         };
+        let (manifest, _, manifest_bytes, sig_bytes) =
+            verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
+        let lease = self.lock_entry(&sha).map_err(io_error)?;
         let install_dir = self.install_dir(&sha);
         if install_dir.exists() && !force {
             verify_bundle_file(archive, trust).map_err(BundleInstallError::Verify)?;
@@ -632,10 +651,6 @@ impl BundleRegistry {
                 bundle_sha256: sha.clone(),
             });
         }
-        let (manifest, _, manifest_bytes, sig_bytes) =
-            verify_head(archive, trust).map_err(BundleInstallError::Verify)?;
-
-        self.create_root().map_err(io_error)?;
         let staging = self.root.join(format!("{sha}.partial"));
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(|e| {
@@ -678,27 +693,30 @@ impl BundleRegistry {
             &sha,
         )?;
 
-        if install_dir.exists() {
-            std::fs::remove_dir_all(&install_dir).map_err(|e| {
-                io_error(format!(
-                    "removing existing install at {}: {e}",
-                    install_dir.display()
-                ))
-            })?;
-        }
-        std::fs::rename(&staging, &install_dir).map_err(|e| {
+        sync_staging(&staging, &manifest).map_err(io_error)?;
+        publish_install_with(&staging, &install_dir, exchange_directories).map_err(|e| {
             io_error(format!(
                 "promoting staging {} → install {}: {e}",
                 staging.display(),
                 install_dir.display()
             ))
         })?;
+        crate::private_fs::sync_managed_directory_chain(&self.root, &self.root)
+            .map_err(|error| io_error(error.to_string()))?;
+        // After an exchange, staging holds only the obsolete generation.
+        // Interrupted cleanup cannot damage the newly published directory.
+        if std::fs::symlink_metadata(&staging).is_ok() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
         self.persist_archive(archive, &sha).map_err(io_error)?;
 
-        Ok(InstalledBundle {
-            sha256: sha,
-            root: install_dir,
-            manifest,
+        Ok(BundleInstallLease {
+            bundle: InstalledBundle {
+                sha256: sha,
+                root: install_dir,
+                manifest,
+            },
+            _lease: lease,
         })
     }
 
@@ -756,15 +774,52 @@ impl BundleRegistry {
 
     /// Create the registry root, owner-only.
     fn create_root(&self) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root)
-            .map_err(|e| format!("creating registry root {}: {e}", self.root.display()))?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&self.root) {
+            if !metadata.is_dir() || metadata.file_type().is_symlink() {
+                return Err("bundle registry root must be a real directory".to_string());
+            }
+            crate::private_fs::require_current_owner(&metadata)
+                .map_err(|error| error.to_string())?;
+        }
+        crate::config::create_private_dir(&self.root).map_err(|error| error.to_string())
+    }
+
+    /// Every installer and remover shares one stable content-addressed lease.
+    pub(super) fn lock_entry(&self, sha: &str) -> Result<File, String> {
+        if sha.len() != 64
+            || !sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("bundle address must be canonical SHA-256".to_string());
+        }
+        self.create_root()?;
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.root, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| format!("restricting registry root {}: {e}", self.root.display()))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
-        Ok(())
+        let file = options
+            .open(self.root.join(format!(".{sha}.lock")))
+            .map_err(|error| error.to_string())?;
+        let metadata = file.metadata().map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("bundle lease must be a regular file".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if metadata.nlink() != 1 {
+                return Err("bundle lease cannot have multiple links".to_string());
+            }
+        }
+        crate::private_fs::require_current_owner(&metadata).map_err(|error| error.to_string())?;
+        file.lock().map_err(|error| error.to_string())?;
+        Ok(file)
     }
 
     /// Copy the archive to `<sha>.mvmpkg`, atomically.
@@ -787,6 +842,68 @@ impl BundleRegistry {
             )
         })?;
         Ok(())
+    }
+}
+
+fn sync_staging(staging: &Path, manifest: &BundleManifest) -> Result<(), String> {
+    let sync = || -> io::Result<()> {
+        for name in [MANIFEST_FILENAME, SIGNATURE_FILENAME] {
+            File::open(staging.join(name))?.sync_all()?;
+        }
+        let mut directories = BTreeSet::new();
+        for artifact in &manifest.artifacts {
+            let path = staging.join(&artifact.path);
+            for parent in path
+                .ancestors()
+                .skip(1)
+                .take_while(|parent| parent.starts_with(staging))
+            {
+                directories.insert(parent.to_path_buf());
+            }
+        }
+        for directory in directories.iter().rev() {
+            File::open(directory)?.sync_all()?;
+        }
+        File::open(staging)?.sync_all()
+    };
+    sync().map_err(|error| format!("syncing bundle staging: {error}"))
+}
+
+fn publish_install_with(
+    staging: &Path,
+    destination: &Path,
+    exchange: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            exchange(staging, destination)
+        }
+        Ok(_) => Err(io::Error::other(
+            "existing bundle install is not a real directory",
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::rename(staging, destination)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn exchange_directories(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        rustix::fs::renameat_with(
+            rustix::fs::CWD,
+            source,
+            rustix::fs::CWD,
+            destination,
+            rustix::fs::RenameFlags::EXCHANGE,
+        )
+        .map_err(Into::into)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (source, destination);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 }
 
@@ -1131,6 +1248,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_replacement_preserves_the_previously_committed_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("installed");
+        let staging = directory.path().join("staging");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(current.join("rootfs"), b"committed").unwrap();
+        std::fs::write(staging.join("rootfs"), b"replacement").unwrap();
+        let fail = |_: &Path, _: &Path| Err(io::Error::other("injected exchange failure"));
+        assert!(publish_install_with(&staging, &current, fail).is_err());
+        assert_eq!(std::fs::read(current.join("rootfs")).unwrap(), b"committed");
+        assert_eq!(
+            std::fs::read(staging.join("rootfs")).unwrap(),
+            b"replacement"
+        );
+        publish_install_with(&staging, &current, exchange_directories).unwrap();
+        assert_eq!(
+            std::fs::read(current.join("rootfs")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(std::fs::read(staging.join("rootfs")).unwrap(), b"committed");
+    }
+
+    #[test]
     fn a_tampered_artifact_is_refused_when_streamed() {
         let dir = tempfile::tempdir().unwrap();
         let path = sealed_from_files(dir.path());
@@ -1147,8 +1288,17 @@ mod tests {
                 BundleVerifyError::ArtifactSha256Mismatch { .. }
             ))
         ));
+        let lease_path = registry
+            .root()
+            .join(format!(".{}.lock", archive_sha256(&path).unwrap()));
         let leftovers: Vec<_> = std::fs::read_dir(registry.root())
-            .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|e| e.path())
+                    .filter(|path| path != &lease_path)
+                    .collect()
+            })
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "refused install left {leftovers:?}");
     }

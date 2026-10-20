@@ -47,6 +47,16 @@ pub(super) fn open_payload(root: &Path, name: &str, size: u64) -> io::Result<Fil
     Ok(file)
 }
 
+pub(super) fn open_sized_regular(path: &Path, size: u64) -> io::Result<File> {
+    let file = open_path(path, false)?;
+    regular(&file, Some(size))?;
+    Ok(file)
+}
+
+pub(super) fn sync_directory(path: &Path) -> io::Result<()> {
+    open_path(path, true)?.sync_all()
+}
+
 pub(super) fn ensure_unchanged(
     input: &File,
     before: &std::fs::Metadata,

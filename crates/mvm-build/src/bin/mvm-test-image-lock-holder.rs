@@ -9,12 +9,13 @@
 //! cross-process locking invariants that unit tests inside one process cannot
 //! reach.
 
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
-use std::path::PathBuf;
-
+#[cfg(unix)]
 fn main() {
+    use std::fs::OpenOptions;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::path::PathBuf;
+
     let lock_path = std::env::args()
         .nth(1)
         .expect("usage: mvm-test-image-lock-holder <lock-path>");
@@ -38,4 +39,10 @@ fn main() {
 
     // Block until stdin closes or the process is terminated.
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("the image-lock holder fixture requires Unix flock");
+    std::process::exit(1);
 }

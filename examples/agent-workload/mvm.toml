@@ -1,7 +1,7 @@
 flake = "."
 profile = "default"
 cpus = 2
-mem = "2G"
+mem = "4G"
 
 [network]
 allow_hosts = ["api.anthropic.com:443"]

@@ -2074,13 +2074,13 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl pack build SPEC.json --out FILE.mvmpkg --input-observation PATH` | Opt into bounded, unsigned frozen Nix graph diagnostics; publish the no-clobber JSON report only after successful build, health checking and export. Not an admission credential |
 | `mvmctl pack build SPEC.json --out FILE.mvmpkg [--lock FILE] [--health-timeout SECS] [--hypervisor H]` | Compile a locked pack spec, build it in the builder VM, boot its entrypoint as a health check, and seal it into a `.mvmpkg` signed by the host key. The archive carries a sealed-prod posture and a signed environment naming the entrypoint, target and sizing. A stale lock, a non-zero health exit, or any artifact that changes between the health boot and signing is refused, and nothing is signed. Python (`mvm.packs`) and TypeScript (`packs`) write the spec as data |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
-| `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
+| `mvmctl pack pull ns/name[@version] [--json]`             | Authenticate, install, and pin a registry product. Application descriptors additionally bind an independently trusted bundle; application JSON reports `status: "installed"`, `installed: true`, descriptor `manifest_sha256`, `bundle_sha256`, and `key_id` only after the reference commit. Same trust policy and behavior as `mvmctl pull` |
 | `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
 | `mvmctl pack registry rm ns/name[@version]`               | Compatibility spelling of `pack rm`                                                                                                                               |
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --document PATH --bundle PATH [--official]` | Verify and cache a signed revocation feed. Without `--official`, use the operator-configured release identity with at most 48-hour validity. With `--official`, require the dedicated `tinylabscom/mvm-packs` `registry-pack-revocations.yml` identity with at most 30-day validity. Both paths reject expired feeds and advance a rollback-resistant checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. A schema-v2 application descriptor is authenticated under the same publisher policy, revocation feed and pins, then its archive is acquired within the signed size bound, independently bundle-verified, installed and pinned. Text output reads `installed ns/name@version (manifest DIGEST, bundle SHA256)`, and `--json` prints `reference`, `manifest_sha256`, `bundle_sha256`, `key_id`, `status: "installed"` and `installed: true`. `pack update` prints the same text line for an application. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`. The former identity is accepted only for the nine exact historical versioned manifest reference/byte-digest pairs listed in [pack authoring](/guides/pack-authoring/#decide-who-may-publish), and only before 2026-11-06 00:00 UTC; the exception is checked after real Sigstore verification identifies the signer. Explicit operator publisher policy is not constrained by that built-in digest exception or cutoff. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. A fresh feed under the separate built-in MVM release identity is required for `mvm/` installation and execution; built-image packs outside `mvm/` require independent operator-configured revocation trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -2096,6 +2096,30 @@ replace publisher signatures or existing authenticated installed pins.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Optional: pre-spawn standby microVMs so even the first run of an image claims a warm one                                                                          |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+Application descriptors use the same catalog digest, publisher policy, pins, and
+current revocation policy as legacy packs. Their bundles must already have an
+independently enrolled key in `$MVM_HOME/trusted-publishers/`; naming a key in a
+descriptor never enrolls it. Pull accepts canonical HTTPS or digest-pinned OCI
+sources, limits acquisition to the descriptor's signed byte size and at most
+4 GiB, and checks the exact archive SHA-256, independent bundle signature,
+asserted key ID, and descriptor-to-bundle architecture match. OCI sources also
+require the production registry allowlist, including when reusing a cached archive.
+Cached archives are reverified and extracted files are rebuilt from verified
+bytes so their content-addressed directory name is not treated as proof.
+
+The application reference is committed in the pack lock only after complete bundle
+installation and publication of the original descriptor evidence. An interrupted
+pull or failure before the atomic reference rename may leave complete verified,
+unreferenced cache content, but does not adopt the new application reference.
+Bundle and descriptor files and directories are synced before committing the pin;
+the pin's directory is synced afterward. An error in that final sync can leave
+the complete reference committed with uncertain durability; retry the pull to
+reverify rather than assume rollback. These filesystem syncs do not certify
+hardware power-loss behavior. Installation is not a launch
+grant: host/backend compatibility and current admission checks remain required at
+execution, and application-reference launch is not implemented by this pull path.
+Applications cannot satisfy a policy-pack dependency.
 
 Locked `pack build` inputs never receive the contributor build's automatic
 local-checkout `mvm` override: the compiled GitHub input remains the lock's pinned
@@ -2433,6 +2457,16 @@ All commands accept these global options:
 | `--verbose` (alias `--debug`) | Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set. |
 
 ## Environment Variables
+
+`MVM_SOURCE_HELPER_BASE_URL` selects the exact base containing the source
+commit's platform archive and matching `.bundle`, with no implicit fallback or
+other probes. Signatures and `SOURCE_COMMIT` remain mandatory. Older fixed-URL
+clients can use it only when matching signed artifacts actually exist there;
+unpublished commits require explicit local build mode or separately authorized
+backfill. By default, current clients use the `source-builds-` plus full-SHA
+prerelease and consult legacy `source-builds` only on archive HTTP 404. See
+[source-build recovery](/contributing/development/).
+`MVM_SKIP_COSIGN_VERIFY` does not authorize installation of source host helpers.
 
 | Variable                                  | Description                                                                                                                                                                                                                                                                                                                                                                                 | Default                          |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |

@@ -4,6 +4,12 @@
 verifies OCI content, builds deterministic ext4 images, seals root filesystems,
 clones runtime state efficiently, and stores content-addressed snapshots.
 
+The ext4 writer/reader, image-contract metadata, output path rules and manifest
+digests are platform-neutral. Host directory materialization, OCI unpacking,
+output extraction, cloning and snapshot mutation are Unix-only APIs. Non-Unix
+hosts do not silently drop extended attributes or substitute weaker write
+semantics for these operations.
+
 ## Who uses it
 
 `mvm-build` uses it to turn source and OCI content into bootable artifacts.

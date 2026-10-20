@@ -17,10 +17,10 @@ use thiserror::Error;
 use crate::packs::KeylessTrust;
 use crate::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackLockfile, PackPin, PackReference, RegistryPackError,
-    RegistryPackImage, RegistryPackInstallError, RegistryPackPublisherPolicy,
-    RegistryPackSignatureChecker, RegistryPackVerification, RegistryPackVerificationError,
-    VerifiedRegistryPack, adopt_registry_pack_with, default_signature_checker,
-    install_registry_pack_at, verify_registry_pack_contents, verify_registry_pack_with,
+    RegistryPackInstallError, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
+    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryPack,
+    adopt_registry_pack_with, default_signature_checker, install_registry_pack_at,
+    verify_registry_pack_contents, verify_registry_pack_with,
 };
 use crate::registry_pack_revocation::{
     RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
@@ -79,7 +79,7 @@ struct RevocationTrustFile {
 /// Missing or stale official data always refuses the pack. Built-image packs
 /// outside `mvm/` also require an operator feed.
 pub fn check_registry_pack_revocations_if_configured(
-    verified: &VerifiedRegistryPack,
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
 ) -> Result<(), RegistryPackStoreError> {
     let trust_path = crate::config::registry_pack_revocation_trust_path();
     let operator_store = RegistryPackRevocationStore::in_mvm_home();
@@ -107,13 +107,13 @@ fn official_registry_pack_revocation_store() -> RegistryPackRevocationStore {
 }
 
 fn check_revocations_for_pack_at(
-    verified: &VerifiedRegistryPack,
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     operator_trust_path: &Path,
     operator_store: &RegistryPackRevocationStore,
     official_store: &RegistryPackRevocationStore,
     now: DateTime<Utc>,
 ) -> Result<(), RegistryPackStoreError> {
-    if verified.manifest().reference.namespace() == "mvm" {
+    if verified.reference().namespace() == "mvm" {
         check_official_registry_pack_revocations_with(verified, now, |trust, at| {
             official_store
                 .load(trust, at)
@@ -125,7 +125,7 @@ fn check_revocations_for_pack_at(
 }
 
 fn check_official_registry_pack_revocations_with<F>(
-    verified: &VerifiedRegistryPack,
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     now: DateTime<Utc>,
     load: F,
 ) -> Result<(), RegistryPackStoreError>
@@ -205,7 +205,7 @@ fn update_registry_pack_revocations_at(
 }
 
 fn check_registry_pack_revocations_at(
-    verified: &VerifiedRegistryPack,
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     trust_path: &Path,
     store: &RegistryPackRevocationStore,
     now: DateTime<Utc>,
@@ -216,7 +216,7 @@ fn check_registry_pack_revocations_at(
 }
 
 fn check_registry_pack_revocations_with<F>(
-    verified: &VerifiedRegistryPack,
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
     trust_path: &Path,
     now: DateTime<Utc>,
     load: F,
@@ -229,11 +229,7 @@ where
 {
     let trust = match load_revocation_trust(trust_path)? {
         Some(trust) => trust,
-        None if matches!(
-            &verified.manifest().image,
-            Some(RegistryPackImage::Built(_))
-        ) =>
-        {
+        None if verified.requires_operator_revocations() => {
             return Err(RegistryPackStoreError::MissingRevocationTrust {
                 path: trust_path.display().to_string(),
             });
@@ -483,6 +479,40 @@ pub fn lock_registry_pack_store(
 }
 
 impl RegistryPackStoreLease {
+    pub(crate) fn commit_application_pin(
+        &self,
+        application: &crate::registry_pack::VerifiedRegistryApplication,
+    ) -> Result<(), RegistryPackStoreError> {
+        use crate::registry_pack::AuthenticatedRegistryManifest;
+        let lock = load_pack_lockfile(&self.lock_path)?;
+        if lock
+            .pins()
+            .iter()
+            .any(|pin| pin.reference() == application.reference())
+        {
+            lock.verify_manifest(application.reference(), application.manifest_bytes())?;
+        }
+        let pin = PackPin::new(
+            application.reference().clone(),
+            application.manifest_sha256().clone(),
+        )?;
+        save_pack_lockfile_locked(&self.lock_path, &upsert_pack_pin(lock, pin)?)?;
+        let parent = self
+            .lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::private_fs::sync_managed_directory_chain(parent, parent).map_err(io_at(parent))?;
+        crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackPin)
+            .detail(format!(
+                "pack={} manifest_sha256={}",
+                application.reference(),
+                application.manifest_sha256().as_str()
+            ))
+            .emit();
+        Ok(())
+    }
+
     /// Under this lease, refuse any different pin for the same coordinate,
     /// publish without repair, then atomically record the authenticated pin.
     pub fn install_local_and_pin(
@@ -933,7 +963,6 @@ mod tests {
         PackAdoption, REGISTRY_PACK_MANIFEST_SCHEMA_VERSION, RegistryPackFile,
         RegistryPackManifest, RegistryPackPublisher,
     };
-    #[cfg(unix)]
     use chrono::TimeZone;
 
     const PROFILE: &[u8] = b"[tools]\nallow = [\"git\"]\n";

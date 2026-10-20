@@ -17,7 +17,7 @@ name: Site isolation watch
 # read the headers off the wire — and it runs on a cron because the deploy is
 # release-triggered and may not run for weeks.
 #
-# Failure opens or updates one tracking issue; a clean run closes it. That is
+# Failure opens or updates one tracking issue; a clean run comments on it; a pull request closes it. That is
 # the enforcement surface, not a merge block: no PR can regress this and no PR
 # can fix it.
 
@@ -28,7 +28,7 @@ on:
 
 permissions:
   contents: read
-  issues: write # opens/updates/closes the tracking issue
+  issues: write # opens/updates the tracking issue; a pull request closes it
 
 concurrency:
   group: ${{ github.workflow }}
@@ -51,7 +51,7 @@ jobs:
           ./scripts/check-site-isolation-headers.sh 2>&1 | tee report.txt
           echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Open, update, or close the tracking issue
+      - name: Open or update the tracking issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -66,10 +66,9 @@ jobs:
 
           if [ "$STATUS" = "0" ]; then
             if [ -n "$EXISTING" ]; then
-              printf 'The live site is cross-origin isolated again ([run](%s)) — closing.\n' \
+              printf 'The live site is cross-origin isolated again ([run](%s)). Close this issue with a pull request.\n' \
                 "$RUN_URL" > body.md
               gh issue comment "$EXISTING" --repo "$REPO" --body-file body.md
-              gh issue close "$EXISTING" --repo "$REPO"
             fi
             exit 0
           fi

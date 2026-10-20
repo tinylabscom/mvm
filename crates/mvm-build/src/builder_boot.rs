@@ -26,8 +26,11 @@
 //!   [`IMAGE_ABI_MARKER`].
 
 pub mod abi;
+#[cfg(unix)]
 pub mod cmdline;
+#[cfg(unix)]
 pub mod payload;
+#[cfg(unix)]
 pub mod stage;
 
 pub use crate::builder_guest_paths::{RUNTIME_HOST_BIN_DIR, guest_host_binary};
@@ -35,19 +38,28 @@ pub use abi::{
     BootAbiError, IMAGE_ABI_MARKER, baked_only_abis, check_image_abi, parse_image_abi_marker,
     payload_supported_abis,
 };
+#[cfg(unix)]
 pub use cmdline::{
     BuilderBoot, LIBKRUN_BUILDER_CONSOLE_BASE, Stage1Cmdline, Stage1CmdlineError,
     builder_boot_cmdline, parse_stage1_cmdline,
 };
+#[cfg(unix)]
 pub use payload::{
     BootPayloadError, BuilderBootPayload, BuilderBootPayloadBuilder, PayloadDigest,
     PayloadManifest, install_payload, verify_unpacked_payload,
 };
+#[cfg(unix)]
 pub use stage::{
     BootPayloadSource, PAYLOAD_FILE_NAME, StageBootError, current_payload_digest,
     read_image_boot_abi, register_boot_payload_source, stage_builder_boot, stage_image_boot,
     supported_image_abis,
 };
+
+/// Hosts without a builder runtime cannot register a boot payload.
+#[cfg(not(unix))]
+pub fn supported_image_abis() -> mvm_core::image_set::BuilderBootAbiRange {
+    baked_only_abis()
+}
 
 /// Where the payload's binaries and manifest sit inside the initramfs,
 /// relative to its root.
@@ -86,7 +98,7 @@ pub fn guest_host_binary_sh(var: &str, name: &str) -> String {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

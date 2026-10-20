@@ -311,14 +311,18 @@ fn thin(data: &[u8], offset: usize) -> Result<Slice<'_>> {
                 };
                 let flags = slice.u32(section + if wide { 64 } else { 56 })? & 0xff;
                 if !matches!(flags, 1 | 0xc | 0x12) {
+                    let section_len =
+                        usize::try_from(section_len).map_err(|_| "section overflow")?;
+                    let section_end = section_offset
+                        .checked_add(section_len)
+                        .ok_or("section overflow")?;
+                    if section_offset < fileoff || section_end > fileoff + filesize {
+                        return Err("file-backed section exceeds segment".into());
+                    }
                     if section_offset != 0 {
                         slice.first_section = slice.first_section.min(section_offset);
                     }
-                    let payload = range(
-                        data,
-                        section_offset,
-                        usize::try_from(section_len).map_err(|_| "section overflow")?,
-                    )?;
+                    let payload = range(data, section_offset, section_len)?;
                     if segment_name == "__TEXT"
                         && name(range(data, section, 16)?)? == "__info_plist"
                         && slice.info.replace(payload).is_some()

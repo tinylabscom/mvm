@@ -245,7 +245,7 @@ jobs:
         run: sh scripts/installer-compat/docs-install-smoke.sh public/src/content/docs/install/linux.md "$INSTALLER_URL"
 
   report:
-    name: Open, update, or close the tracking issue
+    name: Open or update the tracking issue
     needs: [resolve, installer, upgrade, distro, docs-smoke]
     # Pull requests show their own red; a dispatch has an operator watching.
     if: always() && github.event_name == 'schedule'
@@ -275,8 +275,8 @@ jobs:
 
           if [ -z "$failing" ]; then
             if [ -n "$existing" ]; then
-              gh issue close "$existing" --repo "$REPO" \
-                --comment "The installer compat lanes are green again. Run: $RUN_URL"
+              gh issue comment "$existing" --repo "$REPO" \
+                --body "The installer compat lanes are green again. Run: $RUN_URL Close this issue with a pull request."
             fi
             exit 0
           fi

@@ -15,9 +15,15 @@ use tempfile::TempDir;
 
 use mvm_client::registry_pack_local::profile_pack_dependencies;
 use mvm_core::packs::Sha256Hex;
+use mvm_core::registry_pack::application_bundle::{
+    ApplicationInstallStore, InstalledRegistryApplication, install_application_bundle,
+    verify_application_bundle,
+};
 use mvm_core::registry_pack::{
-    InstalledRegistryPack, PackAdoption, PackReference, RegistryPackImage,
-    RegistryPackVerification, VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
+    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackReference,
+    RegistryPackImage, RegistryPackVerification, VerifiedRegistryApplication,
+    VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_manifest,
+    verify_registry_manifest,
 };
 use mvm_core::registry_pack_store::{
     PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
@@ -198,12 +204,35 @@ pub struct PullSummary {
     pub refreshed: bool,
 }
 
-/// Fetch, verify, install, and pin a pack and its signed profile dependencies.
+/// Only completed installation and pin commits are reported as installed.
+#[derive(Debug)]
+pub enum PullOutcome {
+    Installed(PullSummary),
+    InstalledApplication(Box<InstalledRegistryApplication>),
+}
+
+#[derive(Debug)]
+enum VerifiedPull {
+    Installed(PullSummary),
+    Application(Box<VerifiedRegistryApplication>),
+}
+
+impl VerifiedPull {
+    fn reference(&self) -> &PackReference {
+        match self {
+            Self::Installed(summary) => &summary.reference,
+            Self::Application(application) => application.reference(),
+        }
+    }
+}
+
+/// Authenticate a manifest; install legacy packs and their signed dependencies.
 ///
 /// A pack whose coordinate is already pinned is re-verified lock-first
 /// (digest drift refuses); a new pack is adopted signature-first. The pin is
-/// written only after installation succeeds.
-pub fn pull(reference_arg: &str) -> Result<PullSummary> {
+/// written only after installation succeeds. Applications independently verify
+/// their bundle under local consumer trust before installation and pin commit.
+pub fn pull(reference_arg: &str) -> Result<PullOutcome> {
     let requested: PackReference = reference_arg
         .parse()
         .with_context(|| format!("invalid pack reference {reference_arg:?}"))?;
@@ -211,7 +240,7 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
     let index = fetch_index(&config)?;
     let mut seen = BTreeMap::new();
     let mut active = Vec::new();
-    pull_with_dependencies(
+    let verified = pull_with_dependencies(
         &config,
         &index,
         &requested,
@@ -232,7 +261,62 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
             pull_one(config, reference, &advertised.manifest_sha256)
         },
     )?
-    .context("the requested pack was already visited before its pull")
+    .context("the requested pack was already visited before its pull")?;
+    match verified {
+        VerifiedPull::Installed(summary) => Ok(PullOutcome::Installed(summary)),
+        VerifiedPull::Application(application) => acquire_application(&application)
+            .map(Box::new)
+            .map(PullOutcome::InstalledApplication),
+    }
+}
+
+fn acquire_application(
+    application: &VerifiedRegistryApplication,
+) -> Result<InstalledRegistryApplication> {
+    use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
+    check_registry_pack_revocations_if_configured(application)?;
+    crate::commands::bundle::fetch::admit_application_source(application)?;
+    let trust = FsTrustStore::default_path()?;
+    anyhow::ensure!(
+        trust
+            .lookup(&application.manifest().application.bundle.key_id)
+            .is_some(),
+        "application bundle key is not independently enrolled in the consumer trust store"
+    );
+    let registry = BundleRegistry::default_path()?;
+    if let Ok(metadata) = std::fs::symlink_metadata(registry.root()) {
+        anyhow::ensure!(
+            metadata.is_dir() && !metadata.file_type().is_symlink(),
+            "bundle registry root must be a real directory"
+        );
+    }
+    let cached = registry.archive_path(
+        application
+            .manifest()
+            .application
+            .bundle
+            .archive_sha256
+            .as_str(),
+    );
+    let candidate = match verify_application_bundle(application, &cached, &trust) {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            let loaded = crate::commands::bundle::fetch::load_application_bundle(application)?;
+            verify_application_bundle(application, loaded.path(), &trust)?
+        }
+    };
+    let store = ApplicationInstallStore::new(
+        mvm_core::config::registry_pack_cache_dir(),
+        mvm_core::config::pack_lockfile_path(),
+        registry.root(),
+    );
+    install_application_bundle(
+        &candidate,
+        &store,
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+        &trust,
+    )
+    .map_err(Into::into)
 }
 
 fn register_dependency(
@@ -276,9 +360,9 @@ fn pull_with_dependencies<F>(
     seen: &mut BTreeMap<String, PackReference>,
     active: &mut Vec<PackReference>,
     pull_pack: &mut F,
-) -> Result<Option<PullSummary>>
+) -> Result<Option<VerifiedPull>>
 where
-    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(PullSummary, Vec<PackReference>)>,
+    F: FnMut(&PackRegistryConfig, &PackReference) -> Result<(VerifiedPull, Vec<PackReference>)>,
 {
     let entry = index
         .iter()
@@ -299,9 +383,13 @@ where
     }
     active.push(reference.clone());
     let (summary, dependencies) = pull_pack(config, &reference)?;
+    if active.len() > 1 && matches!(summary, VerifiedPull::Application(_)) {
+        bail!("application {reference} cannot satisfy a signed policy-pack dependency");
+    }
     for dependency in dependencies {
-        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack)
-            .with_context(|| format!("pulling dependency {dependency} of {}", summary.reference))?;
+        pull_with_dependencies(config, index, &dependency, seen, active, pull_pack).with_context(
+            || format!("pulling dependency {dependency} of {}", summary.reference()),
+        )?;
     }
     active.pop();
     Ok(Some(summary))
@@ -311,7 +399,7 @@ fn pull_one(
     config: &PackRegistryConfig,
     reference: &PackReference,
     advertised_digest: &Sha256Hex,
-) -> Result<(PullSummary, Vec<PackReference>)> {
+) -> Result<(VerifiedPull, Vec<PackReference>)> {
     let fetched = download_pack(config, reference)?;
     let actual = Sha256Hex::from_bytes(&fetched.manifest_bytes);
     if &actual != advertised_digest {
@@ -341,7 +429,7 @@ fn pull_one(
     // (that is what `pack registry update` relies on).
     let pinned = lock.pins().iter().any(|pin| pin.reference() == reference);
 
-    let verified: VerifiedRegistryPack = if pinned {
+    let verified = if pinned {
         let request = RegistryPackVerification::new(
             reference,
             &fetched.manifest_bytes,
@@ -349,14 +437,23 @@ fn pull_one(
             &lock,
             &policy,
         );
-        verify_registry_pack(&request)?
+        verify_registry_manifest(&request)?
     } else {
-        adopt_registry_pack(&PackAdoption {
+        adopt_registry_manifest(&PackAdoption {
             requested: reference,
             manifest_bytes: &fetched.manifest_bytes,
             signature_bundle: &fetched.signature_bundle,
             publisher_policy: &policy,
         })?
+    };
+    let verified = match verified {
+        VerifiedRegistryManifest::Application(application) => {
+            check_registry_pack_revocations_if_configured(&application)?;
+            // Persist a pin only after acquisition succeeds. The handoff retains
+            // authenticated bytes and digest for that later transaction.
+            return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));
+        }
+        VerifiedRegistryManifest::Legacy(legacy) => legacy,
     };
     check_registry_pack_revocations_if_configured(&verified)?;
     with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
@@ -387,13 +484,13 @@ fn pull_one(
     let files = verified.payload_files().len();
     let dependencies = declared_pack_dependencies(&installed, &verified)?;
     Ok((
-        PullSummary {
+        VerifiedPull::Installed(PullSummary {
             reference: verified.manifest().reference.clone(),
             manifest_sha256: verified.manifest_sha256().as_str().to_string(),
             files,
             installed_root: installed.root().to_path_buf(),
             refreshed: pinned,
-        },
+        }),
         dependencies,
     ))
 }
@@ -894,13 +991,13 @@ mod tests {
         assert_eq!(visited, ["agent/root@1.0.0", "runtime/node@1.0.0"]);
     }
 
-    fn summary(reference: &PackReference) -> PullSummary {
-        PullSummary {
+    fn summary(reference: &PackReference) -> VerifiedPull {
+        VerifiedPull::Installed(PullSummary {
             reference: reference.clone(),
             manifest_sha256: String::new(),
             files: 0,
             installed_root: PathBuf::new(),
             refreshed: false,
-        }
+        })
     }
 }

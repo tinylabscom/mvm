@@ -11,6 +11,8 @@
 //! application with whiteouts, opaque-directory whiteout,
 //! overlapping file overrides between layers.
 
+#![cfg(unix)]
+
 mod oci_unpack_common;
 
 use mvm_fs::oci_to_rootfs::{ImageStaging, OciUnpackError, StagingOptions};

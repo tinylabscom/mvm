@@ -161,7 +161,7 @@ fn linux_only_set_does_not_depend_on_a_paired_mvm_checkout() {
     manifest["compatibility"]["builder_boot_abi"] =
         serde_json::json!(mvm_core::image_set::BuilderBootAbi::NO_MVM_BINARY.get());
     manifest["compatibility"]["builder_cache_contract"] =
-        serde_json::json!(crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION);
+        serde_json::json!(crate::builder_contract::BUILDER_VM_CACHE_CONTRACT_VERSION);
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let set = pair
         .read_with(

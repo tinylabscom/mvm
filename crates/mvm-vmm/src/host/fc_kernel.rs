@@ -169,11 +169,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// Public because a cache that boots kernels in place has to recognise them.
 #[must_use]
 pub fn extracted_elf_files(path: &Path) -> [PathBuf; 2] {
-    [sibling_elf(path), sibling(path, ".elf.src")]
+    mvm_core::kernel_format::extracted_elf_files(path)
 }
 
+#[cfg(test)]
 fn sibling_elf(path: &Path) -> PathBuf {
-    sibling(path, ".elf")
+    let [elf, _] = extracted_elf_files(path);
+    elf
 }
 
 fn gzip_offsets(image: &[u8]) -> impl Iterator<Item = usize> + '_ {

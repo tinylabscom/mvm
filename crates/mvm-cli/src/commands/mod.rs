@@ -3,7 +3,7 @@ mod bench;
 mod bootstrap;
 mod build;
 mod builder_shell_job;
-mod bundle;
+pub(crate) mod bundle;
 mod capture;
 pub mod catalog;
 mod cmd_audit;
