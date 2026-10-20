@@ -278,9 +278,10 @@ pub struct SynthesisInputBuilder<'a> {
 }
 
 impl<'a> SynthesisInputBuilder<'a> {
-    /// An empty builder: nothing set yet.
-    #[must_use]
-    pub fn new() -> Self {
+    /// An empty builder: nothing set yet. Reached only through
+    /// [`SynthesisInput::builder`], so the builder has no `Default` a caller
+    /// could use to skip it.
+    fn new() -> Self {
         Self {
             vm_name: None,
             tenant: None,
@@ -702,12 +703,6 @@ impl<'a> SynthesisInputBuilder<'a> {
                 .ok_or(BuilderError::missing("SynthesisInput", "stream_retention"))?,
             attestation_mode: self.attestation_mode.unwrap_or(AttestationMode::Noop),
         })
-    }
-}
-
-impl<'a> Default for SynthesisInputBuilder<'a> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

@@ -3067,6 +3067,17 @@ mod tests {
         assert!(!touched, "no archive + no dir → returns false");
     }
 
+    /// An absent registry root is "nothing installed": `remove` answers
+    /// `false` without creating the root as a side effect of locking.
+    #[test]
+    fn bundle_registry_remove_on_an_absent_root_creates_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("never-created");
+        let registry = BundleRegistry::new(&root);
+        assert!(!registry.remove(&"a".repeat(64)).expect("remove ok"));
+        assert!(!root.exists(), "removing from nothing must not create it");
+    }
+
     #[test]
     fn bundle_registry_list_returns_installed_shas_sorted() {
         let tmp = tempfile::tempdir().unwrap();
