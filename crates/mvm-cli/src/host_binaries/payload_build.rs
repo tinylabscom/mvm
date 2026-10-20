@@ -29,7 +29,7 @@ pub(crate) struct EmbeddedSourceBinary {
 }
 
 /// The payload manifest, relative to the workspace root.
-pub(crate) const MANIFEST_PATH: &str = "crates/mvm-build/src/host_payload_manifest.rs";
+pub(crate) const MANIFEST_PATH: &str = "crates/mvm-builder-guest/src/host_payload_manifest.rs";
 
 /// Every binary in the payload, read from the manifest in `workspace_root`.
 pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceBinary>, String> {
@@ -41,21 +41,21 @@ pub(crate) fn read_manifest(workspace_root: &Path) -> Result<Vec<EmbeddedSourceB
 
 /// Every binary in the payload, in the order the table lists them.
 ///
-/// Read out of the *text* of `crates/mvm-build/src/host_payload_manifest.rs`,
+/// Read out of the *text* of `crates/mvm-builder-guest/src/host_payload_manifest.rs`,
 /// because a build script cannot depend on the crate it is building. The order
 /// is part of the payload's identity — extraction hashes the table in order —
 /// so both callers must read the same text the same way.
 ///
 /// `HOST_BINARIES` (the builder boot payload) and the bootstrap support list
 /// name each binary's package. `SEED_BINARIES` (host-side only, e.g. the
-/// Stage 0 nix-seed's `/init`) are `mvm-build` `[[bin]]`s and name none.
+/// Stage 0 nix-seed's `/init`) are `mvm-builder-guest` `[[bin]]`s and name none.
 pub(crate) fn parse_embedded_manifest(src: &str) -> Result<Vec<EmbeddedSourceBinary>, String> {
     let mut manifest = parse_host_binaries(src)?;
     manifest.extend(
         read_quoted_strings_block(src, "SEED_BINARIES")?
             .into_iter()
             .map(|name| EmbeddedSourceBinary {
-                package: "mvm-build".to_string(),
+                package: "mvm-builder-guest".to_string(),
                 name,
                 features: String::new(),
             }),
@@ -560,7 +560,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         let request = KeyRequest {
-            package: "mvm-build",
+            package: "mvm-builder-guest",
             binary: "mvm-builderd",
             features: "",
             target: "x86_64-unknown-linux-musl",
@@ -591,7 +591,7 @@ mod tests {
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
         let mut cache = EmbedCache::with_root(root, Some(root.join("store")));
         let request = KeyRequest {
-            package: "mvm-build",
+            package: "mvm-builder-guest",
             binary: "mvm-builderd",
             features: "",
             target: "x86_64-unknown-linux-musl",
@@ -729,7 +729,7 @@ mod tests {
     #[test]
     fn a_quiet_zigbuild_differs_only_by_quiet() {
         let binary = EmbeddedSourceBinary {
-            package: "mvm-build".to_string(),
+            package: "mvm-builder-guest".to_string(),
             name: "mvm-host-vm-init".to_string(),
             features: String::new(),
         };
@@ -793,8 +793,8 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[
     fn host_binary_names_exclude_bootstrap_support_entries() {
         let src = r#"
 pub const HOST_BINARIES: &[HostBinary] = &[
-    HostBinary { package: "mvm-build", name: "mvm-host-vm-init", install_path: Some("/sbin/mvm-host-vm-init"), mode: 0o755 },
-    HostBinary { package: "mvm-build", name: "mvm-builderd", install_path: Some("/sbin/mvm-builderd"), mode: 0o755 },
+    HostBinary { package: "mvm-builder-guest", name: "mvm-host-vm-init", install_path: Some("/sbin/mvm-host-vm-init"), mode: 0o755 },
+    HostBinary { package: "mvm-builder-guest", name: "mvm-builderd", install_path: Some("/sbin/mvm-builderd"), mode: 0o755 },
 ];
 pub const SEED_BINARIES: &[&str] = &["stage0-init"];
 pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
@@ -814,7 +814,7 @@ pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary
         let src = r#"
 pub const HOST_BINARIES: &[HostBinary] = &[
     HostBinary {
-        package: "mvm-build",
+        package: "mvm-builder-guest",
         name: "mvm-host-vm-init",
         install_path: Some("/sbin/mvm-host-vm-init"),
         mode: 0o755,
@@ -831,7 +831,7 @@ pub const HOST_BINARIES: &[HostBinary] = &[
             parse_host_binaries(src).unwrap(),
             vec![
                 EmbeddedSourceBinary {
-                    package: "mvm-build".to_string(),
+                    package: "mvm-builder-guest".to_string(),
                     name: "mvm-host-vm-init".to_string(),
                     features: String::new(),
                 },
@@ -848,7 +848,7 @@ pub const HOST_BINARIES: &[HostBinary] = &[
     fn a_host_binary_without_a_package_is_refused_rather_than_misaligned() {
         let src = r#"
 pub const HOST_BINARIES: &[HostBinary] = &[
-    HostBinary { package: "mvm-build", name: "mvm-host-vm-init", mode: 0o755 },
+    HostBinary { package: "mvm-builder-guest", name: "mvm-host-vm-init", mode: 0o755 },
     HostBinary { name: "mvm-setpriv", mode: 0o755 },
 ];
 "#;
@@ -866,13 +866,17 @@ pub const HOST_BINARIES: &[HostBinary] = &[
         };
 
         let parsed = parse_embedded_manifest(include_str!(
-            "../../../mvm-build/src/host_payload_manifest.rs"
+            "../../../mvm-builder-guest/src/host_payload_manifest.rs"
         ))
         .unwrap();
         let compiled: Vec<EmbeddedSourceBinary> = HOST_BINARIES
             .iter()
             .map(|bin| (bin.package, bin.name))
-            .chain(SEED_BINARIES.iter().map(|name| ("mvm-build", *name)))
+            .chain(
+                SEED_BINARIES
+                    .iter()
+                    .map(|name| ("mvm-builder-guest", *name)),
+            )
             .map(|(package, name)| EmbeddedSourceBinary {
                 package: package.to_string(),
                 name: name.to_string(),

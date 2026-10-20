@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 const ALLOWLIST: &[&str] = &[
     "crates/mvm-build/src/persistent_builder.rs",
     "crates/mvm-build/src/pipeline/vsock_builder.rs",
-    "crates/mvm-build/src/builder_protocol.rs",
+    "crates/mvm-builder-guest/src/builder_protocol.rs",
     "crates/mvm-agentd/src/builder_agent.rs",
 ];
 
@@ -154,7 +154,7 @@ mod tests {
         // WS-D routed vsock_builder.rs through BuilderdClient → it stops matching.
         let hits = vec![
             "crates/mvm-build/src/persistent_builder.rs".to_string(),
-            "crates/mvm-build/src/builder_protocol.rs".to_string(),
+            "crates/mvm-builder-guest/src/builder_protocol.rs".to_string(),
             "crates/mvm-agentd/src/builder_agent.rs".to_string(),
         ];
         assert_eq!(

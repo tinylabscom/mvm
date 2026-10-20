@@ -64,18 +64,6 @@
       ]
     },
     {
-      "path": "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
-      "package": "mvm-build",
-      "claims": [
-        2
-      ],
-      "scope": {
-        "examine_re": "virtiofs_mount_flags",
-        "why": "This file is on claim 2's surface only because the claim's witness test `virtiofs_mount_flags_keep_workspace_read_only` is declared in it. The witness guards one function, `virtiofs_mount_flags`, and the surrounding 4476 lines are the builder VM's init - vsock framing, nix-store seeding, ext4 probing - which assert nothing about a guest elevating to uid 0. Measured 2026-07-31: 164 of 291 mutants survive, none of them in the witnessed function, which is fully caught. Scoped to the code the witness actually guards so the claim's result means what it says.",
-        "excluded_tracked_by": "#2006"
-      }
-    },
-    {
       "path": "crates/mvm-build/src/guest_bins/release.rs",
       "package": "mvm-build",
       "claims": [
@@ -102,6 +90,18 @@
       "claims": [
         3
       ]
+    },
+    {
+      "path": "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs",
+      "package": "mvm-builder-guest",
+      "claims": [
+        2
+      ],
+      "scope": {
+        "examine_re": "virtiofs_mount_flags",
+        "why": "This file is on claim 2's surface only because the claim's witness test `virtiofs_mount_flags_keep_workspace_read_only` is declared in it. The witness guards one function, `virtiofs_mount_flags`, and the surrounding 4476 lines are the builder VM's init - vsock framing, nix-store seeding, ext4 probing - which assert nothing about a guest elevating to uid 0. Measured 2026-07-31: 164 of 291 mutants survive, none of them in the witnessed function, which is fully caught. Scoped to the code the witness actually guards so the claim's result means what it says.",
+        "excluded_tracked_by": "#2006"
+      }
     },
     {
       "path": "crates/mvm-cli/src/commands/image/pull_core.rs",

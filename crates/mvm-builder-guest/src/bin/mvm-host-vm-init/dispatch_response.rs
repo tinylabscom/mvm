@@ -6,7 +6,7 @@
 //! `mvm-host-vm-init` keeps a ≤ 1.5 MiB rootfs size budget and
 //! deliberately does not pull `serde_json` (`Cargo.toml` comment at
 //! the deps section). The host-side
-//! consumer (`mvm_build::builder_protocol::HostVmResponse::Result`)
+//! consumer (`mvm_builder_guest::builder_protocol::HostVmResponse::Result`)
 //! is a typed serde enum; this module mirrors its wire shape
 //! exactly so the host's `serde_json::from_slice::<HostVmResponse>`
 //! parses what we emit. The `builder_response_matches_typed_serde`
@@ -60,7 +60,7 @@ pub(crate) struct DispatchResponse {
 }
 
 impl DispatchResponse {
-    /// Render as the exact wire JSON `mvm_build::builder_protocol::HostVmResponse::Result`
+    /// Render as the exact wire JSON `mvm_builder_guest::builder_protocol::HostVmResponse::Result`
     /// deserializes from. Field order matches the serde-derived
     /// internally-tagged enum encoding (`"kind"` first, then the
     /// variant's struct fields in declaration order).
@@ -94,12 +94,12 @@ pub(crate) fn bye_json() -> &'static str {
 /// Wire JSON for `HostVmResponse::StderrChunk`, one frame per stderr
 /// line the dispatch loop streams back to the
 /// host while a build is running. Matches the serde-derived shape in
-/// `mvm_build::builder_protocol::HostVmResponse::StderrChunk`
+/// `mvm_builder_guest::builder_protocol::HostVmResponse::StderrChunk`
 /// (`{"kind":"stderr_chunk","job_id":"...","line":"..."}`); the
 /// cross-validation test below pins it.
 ///
 /// `line` must already have its trailing `\n` stripped — the host's
-/// `mvm_build::builder_protocol::HostVmResponse::StderrChunk` docs
+/// `mvm_builder_guest::builder_protocol::HostVmResponse::StderrChunk` docs
 /// commit to that.
 pub(crate) fn stderr_chunk_json(job_id: &str, line: &str) -> String {
     let mut out = String::with_capacity(64 + job_id.len() + line.len());
@@ -158,16 +158,16 @@ pub(crate) fn workload_failed_json(workload_id: &str, error: &str) -> String {
 }
 
 /// The single-shot job outcome the guest writes to `/job/result`, as
-/// `mvm_build::builder_job_contract::JobOutcome` parses it: the contract
+/// `mvm_builder_guest::builder_job_contract::JobOutcome` parses it: the contract
 /// version this init speaks, the exit code, the stderr tail cut to the
 /// contract's bound, the failure category, and the job's run time.
 pub(crate) fn job_outcome_json(
     exit_code: i32,
-    failure: Option<mvm_build::builder_job_contract::FailureCategory>,
+    failure: Option<mvm_builder_guest::builder_job_contract::FailureCategory>,
     stderr_tail: &str,
     build_ms: Option<u64>,
 ) -> String {
-    use mvm_build::builder_job_contract::{BUILDER_JOB_CONTRACT_VERSION, bounded_tail};
+    use mvm_builder_guest::builder_job_contract::{BUILDER_JOB_CONTRACT_VERSION, bounded_tail};
     let tail = bounded_tail(stderr_tail);
     let mut out = String::with_capacity(128 + tail.len());
     out.push_str(r#"{"contract_version":"#);
@@ -314,11 +314,11 @@ mod tests {
 
     #[test]
     fn bye_json_matches_typed_builder_response_bye() {
-        let typed: mvm_build::builder_protocol::HostVmResponse =
+        let typed: mvm_builder_guest::builder_protocol::HostVmResponse =
             serde_json::from_str(bye_json()).expect("parse");
         assert!(matches!(
             typed,
-            mvm_build::builder_protocol::HostVmResponse::Bye {}
+            mvm_builder_guest::builder_protocol::HostVmResponse::Bye {}
         ));
     }
 
@@ -330,10 +330,10 @@ mod tests {
         let job_id = "01234567-89ab-cdef-0123-456789abcdef";
         let line = "[mvm] nix build: 12/47 derivations";
         let json = stderr_chunk_json(job_id, line);
-        let typed: mvm_build::builder_protocol::HostVmResponse =
+        let typed: mvm_builder_guest::builder_protocol::HostVmResponse =
             serde_json::from_str(&json).expect("must parse as typed HostVmResponse");
         match typed {
-            mvm_build::builder_protocol::HostVmResponse::StderrChunk {
+            mvm_builder_guest::builder_protocol::HostVmResponse::StderrChunk {
                 job_id: got_id,
                 line: got_line,
             } => {
@@ -360,7 +360,7 @@ mod tests {
     }
 
     /// **The cross-validation test.** Hand-rolled JSON must
-    /// deserialize as `mvm_build::builder_protocol::HostVmResponse`
+    /// deserialize as `mvm_builder_guest::builder_protocol::HostVmResponse`
     /// with `Result` variant carrying the expected fields. Bumps
     /// either struct's shape (renames, additions, type changes)
     /// trip this test, which is the signal to re-sync.
@@ -374,10 +374,10 @@ mod tests {
             build_ms: 1234,
         };
         let json = resp.to_json();
-        let typed: mvm_build::builder_protocol::HostVmResponse =
+        let typed: mvm_builder_guest::builder_protocol::HostVmResponse =
             serde_json::from_str(&json).expect("must parse as typed HostVmResponse");
         match typed {
-            mvm_build::builder_protocol::HostVmResponse::Result {
+            mvm_builder_guest::builder_protocol::HostVmResponse::Result {
                 job_id,
                 exit_code,
                 stderr_tail,
@@ -403,7 +403,7 @@ mod tests {
     /// `JobOutcome`, unknown fields denied, for every failure category.
     #[test]
     fn job_outcome_json_parses_as_the_typed_contract_outcome() {
-        use mvm_build::builder_job_contract::{
+        use mvm_builder_guest::builder_job_contract::{
             BUILDER_JOB_CONTRACT_VERSION, FailureCategory, JobOutcome, parse_outcome,
         };
         let success = parse_outcome(&job_outcome_json(0, None, "ok\n\"quoted\"", Some(9))).unwrap();
@@ -438,13 +438,14 @@ mod tests {
 
     #[test]
     fn job_outcome_json_bounds_the_stderr_tail() {
-        let long = "x".repeat(mvm_build::builder_job_contract::STDERR_TAIL_MAX_BYTES * 3);
-        let parsed =
-            mvm_build::builder_job_contract::parse_outcome(&job_outcome_json(1, None, &long, None))
-                .unwrap();
+        let long = "x".repeat(mvm_builder_guest::builder_job_contract::STDERR_TAIL_MAX_BYTES * 3);
+        let parsed = mvm_builder_guest::builder_job_contract::parse_outcome(&job_outcome_json(
+            1, None, &long, None,
+        ))
+        .unwrap();
         assert_eq!(
             parsed.stderr_tail.len(),
-            mvm_build::builder_job_contract::STDERR_TAIL_MAX_BYTES
+            mvm_builder_guest::builder_job_contract::STDERR_TAIL_MAX_BYTES
         );
     }
 
@@ -453,7 +454,7 @@ mod tests {
     /// either side trips this.
     #[test]
     fn workload_emitters_parse_as_typed_builder_response() {
-        use mvm_build::builder_protocol::{HostVmResponse, WorkloadId};
+        use mvm_builder_guest::builder_protocol::{HostVmResponse, WorkloadId};
 
         let id = "00000000-0000-0000-0000-000000000000";
 

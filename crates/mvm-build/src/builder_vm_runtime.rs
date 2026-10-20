@@ -109,17 +109,9 @@ pub(crate) const LIBKRUN_BLOCK_DEVICE_TAIL_RESERVE_BYTES: u64 = 64 * 1024;
 /// disable the safety net.
 pub const MVM_BUILDER_VM_TIMEOUT_SECS_ENV: &str = "MVM_BUILDER_VM_TIMEOUT_SECS";
 
-/// Builder persistent `/nix` store auto-GC threshold (GiB of *used*
-/// space). When the in-guest store exceeds this after a build, the
-/// build script runs `nix-collect-garbage --delete-older-than 14d`.
-/// Default 24 GiB (above doctor's 20 GiB warning, below the 64 GiB
-/// sparse cap [`DEFAULT_NIX_STORE_MIB`](crate::builder_vm::DEFAULT_NIX_STORE_MIB)).
-/// Override: [`MVM_BUILDER_STORE_GC_GIB_ENV`].
-///
-/// Lives here because `render_flake_cmd_sh` reads it at render time;
-/// The libkrun compatibility module re-exports it near `DEFAULT_NIX_STORE_MIB` for
-/// discoverability.
-pub const DEFAULT_BUILDER_STORE_GC_GIB: u32 = 24;
+pub use mvm_builder_guest::stage0_guest::{
+    DEFAULT_BUILDER_STORE_GC_GIB, STAGE0_STORE_GC_KIB_CMDLINE_KEY, read_last_bytes_of,
+};
 
 /// Env var that overrides [`DEFAULT_BUILDER_STORE_GC_GIB`]. Plain
 /// integer GiB; a missing/garbage/zero value falls back to the
@@ -169,17 +161,6 @@ pub fn builder_store_gc_cap_kib() -> u64 {
     u64::from(gib) * 1024 * 1024
 }
 
-/// Kernel-cmdline token carrying [`builder_store_gc_cap_kib`] into the Stage 0
-/// guest.
-///
-/// The guest cannot read the host's environment, so without this the
-/// [`MVM_BUILDER_STORE_GC_GIB_ENV`] override would govern the steady-state
-/// store and silently not the Stage 0 one. It rides the cmdline rather than
-/// `stage0-build.conf` because the ordinary builder-image bootstrap writes no
-/// config at all — only the SDK-sidecar and external-kernel paths do — so a
-/// config-carried cap reached the guest on exactly the paths that did not need
-/// it.
-pub const STAGE0_STORE_GC_KIB_CMDLINE_KEY: &str = "mvm.store_gc_kib";
 
 /// The cmdline token every Stage 0 boot carries.
 pub fn stage0_store_gc_cmdline_token() -> String {
@@ -879,26 +860,6 @@ pub fn stage_filtered_work_input(src: &Path) -> Result<tempfile::TempDir, Builde
 /// `artifact_out/` after the install pipeline finishes. The host
 /// reads + parses this to decide whether the install succeeded.
 pub const INSTALL_RESULT_FILENAME: &str = "result.json";
-
-/// Read the last `max_bytes` of `path` into a `String`, replacing any
-/// invalid UTF-8 lossily. Returns `Err` if the file is missing or
-/// unreadable. Used by [`finalize_flake_job`] to surface the tail of
-/// `<job_dir>/nix-stderr.log` (the cmd.sh's nix-build stderr capture)
-/// in the failure path without loading a multi-hundred-KB log into
-/// memory.
-pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut file = std::fs::File::open(path)?;
-    let len = file.metadata()?.len();
-    let take = max_bytes.min(len);
-    // SeekFrom::End wants i64; max_bytes is bounded to a small constant
-    // at every call site (4 KiB today) so the cast is safe.
-    let offset = i64::try_from(take).unwrap_or(i64::MAX).saturating_neg();
-    file.seek(SeekFrom::End(offset))?;
-    let mut buf = Vec::with_capacity(take as usize);
-    file.read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
 
 fn missing_job_result_diagnostics(job_dir: &Path, vm_state_dir: &Path) -> String {
     let console_log = vm_state_dir.join("console.log");

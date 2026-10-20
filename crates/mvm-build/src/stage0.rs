@@ -34,53 +34,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
-/// Scratch payload baked into the tightly packed Stage 0 ext4 root and removed
-/// by PID 1 before it creates the small amount of mutable bootstrap state.
-pub const ROOT_RUNTIME_RESERVE_PATH: &str = "/.mvm-stage0-root-reserve";
+pub use mvm_builder_guest::stage0_guest::{ROOT_RUNTIME_RESERVE_PATH, copy_nonempty_file};
 pub const ROOT_RUNTIME_RESERVE_BYTES: usize = 8 << 20;
 
 const ROOT_MARKER_FILE: &str = ".mvm-stage0-root";
 const ROOT_MARKER_SCHEMA_VERSION: u32 = 1;
-
-/// Copy a non-empty artifact through an explicit userspace buffer.
-///
-/// Stage 0 copies from its ext4-backed Nix store to the output staging tree.
-/// Bootstrap artifacts use ordinary reads and writes and reject an empty
-/// source before it can be reported as successfully emitted.
-pub fn copy_nonempty_file(src: &Path, dst: &Path) -> Result<u64> {
-    let mut input = std::io::BufReader::new(
-        std::fs::File::open(src).with_context(|| format!("open {} for copy", src.display()))?,
-    );
-    let mut output = std::io::BufWriter::new(
-        std::fs::File::create(dst).with_context(|| format!("create {} for copy", dst.display()))?,
-    );
-    let mut buffer = [0u8; 64 * 1024];
-    let mut copied = 0u64;
-    loop {
-        let read = input
-            .read(&mut buffer)
-            .with_context(|| format!("read {}", src.display()))?;
-        if read == 0 {
-            break;
-        }
-        output
-            .write_all(&buffer[..read])
-            .with_context(|| format!("write {}", dst.display()))?;
-        copied = copied.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-    }
-    output
-        .flush()
-        .with_context(|| format!("flush {}", dst.display()))?;
-    if copied == 0 {
-        let _ = std::fs::remove_file(dst);
-        bail!(
-            "copy {} -> {} produced an empty artifact",
-            src.display(),
-            dst.display()
-        );
-    }
-    Ok(copied)
-}
 
 /// One downloadable bootstrap asset, pinned by upstream URL + SHA-256.
 /// The cache key is [`Self::cache_filename`].

@@ -75,7 +75,7 @@ const BOUNDARIES: &[Boundary] = &[
         forbidden: &[],
     },
     Boundary {
-        path: "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        path: "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs",
         required: &[
             "fork_guest_agent();",
             "fn fork_guest_agent()",

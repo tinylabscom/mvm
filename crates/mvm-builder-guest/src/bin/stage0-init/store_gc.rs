@@ -15,7 +15,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use mvm_build::builder_vm_runtime::{
+use mvm_builder_guest::stage0_guest::{
     DEFAULT_BUILDER_STORE_GC_GIB, STAGE0_STORE_GC_KIB_CMDLINE_KEY,
 };
 

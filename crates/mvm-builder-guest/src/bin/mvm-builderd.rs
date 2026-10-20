@@ -2,36 +2,20 @@
 //!
 //! Runs inside the builder VM as a long-lived service. It binds the
 //! AF_VSOCK control port, accepts host connections from `mvmctl`'s
-//! builder client, and serves the typed `mvm_build::builderd_protocol`
+//! builder client, and serves the typed `mvm_builder_guest::builderd_protocol`
 //! over each one — handshake, then allowlisted build/eval operations.
 //! There is no shell surface.
 //!
 //! The daemon logic lives in the cross-platform `builderd` /
 //! `builderd_protocol` library modules; this binary is just the
 //! Linux-only AF_VSOCK listener that feeds accepted connections into
-//! `builderd::serve_connection`. The modules are
-//! `#[path]`-included (not reached via `use mvm_build::…`) so the binary
-//! cross-compiles to static `aarch64-unknown-linux-musl` for the builder
-//! rootfs without dragging in the full `mvm-build` lib (which pulls
-//! `reqwest`/`tokio`) — the same structure every builder bin uses.
+//! `builderd::serve_connection`.
 //!
 //! On a non-Linux host the binary still compiles (workspace ergonomics)
 //! but is a no-op that exits non-zero; the production binary is
-//! cross-compiled from the builder-VM flake.
+//! cross-compiled to static musl and embedded in `mvmctl`.
 
 use std::process::ExitCode;
-
-#[cfg(target_os = "linux")]
-#[path = "../builderd_protocol.rs"]
-mod builderd_protocol;
-
-#[cfg(target_os = "linux")]
-#[path = "../builderd.rs"]
-mod builderd;
-
-#[cfg(target_os = "linux")]
-#[path = "../builder_guest_paths.rs"]
-mod builder_guest_paths;
 
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -53,7 +37,7 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::builderd;
+    use mvm_builder_guest::builderd;
     use std::os::fd::FromRawFd;
     use std::os::unix::net::UnixStream;
     use std::process::ExitCode;

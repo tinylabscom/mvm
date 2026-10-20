@@ -1,7 +1,7 @@
 //! `xtask check-mvm-host-binaries-sync`
 //!
 //! CI lint — asserts the Rust manifest at
-//! `crates/mvm-build/src/host_payload_manifest.rs` and the Nix
+//! `crates/mvm-builder-guest/src/host_payload_manifest.rs` and the Nix
 //! attrset at `nix/lib/mvm-host-binaries.nix` agree on the set of
 //! legacy-image-installed entries and their install paths. A payload-only
 //! binary has no install path and does not belong in the Nix mirror.
@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const INSTALL_ACTION: &str = ".github/actions/install-zigbuild/action.yml";
-const RUST_MANIFEST: &str = "crates/mvm-build/src/host_payload_manifest.rs";
+const RUST_MANIFEST: &str = "crates/mvm-builder-guest/src/host_payload_manifest.rs";
 
 pub fn run(workspace: &Path) -> Result<()> {
     let rust_entries = parse_rust_manifest(workspace)?;
@@ -26,7 +26,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if rust_entries != nix_entries {
         bail!(
             "drift between manifests:\n  Rust: {:#?}\n  Nix:  {:#?}\n\n\
-             Fix: ensure crates/mvm-build/src/host_payload_manifest.rs and \
+             Fix: ensure crates/mvm-builder-guest/src/host_payload_manifest.rs and \
              nix/lib/mvm-host-binaries.nix list the same entries with the \
              same install_path.",
             rust_entries,

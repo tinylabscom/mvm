@@ -41,7 +41,7 @@
 //!   6. Spawn `/bin/sh -eu /job/cmd.sh`. Capture exit + stderr
 //!      tail (last 20 lines, to keep the result file small).
 //!   7. Write `/job/result` as the job outcome
-//!      `mvm_build::builder_job_contract` defines: contract version, exit
+//!      `mvm_builder_guest::builder_job_contract` defines: contract version, exit
 //!      code, bounded stderr tail, failure category, run time. A job
 //!      directory staged under another contract version is refused here
 //!      instead of run.
@@ -79,7 +79,7 @@ mod boot_timings;
 mod builder_request;
 /// Hand-rolled `HostVmResponse::Result` JSON. Cross-platform
 /// (testable on macOS) so the wire shape can be validated against
-/// `mvm_build::builder_protocol`'s typed serde via a dev-dep test,
+/// `mvm_builder_guest::builder_protocol`'s typed serde via a dev-dep test,
 /// without dragging serde_json into the production builder-init
 /// binary.
 #[cfg(any(target_os = "linux", test))]
@@ -642,7 +642,7 @@ fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
 const SETPRIV: &str = "mvm-setpriv";
 
 /// Build the `setsid` + `mvm-setpriv` command that forks the guest agent under
-/// `agent_uid` (see `mvm_build::builder_agent_uid`). `setpriv` is the helper resolved through
+/// `agent_uid` (see `mvm_builder_guest::builder_agent_uid`). `setpriv` is the helper resolved through
 /// `guest_host_binary`: the boot payload's copy, or on an image booted without
 /// one, the copy it bakes at `/sbin`.
 /// The agent receives only `CAP_KILL` and `CAP_SYS_TIME`: the former permits
@@ -774,7 +774,7 @@ mod tests {
         let cmd = agent_spawn_command(
             Path::new("/run/mvm/host-bins/mvm-setpriv"),
             Path::new("/usr/local/bin/mvm-guest-agent"),
-            mvm_build::builder_agent_uid::AGENT_UID,
+            mvm_builder_guest::builder_agent_uid::AGENT_UID,
         );
         assert_eq!(cmd.get_program().to_str().unwrap(), "/bin/busybox");
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
@@ -806,7 +806,7 @@ mod tests {
         let cmd = agent_spawn_command(
             Path::new("/run/mvm/host-bins/mvm-setpriv"),
             Path::new("/mvm/runtime/agent"),
-            mvm_build::builder_agent_uid::agent_uid_for_image(Some(legacy)),
+            mvm_builder_guest::builder_agent_uid::agent_uid_for_image(Some(legacy)),
         );
         let args: Vec<&str> = cmd.get_args().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args[2..4], ["--reuid=990", "--regid=990"]);
@@ -865,7 +865,7 @@ mod tests {
         let agent = Path::new("/mvm/runtime/agent");
         let setpriv_arg = || {
             let setpriv =
-                mvm_build::builder_guest_paths::guest_host_binary_in(&run, &sbin, SETPRIV);
+                mvm_builder_guest::builder_guest_paths::guest_host_binary_in(&run, &sbin, SETPRIV);
             let cmd = agent_spawn_command(&setpriv, agent, 901);
             cmd.get_args().nth(1).map(PathBuf::from)
         };
@@ -1363,7 +1363,7 @@ mod linux {
         classify_failed_job, mirror_build_logs, mirror_host_visible_out_artifact,
         refuse_unless_contract, write_result, write_setup_failure,
     };
-    use mvm_build::builder_job_contract::FailureCategory;
+    use mvm_builder_guest::builder_job_contract::FailureCategory;
 
     /// Persistent Nix-store device — virtio-blk attached as
     /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
@@ -1513,8 +1513,8 @@ mod linux {
             );
             std::process::exit(1);
         };
-        let setpriv = mvm_build::builder_boot::guest_host_binary(crate::SETPRIV);
-        let agent_uid = mvm_build::builder_agent_uid::booted_image_agent_uid();
+        let setpriv = mvm_builder_guest::builder_boot::guest_host_binary(crate::SETPRIV);
+        let agent_uid = mvm_builder_guest::builder_agent_uid::booted_image_agent_uid();
         let mut cmd = crate::agent_spawn_command(&setpriv, &agent_bin, agent_uid);
         // BusyBox `setsid` puts the agent in a new session, matching the
         // workload init path. Stdio is inherited so logs reach the console.
@@ -1544,7 +1544,7 @@ mod linux {
     /// the missing proxy. Refusing here is the same posture as the
     /// required-overlay arm below, for the same reason.
     fn fork_vsock_egress_client_if_requested(cmdline: &str) {
-        use mvm_build::egress_readiness::{EgressProbe, egress_readiness_outcome};
+        use mvm_builder_guest::egress_readiness::{EgressProbe, egress_readiness_outcome};
         use std::os::unix::process::CommandExt;
 
         if !crate::vsock_egress_requested_from_cmdline(cmdline) {
@@ -1604,7 +1604,7 @@ mod linux {
         match egress_readiness_outcome(probe_vsock_egress_proxy(&mut child)) {
             Ok(()) => eprintln!(
                 "mvm-host-vm-init: local vsock egress proxy ready at {}",
-                mvm_build::egress_readiness::EGRESS_PROXY_LISTEN_ADDR
+                mvm_builder_guest::egress_readiness::EGRESS_PROXY_LISTEN_ADDR
             ),
             Err(why) => {
                 eprintln!("mvm-host-vm-init: {why}; refusing boot");
@@ -1615,8 +1615,8 @@ mod linux {
 
     /// Report an egress refusal and stop. Never returns — a builder guest with
     /// no proxy has nothing useful left to do.
-    fn refuse_boot(probe: mvm_build::egress_readiness::EgressProbe) -> ! {
-        let why = mvm_build::egress_readiness::egress_readiness_outcome(probe)
+    fn refuse_boot(probe: mvm_builder_guest::egress_readiness::EgressProbe) -> ! {
+        let why = mvm_builder_guest::egress_readiness::egress_readiness_outcome(probe)
             .expect_err("refuse_boot is only called with a refusing probe");
         eprintln!("mvm-host-vm-init: {why}; refusing boot");
         std::process::exit(1);
@@ -1626,8 +1626,8 @@ mod linux {
     /// the deadline passes.
     fn probe_vsock_egress_proxy(
         child: &mut std::process::Child,
-    ) -> mvm_build::egress_readiness::EgressProbe {
-        use mvm_build::egress_readiness::{
+    ) -> mvm_builder_guest::egress_readiness::EgressProbe {
+        use mvm_builder_guest::egress_readiness::{
             EGRESS_PROXY_LISTEN_ADDR, EGRESS_PROXY_READY_TIMEOUT, EgressProbe,
         };
         use std::net::{SocketAddr, TcpStream};
@@ -2043,7 +2043,7 @@ mod linux {
         }
         // Best-effort vsock send of the
         // `HostVmResponse::Result` frame the host's
-        // `mvm_build::builder_protocol::read_host_vm_response_from_socket`
+        // `mvm_builder_guest::builder_protocol::read_host_vm_response_from_socket`
         // is waiting for. Runs BEFORE write_boot_timings so the
         // timings snapshot we send mirrors what hits the filesystem.
         // Any failure logs and falls through to power_off — the
@@ -2090,7 +2090,7 @@ mod linux {
     // Wire shape is hand-rolled by
     // `crate::dispatch_response::DispatchResponse::to_json`; the
     // cross-validation test in that module pins the output against
-    // `mvm_build::builder_protocol::HostVmResponse` so the host
+    // `mvm_builder_guest::builder_protocol::HostVmResponse` so the host
     // deserializer parses what we emit.
     //
     // AF_VSOCK constants are inlined rather than going through
@@ -2261,7 +2261,11 @@ mod linux {
     /// failure is logged and the builder VM continues serving the legacy
     /// dispatch channel, so an old daemon-less image degrades gracefully.
     fn spawn_builderd() {
-        match Command::new(mvm_build::builder_boot::guest_host_binary("mvm-builderd")).spawn() {
+        match Command::new(mvm_builder_guest::builder_boot::guest_host_binary(
+            "mvm-builderd",
+        ))
+        .spawn()
+        {
             Ok(child) => eprintln!(
                 "mvm-host-vm-init: spawned mvm-builderd (pid {})",
                 child.id()

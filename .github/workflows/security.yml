@@ -599,6 +599,7 @@ jobs:
           - mvm-agentd
           - mvm-backends
           - mvm-build
+          - mvm-builder-guest
           # Four mutant slices, not file shards. File packing cannot split a
           # file, and two of this package's files (update.rs, 99 mutants;
           # parse.rs, 71) each outlast the 315-minute step on their own,

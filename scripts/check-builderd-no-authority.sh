@@ -13,7 +13,7 @@
 #           authority that lives above the host->builder boundary.
 set -euo pipefail
 
-PKG=mvm-build
+PKG=mvm-builder-guest
 BIN=mvm-builderd
 
 echo "::group::Build mvm-builderd (release)"

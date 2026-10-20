@@ -28,7 +28,7 @@
 
 use std::path::Path;
 
-use mvm_build::builder_boot::{
+use mvm_builder_guest::builder_boot::{
     BootAbiError, BootPayloadError, IMAGE_ABI_MARKER, Stage1CmdlineError, check_image_abi,
     parse_image_abi_marker, payload_supported_abis,
 };
@@ -51,7 +51,7 @@ pub(crate) enum BootRole {
 /// Decide the role from what this process can observe: its pid, whether the
 /// payload's manifest is on disk, and the stage marker stage 1 exports.
 pub(crate) fn boot_role(pid: u32, payload_present: bool, stage_env: Option<&str>) -> BootRole {
-    if stage_env == Some(mvm_build::builder_boot::STAGE2) {
+    if stage_env == Some(mvm_builder_guest::builder_boot::STAGE2) {
         BootRole::Stage2
     } else if pid == 1 && payload_present {
         BootRole::Stage1
@@ -99,7 +99,7 @@ pub(crate) fn base_pseudofs_mounts(
 pub(crate) fn pid1_path() -> String {
     format!(
         "{}:/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin",
-        mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR
+        mvm_builder_guest::builder_boot::RUNTIME_HOST_BIN_DIR
     )
 }
 
@@ -107,9 +107,9 @@ pub(crate) fn pid1_path() -> String {
 #[cfg(target_os = "linux")]
 pub(crate) fn run_pid1() -> std::process::ExitCode {
     let payload_manifest = Path::new("/")
-        .join(mvm_build::builder_boot::PAYLOAD_DIR_IN_INITRAMFS)
-        .join(mvm_build::builder_boot::PAYLOAD_MANIFEST_NAME);
-    let stage = std::env::var(mvm_build::builder_boot::STAGE_ENV).ok();
+        .join(mvm_builder_guest::builder_boot::PAYLOAD_DIR_IN_INITRAMFS)
+        .join(mvm_builder_guest::builder_boot::PAYLOAD_MANIFEST_NAME);
+    let stage = std::env::var(mvm_builder_guest::builder_boot::STAGE_ENV).ok();
     match boot_role(
         std::process::id(),
         payload_manifest.is_file(),
@@ -181,7 +181,7 @@ mod linux {
 
     use mvm_agentd::guest_mount;
     use mvm_agentd::vsock::RootfsConfig;
-    use mvm_build::builder_boot::{
+    use mvm_builder_guest::builder_boot::{
         PAYLOAD_DIR_IN_INITRAMFS, RUNTIME_HOST_BIN_DIR, STAGE_ENV, STAGE1_MEMBER, STAGE2,
         install_payload, parse_stage1_cmdline, verify_unpacked_payload,
     };
@@ -374,7 +374,7 @@ mod tests {
     fn pid1_resolves_the_payload_copies_first() {
         let path = pid1_path();
         let first = path.split(':').next().unwrap();
-        assert_eq!(first, mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR);
+        assert_eq!(first, mvm_builder_guest::builder_boot::RUNTIME_HOST_BIN_DIR);
         assert!(path.contains(":/sbin:"), "{path}");
     }
 
@@ -382,7 +382,7 @@ mod tests {
     /// in has to be one the pivot carries into the builder image.
     #[test]
     fn the_payload_copy_survives_the_pivot() {
-        let top = mvm_build::builder_boot::RUNTIME_HOST_BIN_DIR
+        let top = mvm_builder_guest::builder_boot::RUNTIME_HOST_BIN_DIR
             .split('/')
             .nth(1)
             .map(|first| format!("/{first}"))

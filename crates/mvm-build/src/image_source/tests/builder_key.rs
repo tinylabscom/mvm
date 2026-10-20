@@ -53,14 +53,14 @@ version = "0.1.0"
 dependencies = ["libc"]
 
 [[package]]
-name = "mvm-build"
+name = "mvm-builder-guest"
 version = "0.1.0"
 dependencies = ["mvm-setpriv"]
 
 [[package]]
 name = "mvm-cli"
 version = "0.1.0"
-dependencies = ["clap", "mvm-build"]
+dependencies = ["clap", "mvm-builder-guest"]
 
 [[package]]
 name = "libc"
@@ -105,13 +105,13 @@ fn mvm_checkout(mvm: &Path) {
     );
     crate_at(
         mvm,
-        "mvm-build",
+        "mvm-builder-guest",
         "[dependencies]\nmvm-setpriv = { path = \"../mvm-setpriv\" }\n",
     );
     crate_at(
         mvm,
         "mvm-cli",
-        "[dependencies]\nclap.workspace = true\nmvm-build = { path = \"../mvm-build\" }\n",
+        "[dependencies]\nclap.workspace = true\nmvm-builder-guest = { path = \"../mvm-builder-guest\" }\n",
     );
     write(&mvm.join("nix/flake.nix"), "{ outputs = _: { }; }\n");
     write(&mvm.join("nix/lib/workspace-filter.nix"), "{ }\n");
@@ -263,7 +263,10 @@ fn an_edit_to_each_source_the_builder_image_reads_changes_its_key() {
             );
         }),
         ("the package the baked host binaries come from", |mvm| {
-            write(&mvm.join("crates/mvm-build/src/lib.rs"), "pub fn g() {}\n");
+            write(
+                &mvm.join("crates/mvm-builder-guest/src/lib.rs"),
+                "pub fn g() {}\n",
+            );
         }),
         ("a lock bump of a crate setpriv reaches", |mvm| {
             write(&mvm.join("Cargo.lock"), &cargo_lock("0.2.1", "4.0.0"));

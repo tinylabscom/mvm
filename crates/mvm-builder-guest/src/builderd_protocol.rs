@@ -65,6 +65,19 @@ pub const PROTOCOL_VERSION: u32 = 1;
 #[serde(transparent)]
 pub struct OperationId(pub Uuid);
 
+impl OperationId {
+    /// Mint a fresh operation id for a host-dispatched operation.
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for OperationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl std::fmt::Display for OperationId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)

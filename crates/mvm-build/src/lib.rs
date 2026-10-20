@@ -8,11 +8,11 @@ pub mod base_image_contract;
 pub mod build_cache;
 pub mod builder_boot;
 pub mod builder_contract;
-pub mod builder_guest_paths;
+pub use mvm_builder_guest::builder_guest_paths;
 pub mod builder_image_inputs;
 pub mod cache_install;
 pub mod embed_toolchain;
-pub mod host_payload_manifest;
+pub use mvm_builder_guest::host_payload_manifest;
 pub mod image_protocol;
 pub mod image_source;
 pub mod source_closure;
@@ -56,11 +56,11 @@ pub mod boot_image_select;
 /// The uid a builder guest runs its guest agent under, chosen from the
 /// identities the booted image names.
 #[cfg(unix)]
-pub mod builder_agent_uid;
+pub use mvm_builder_guest::builder_agent_uid;
 #[cfg(unix)]
 pub mod builder_cmdline;
 #[cfg(unix)]
-pub mod builder_disk_transport;
+pub use mvm_builder_guest::builder_disk_transport;
 #[cfg(unix)]
 mod builder_egress_process;
 #[cfg(unix)]
@@ -68,7 +68,7 @@ mod builder_host_binaries;
 /// What a staged builder job directory means to the guest, and the versioned
 /// outcome the guest writes back.
 #[cfg(unix)]
-pub mod builder_job_contract;
+pub use mvm_builder_guest::builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 #[cfg(unix)]
@@ -84,7 +84,7 @@ pub mod builder_output;
 pub mod builder_pack;
 /// Vsock dispatch wire types for the persistent builder VM.
 #[cfg(unix)]
-pub mod builder_protocol;
+pub use mvm_builder_guest::builder_protocol;
 #[cfg(unix)]
 pub mod builder_route;
 #[cfg(unix)]
@@ -105,7 +105,7 @@ pub mod builder_vm_transport;
 /// daemon: stateless request dispatch + the framed connection serve
 /// loop. The bin entrypoint and AF_VSOCK listener land with boot wiring.
 #[cfg(unix)]
-pub mod builderd;
+pub use mvm_builder_guest::builderd;
 /// Host-side client for the resident `mvm-builderd` daemon: connect +
 /// handshake, run one typed operation per connection, stream
 /// progress/log events, and surface a typed terminal outcome.
@@ -115,7 +115,7 @@ pub mod builderd_client;
 /// `mvm-builderd` builder-VM service (the long-term replacement for the
 /// controlled-shell-job channel in `builder_protocol`).
 #[cfg(unix)]
-pub mod builderd_protocol;
+pub use mvm_builder_guest::builderd_protocol;
 #[cfg(unix)]
 pub mod cache;
 /// The lib half of the retired `mvm-egress-proxy` bin, which no builder VM
@@ -123,7 +123,7 @@ pub mod cache;
 #[cfg(unix)]
 pub mod egress_proxy;
 #[cfg(unix)]
-pub mod egress_readiness;
+pub use mvm_builder_guest::egress_readiness;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 #[cfg(unix)]
 pub mod guest_elf;
@@ -171,7 +171,7 @@ pub mod published_image_set;
 pub mod rootfs;
 /// In-process newc cpio writer for host-assembled initramfs archives.
 #[cfg(unix)]
-pub mod rootfs_inject;
+pub use mvm_builder_guest::rootfs_inject;
 /// Shared run-path rootfs orchestration (inject runtime + materialize ext4),
 /// used by the CLI's `run --image` and the `mvm-client` local backend.
 #[cfg(unix)]
@@ -179,7 +179,7 @@ pub mod run_image;
 #[cfg(unix)]
 pub mod runtime_identity;
 #[cfg(unix)]
-pub mod seed_store_entries;
+pub use mvm_builder_guest::seed_store_entries;
 #[cfg(unix)]
 pub mod stage0;
 /// Host-side Stage 0 pieces that belong to no particular VMM.
@@ -193,7 +193,7 @@ pub mod stage0_host;
 pub mod stage0_kernel;
 /// Whether a builder guest may fall back to a tmpfs Nix store, or must stop.
 #[cfg(unix)]
-pub mod store_readiness;
+pub use mvm_builder_guest::store_readiness;
 #[cfg(unix)]
 pub mod template_reuse;
 /// Persistent ext4 image materialization for user-attached block volumes.

@@ -1,7 +1,7 @@
 //! Hand-rolled parser for `HostVmRequest` JSON, the wire-format the
 //! persistent builder VM's dispatch loop reads off vsock.
 //!
-//! Mirror of `mvm_build::builder_protocol::HostVmRequest` on the
+//! Mirror of `mvm_builder_guest::builder_protocol::HostVmRequest` on the
 //! host side. Cross-platform on purpose — the parser sees coverage
 //! from `cargo test` on every developer host so the wire shape
 //! stays in lock-step with the host's serde-derived encoding
@@ -53,7 +53,7 @@
 
 use std::fmt;
 
-/// In-guest mirror of `mvm_build::builder_vm::BuilderJob`.
+/// In-guest mirror of `mvm_builder_guest::builder_protocol::BuilderJob`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuilderJob {
     Flake {
@@ -65,7 +65,7 @@ pub enum BuilderJob {
     },
 }
 
-/// In-guest mirror of `mvm_build::builder_protocol::HostVmRequest`.
+/// In-guest mirror of `mvm_builder_guest::builder_protocol::HostVmRequest`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostVmRequest {
     Run {
@@ -77,7 +77,7 @@ pub enum HostVmRequest {
     /// Start a workload microVM inside the host VM. Carries the spawn
     /// config the `WorkloadVmm` backend (Firecracker today) needs.
     /// Fields mirror
-    /// `mvm_build::builder_protocol::HostVmRequest::WorkloadStart`.
+    /// `mvm_builder_guest::builder_protocol::HostVmRequest::WorkloadStart`.
     WorkloadStart {
         workload_id: String,
         kernel_path: String,
@@ -175,7 +175,7 @@ fn parse_workload(
 }
 
 /// Parse `workload_start`, which carries the full spawn config.
-/// Mirrors `mvm_build::builder_protocol::HostVmRequest::WorkloadStart`.
+/// Mirrors `mvm_builder_guest::builder_protocol::HostVmRequest::WorkloadStart`.
 fn parse_workload_start(text: &str) -> Result<HostVmRequest, ParseError> {
     let workload_id = find_string_value(text, "workload_id")
         .ok_or(ParseError::MissingWorkloadField("workload_id"))?;
@@ -453,14 +453,14 @@ mod tests {
     }
 
     /// **The cross-validation test.** What the host's serde-derived
-    /// writer (`mvm_build::builder_protocol::HostVmRequest` →
+    /// writer (`mvm_builder_guest::builder_protocol::HostVmRequest` →
     /// `mvm_agentd::vsock::write_frame`) emits must parse cleanly
     /// via this hand-rolled parser. Any schema drift on either side
     /// trips this test and that's the signal to resync.
     #[test]
     fn parses_what_mvm_build_serializes_with_serde() {
-        use mvm_build::builder_protocol::{HostVmRequest as HostReq, JobId};
-        use mvm_build::builder_vm::BuilderJob as HostJob;
+        use mvm_builder_guest::builder_protocol::BuilderJob as HostJob;
+        use mvm_builder_guest::builder_protocol::{HostVmRequest as HostReq, JobId};
 
         // Flake run
         let req = HostReq::Run {
@@ -611,7 +611,7 @@ mod tests {
     /// serde writer emits must parse via this hand-rolled parser.
     #[test]
     fn parses_workload_start_serialized_by_mvm_build() {
-        use mvm_build::builder_protocol::{HostVmRequest as HostReq, WorkloadId};
+        use mvm_builder_guest::builder_protocol::{HostVmRequest as HostReq, WorkloadId};
 
         let req = HostReq::WorkloadStart {
             workload_id: WorkloadId(uuid::Uuid::nil()),

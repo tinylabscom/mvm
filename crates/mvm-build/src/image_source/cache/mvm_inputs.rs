@@ -57,7 +57,7 @@ const IMAGE_ROLE_LISTED_INPUTS: &[&str] = &["Cargo.toml", "nix"];
 
 /// The package the image checkout's `scripts/build-host-binaries.sh` compiles
 /// the builder's host binaries from.
-const HOST_BINARY_PACKAGE: &str = "mvm-build";
+const HOST_BINARY_PACKAGE: &str = "mvm-builder-guest";
 
 /// Cargo configuration the host-binary build reads from the checkout, beside
 /// the manifests: target flags and linker settings change the bytes.

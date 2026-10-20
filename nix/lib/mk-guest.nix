@@ -350,7 +350,7 @@ let
     inherit mvmSrc;
   };
   # Without a baked copy, the helper is the one the builder boot payload
-  # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-build/src/builder_guest_paths.rs).
+  # installs at `RUNTIME_HOST_BIN_DIR` (crates/mvm-builder-guest/src/builder_guest_paths.rs).
   setpriv = if withSetpriv then "${setprivPkg}/bin/mvm-setpriv" else "/run/mvm/host-bins/mvm-setpriv";
   setprivHelperName = "mvm-setpriv";
 

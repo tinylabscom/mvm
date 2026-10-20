@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use mvm_build::builder_job_contract::{
+use mvm_builder_guest::builder_job_contract::{
     CLASSIFY_WINDOW_BYTES, FailureCategory, NIX_STDERR_LOG, NIX_STDOUT_LOG, RESULT_FILE,
     check_job_dir, classify_job_failure,
 };
@@ -40,7 +40,7 @@ pub(crate) fn write_setup_failure(detail: &str) {
 /// Classify a failed single-shot job from the build log `cmd.sh`
 /// redirected Nix's stderr into, falling back to the script's own tail.
 pub(crate) fn classify_failed_job(script_tail: &str) -> FailureCategory {
-    let log = mvm_build::builder_vm_runtime::read_last_bytes_of(
+    let log = mvm_builder_guest::stage0_guest::read_last_bytes_of(
         Path::new(&format!("{JOB_DIR}/{NIX_STDERR_LOG}")),
         CLASSIFY_WINDOW_BYTES as u64,
     )

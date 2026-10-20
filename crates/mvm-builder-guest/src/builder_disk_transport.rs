@@ -40,6 +40,9 @@ pub const INPUT_DISK_MIN_BYTES: u64 = 16 << 20;
 /// cannot grow the device it was handed.
 pub const OUTPUT_DISK_BYTES: u64 = 8192 << 20;
 
+/// File name of the closure NAR inside a builder pack and inside the input disk.
+pub const CLOSURE_FILE: &str = "nix-closure.nar";
+
 /// Archive directory the optional seeded-closure NAR rides under, mirroring
 /// the guest's `/closure-seed` mount point
 /// (`mvm-host-vm-init`'s `CLOSURE_SEED_NAR` contract). Kept in sync with the
@@ -104,10 +107,7 @@ pub fn pack_input_disk(
             // the tar entry name comes from `CLOSURE_FILE` regardless of what the
             // source NAR happens to be called — otherwise a differently-named
             // source silently lands the guest import a no-op.
-            let name = format!(
-                "{CLOSURE_SEED_TAR_DIR}/{}",
-                crate::builder_pack::CLOSURE_FILE
-            );
+            let name = format!("{CLOSURE_SEED_TAR_DIR}/{CLOSURE_FILE}");
             b.append_path_with_name(nar, &name)
                 .with_context(|| format!("archive closure NAR from {}", nar.display()))?;
         }

@@ -1,0 +1,61 @@
+[package]
+name = "mvm-builder-guest"
+publish = false
+version.workspace = true
+edition.workspace = true
+description = "builder-VM guest binaries and the contract they share with the host that boots them"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+# The binaries `mvm-cli/build.rs` cross-compiles to static musl and embeds:
+# every crate this package reaches is compiled by that nested build, so the
+# host-side builder pipeline (git, VMM drivers, HTTP/TLS) must not become a
+# dependency here. `mvm-build` depends on this crate and re-exports its
+# modules, never the other way round. Bin names are load-bearing:
+# build.rs + src/host_payload_manifest.rs + nix/lib/mvm-host-binaries.nix all
+# key on them.
+[[bin]]
+name = "mvm-host-vm-init"
+path = "src/bin/mvm-host-vm-init.rs"
+
+# The resident builder-VM control daemon: Linux-only AF_VSOCK listener over the
+# typed `builderd_protocol`.
+[[bin]]
+name = "mvm-builderd"
+path = "src/bin/mvm-builderd.rs"
+
+# PID 1 of the nix-tarball Stage 0 seed. Host-side only: laid down as the
+# seed's `/init`, never installed in a builder rootfs.
+[[bin]]
+name = "stage0-init"
+path = "src/bin/stage0-init.rs"
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+libc.workspace = true
+mvm-core.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.29", features = ["mount", "reboot", "signal", "ioctl", "fs"] }
+
+[target.'cfg(unix)'.dependencies]
+mvm-agentd.workspace = true
+
+# Tests only: the stage0 seed tests read `mvm-fs`'s overlay manifest name, and
+# the init tests use `mvm-core`'s test environment guard.
+[dev-dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
+mvm-fs.workspace = true
+
+[lints]
+workspace = true

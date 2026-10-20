@@ -718,7 +718,7 @@ jobs:
               # fixed: mvm-host-vm-init is a [[bin]] of mvm-build, so the
               # standalone crate directory this named cannot exist and the
               # filter never matched.
-              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
+              - 'crates/mvm-builder-guest/src/bin/mvm-host-vm-init/**'
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'

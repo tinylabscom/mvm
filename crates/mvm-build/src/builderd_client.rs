@@ -29,19 +29,6 @@ use crate::builderd_protocol::{BuilderRequest, BuilderResponse, FailureCategory,
 #[cfg(test)]
 use crate::builderd_protocol::PROTOCOL_VERSION;
 
-impl OperationId {
-    /// Mint a fresh operation id for a host-dispatched operation.
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl Default for OperationId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// The **libkrun**-shape control socket for a builder VM rooted at
 /// `vm_state_dir`: normally `<vm_state_dir>/vsock-<port>.sock`.
 pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {

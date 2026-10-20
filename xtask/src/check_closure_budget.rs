@@ -91,7 +91,10 @@ const BUDGETS: &[ClosureBudget] = &[
 /// 374 (was 307): in-process checkout identity adds the same 64 crates as
 /// Linux, plus the byte-only Mach-O signer, plist and XML parser. Native
 /// verification uses the existing public Security/CoreFoundation dependencies.
-const MACOS_CLOSURE_BUDGET: usize = 374;
+///
+/// 375 (was 374): the first-party `mvm-builder-guest` crate, same reason as
+/// the Linux budget below.
+const MACOS_CLOSURE_BUDGET: usize = 375;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -263,7 +266,12 @@ const MACOS_CLOSURE_BUDGET: usize = 374;
 /// all-feature-only crates now reachable by default. No gix default, basic,
 /// extras or network-client feature is enabled; the identity path does not
 /// execute commands, filters, hooks, credential helpers or network clients.
-pub(crate) const CLOSURE_BUDGET: usize = 377;
+///
+/// 378 (was 377): `mvm-builder-guest`, the builder-VM guest binaries and the
+/// contract they share with the host, becomes its own first-party crate so the
+/// musl build that embeds them stops compiling `mvm-build`'s closure. Every
+/// dependency it has was already present, so the one new node is the crate itself.
+pub(crate) const CLOSURE_BUDGET: usize = 378;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

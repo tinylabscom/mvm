@@ -27,10 +27,71 @@
 //! wire-cap regression is exercised explicitly by the fuzz seed in
 //! `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_builder_request.rs`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::builder_vm::BuilderJob;
+/// What the builder is asked to produce.
+///
+/// An enum so the same trait can dispatch both flake builds (`Flake`)
+/// and the application-dependency install pipeline (`Install`). Each
+/// variant pairs 1:1 with a `BuilderArtifacts` variant — see the
+/// per-variant docs there for the expected outputs.
+///
+/// The `Install` variant is plumbing only: it's reserved here so the
+/// install pipeline can land behavior changes against a stable shape,
+/// and today every backend errors with
+/// `BuilderVmError::NotYetImplemented` when it sees an `Install`
+/// job.
+///
+/// `Serialize`/`Deserialize` + `#[serde(deny_unknown_fields)]` let
+/// `BuilderJob` ride inside
+/// [`HostVmRequest::Run`] over the
+/// vsock-framed dispatch channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub enum BuilderJob {
+    /// Build a Nix flake attribute. The flake attribute path is
+    /// system-specific; callers map host architecture to the
+    /// matching Linux system (`aarch64-linux` on Apple Silicon,
+    /// `x86_64-linux` on Intel/AMD).
+    Flake {
+        /// Flake reference (e.g. `git+file:///work?dir=.`, `.#default`,
+        /// `path:./.`).
+        flake_ref: String,
+        /// Attribute path under the flake (e.g.
+        /// `packages.x86_64-linux.tenant-worker`). Resolved by callers
+        /// before invoking the builder.
+        attr_path: String,
+    },
+
+    /// Frozen-only diagnostic build, using a captured reference lock graph.
+    /// This is not an admission credential and is refused by resident builders.
+    FrozenFlakeDiagnostic {
+        flake_ref: String,
+        attr_path: String,
+        input_digest: String,
+        expected_mvm_revision: String,
+    },
+
+    /// Application-dependency install pipeline. The builder VM reads a
+    /// serialised install spec from `spec_path` (lockfile +
+    /// source-root + ecosystem + gate), runs the corresponding package
+    /// manager (`uv pip install --no-deps`, `pnpm install
+    /// --frozen-lockfile`, …) inside the VM, seals the resulting volume
+    /// with SBOM + fetch log + CVE + attestations, and emits a
+    /// `result.json` next to the volume.
+    ///
+    /// **Today every backend errors with
+    /// `BuilderVmError::NotYetImplemented` for this variant.**
+    Install {
+        /// Absolute host path to the install-spec JSON the builder
+        /// VM reads at start-up. Today the orchestrator does not
+        /// produce one.
+        spec_path: PathBuf,
+    },
+}
 
 /// Per-dispatch identifier the host stamps before sending a
 /// [`HostVmRequest::Run`] and the guest echoes in the matching

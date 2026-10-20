@@ -38,10 +38,6 @@ mod store_gc;
 #[path = "stage0-init/seed.rs"]
 mod seed;
 
-#[cfg(any(target_os = "linux", test))]
-#[path = "../seed_store_entries.rs"]
-mod seed_store_entries;
-
 fn main() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -67,7 +63,7 @@ mod linux {
     use std::time::{Duration, Instant};
 
     use crate::seed::{find_seed_bin, find_seed_cacert, seed_store_has_required_runtime};
-    use crate::seed_store_entries::seed_store_entries_hash;
+    use mvm_builder_guest::seed_store_entries::seed_store_entries_hash;
 
     const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
@@ -403,7 +399,7 @@ mod linux {
         "unknown termination".to_string()
     }
 
-    use mvm_build::egress_readiness::{EgressProbe, egress_readiness_outcome};
+    use mvm_builder_guest::egress_readiness::{EgressProbe, egress_readiness_outcome};
 
     fn probe_vsock_egress_proxy(mut child: Option<&mut Child>) -> EgressProbe {
         let Ok(proxy_addr) = VSOCK_EGRESS_PROXY_LISTEN_ADDR.parse::<SocketAddr>() else {
@@ -525,7 +521,7 @@ mod linux {
     }
 
     fn release_root_runtime_reserve() -> Result<(), String> {
-        let path = Path::new(mvm_build::stage0::ROOT_RUNTIME_RESERVE_PATH);
+        let path = Path::new(mvm_builder_guest::stage0_guest::ROOT_RUNTIME_RESERVE_PATH);
         release_root_runtime_reserve_at(path)
     }
 
@@ -672,7 +668,7 @@ mod linux {
         // and fall back to a tmpfs too small for a kernel source tree. The
         // letter stays as a fallback for a store image formatted before it
         // carried a label.
-        let label = mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL;
+        let label = mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL;
         // Every attached virtio disk, not a fixed prefix of them. The QEMU path
         // attaches seed, work, out, mvm-bins and the FlowMux identity ahead of
         // the store, so a four-entry list stopped two devices short of the disk
@@ -703,11 +699,11 @@ mod linux {
         // degrade to a RAM-sized tmpfs whose exhaustion surfaces thousands of
         // lines later as an unrelated-looking build error.
         if let Some(bytes) = block_device_bytes(device)
-            && bytes < mvm_build::store_readiness::MIN_PLAUSIBLE_STORE_BYTES
+            && bytes < mvm_builder_guest::store_readiness::MIN_PLAUSIBLE_STORE_BYTES
         {
             return Err(FATAL_STORE_PREFIX.to_string()
-                + &mvm_build::store_readiness::store_readiness_outcome(
-                    mvm_build::store_readiness::StoreProbe::ImplausiblySmall {
+                + &mvm_builder_guest::store_readiness::store_readiness_outcome(
+                    mvm_builder_guest::store_readiness::StoreProbe::ImplausiblySmall {
                         device: device.to_string(),
                         bytes,
                     },
@@ -778,7 +774,7 @@ mod linux {
         }
         let store_device = find_labeled_ext4_disk_among(
             virtio_block_devices(),
-            mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
+            mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL,
         )
         .unwrap_or_else(|| PathBuf::from(stage0_nix_store_device(is_qemu())));
         let store_device = store_device
@@ -861,7 +857,7 @@ mod linux {
         let mut command = Command::new(mkfs);
         command
             .args(["-F", "-q", "-b", "4096", "-L"])
-            .arg(mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
+            .arg(mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL)
             .arg(dev)
             .arg(blocks_4k.to_string());
         command
@@ -1173,11 +1169,7 @@ mod linux {
 
     fn copy_artifacts_into(out: &Path, mode: &str, out_root: &Path) -> Result<(), String> {
         if mode == "sdk-sidecar" {
-            for name in [
-                mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
-                mvm_fs::sdk_sidecar::SDK_SIDECAR_VERSION_FILE,
-                mvm_fs::overlay::CHECKSUM_MANIFEST_FILE,
-            ] {
+            for name in mvm_builder_guest::stage0_guest::SDK_SIDECAR_OUTPUT_FILES {
                 let source = out.join(name);
                 if !source.is_file() {
                     return Err(format!(
@@ -1273,7 +1265,7 @@ mod linux {
     fn stage_disk_transport_input(transport: &DiskTransport) -> Result<(), String> {
         let input_stage = Path::new(STAGE0_INPUT_STAGE);
         reset_stage_dir(input_stage)?;
-        mvm_build::builder_disk_transport::read_output_disk(
+        mvm_builder_guest::builder_disk_transport::read_output_disk(
             Path::new(&transport.input_dev),
             input_stage,
         )
@@ -1292,7 +1284,7 @@ mod linux {
         // The egress client is executed from `/mvm-bins` under its own uid, and
         // the host's 0700 payload cache mode rode in with the archive.
         let bins = input_stage.join("mvm-bins");
-        mvm_build::builder_disk_transport::grant_search(&[
+        mvm_builder_guest::builder_disk_transport::grant_search(&[
             Path::new(STAGE0_NIX_STORE_MOUNT),
             input_stage,
             &bins,
@@ -1315,7 +1307,7 @@ mod linux {
             .map_err(|e| format!("read /proc/cmdline: {e}"))?;
         let transport = disk_transport_from_cmdline(&cmdline)
             .ok_or_else(|| "libkrun Stage 0 requires mvm.builder_transport=disk".to_string())?;
-        mvm_build::builder_disk_transport::write_output_disk(
+        mvm_builder_guest::builder_disk_transport::write_output_disk(
             Path::new(STAGE0_OUTPUT_STAGE),
             Path::new(&transport.output_dev),
         )
@@ -1403,7 +1395,7 @@ mod linux {
     }
 
     pub(crate) fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
-        mvm_build::stage0::copy_nonempty_file(src, dst)
+        mvm_builder_guest::stage0_guest::copy_nonempty_file(src, dst)
             .map(|_| ())
             .map_err(|error| error.to_string())
     }
@@ -1526,7 +1518,7 @@ mod linux {
                     "-b",
                     "4096",
                     "-L",
-                    mvm_build::rootfs::STAGE0_NIX_STORE_EXT4_LABEL,
+                    mvm_builder_guest::stage0_guest::STAGE0_NIX_STORE_EXT4_LABEL,
                     "/dev/vda",
                     "4096",
                 ]

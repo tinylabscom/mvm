@@ -464,7 +464,7 @@ pub fn dispatch_nix_build(
 /// library test holds this list to), plus a guest sidecar the image published.
 /// Spelled out here because the daemon binary compiles this file without the
 /// rest of the library.
-pub(crate) const EXPORTED_MEMBERS: &[&str] = &[
+pub const EXPORTED_MEMBERS: &[&str] = &[
     "initrd",
     "rootfs-closure-paths",
     "manifest.json",

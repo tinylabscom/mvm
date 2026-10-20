@@ -49,7 +49,7 @@ const FC_BASE_CMDLINE: &str = "console=ttyS0 reboot=k panic=1 pci=off";
 const GUEST_CID: u32 = 3;
 
 /// Generic (VMM-agnostic) spawn config — the post-parse form of
-/// `mvm_build::builder_protocol::HostVmRequest::WorkloadStart`.
+/// `mvm_builder_guest::builder_protocol::HostVmRequest::WorkloadStart`.
 #[derive(Debug, Clone)]
 pub struct WorkloadSpawnConfig {
     pub workload_id: String,

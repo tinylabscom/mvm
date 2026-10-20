@@ -259,9 +259,9 @@ category = "test-fixture"
 reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
 
 [[binary]]
-package = "mvm-build"
+package = "mvm-builder-guest"
 name = "mvm-builderd"
-source = "crates/mvm-build/src/bin/mvm-builderd.rs"
+source = "crates/mvm-builder-guest/src/bin/mvm-builderd.rs"
 required_features = []
 [binary.capture]
 kind = "runtime-gap"
@@ -283,9 +283,9 @@ category = "artifact-tool"
 reason = "Retired builder-guest proxy. No host-binary manifest names it, so no builder image installs or launches it; the target is compiled only because the image repository's host-binary script still names it."
 
 [[binary]]
-package = "mvm-build"
+package = "mvm-builder-guest"
 name = "mvm-host-vm-init"
-source = "crates/mvm-build/src/bin/mvm-host-vm-init.rs"
+source = "crates/mvm-builder-guest/src/bin/mvm-host-vm-init.rs"
 required_features = []
 [binary.capture]
 kind = "runtime-gap"
@@ -307,9 +307,9 @@ category = "test-fixture"
 reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
 
 [[binary]]
-package = "mvm-build"
+package = "mvm-builder-guest"
 name = "stage0-init"
-source = "crates/mvm-build/src/bin/stage0-init.rs"
+source = "crates/mvm-builder-guest/src/bin/stage0-init.rs"
 required_features = []
 [binary.capture]
 kind = "runtime-gap"

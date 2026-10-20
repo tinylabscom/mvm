@@ -7,9 +7,13 @@ use thiserror::Error;
 
 use super::PAYLOAD_CMDLINE_KEY;
 use super::payload::PayloadDigest;
-use crate::builder_vm_transport::{
-    BUILDER_INPUT_DEVICE, BUILDER_OUTPUT_DEVICE, BUILDER_RUNTIME_DEVICE, BUILDER_VSOCK_EGRESS_TOKEN,
-};
+
+/// The block devices a builder VM boots with, by their guest names.
+pub const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
+pub const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
+pub const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
+/// The kernel command-line token that tells the guest its egress is vsock.
+pub const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 
 /// The PID 1 a legacy builder image bakes, reached with `init=` when a boot
 /// carries no payload.

@@ -3710,6 +3710,7 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-agentd",
+ "mvm-builder-guest",
  "mvm-compiler",
  "mvm-contract",
  "mvm-core",
@@ -3717,7 +3718,6 @@ dependencies = [
  "mvm-http",
  "mvm-net",
  "mvm-vmm",
- "nix",
  "serde",
  "serde_jcs",
  "serde_json",
@@ -3731,6 +3731,26 @@ dependencies = [
  "uuid",
  "which",
  "xattr",
+]
+
+[[package]]
+name = "mvm-builder-guest"
+version = "0.24.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "mvm-agentd",
+ "mvm-core",
+ "mvm-fs",
+ "nix",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]

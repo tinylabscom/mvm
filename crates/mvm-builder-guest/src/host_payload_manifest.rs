@@ -47,7 +47,7 @@ pub struct SourceBuiltBinary {
 /// builder boot, and what a legacy builder image bakes at `install_path`.
 pub const HOST_BINARIES: &[HostBinary] = &[
     HostBinary {
-        package: "mvm-build",
+        package: "mvm-builder-guest",
         name: "mvm-host-vm-init",
         install_path: Some("/sbin/mvm-host-vm-init"),
         mode: 0o755,
@@ -56,7 +56,7 @@ pub const HOST_BINARIES: &[HostBinary] = &[
     // (mvm-host-vm-init) launches it at boot; the host reaches it on the
     // builder VM's forwarded AF_VSOCK control port.
     HostBinary {
-        package: "mvm-build",
+        package: "mvm-builder-guest",
         name: "mvm-builderd",
         install_path: Some("/sbin/mvm-builderd"),
         mode: 0o755,
@@ -88,7 +88,7 @@ pub fn legacy_installed_host_binary_names() -> impl Iterator<Item = &'static str
         .map(|bin| bin.name)
 }
 
-/// Host-side-only embedded `mvm-build` binaries. Cross-compiled +
+/// Host-side-only embedded `mvm-builder-guest` binaries. Cross-compiled +
 /// embedded by `mvm-cli/build.rs` exactly like [`HOST_BINARIES`], but
 /// **not** installed into any VM rootfs — they carry no `install_path`
 /// and are absent from `nix/lib/mvm-host-binaries.nix` (the
@@ -132,7 +132,7 @@ mod tests {
             .iter()
             .find(|bin| bin.name == "mvm-setpriv")
             .expect("mvm-setpriv is a payload member");
-        assert_eq!(setpriv.package, crate::source_closure::SETPRIV_PACKAGE);
+        assert_eq!(setpriv.package, "mvm-setpriv");
         assert_eq!(setpriv.install_path, None);
     }
 }
