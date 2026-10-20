@@ -173,6 +173,29 @@ legacy release filled. Use the explicit local build mode above, or request a
 separately authorized historical backfill. Rerunning that commit's frozen old
 workflow still targets the full legacy release and is not a migration.
 
+For an operator-approved backfill, dispatch **Source host helpers** on `main`
+with `source_sha` set to the full lowercase source commit. The workflow rejects
+non-`main` refs and sources that are not ancestors of its own immutable workflow
+commit. An empty input retains the normal current-commit build.
+
+Build tooling, signing and publication use the workflow revision, while a
+separate checkout supplies the exact historical helper source. Archive names,
+`SOURCE_COMMIT` and the destination `source-builds-<commit>` tag all use the
+validated source SHA. Build jobs have read-only repository permissions and no
+signing token. The publisher preserves existing complete archive/signature
+pairs and refuses partial pairs; never delete assets or rerun with clobbering
+to repair a partial release.
+
+Before dispatch, obtain approval for the source SHA, exact workflow revision,
+destination tag, three platform archives and their three `.bundle` signatures,
+and the verification procedure. Afterwards, check that the tag resolves to the
+source commit, the release is a non-latest prerelease, all six assets exist,
+and each archive verifies against the source-workflow identity on `main` with
+the matching `SOURCE_COMMIT`. Then test the explicit-base recovery command
+above with a clean binary built from that historical commit in isolated state.
+Neither a successful workflow run nor manual archive extraction proves that
+bootstrap installation and repeat bootstrap work.
+
 Source guest-runtime caches are keyed by the source fingerprint, version and
 guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy
 a matching runtime from the default home cache, verifying its archive, member

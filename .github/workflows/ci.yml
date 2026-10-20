@@ -361,6 +361,7 @@ jobs:
           python3 scripts/test_rust_registry_smoke.py
           python3 scripts/test-sdk-release-preflight.py
           python3 scripts/test_publish_source_host_helpers.py
+          python3 scripts/test_resolve_source_helper_commit.py
 
       - name: Disposable GCP KVM controller tests
         run: |

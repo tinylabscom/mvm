@@ -522,8 +522,10 @@ fn every_signed_release_blob_uses_the_one_bundle_format() {
 #[test]
 fn source_helper_publication_is_commit_addressed_and_immutable() {
     let workflow = fs::read_to_string(".github/workflows/source-host-helpers.yml").unwrap();
-    assert!(workflow.contains("source-host-helpers-${{ github.sha }}"));
-    assert!(workflow.contains("--commit \"${GITHUB_SHA}\""));
+    assert!(workflow.contains("source-host-helpers-${{ inputs.source_sha || github.sha }}"));
+    assert!(workflow.contains("--commit \"${SOURCE_SHA}\""));
+    assert!(workflow.contains("scripts/resolve-source-helper-commit.py"));
+    assert!(workflow.contains("ref: ${{ needs.source.outputs.sha }}"));
     assert!(workflow.contains("scripts/publish-source-host-helpers.py"));
     assert!(!workflow.contains("--clobber"));
     let publisher = fs::read_to_string("scripts/publish-source-host-helpers.py").unwrap();
@@ -533,6 +535,7 @@ fn source_helper_publication_is_commit_addressed_and_immutable() {
     assert!(publisher.contains("\"make_latest\": \"false\""));
     let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
     assert!(ci.contains("python3 scripts/test_publish_source_host_helpers.py"));
+    assert!(ci.contains("python3 scripts/test_resolve_source_helper_commit.py"));
 }
 
 #[test]
