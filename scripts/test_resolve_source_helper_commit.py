@@ -74,7 +74,7 @@ class SourceTests(unittest.TestCase):
         self.assertIn("needs: source", build)
         self.assertIn("ref: ${{ github.sha }}", build)
         self.assertIn("ref: ${{ needs.source.outputs.sha }}", build)
-        self.assertIn("working-directory: helper-source", build)
+        self.assertIn("          cd helper-source\n", build)
         self.assertIn('test "$(git -C helper-source rev-parse HEAD)"', build)
         self.assertIn('${SOURCE_SHA}-${TARGET}', build)
         self.assertIn('"${SOURCE_SHA}" > "dist/${name}/SOURCE_COMMIT"', build)

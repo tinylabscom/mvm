@@ -80,12 +80,12 @@ jobs:
           targets: ${{ matrix.build_target }}
       - uses: ./.github/actions/install-zigbuild
       - name: Build launch helpers
-        working-directory: helper-source
         env:
           BUILD_TARGET: ${{ matrix.build_target }}
         shell: bash
         run: |
           set -euo pipefail
+          cd helper-source
           if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-network-endpoint \
