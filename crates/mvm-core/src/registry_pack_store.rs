@@ -1999,6 +1999,16 @@ mod tests {
         let fixture = application_descriptor_fixture();
         let mut environment = crate::util::test_env::TestEnv::new();
         environment.isolate_mvm_home(fixture.home.path().join("home"));
+        for path in [
+            fixture.installed.manifest_path(),
+            fixture.installed.signature_path(),
+        ] {
+            assert!(
+                std::fs::symlink_metadata(&path).unwrap().is_file(),
+                "a valid regular sidecar must still refuse unsupported safe acquisition: {}",
+                path.display()
+            );
+        }
         let requested = reference("runtime/python");
         let error = open_installed_registry_manifest_with(
             &OpenInstalledRequest {

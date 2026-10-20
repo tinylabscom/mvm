@@ -266,16 +266,81 @@ class PackageTests(unittest.TestCase):
                         report = args[args.index("--notary-report") + 1]
                         self.assertTrue(report.endswith("-notarization.json"))
 
+    def assert_live_python_contract(self, source, job):
+        body = re.split(r"\n  [a-z][a-z0-9-]*:\n",
+                        source.split(f"\n  {job}:\n", 1)[1], maxsplit=1)[0]
+        body = "\n".join(line for line in body.splitlines()
+                         if not line.lstrip().startswith("#"))
+        marker = "      - name: Run the documented surface end to end\n"
+        self.assertIn(marker, body)
+        setup, step = body.split(marker, 1)
+        step = step.split("\n      - ", 1)[0]
+        if job == "e2e-docs-linux":
+            match = re.search(
+                r'uses: actions/setup-python@v5\n\s+with:\n'
+                r'\s+python-version: "(3)\.(\d+)"', setup,
+            )
+            self.assertIsNotNone(match, "Linux must install a pinned interpreter before the suite")
+            self.assertGreaterEqual(int(match[2]), 12)
+            self.assertIn("        run: just e2e::docs", step)
+            return "just e2e::docs"
+        self.assertEqual(job, "e2e-docs-macos")
+        self.assertIn("uses: astral-sh/setup-uv@v8.2.0", setup)
+        self.assertIn('version: "0.12.5"', setup)
+        self.assertIn("        run: |\n", step)
+        run = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        self.assertIn("set -o pipefail", run)
+        match = re.search(
+            r'^uv run --no-project --python (3)\.(\d+) -- just e2e::docs'
+            r' 2>&1 \| tee "\$RUNNER_TEMP/e2e-docs\.log"$', run, re.MULTILINE,
+        )
+        self.assertIsNotNone(match, "installing uv alone does not select Python for the suite")
+        self.assertGreaterEqual(int(match[2]), 12)
+        return run
+
     def test_documented_surface_uses_supported_python_in_both_live_jobs(self):
         root = Path(__file__).resolve().parents[2]
         source = (root / ".github/workflows/e2e-docs.yml").read_text()
         for job in ["e2e-docs-linux", "e2e-docs-macos"]:
-            body = re.split(r"\n  [a-z][a-z0-9-]*:\n",
-                            source.split(f"\n  {job}:\n", 1)[1], maxsplit=1)[0]
-            self.assertIn('python-version: "3.12"', body, job)
-            self.assertIn("uses: actions/setup-python@v5", body, job)
-            self.assertLess(body.index("uses: actions/setup-python@v5"),
-                            body.index("just e2e::docs"), job)
+            self.assert_live_python_contract(source, job)
+        recipe = (root / "just/e2e/mod.just").read_text()
+        self.assertIn("docs:\n    ./scripts/e2e-documented-surface.sh", recipe)
+        script = (root / "scripts/e2e-documented-surface.sh").read_text()
+        for assignment in re.findall(r"^\s*(?:export )?PATH=(.*)$", script, re.MULTILINE):
+            self.assertIn("$PATH", assignment, "suite must preserve the selected interpreter PATH")
+
+    def test_documented_surface_refuses_unsupported_unpinned_or_bare_uv(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / ".github/workflows/e2e-docs.yml").read_text()
+        for version in ["3.9", "3.11", "3.x", "3"]:
+            for job in ["e2e-docs-linux", "e2e-docs-macos"]:
+                with self.subTest(version=version, job=job), self.assertRaises(AssertionError):
+                    self.assert_live_python_contract(source.replace("3.12", version), job)
+        for replacement in ["just e2e::docs", "uv run -- just e2e::docs"]:
+            changed = source.replace(
+                "uv run --no-project --python 3.12 -- just e2e::docs", replacement,
+            )
+            with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                self.assert_live_python_contract(changed, "e2e-docs-macos")
+
+    def test_documented_surface_uv_arguments_and_pipeline_exit_without_running_uv(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / ".github/workflows/e2e-docs.yml").read_text()
+        run = self.assert_live_python_contract(source, "e2e-docs-macos")
+        stub = self.root / "uv"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV_LOG"\nexit "$UV_STATUS"\n')
+        stub.chmod(0o700)
+        for status in [0, 7]:
+            env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}",
+                       RUNNER_TEMP=str(self.root), ARGV_LOG=str(self.root / "uv-args"),
+                       UV_STATUS=str(status))
+            result = subprocess.run(
+                ["/bin/bash", "-c", run], cwd=self.root, env=env,
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            self.assertEqual(result.returncode, status, result.stderr)
+            self.assertEqual((self.root / "uv-args").read_text().splitlines(),
+                             ["run", "--no-project", "--python", "3.12", "--", "just", "e2e::docs"])
 
 
 if __name__ == "__main__":
