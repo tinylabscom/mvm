@@ -323,8 +323,13 @@ install_from_archive() {
   if [ -n "$GUEST_RUNTIME" ]; then
     [ -f "$GUEST_RUNTIME" ] || fail "no guest runtime at $GUEST_RUNTIME"
     mkdir -p "$(dirname "$unpacked")/guest-runtime"
-    cp "$GUEST_RUNTIME" "$(dirname "$unpacked")/guest-runtime/" \
-      || fail "could not stage $GUEST_RUNTIME beside mvmctl"
+    # The checksum and the signature bundles travel with the archive: a launch
+    # authenticates the runtime it assembled from, and an unsigned one is refused.
+    for staged in "$GUEST_RUNTIME" "$GUEST_RUNTIME".sha256 "$GUEST_RUNTIME".bundle "$GUEST_RUNTIME".sha256.bundle; do
+      [ -f "$staged" ] || continue
+      cp "$staged" "$(dirname "$unpacked")/guest-runtime/" \
+        || fail "could not stage $staged beside mvmctl"
+    done
   fi
   shipped=""
   for entry in "$(dirname "$unpacked")"/*; do

@@ -1629,9 +1629,13 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
 
     let gate = job_block(&workflow, "release-archive-smoke");
     assert!(
-        gate.contains("    needs: [build, guest-runtime]\n")
+        gate.contains("    needs: [build, guest-runtime, runtime-proof-candidate]\n")
             && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
         "the archive smoke must run the shared lane on what `build` uploaded"
+    );
+    assert!(
+        gate.contains("runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}"),
+        "the smoke must boot with the signed runtime candidate, which a launch can authenticate"
     );
     assert!(
         gate.contains("tag: ${{ github.event_name == 'push' && github.ref_name || '' }}"),

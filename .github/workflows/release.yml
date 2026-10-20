@@ -614,9 +614,18 @@ jobs:
   # endpoint from them. v0.22.0 published an endpoint that could not survive a
   # guest's egress handshake for exactly that reason.
   release-archive-smoke:
-    needs: [build, guest-runtime]
+    needs: [build, guest-runtime, runtime-proof-candidate]
+    # A dry run signs no candidate, so its candidate job is skipped; the smoke
+    # still has to run there.
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.guest-runtime.result == 'success' && (needs.runtime-proof-candidate.result == 'success' || needs.runtime-proof-candidate.result == 'skipped') }}
     uses: ./.github/workflows/release-archive-smoke.yml
     with:
+      runtime_candidate_artifact_id: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_id }}
+      runtime_candidate_artifact_digest: ${{ needs.runtime-proof-candidate.outputs.candidate_artifact_digest }}
+      runtime_archive_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
+      runtime_checksum_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
+      runtime_archive_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.archive_bundle_sha256 }}
+      runtime_checksum_bundle_sha256: ${{ needs.runtime-proof-candidate.outputs.checksum_bundle_sha256 }}
       # A tag must ship the version it names; a dry run builds from a branch,
       # whose name is not a version.
       tag: ${{ github.event_name == 'push' && github.ref_name || '' }}

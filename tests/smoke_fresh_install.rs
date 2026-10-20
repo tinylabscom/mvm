@@ -422,6 +422,37 @@ fn an_unpublished_guest_runtime_is_adopted_from_beside_mvmctl() {
     }
 }
 
+/// A launch authenticates the runtime its pieces came from, so the checksum and
+/// both signature bundles must be staged with the archive; the bare archive is
+/// refused at the first boot.
+#[test]
+fn a_signed_guest_runtime_is_staged_with_its_checksum_and_bundles() {
+    let smoke = Smoke::new();
+    let lister = "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl 1.2.3' ;;\n  \
+                  bootstrap) ls \"$(dirname \"$(readlink -f \"$0\")\")/guest-runtime\" >&2 ;;\nesac";
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", lister)]);
+    let runtime = smoke.dir.path().join("mvm-guest-bins-v1.2.3.tar.gz");
+    for suffix in ["", ".sha256", ".bundle", ".sha256.bundle"] {
+        std::fs::write(format!("{}{suffix}", runtime.display()), b"x").unwrap();
+    }
+
+    smoke.run_archive_with(
+        &archive,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_GUEST_RUNTIME", runtime.to_str().unwrap())],
+    );
+
+    let transcript = smoke.transcript();
+    for staged in [
+        "mvm-guest-bins-v1.2.3.tar.gz\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.sha256\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.bundle\n",
+        "mvm-guest-bins-v1.2.3.tar.gz.sha256.bundle\n",
+    ] {
+        assert!(transcript.contains(staged), "{staged}\n{transcript}");
+    }
+}
+
 /// Adopting the runtime is not enough: bootstrap must assemble the launch
 /// pieces from it, or the boots that follow ran on something else.
 #[test]
