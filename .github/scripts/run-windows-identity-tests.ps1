@@ -60,7 +60,8 @@ function Control-Hashes {
         'crates/mvm-build/tests/local_producer_pair.rs',
         'crates/mvm-build/tests/fixtures/local-producer-v2.json',
         'crates/mvm-build/tests/fixtures/local-producer-manifests.json',
-        'crates/mvm-core/src/image_set/tests/local.rs'
+        'crates/mvm-core/src/image_set/tests/local.rs',
+        'crates/mvm-core/src/registry_pack_store.rs'
     )) {
         $hashes[$path] = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
     }
@@ -191,6 +192,9 @@ $requiredPairTests = @(
     'in_process_producer_and_strict_consumer_preserve_schema3_contract'
 )
 $coreTests = @('image_set::tests::local::wire::a_worktree_state_is_tagged_and_closed')
+$applicationTests = @(
+    'registry_pack_store::tests::open_application_descriptor_preserves_unsupported_safe_reader_refusal'
+)
 
 try {
     $receipt.controls_before = Control-Hashes
@@ -207,8 +211,10 @@ try {
     Test-Inventory $build 'emitter' $emitterTests 'image_source::build::emitter::tests::' $requiredEmitterTests
     Test-Inventory $pair 'pair' $pairTests '' $requiredPairTests
     Test-Inventory $core 'core-v1-refusal' $coreTests $coreTests[0]
+    Test-Inventory $core 'application-local-reader-refusal' $applicationTests $applicationTests[0]
     if ($gitTests.Count -ne 25 -or $requiredEmitterTests.Count -ne 2 -or
-        $requiredPairTests.Count -ne 4 -or $results.Count -ne 32) {
+        $requiredPairTests.Count -ne 4 -or $applicationTests.Count -ne 1 -or
+        $results.Count -ne 33) {
         throw 'The required runtime witness count changed.'
     }
     $receipt.complete = $true
