@@ -479,6 +479,40 @@ pub fn lock_registry_pack_store(
 }
 
 impl RegistryPackStoreLease {
+    pub(crate) fn commit_application_pin(
+        &self,
+        application: &crate::registry_pack::VerifiedRegistryApplication,
+    ) -> Result<(), RegistryPackStoreError> {
+        use crate::registry_pack::AuthenticatedRegistryManifest;
+        let lock = load_pack_lockfile(&self.lock_path)?;
+        if lock
+            .pins()
+            .iter()
+            .any(|pin| pin.reference() == application.reference())
+        {
+            lock.verify_manifest(application.reference(), application.manifest_bytes())?;
+        }
+        let pin = PackPin::new(
+            application.reference().clone(),
+            application.manifest_sha256().clone(),
+        )?;
+        save_pack_lockfile_locked(&self.lock_path, &upsert_pack_pin(lock, pin)?)?;
+        let parent = self
+            .lock_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        crate::private_fs::sync_managed_directory_chain(parent, parent).map_err(io_at(parent))?;
+        crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackPin)
+            .detail(format!(
+                "pack={} manifest_sha256={}",
+                application.reference(),
+                application.manifest_sha256().as_str()
+            ))
+            .emit();
+        Ok(())
+    }
+
     /// Under this lease, refuse any different pin for the same coordinate,
     /// publish without repair, then atomically record the authenticated pin.
     pub fn install_local_and_pin(

@@ -31,7 +31,7 @@ use super::Cli;
 
 mod build;
 pub(super) mod export;
-pub(super) mod fetch;
+pub(crate) mod fetch;
 mod gc;
 mod install;
 mod push;

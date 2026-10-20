@@ -23,7 +23,8 @@ pub(super) const REGISTRY_SCHEME: &str = "oci://";
 
 /// Largest bundle layer a pull buffers. Bundles are verified in memory, so
 /// this bounds what a registry can make the host allocate.
-pub(super) const MAX_BUNDLE_LAYER_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub(super) const MAX_BUNDLE_LAYER_BYTES: u64 =
+    mvm_core::registry_pack::application_bundle::MAX_APPLICATION_ARCHIVE_BYTES;
 
 const BUNDLE_KIND: ArtifactKind<'static> = ArtifactKind {
     artifact_type: BUNDLE_ARTIFACT_TYPE,
@@ -66,8 +67,12 @@ impl RegistryTransport {
     }
 
     fn client(&self) -> OciArtifactClient {
+        self.client_with_limit(MAX_BUNDLE_LAYER_BYTES)
+    }
+
+    fn client_with_limit(&self, max_layer_bytes: u64) -> OciArtifactClient {
         OciArtifactClient::new(self.config.clone(), self.auth.clone()).with_limits(ArtifactLimits {
-            max_layer_bytes: MAX_BUNDLE_LAYER_BYTES,
+            max_layer_bytes,
             ..ArtifactLimits::default()
         })
     }
@@ -152,8 +157,20 @@ pub(super) fn pull_bundle(
     reference: &ImageReference,
     transport: &RegistryTransport,
 ) -> Result<PulledBundle> {
+    pull_bundle_bounded(reference, transport, MAX_BUNDLE_LAYER_BYTES)
+}
+
+pub(super) fn pull_bundle_bounded(
+    reference: &ImageReference,
+    transport: &RegistryTransport,
+    max_layer_bytes: u64,
+) -> Result<PulledBundle> {
     let pulled = runtime()?
-        .block_on(transport.client().pull(reference, BUNDLE_KIND))
+        .block_on(
+            transport
+                .client_with_limit(max_layer_bytes)
+                .pull(reference, BUNDLE_KIND),
+        )
         .with_context(|| format!("pulling bundle from {}", display_reference(reference)))?;
     Ok(PulledBundle {
         bytes: pulled.layer,
