@@ -29,11 +29,10 @@ fn libkrun_is_an_optional_backend_not_a_generic_capability_switch() {
     );
 
     let lib = std::fs::read_to_string(crate_root().join("src/lib.rs")).unwrap();
-    assert!(lib.contains("#[cfg(unix)]\ninclude!(\"unix_modules.rs\");"));
-    let unix = std::fs::read_to_string(crate_root().join("src/unix_modules.rs")).unwrap();
     for module in ["libkrun_builder", "libkrun_network_provider"] {
-        let gated = format!("#[cfg(feature = \"builder-libkrun\")]\npub mod {module};");
-        assert!(unix.contains(&gated), "{module} must stay feature-gated");
+        let gated =
+            format!("#[cfg(feature = \"builder-libkrun\")]\n#[cfg(unix)]\npub mod {module};");
+        assert!(lib.contains(&gated), "{module} must stay feature-gated");
     }
 }
 
