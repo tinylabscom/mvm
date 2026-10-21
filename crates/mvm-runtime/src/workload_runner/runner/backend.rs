@@ -3,6 +3,16 @@
 use super::*;
 use std::time::Instant;
 
+/// A VM state directory belongs to a booted VM when it holds its console log or
+/// the pid file its supervisor wrote. A machine whose console is not captured
+/// (a named HVF machine) has only the pid file, and must still be listed.
+fn has_vm_marker(state_dir: &std::path::Path) -> bool {
+    state_dir.join("console.log").exists()
+        || mvm_vmm::host::process_liveness::PID_FILE_NAMES
+            .iter()
+            .any(|name| state_dir.join(name).exists())
+}
+
 impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     WorkloadRunner<mvm_backends::driver::hvf::HvfDriver, S, B>
 {
@@ -345,7 +355,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         };
         let mut vms = Vec::new();
         for entry in entries.flatten() {
-            if !entry.path().join("console.log").exists() {
+            if !has_vm_marker(&entry.path()) {
                 continue;
             }
             let Ok(name) = entry.file_name().into_string() else {

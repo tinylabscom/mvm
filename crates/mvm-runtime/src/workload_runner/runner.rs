@@ -2118,6 +2118,45 @@ mod tests {
         }
     }
 
+    /// A named HVF machine writes its supervisor pid file but no console log.
+    /// Listing only console-logged directories made `machine ls` report such a
+    /// running machine as stopped.
+    #[test]
+    fn list_includes_a_vm_that_has_a_pid_file_but_no_console_log() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let vms = mvm_core::config::vms_dir();
+        for (name, marker) in [
+            ("pid-only", Some("hvf.pid")),
+            ("console-only", Some("console.log")),
+            ("neither", None),
+        ] {
+            let dir = vms.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            if let Some(marker) = marker {
+                std::fs::write(dir.join(marker), "1").unwrap();
+            }
+        }
+        let runner = WorkloadRunner::new(
+            MockDriver::default(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+
+        let mut names: Vec<String> = VmBackend::list(&runner)
+            .unwrap()
+            .into_iter()
+            .map(|vm| vm.name)
+            .collect();
+        names.sort();
+
+        assert_eq!(names, ["console-only", "pid-only"]);
+    }
+
     #[test]
     fn stops_and_dropped_handles_never_reap_unproven_runtime_generations() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
