@@ -342,10 +342,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        anyhow::ensure!(
-            self.driver.kind() != BackendKind::Hvf,
-            "native HVF workload requires OwnedRuntimeLaunch; legacy activation return is unavailable"
-        );
         self.require_caller_registration_shape(inputs.config)?;
         let lifecycle =
             crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
@@ -2063,6 +2059,47 @@ mod tests {
         assert!(!cmdline.contains("mvm.secret_env="), "{cmdline}");
         assert!(!cmdline.contains("mvm-secret-test"), "{cmdline}");
         assert!(!cmdline.contains(&hex::encode("API_KEY=")), "{cmdline}");
+    }
+
+    /// A blanket refusal in front of the HVF driver turns `machine run` into an
+    /// error on the default macOS backend before anything is checked. Both
+    /// entrypoints must reach the real launch checks, which refuse this
+    /// synthetic config for their own reasons (no rootfs, no kernel).
+    #[test]
+    fn an_hvf_runner_reaches_the_launch_checks_instead_of_a_blanket_refusal() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            mvm_backends::driver::hvf::HvfDriver::new(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = config("hvf-not-blanket-refused");
+        let redaction = RedactionPolicy::default();
+
+        let started = VmBackend::start(&runner, &cfg).expect_err("no rootfs to boot");
+        let launched = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &cfg.network_policy,
+                cmdline: String::new(),
+            })
+            .map(|_| ())
+            .expect_err("no rootfs to boot");
+
+        for error in [format!("{started:#}"), format!("{launched:#}")] {
+            assert!(
+                !error.contains("native HVF"),
+                "HVF was refused outright instead of reaching the launch checks: {error}"
+            );
+        }
     }
 
     #[test]

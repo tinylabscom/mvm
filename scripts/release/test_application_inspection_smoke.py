@@ -356,6 +356,25 @@ class InspectionSmokeTests(unittest.TestCase):
             self.assertEqual([record["verified_entries"] for record in instance.records], [7, 11])
             self.assertTrue(all(not record["verifier_final_self_outcome_covered"] for record in instance.records))
 
+    def test_audit_log_may_only_grow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = smoke.Smoke(Path("/cli"), root, root, FIXTURE)
+            prepare_audit(instance, root)
+            log = root / smoke.AUDIT_LOG
+            original = log.read_bytes()
+            log.write_bytes(original + b"two\n")
+            self.assertEqual(smoke.snapshot(root), smoke.snapshot(root))
+
+            def command(*_):
+                log.write_bytes(b"rewritten\n")
+                return type("Result", (), {"returncode": 0, "stdout": b"{}", "stderr": b""})()
+
+            with patch.object(instance, "command", side_effect=command), \
+                    patch.object(smoke, "assert_inspection"):
+                with self.assertRaisesRegex(ValueError, "original prefix"):
+                    instance.inspect("positive", root, True)
+
     def test_closed_environment_does_not_forward_credentials(self):
         with patch.dict("os.environ", {"GITHUB_TOKEN": "not-forwarded", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "not-forwarded"}):
             env = smoke.closed_environment(Path("/consumer"), Path("/scratch"), Path("/catalog"))

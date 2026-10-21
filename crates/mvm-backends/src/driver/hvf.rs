@@ -40,8 +40,11 @@ use mvm_vmm::driver::traits::{
 };
 
 mod cold_channel;
+mod standby;
 use cold_channel::{BootInputFiles, boot_with_custody, failed_owned_boot, require_cold_config};
 pub use cold_channel::{ColdHvfBootFailure, ColdHvfOwner, RetainedHvfLaunch};
+#[cfg(test)]
+use standby::wait_for_standby_agent;
 
 /// How long a capture waits for the paused supervisor to publish both halves of
 /// its snapshot. Generous: the write is proportional to guest RAM.
@@ -113,11 +116,9 @@ impl HvfDriver {
     /// errors retain original native custody for the concrete runtime caller.
     pub fn spawn_standby_parent_owned(
         &self,
-        _req: &StandbyParentSpawn<'_>,
+        req: &StandbyParentSpawn<'_>,
     ) -> Result<StandbyHandle> {
-        // No durable receiver currently holds the original preparation leases.
-        // Refuse before handoff config, child or capture-writer creation.
-        bail!("owned HVF warm launch unavailable: authenticated durable custody receiver required")
+        standby::spawn_standby_parent(req)
     }
 }
 
@@ -1096,59 +1097,6 @@ fn wait_for_agent_socket(
         std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
         attempt = attempt.saturating_add(1);
     }
-}
-
-/// Poll `socket` until a guest agent answers the authenticated readiness probe
-/// in either serving state.
-///
-/// A parent booted with the universal initramfs is still waiting for
-/// `ActivateEnvironment` here — the runner activates it only after this
-/// returns — and that agent answers every `Ping` with `NotActivated`. That
-/// answer is the agent serving, so it counts. Requiring `Pong` instead waits
-/// for a reply the guest cannot give until the caller's next step, and fails
-/// every such parent at the deadline.
-#[cfg(test)]
-fn wait_for_standby_agent(socket: &Path, timeout: std::time::Duration) -> Result<()> {
-    let deadline = Instant::now() + timeout;
-    let mut attempt = 0u32;
-    let mut last_error: Option<anyhow::Error> = None;
-    loop {
-        if socket.exists() {
-            // The HVF agent socket is the bridge's direct stream endpoint. It
-            // is not a Firecracker-style CONNECT multiplexer, so sending the
-            // `CONNECT <port>` preamble would be interpreted by the guest as
-            // the first four bytes of an RPC frame. Probe the authenticated
-            // RPC stream directly; this waits for a real guest response rather
-            // than treating the host-side listener as readiness.
-            match std::os::unix::net::UnixStream::connect(socket) {
-                Ok(mut stream) => {
-                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
-                    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
-                    match mvm_agentd::vsock::probe_agent_serving(&mut stream) {
-                        Ok(_) => return Ok(()),
-                        Err(error) => last_error = Some(error),
-                    }
-                }
-                Err(error) => last_error = Some(error.into()),
-            }
-        }
-        // Probe first, then check the clock: an agent already serving is
-        // ready whatever the budget, and the remaining time, not a comparison
-        // against the deadline, decides whether to keep waiting.
-        if deadline.saturating_duration_since(Instant::now()).is_zero() {
-            break;
-        }
-        std::thread::sleep(mvm_core::poll_backoff::fine_poll_delay(attempt));
-        attempt = attempt.saturating_add(1);
-    }
-    let reason = last_error.map_or_else(
-        || "the socket was never bound".to_string(),
-        |error| format!("last probe: {error:#}"),
-    );
-    anyhow::bail!(
-        "guest agent socket {} was not responsive within {timeout:?} ({reason})",
-        socket.display()
-    )
 }
 
 /// Resolve the host UDS for a console data port via the shared HVF-style socket

@@ -15,6 +15,13 @@ declined; the reasons are recorded so they are not re-derived.
 | [#4560](https://github.com/tinylabscom/mvm/issues/4560) — narrow features in the `mvm-builder-guest` closure | Leave the features as they are | The musl guest closure (`cargo tree -p mvm-builder-guest --target aarch64-unknown-linux-musl -e normal,build --prefix none`, repeat-marker `(*)` stripped before `sort -u`) is 134 unique crates; the 144 in the issue counts the same crate twice when one line carries `(*)`. The only multi-crate saving is `url`: removing it from `mvm-core` takes the closure to 106 (28 crates: `idna`, the `icu_*` family, `zerovec`, `yoke`, `form_urlencoded`, `percent-encoding`, and their proc-macros). `url` 2.5.8 has no feature that drops `idna`, and `mvm-core` uses it in `registry_pack/application.rs` to validate application locators, so the saving needs either the registry-pack module gated out of the guest or a hand-written host parser. That changes locator validation for a 28-crate gain. The other candidate features are worth one crate each at most: `chrono` without `clock` would drop `iana-time-zone` (and `mvm-contract` and host crates enable `clock` anyway), and `regex` without `perf` would drop `aho-corasick` at a matching speed cost. `serde_json` is already `default-features = false`. | A decision that locator validation no longer needs a full URL parser, or a build-time budget the 28 crates would meet. |
 | [#4561](https://github.com/tinylabscom/mvm/issues/4561) — unify the workspace on one `rand` | Nothing to unify in this tree; the remaining duplicate is third-party | Every workspace crate, `mvm-agentd` and `hickory-proto` included, is already on `rand` 0.10.2 / `rand_core` 0.10.1; the issue's premise of a 0.8 pin is out of date. `cargo tree -d -i rand` shows one other copy, `rand` 0.9.4 with `rand_core` 0.9.5, reached only through `sigstore-tsa` 0.11.0 (`sigstore-verify`, behind `manifest-verify`). Collapsing it means forking or downgrading a signature-verification dependency, which is not done. `deny.toml` already lists `rand` and `rand_core` in the audited skip baseline with that reason. | `sigstore-verify` releasing on the `rand` 0.10 generation. |
 
+## Owner decisions
+
+- 2026-10-20, #4561: leave the `rand` 0.9 copy in place. It is pulled in by
+  the signature-verification dependency and is already in the audited skip
+  baseline in `deny.toml`; unifying it would mean forking or downgrading a
+  signature dependency.
+
 ## Limits
 
 - The 12-crate figure comes from the package metadata closure, not a

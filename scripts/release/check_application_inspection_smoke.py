@@ -39,10 +39,22 @@ def contained(root, relative):
     return result
 
 
+# Every command appends its own invocation record here; that is the one file
+# allowed to change, and only by growing (see Smoke.inspect).
+AUDIT_LOG = "audit/local.jsonl"
+
+
+def audit_log(root):
+    path = root / AUDIT_LOG
+    return path.read_bytes() if path.exists() else b""
+
+
 def snapshot(root):
     """Hash names, types, modes and bytes; never serialize consumer contents."""
     entries = {}
     for path in sorted(root.rglob("*")):
+        if path.relative_to(root).as_posix() == AUDIT_LOG:
+            continue
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise ValueError("consumer state contains a symlink")
