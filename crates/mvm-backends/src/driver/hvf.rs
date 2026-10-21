@@ -1469,9 +1469,13 @@ impl RunningVm for HvfRunningVm {
         {
             return Ok(VmStatus::Stopped);
         }
+        // PID/executable evidence is only meaningful after the operator root
+        // authenticates this handle's custody. Do not let a missing root turn
+        // an unauthenticated marker into a running VM.
+        stop_wire::existing_operator()?;
         // The authenticated handshake can fail for a supervisor that is alive
-        // (a status probe has no operator custody); the recorded pid and the
-        // executable behind it still say whether the VM runs.
+        // (for example, when its control channel is unavailable); the recorded
+        // pid and the executable behind it still say whether the VM runs.
         if ConnectedInstance::connect_instance(self.instance.clone()).is_ok() {
             return Ok(VmStatus::Running);
         }
@@ -2261,6 +2265,43 @@ mod tests {
             "4242"
         );
         assert!(!mvm_core::config::mvm_keys_dir().exists());
+    }
+
+    #[test]
+    fn authenticated_pid_fallback_reports_a_live_supervisor_when_control_is_unavailable() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let (secret, public) = stop_wire::root_paths().unwrap();
+        mvm_core::config::create_private_dir(secret.parent().unwrap()).unwrap();
+        mvm_core::crypto::ed25519_keypair::load_or_init(&secret, &public).unwrap();
+
+        let vm = "authenticated-fallback";
+        let directory = vm_state_dir(vm);
+        mvm_core::config::create_private_dir(&directory).unwrap();
+        let instance = HvfInstance {
+            vm_id: vm.into(),
+            boot_nonce: [10; 32],
+        };
+        std::fs::write(
+            directory.join(stop_wire::INSTANCE_FILE),
+            serde_json::to_vec(&instance).unwrap(),
+        )
+        .unwrap();
+        let supervisor = directory.join("mvm-hvf-supervisor");
+        std::fs::copy("/bin/sleep", &supervisor).unwrap();
+        let mut child = std::process::Command::new(&supervisor)
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(directory.join(PID_FILE_NAME), child.id().to_string()).unwrap();
+
+        let status = HvfDriver::new()
+            .attach(&VmId(vm.into()))
+            .and_then(|handle| handle.status());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(status.unwrap(), VmStatus::Running);
     }
 
     #[test]
