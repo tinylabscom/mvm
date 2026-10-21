@@ -23,4 +23,4 @@ is that the lane is green again.
 
 | Criterion | Evidence | Limit |
 |---|---|---|
-| The lane is green again | [Run 39636025789](https://github.com/tinylabscom/mvm/actions/runs/39636025789), `workflow_dispatch` on `main` at `62ce18e62149cdb46475c64d239e5d67821981e0`: job `smoke` succeeded, including the `Full pack signing round-trip test` step | A dispatch, not a `schedule` event; both run the same `smoke` job. The next scheduled run will repeat it. The failure was the same fixture contract mismatch recorded above, fixed before this run's commit. |
+| The lane is green again | [Run 39636025789](https://github.com/tinylabscom/mvm/actions/runs/39636025789), `workflow_dispatch` on `main` at `62ce18e62149cdb46475c64d239e5d67821981e0`: job `smoke` succeeded, including the `Full pack signing round-trip test` step | A dispatch, not a `schedule` event; both run the same `smoke` job. The next scheduled run will repeat it. The failed run's log ends in a signature-stage identity mismatch (expected the `refs/tags/v0.0.0-smoke` workflow identity, got `refs/heads/main`); this row does not identify which change fixed it, only that a later run on main passes. |
