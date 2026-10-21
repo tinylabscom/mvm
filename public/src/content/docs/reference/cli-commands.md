@@ -2153,6 +2153,10 @@ require the production registry allowlist, including when reusing a cached archi
 Cached archives are reverified and extracted files are rebuilt from verified
 bytes so their content-addressed directory name is not treated as proof.
 
+Source hosts must be plain ASCII. A locator whose host is internationalized
+(for example `bücher.example`) or written in its `xn--` punycode form is
+refused; publish the registry or bundle host under an ASCII name instead.
+
 The application reference is committed in the pack lock only after complete bundle
 installation and publication of the original descriptor evidence. An interrupted
 pull or failure before the atomic reference rename may leave complete verified,
