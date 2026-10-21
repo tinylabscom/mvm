@@ -1322,6 +1322,24 @@ impl VmFullControl for HvfVmFullControl {
     }
 }
 
+/// Running when `pid_file` names a live process whose executable `accept`s.
+fn supervisor_pid_status(pid_file: &Path, accept: &dyn Fn(&Path) -> bool) -> VmStatus {
+    use mvm_vmm::host::process_liveness::{pid_is_alive, process_executable, read_pid_file};
+    match read_pid_file(pid_file) {
+        Some(pid)
+            if pid_is_alive(pid) && process_executable(pid).is_some_and(|exe| accept(&exe)) =>
+        {
+            VmStatus::Running
+        }
+        _ => VmStatus::Stopped,
+    }
+}
+
+fn is_hvf_supervisor(exe: &Path) -> bool {
+    exe.file_name()
+        .is_some_and(|name| name == "mvm-hvf-supervisor")
+}
+
 /// Handle for an HVF instance name no launch was attempted under, or whose last
 /// instance was confirmed stopped and cleaned up. Stopping it is a no-op;
 /// anything that needs a live guest refuses.
@@ -1451,8 +1469,13 @@ impl RunningVm for HvfRunningVm {
         {
             return Ok(VmStatus::Stopped);
         }
-        let _ = ConnectedInstance::connect_instance(self.instance.clone())?;
-        Ok(VmStatus::Running)
+        // The authenticated handshake can fail for a supervisor that is alive
+        // (a status probe has no operator custody); the recorded pid and the
+        // executable behind it still say whether the VM runs.
+        if ConnectedInstance::connect_instance(self.instance.clone()).is_ok() {
+            return Ok(VmStatus::Running);
+        }
+        Ok(supervisor_pid_status(&self.pid_file, &is_hvf_supervisor))
     }
 
     fn vsock_connect(&self, guest_port: u32) -> Result<Box<dyn DuplexStream>> {
@@ -2162,6 +2185,38 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.join(PID_FILE_NAME)).unwrap(),
             "4242"
+        );
+    }
+
+    #[test]
+    fn supervisor_pid_status_follows_the_recorded_live_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join(PID_FILE_NAME);
+        let own = i32::try_from(std::process::id()).unwrap();
+        std::fs::write(&pid_file, own.to_string()).unwrap();
+        assert_eq!(
+            supervisor_pid_status(&pid_file, &|_| true),
+            VmStatus::Running
+        );
+        assert_eq!(
+            supervisor_pid_status(&pid_file, &|_| false),
+            VmStatus::Stopped
+        );
+        assert_eq!(
+            supervisor_pid_status(&pid_file, &is_hvf_supervisor),
+            VmStatus::Stopped
+        );
+        let mut gone = std::process::Command::new("true").spawn().unwrap();
+        let dead = i32::try_from(gone.id()).unwrap();
+        gone.wait().unwrap();
+        std::fs::write(&pid_file, dead.to_string()).unwrap();
+        assert_eq!(
+            supervisor_pid_status(&pid_file, &|_| true),
+            VmStatus::Stopped
+        );
+        assert_eq!(
+            supervisor_pid_status(&dir.path().join("absent"), &|_| true),
+            VmStatus::Stopped
         );
     }
 
