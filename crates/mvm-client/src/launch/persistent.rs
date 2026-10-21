@@ -185,10 +185,6 @@ fn register_vm_name(vm_name: &str, network_name: &str) {
 pub fn start_persistent_oci_machine(
     params: PersistentImageStartParams<'_>,
 ) -> Result<mvm_hostd::plan_admission::AdmittedPlan> {
-    anyhow::ensure!(
-        params.backend.kind() != mvm_core::vm_backend::BackendKind::Hvf,
-        "native persistent start requires a caller-owned host context; admitted-plan-only return is unavailable"
-    );
     let PreparedPersistentBoot {
         backend,
         start_config,
