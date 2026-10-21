@@ -6,6 +6,9 @@ fn candidate_prefix_is_used_only_for_live_pack_production() {
     for (command, live, expected) in [
         ("pack build --out app.mvmpkg", true, true),
         ("pack build --out app.mvmpkg", false, false),
+        ("bundle build --image alpine --out app.mvmpkg", true, true),
+        ("bundle build --image alpine --out app.mvmpkg", false, false),
+        ("bundle inspect app.mvmpkg", true, false),
         ("pack pull acme/hello", true, false),
         ("machine run --manifest app.mvmpkg", true, false),
         ("machine check-artifact app.mvmpkg", true, false),
@@ -15,6 +18,24 @@ fn candidate_prefix_is_used_only_for_live_pack_production() {
         let selected = fixture::producer_binary(&arguments, live, Some("/producer/mvmctl".into()));
         assert_eq!(selected.is_some(), expected, "{command}");
     }
+}
+
+#[test]
+fn revocation_update_names_both_signed_inputs() {
+    let args = fixture::revocation_update_args(std::path::Path::new("/r"));
+    let args: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+    assert_eq!(
+        args,
+        [
+            "image",
+            "revocations",
+            "update",
+            "--document",
+            "/r/revocations.json",
+            "--bundle",
+            "/r/revocations.json.bundle"
+        ]
+    );
 }
 
 #[test]

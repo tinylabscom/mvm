@@ -329,6 +329,17 @@ if [[ -n "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]]; then
     --candidate-dir "$MVM_E2E_RUNTIME_CANDIDATE_DIR" --cli "$MVMCTL" \
     --out-dir "$producer_root/bin"
   export MVM_E2E_PRODUCER_MVMCTL="$producer_root/bin/mvmctl"
+  # Offline pack admission needs an applied image-set revocation list, and
+  # `image revocations update` fetches nothing. Download the published pair;
+  # the update verifies the signature and freshness before applying it.
+  revocations_dir="$producer_root/revocations"
+  mkdir -p "$revocations_dir"
+  revocations_url="https://github.com/tinylabscom/mvm-images/releases/download/revocations"
+  for name in revocations.json revocations.json.bundle; do
+    curl --fail --silent --show-error --location --retry 3 \
+      --output "$revocations_dir/$name" "$revocations_url/$name"
+  done
+  export MVM_E2E_IMAGE_REVOCATIONS_DIR="$revocations_dir"
   echo "==> producer-only candidate prefix: $producer_root (retained; cleanup requires confirmed absence of readers)"
 fi
 
