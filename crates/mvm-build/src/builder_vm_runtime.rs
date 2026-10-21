@@ -467,6 +467,18 @@ fn render_flake_cmd_sh_observed(
     } else {
         ("nix", String::new())
     };
+    // `/work` is the mvm workspace only in override mode. Otherwise it is the
+    // user's (or a frozen pack's) flake, `mvm` is a pinned input that carries
+    // its own source, and pointing the workspace filter at `/work` would find
+    // no Cargo.lock.
+    let workspace_export = if override_mvm {
+        "# Flake convention: workspace-path env var so flakes that reference\n\
+         # the workspace root don't depend on relative-path resolution\n\
+         # against the store-copied flake dir.\n\
+         export MVM_WORKSPACE_PATH=/work\n"
+    } else {
+        ""
+    };
     let body = format!(
         r#"#!/bin/sh
 # mvm-builder-vm cmd.sh — emitted by BuilderVmRuntime.
@@ -543,11 +555,7 @@ download-attempts = 5
 http-connections = 8
 connect-timeout = 15
 stalled-download-timeout = 90"
-# Flake convention: workspace-path env var so flakes that reference
-# the workspace root don't depend on relative-path resolution
-# against the store-copied flake dir.
-export MVM_WORKSPACE_PATH=/work
-# Host-vm binaries extracted from the mvmctl embedded payload and
+{workspace_export}# Host-vm binaries extracted from the mvmctl embedded payload and
 # mounted read-only at /mvm-bins. The builder-vm
 # flake reads this to install the correct cross-compiled binaries into
 # the rootfs without a separate nix build.
@@ -1437,6 +1445,11 @@ mod tests {
             assert!(!line.contains("--output-lock-file"));
         }
         let plain = super::render_flake_cmd_sh("/work", "default", false);
+        assert!(!plain.contains("MVM_WORKSPACE_PATH"));
+        assert!(
+            super::render_flake_cmd_sh("/work", "default", true)
+                .contains("export MVM_WORKSPACE_PATH=/work\n")
+        );
         assert!(!plain.contains("OBS_DIR"));
         assert!(plain.contains("--no-write-lock-file"));
         assert_eq!(
