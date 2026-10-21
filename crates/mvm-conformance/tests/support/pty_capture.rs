@@ -12,11 +12,11 @@ use std::time::Duration;
 use tokio::io::unix::AsyncFd;
 
 pub fn output(command: Command, timeout: Duration) -> io::Result<Output> {
-    output_with_read(command, timeout, |mut file, buf| file.read(buf))
+    capture_using_reader(command, timeout, |mut file, buf| file.read(buf))
 }
 
 // The read seam exercises failures through real child cleanup, not just parsing.
-pub(super) fn output_with_read(
+pub(super) fn capture_using_reader(
     command: Command,
     timeout: Duration,
     read: impl FnMut(&File, &mut [u8]) -> io::Result<usize> + Send + 'static,

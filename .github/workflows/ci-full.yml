@@ -714,11 +714,9 @@ jobs:
         with:
           filters: |
             spawn:
-              # Same absorbed-path bug the builder VM lane above already
-              # fixed: mvm-host-vm-init is a [[bin]] of mvm-build, so the
-              # standalone crate directory this named cannot exist and the
-              # filter never matched.
-              - 'crates/mvm-builder-guest/src/bin/mvm-host-vm-init/**'
+              # Include the owning package's manifest and shared modules,
+              # not only the binary's source directory.
+              - 'crates/mvm-builder-guest/**'
 
       - name: Install Rust toolchain
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
@@ -815,7 +813,7 @@ jobs:
           MVM_FC_BOOT_SMOKE: "1"
           MVM_FC_SMOKE_KERNEL: ${{ github.workspace }}/ci-artifacts/vmlinux
           MVM_FC_SMOKE_ROOTFS: ${{ github.workspace }}/ci-artifacts/rootfs.ext4
-        run: cargo test -p mvm-build --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
+        run: cargo test -p mvm-builder-guest --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture
 
   # Hosted no-KVM smoke test. This exercises the QEMU TCG launch fallback with
   # an installed, signed .mvmpkg produced by the same source-matched binary.

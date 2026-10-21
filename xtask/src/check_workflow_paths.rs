@@ -2101,6 +2101,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workload_spawn_smoke_selects_the_binary_owner_and_its_source_paths() {
+        let workflow = ci_full_workflow();
+        let job = job_block(&workflow, "workload-spawn-smoke-linux");
+        assert!(job.contains(
+            "cargo test -p mvm-builder-guest --bin mvm-host-vm-init live_firecracker_boot_smoke -- --nocapture"
+        ));
+        assert!(job.contains("- 'crates/mvm-builder-guest/**'"));
+        assert!(!job.contains("cargo test -p mvm-build "));
+    }
+
     /// The bug this check was written for: `ci-full.yml` invoked
     /// `cargo test -p mvm-jailer-lite` after that crate was absorbed into
     /// `mvm-hostd`, so the only lane exercising Landlock + seccomp

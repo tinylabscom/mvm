@@ -94,7 +94,7 @@ fn read_error_preserves_output_and_kills_and_reaps_the_child() {
     command.args(["fixture", pid_file.to_str().unwrap()]);
     let mut seen = false;
     let error =
-        pty_capture::output_with_read(command, Duration::from_secs(3), move |mut fd, buf| {
+        pty_capture::capture_using_reader(command, Duration::from_secs(3), move |mut fd, buf| {
             if seen {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -129,8 +129,10 @@ fn continuously_readable_descendant_cannot_extend_capture_past_deadline() {
     let mut command = shell("yes descendant & echo $! > \"$1\"; printf writer-marker; exit 0");
     command.args(["fixture", pid_file.to_str().unwrap()]);
     let mut seen = false;
-    let result =
-        pty_capture::output_with_read(command, Duration::from_millis(200), move |mut fd, buf| {
+    let result = pty_capture::capture_using_reader(
+        command,
+        Duration::from_millis(200),
+        move |mut fd, buf| {
             // Once the real writer produces data, make readiness deterministic:
             // no scheduler-dependent gap may turn the continuous stream into EOF.
             if seen {
@@ -140,7 +142,8 @@ fn continuously_readable_descendant_cannot_extend_capture_past_deadline() {
             let n = fd.read(buf)?;
             seen = n > 0;
             Ok(n)
-        });
+        },
+    );
     let pid = std::fs::read_to_string(pid_file)
         .unwrap()
         .trim()
