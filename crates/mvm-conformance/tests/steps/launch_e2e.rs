@@ -25,6 +25,9 @@ use mvm_conformance::IsolatedHome;
 use crate::steps::cli::{mvmctl_command, workspace_root};
 use crate::world::{CliWorld, LaunchRecord};
 
+#[path = "../support/pty_capture.rs"]
+mod pty_capture;
+
 /// Env var naming the artifact-warm `MVM_HOME` these scenarios share.
 ///
 /// Unset means the operator's real home, which is the point when running this
@@ -342,19 +345,11 @@ const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// ever asked to open a console. That is exactly why a guest whose `openpty()`
 /// failed on every OCI image passed this suite.
 ///
-/// The child gets the PTY slave on all three descriptors and the parent keeps
-/// the master, reading until EOF. stdout and stderr are the same stream on a
-/// terminal, which is what a terminal is; the record carries the combined
-/// bytes in `stdout` and leaves `stderr` empty.
+/// The child gets the PTY slave on all three descriptors. Capture follows the
+/// CLI's lifetime, not EOF: detached helpers may retain the slave after the CLI
+/// exits. stdout and stderr share the terminal; the record carries both in
+/// `stdout` and leaves `stderr` empty. Capture errors and timeouts fail the step.
 fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
-    use std::process::Stdio;
-
-    let pty =
-        nix::pty::openpty(None, None).expect("allocate a host PTY for the interactive launch");
-    let (master, slave): (OwnedFd, OwnedFd) = (pty.master, pty.slave);
-
     let home = e2e_home();
     let mut command: Command = mvmctl_command();
     command
@@ -366,55 +361,19 @@ fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
         // A terminal the guest shell can actually address. Without it the
         // shell falls back to `dumb` and some images print nothing at all,
         // which would read as a console failure.
-        .env("TERM", "xterm")
-        .stdin(Stdio::from(
-            slave.try_clone().expect("dup the PTY slave for stdin"),
-        ))
-        .stdout(Stdio::from(
-            slave.try_clone().expect("dup the PTY slave for stdout"),
-        ))
-        .stderr(Stdio::from(slave));
+        .env("TERM", "xterm");
 
     let started = Instant::now();
-    let mut child = command.spawn().expect("failed to spawn mvmctl on a PTY");
-    // The parent's copy of the slave is gone once `command` is dropped; only
-    // the child holds one. Without that the master never sees EOF and the read
-    // below blocks for the full timeout on a *successful* run.
-    drop(command);
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let master_fd = master.as_raw_fd();
-    std::thread::spawn(move || {
-        // SAFETY: `master_fd` is the live PTY master owned by `master` in the
-        // parent frame, which outlives this read: the frame joins on `rx`
-        // before dropping it.
-        let mut reader =
-            unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
-        let mut buf = Vec::new();
-        // EIO is how a PTY master reports "the last slave closed" on Linux,
-        // and it arrives instead of EOF. Whatever was read before it is the
-        // session's output, not an error.
-        let _ = reader.read_to_end(&mut buf);
-        std::mem::forget(reader);
-        let _ = tx.send(buf);
-    });
-
-    let combined = rx
-        .recv_timeout(INTERACTIVE_LAUNCH_TIMEOUT)
-        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-        .unwrap_or_else(|_| {
-            let _ = child.kill();
-            String::new()
-        });
-    let status = child.wait().expect("wait for the interactive mvmctl");
+    let output = pty_capture::output(command, INTERACTIVE_LAUNCH_TIMEOUT)
+        .expect("capture the interactive mvmctl terminal session");
+    let combined = String::from_utf8_lossy(&output.stdout).into_owned();
     let wall = started.elapsed();
-    drop(master);
 
     let dispatch_window_ms = parse_dispatch_window_ms(&combined);
     LaunchRecord {
         stdout: combined,
         stderr: String::new(),
-        exit_code: status.code().unwrap_or(-1),
+        exit_code: output.status.code().unwrap_or(-1),
         dispatch_window_ms,
         wall,
     }

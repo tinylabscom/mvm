@@ -34,7 +34,7 @@ toml.workspace = true
 cucumber = "0.23"
 # `signal`: the runner stops the VMs live steps launched when the job is
 # cancelled or times out mid-step.
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "process"] }
 # Cross-workspace `mvmctl` binary resolution — the same mechanism
 # crates/mvm-cli/tests/cli.rs already uses, so a scenario keeps working
 # through a crate rename as long as the produced binary is still named

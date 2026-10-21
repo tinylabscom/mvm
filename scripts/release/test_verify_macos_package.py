@@ -285,6 +285,8 @@ class PackageTests(unittest.TestCase):
             self.assertIn("        run: just e2e::docs", step)
             return "just e2e::docs"
         self.assertEqual(job, "e2e-docs-macos")
+        self.assertNotIn("uses: actions/setup-python@", setup,
+                         "the macOS installer requires the hosted /Users/runner path")
         self.assertIn("uses: astral-sh/setup-uv@v8.2.0", setup)
         self.assertIn('version: "0.12.5"', setup)
         self.assertIn("        run: |\n", step)
@@ -321,6 +323,23 @@ class PackageTests(unittest.TestCase):
                 "uv run --no-project --python 3.12 -- just e2e::docs", replacement,
             )
             with self.subTest(replacement=replacement), self.assertRaises(AssertionError):
+                self.assert_live_python_contract(changed, "e2e-docs-macos")
+
+    def test_documented_surface_refuses_hosted_python_installer_on_self_hosted_macos(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / ".github/workflows/e2e-docs.yml").read_text()
+        marker = "\n  e2e-docs-macos:\n"
+        before, macos = source.split(marker, 1)
+        for version in ["v5", "v6"]:
+            changed = before + marker + macos.replace(
+                "      - name: Set up uv\n",
+                f"      - uses: actions/setup-python@{version}\n"
+                "        with:\n"
+                '          python-version: "3.12"\n'
+                "      - name: Set up uv\n",
+                1,
+            )
+            with self.subTest(version=version), self.assertRaises(AssertionError):
                 self.assert_live_python_contract(changed, "e2e-docs-macos")
 
     def test_documented_surface_uv_arguments_and_pipeline_exit_without_running_uv(self):

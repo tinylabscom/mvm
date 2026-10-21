@@ -127,6 +127,27 @@ class InspectionSmokeTests(unittest.TestCase):
             (root / "extra").mkdir()
             self.assertNotEqual(original, smoke.snapshot(root))
 
+    def test_snapshot_delta_is_bounded_and_does_not_publish_names_or_contents(self):
+        before = {"private-name": [0o600, "private-content-digest"]}
+        after = {"private-name": [0o644, "replacement-digest"]}
+        after.update({f"secret-{i}": [0o600, "secret"] for i in range(20)})
+        delta = smoke.snapshot_delta(before, after)
+        self.assertEqual(delta["total"], 21)
+        self.assertEqual(len(delta["entries"]), 16)
+        self.assertEqual(delta["omitted"], 5)
+        self.assertEqual(delta["entries"][0]["fields"], ["mode", "bytes"])
+        encoded = json.dumps(delta)
+        for private in ("private-name", "private-content-digest", "replacement-digest", "secret"):
+            self.assertNotIn(private, encoded)
+
+    def test_snapshot_delta_distinguishes_removal_and_type_changes(self):
+        before = {"removed": [0o600, "digest"], "type": [0o700, "directory"]}
+        after = {"type": [0o700, "digest"]}
+        delta = smoke.snapshot_delta(before, after)
+        self.assertEqual(delta["entries"][0]["operation"], "removed")
+        self.assertEqual(delta["entries"][1]["fields"], ["type"])
+        self.assertEqual(smoke.snapshot_delta(after, after)["total"], 0)
+
     def test_closed_environment_does_not_forward_credentials(self):
         with patch.dict("os.environ", {"GITHUB_TOKEN": "not-forwarded", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "not-forwarded"}):
             env = smoke.closed_environment(Path("/consumer"), Path("/scratch"), Path("/catalog"))
@@ -255,6 +276,10 @@ class InspectionSmokeTests(unittest.TestCase):
             with patch.object(instance, "command", side_effect=command):
                 with self.assertRaisesRegex(ValueError, "mutated"):
                     instance.inspect("archive", root, False)
+            mutation = instance.records[-1]
+            self.assertEqual(mutation["name"], "archive-info-state-mutation")
+            self.assertEqual(mutation["delta"]["total"], 1)
+            self.assertEqual(mutation["delta"]["entries"][0]["operation"], "added")
 
     def test_failure_report_survives_and_redacts_private_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:

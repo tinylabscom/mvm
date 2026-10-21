@@ -53,6 +53,35 @@ def snapshot(root):
     return entries
 
 
+def snapshot_delta(before, after, limit=16):
+    """Describe changes without publishing consumer names, bytes, or digests."""
+    changes = []
+    total = 0
+    for name in sorted(before.keys() | after.keys()):
+        old, new = before.get(name), after.get(name)
+        if old == new:
+            continue
+        total += 1
+        if len(changes) >= limit:
+            continue
+        if old is None:
+            fields, operation = [], "added"
+        elif new is None:
+            fields, operation = [], "removed"
+        else:
+            fields = []
+            if old[0] != new[0]:
+                fields.append("mode")
+            if old[1] != new[1]:
+                fields.append("type" if "directory" in (old[1], new[1]) else "bytes")
+            operation = "changed"
+        changes.append({
+            "path_sha256": digest(name.encode()), "operation": operation,
+            "fields": fields,
+        })
+    return {"total": total, "entries": changes, "omitted": total - len(changes)}
+
+
 def assert_inspection(document, fixture):
     expected = {
         "kind": "application",
@@ -245,7 +274,12 @@ class Smoke:
             else:
                 stage = assert_refusal(result, label, home, self.fixture)
                 self.records.append({"name": f"{label}-{verb}-classification", "stage": stage})
-            if snapshot(home) != before:
+            after = snapshot(home)
+            if after != before:
+                self.records.append({
+                    "name": f"{label}-{verb}-state-mutation",
+                    "delta": snapshot_delta(before, after),
+                })
                 raise ValueError(f"{label}-{verb} mutated consumer state")
         self.records.append({
             "name": label, "state_before_sha256": digest(json.dumps(before, sort_keys=True).encode()),

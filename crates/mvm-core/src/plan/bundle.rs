@@ -314,10 +314,10 @@ impl BundleRegistry {
     /// the success — the next install of the same sha will refuse
     /// (or overwrite with `force`) cleanly either way.
     pub fn remove(&self, bundle_sha256: &str) -> anyhow::Result<bool> {
-        if let Err(error) = std::fs::symlink_metadata(&self.root)
-            && error.kind() == std::io::ErrorKind::NotFound
-        {
-            return Ok(false);
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
         }
         let _lease = self.lock_entry(bundle_sha256).map_err(anyhow::Error::msg)?;
         let mut removed_any = false;
@@ -3077,6 +3077,25 @@ mod tests {
         let registry = BundleRegistry::new(&root);
         assert!(!registry.remove(&"a".repeat(64)).expect("remove ok"));
         assert!(!root.exists(), "removing from nothing must not create it");
+    }
+
+    #[test]
+    fn bundle_registry_remove_reports_root_lookup_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("not-a-directory");
+        std::fs::write(&parent, b"retain this file").unwrap();
+        let root = parent.join("bundles");
+        let lookup_error = std::fs::symlink_metadata(&root).unwrap_err();
+        assert_ne!(lookup_error.kind(), std::io::ErrorKind::NotFound);
+
+        let error = BundleRegistry::new(&root)
+            .remove(&"a".repeat(64))
+            .expect_err("an inaccessible registry is not an absent bundle");
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            lookup_error.kind()
+        );
+        assert_eq!(std::fs::read(parent).unwrap(), b"retain this file");
     }
 
     #[test]
