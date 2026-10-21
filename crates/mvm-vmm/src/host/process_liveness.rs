@@ -107,7 +107,10 @@ fn macos_process_is_zombie(pid: i32) -> bool {
         return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
     if bytes != std::mem::size_of::<libc::proc_bsdinfo>() as i32 {
-        return false;
+        // The kernel reports a zombie as `ESRCH` here, with no info, while
+        // `kill(pid, 0)` still succeeds. A process that is gone also answers
+        // `ESRCH`; both are "not a live process", which is all the caller asks.
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
     }
     // SAFETY: The size check above proves that the kernel populated `info`.
     unsafe { info.assume_init().pbi_status == libc::SZOMB }
@@ -541,6 +544,27 @@ fn inspect_then_kill(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stopped supervisor whose parent has not reaped it still answers
+    /// `kill(pid, 0)`. It is not a live process, and a pool or a state-dir
+    /// sweep that believes otherwise keeps a dead VM's records forever.
+    #[test]
+    fn an_exited_but_unreaped_child_is_not_alive() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = i32::try_from(child.id()).unwrap();
+        // `true` has exited once it is a zombie; poll for that without
+        // waiting on it, which would reap it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // SAFETY: signal 0 only probes existence.
+        let still_there = unsafe { libc::kill(pid, 0) } == 0;
+        let alive = pid_is_alive(pid);
+        child.wait().unwrap();
+        assert!(still_there, "the unreaped child must still be a zombie");
+        assert!(!alive, "a zombie must not count as alive");
+    }
 
     #[test]
     fn stat_state_z_is_a_zombie_even_with_a_tricky_command_name() {
