@@ -36,10 +36,22 @@ def contained(root, relative):
     return result
 
 
+# Every command appends its own invocation record here; that is the one file
+# allowed to change, and only by growing (see Smoke.inspect).
+AUDIT_LOG = "audit/local.jsonl"
+
+
+def audit_log(root):
+    path = root / AUDIT_LOG
+    return path.read_bytes() if path.exists() else b""
+
+
 def snapshot(root):
     """Hash names, types, modes and bytes; never serialize consumer contents."""
     entries = {}
     for path in sorted(root.rglob("*")):
+        if path.relative_to(root).as_posix() == AUDIT_LOG:
+            continue
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise ValueError("consumer state contains a symlink")
@@ -233,6 +245,7 @@ class Smoke:
 
     def inspect(self, label, home, accepted):
         before = snapshot(home)
+        audit_before = audit_log(home)
         for verb in ("info", "verify"):
             result = self.command(
                 f"{label}-{verb}", home,
@@ -247,6 +260,9 @@ class Smoke:
                 self.records.append({"name": f"{label}-{verb}-classification", "stage": stage})
             if snapshot(home) != before:
                 raise ValueError(f"{label}-{verb} mutated consumer state")
+            if not audit_log(home).startswith(audit_before):
+                raise ValueError(f"{label}-{verb} rewrote the append-only audit log")
+            audit_before = audit_log(home)
         self.records.append({
             "name": label, "state_before_sha256": digest(json.dumps(before, sort_keys=True).encode()),
             "state_after_sha256": digest(json.dumps(snapshot(home), sort_keys=True).encode()),
