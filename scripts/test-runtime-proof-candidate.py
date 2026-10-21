@@ -830,6 +830,8 @@ class CandidateTransportTests(unittest.TestCase):
                         script.index("stage-producer"))
         self.assertIn('export MVM_E2E_PRODUCER_MVMCTL="$producer_root/bin/mvmctl"', script)
         self.assertNotIn('export MVMCTL="$producer_root', script)
+        self.assertIn('export MVM_E2E_IMAGE_REVOCATIONS_DIR="$revocations_dir"', script)
+        self.assertIn("releases/download/revocations", script)
         action = (root / ".github/actions/fetch-runtime-candidate/action.yml").read_text()
         self.assertLess(action.index("fetch --kind signed"), action.index("verify-collected"))
         self.assertLess(action.index("verify-collected"), action.index('echo "directory='))

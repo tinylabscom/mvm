@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use mvm_core::registry_pack::PackReference;
 use mvm_core::registry_pack::application_bundle::{
     ApplicationInstallStore, ApplicationLaunchError, ResolvedApplication,
-    names_installed_application, resolve_installed_application,
+    names_installed_application, names_installed_policy_pack, resolve_installed_application,
 };
 
 use super::RunArgs;
@@ -35,13 +35,57 @@ pub(in crate::commands) fn apply_application_source(args: &mut RunArgs) -> Resul
     settle(
         args,
         |reference| names_installed_application(reference, &store),
+        |reference| names_installed_policy_pack(reference, &store),
         |reference| resolve_installed_application(reference, &store, &policy, &trust),
     )
+}
+
+/// Record that the plan `plan_id` admitted for run `run_id` boots `resolved`.
+/// Written once admission has produced the plan, so the entry names both ids.
+pub(in crate::commands) fn record_launch(
+    resolved: &ResolvedApplication,
+    run_id: &str,
+    plan_id: &str,
+    log: Option<&std::path::Path>,
+) {
+    let mut event = mvm_core::policy::audit::event(
+        mvm_core::policy::audit::LocalAuditKind::ApplicationLaunch,
+    )
+    .vm_name(run_id)
+    .detail(format!(
+        "application={},descriptor_sha256={},bundle_sha256={},run_id={run_id},plan_id={plan_id}",
+        resolved.reference, resolved.descriptor_sha256, resolved.bundle_sha256,
+    ));
+    if let Some(log) = log {
+        event = event.to_path(log);
+    }
+    event.emit();
+}
+
+/// A positional that names an installed policy pack is not an OCI image; say
+/// so rather than let it fall through to a registry pull.
+fn refuse_positional_policy_pack(
+    source: Option<&str>,
+    names_policy_pack: impl Fn(&PackReference) -> bool,
+) -> Result<()> {
+    let Some((raw, reference)) =
+        source.and_then(|raw| Some((raw, raw.parse::<PackReference>().ok()?)))
+    else {
+        return Ok(());
+    };
+    if names_policy_pack(&reference) {
+        anyhow::bail!(
+            "`{raw}` is installed as a policy pack, not an application, and cannot be run; \
+             to run an OCI image of that name use `--image {raw}`"
+        );
+    }
+    Ok(())
 }
 
 fn settle(
     args: &mut RunArgs,
     names_installed: impl Fn(&PackReference) -> bool,
+    names_policy_pack: impl Fn(&PackReference) -> bool,
     resolve: impl Fn(&PackReference) -> Result<ResolvedApplication, ApplicationLaunchError>,
 ) -> Result<()> {
     let reference = if let Some(raw) = args.application.take() {
@@ -57,21 +101,16 @@ fn settle(
         args.source = None;
         reference
     } else {
+        refuse_positional_policy_pack(args.source.as_deref(), names_policy_pack)?;
         return Ok(());
     };
     let resolved = resolve(&reference)?;
-    mvm_core::audit_emit!(
-        ApplicationLaunch,
-        "application={},descriptor_sha256={},bundle_sha256={}",
-        resolved.reference,
-        resolved.descriptor_sha256,
-        resolved.bundle_sha256,
-    );
     eprintln!(
         "[mvm] {} is installed as bundle {}",
         resolved.reference, resolved.bundle_sha256
     );
-    args.manifest = Some(resolved.bundle_sha256);
+    args.manifest = Some(resolved.bundle_sha256.clone());
+    args.resolved_application = Some(resolved);
     Ok(())
 }
 
@@ -103,9 +142,36 @@ mod tests {
     }
 
     #[test]
+    fn the_launch_entry_names_the_run_and_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("audit.jsonl");
+        let reference: PackReference = "agent/claude@1.0.1".parse().unwrap();
+        let resolved = resolved(&reference).unwrap();
+        record_launch(&resolved, "run-7", "plan-9", Some(&log));
+        let line = std::fs::read_to_string(&log).unwrap();
+        let event: mvm_core::policy::audit::LocalAuditEvent =
+            serde_json::from_str(line.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            event.kind,
+            mvm_core::policy::audit::LocalAuditKind::ApplicationLaunch
+        );
+        assert_eq!(event.vm_name.as_deref(), Some("run-7"));
+        let detail = event.detail.unwrap();
+        for want in [
+            "application=agent/claude@1.0.1",
+            &format!("descriptor_sha256={}", resolved.descriptor_sha256),
+            &format!("bundle_sha256={}", resolved.bundle_sha256),
+            "run_id=run-7",
+            "plan_id=plan-9",
+        ] {
+            assert!(detail.contains(want), "{want} missing from {detail}");
+        }
+    }
+
+    #[test]
     fn a_positional_naming_an_installed_application_becomes_its_bundle() {
         let mut args = positional("agent/claude@1.0.1");
-        settle(&mut args, |_| true, resolved).unwrap();
+        settle(&mut args, |_| true, |_| false, resolved).unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
         assert!(args.source.is_none() && args.image.is_none());
     }
@@ -119,16 +185,47 @@ mod tests {
             "/tmp/app.mvmpkg",
         ] {
             let mut args = positional(value);
-            settle(&mut args, |_| true, |_| panic!("must not resolve")).unwrap();
+            settle(
+                &mut args,
+                |_| true,
+                |_| false,
+                |_| panic!("must not resolve"),
+            )
+            .unwrap();
             assert_eq!(args.source.as_deref(), Some(value));
             assert!(args.manifest.is_none());
         }
     }
 
     #[test]
+    fn a_positional_naming_an_installed_policy_pack_is_refused_not_routed_to_oci() {
+        let mut args = positional("policy/strict@1.0.0");
+        let error = settle(
+            &mut args,
+            |_| false,
+            |_| true,
+            |_| panic!("must not resolve"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("policy pack") && error.contains("--image"),
+            "{error}"
+        );
+        let mut oci = positional("alpine/curl:latest");
+        settle(&mut oci, |_| false, |_| true, resolved).unwrap();
+    }
+
+    #[test]
     fn a_positional_reference_that_is_not_installed_is_left_alone() {
         let mut args = positional("agent/claude");
-        settle(&mut args, |_| false, |_| panic!("must not resolve")).unwrap();
+        settle(
+            &mut args,
+            |_| false,
+            |_| false,
+            |_| panic!("must not resolve"),
+        )
+        .unwrap();
         assert_eq!(args.source.as_deref(), Some("agent/claude"));
     }
 
@@ -138,7 +235,7 @@ mod tests {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        let error = settle(&mut args, |_| false, missing)
+        let error = settle(&mut args, |_| false, |_| false, missing)
             .unwrap_err()
             .to_string();
         assert!(error.contains("mvmctl pack pull agent/claude"), "{error}");
@@ -151,7 +248,7 @@ mod tests {
             application: Some("alpine/curl:latest".to_string()),
             ..RunArgs::default()
         };
-        assert!(settle(&mut args, |_| true, resolved).is_err());
+        assert!(settle(&mut args, |_| true, |_| false, resolved).is_err());
     }
 
     #[test]
@@ -160,7 +257,7 @@ mod tests {
             application: Some("agent/claude".to_string()),
             ..RunArgs::default()
         };
-        settle(&mut args, |_| false, resolved).unwrap();
+        settle(&mut args, |_| false, |_| false, resolved).unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
     }
 

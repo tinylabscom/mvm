@@ -338,3 +338,112 @@ fn descriptor_rejects_trailing_data_after_an_otherwise_valid_object() {
     whitespace.extend_from_slice(b" \n\t\r");
     assert!(parse_application_manifest(&whitespace).is_ok());
 }
+
+#[test]
+fn https_locator_table_matches_the_url_parser_it_replaced() {
+    // Outcomes recorded from the previous `url`-based validator, except the
+    // rows marked as intentional refusals.
+    let digest = "a".repeat(64);
+    let cases: &[(&str, bool)] = &[
+        ("https://bundles.example/app", true),
+        ("https://bundles.example/", true),
+        ("https://bundles.example:8443/a/b", true),
+        ("https://bundles.example:443/app", false),
+        ("https://bundles.example:0443/app", false),
+        ("https://bundles.example:65536/app", false),
+        ("https://bundles.example:65535/app", true),
+        ("https://bundles.example:/app", false),
+        ("https://bundles.example:+1/app", false),
+        ("https://bundles.example", false),
+        ("https://", false),
+        ("https:///app", false),
+        ("HTTPS://bundles.example/app", false),
+        ("http://bundles.example/app", false),
+        ("https://Bundles.example/app", false),
+        ("https://user@bundles.example/app", false),
+        ("https://bundles.example/app?x", false),
+        ("https://bundles.example/app?", false),
+        ("https://bundles.example/app#x", false),
+        ("https://bundles.example/a/./b", false),
+        ("https://bundles.example/a/../b", false),
+        ("https://bundles.example/a/%2e%2E/b", false),
+        ("https://bundles.example/a/.%2e", false),
+        ("https://bundles.example/a/...", true),
+        ("https://bundles.example/a%2fb", true),
+        ("https://bundles.example/a\\b", false),
+        ("https://bundles.example/a b", false),
+        ("https://bundles.example/a\"b", false),
+        ("https://bundles.example/a<b>", false),
+        ("https://bundles.example/a`b", false),
+        ("https://bundles.example/a{b}", false),
+        ("https://bundles.example/a^b", true),
+        ("https://bundles.example/a|b[c]", true),
+        ("https://bundles.example/a\u{7f}", false),
+        ("https://bundles.example/a\tb", false),
+        ("https://bundles.example//a", true),
+        ("https://1.2.3.4/app", true),
+        ("https://1.2.3.4:8080/app", true),
+        ("https://1.2.3.04/app", false),
+        ("https://127.1/app", false),
+        ("https://[::1]/app", true),
+        ("https://[::1]:8443/app", true),
+        ("https://[0:0:0:0:0:0:0:1]/app", false),
+        ("https://[2001:db8::1]/app", true),
+        ("https://[2001:0db8::1]/app", false),
+        ("https://[::ffff:1.2.3.4]/app", false),
+        ("https://[::ffff:102:304]/app", true),
+        ("https://[1:0:2:0:3:0:4:0]/app", true),
+        ("https://[1:0:0:2:0:0:0:3]/app", false),
+        ("https://[::1/app", false),
+        ("https://[::1]x/app", false),
+        // Intentional refusals: hosts that need IDNA conversion.
+        ("https://b\u{fc}cher.example/app", false),
+        ("https://xn--bcher-kva.example/app", false),
+        ("https://a.xn--p1ai/app", false),
+    ];
+    for (source, accepted) in cases {
+        assert_eq!(
+            validate_application_source(source).is_ok(),
+            *accepted,
+            "{source}"
+        );
+    }
+    for registry in ["xn--bcher-kva.example", "b\u{fc}cher.example"] {
+        let source = format!("oci://{registry}/team/app@sha256:{digest}");
+        assert!(validate_application_source(&source).is_err(), "{source}");
+    }
+    let oci = format!("oci://ghcr.io:443/team/app@sha256:{digest}");
+    assert!(validate_application_source(&oci).is_ok());
+}
+
+#[test]
+fn arbitrary_bytes_never_panic_and_accepted_locators_are_plain_ascii() {
+    let alphabet = b"ab.-_:/[]@%?#\\ ^`{}<>\"09xnA~|\x00\x7f\xc3\xbc";
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    for _ in 0..20_000 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let length = (state >> 59) as usize + 4;
+        let mut bytes = b"https://".to_vec();
+        for _ in 0..length {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            bytes.push(alphabet[(state >> 33) as usize % alphabet.len()]);
+        }
+        let Ok(source) = std::str::from_utf8(&bytes) else {
+            continue;
+        };
+        if validate_application_source(source).is_ok() {
+            assert!(source.is_ascii(), "{source:?}");
+            let authority = source["https://".len()..].split('/').next().unwrap();
+            assert!(!authority.contains('@'), "{source:?}");
+        }
+    }
+}
+
+#[test]
+fn overlong_locators_refuse() {
+    let source = format!(
+        "https://bundles.example/{}",
+        "a".repeat(MAX_DESCRIPTOR_BYTES)
+    );
+    assert!(validate_application_source(&source).is_err());
+}

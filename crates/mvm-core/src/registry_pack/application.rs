@@ -144,19 +144,11 @@ pub fn validate_application_source(source: &str) -> Result<(), RegistryPackVerif
         ));
     }
     if let Some(rest) = source.strip_prefix("https://") {
-        let url =
-            url::Url::parse(source).map_err(|_| invalid("application HTTPS source is invalid"))?;
-        let (authority, _) = rest
+        let (authority, path) = rest
             .split_once('/')
             .ok_or_else(|| invalid("application HTTPS source requires an explicit path"))?;
-        validate_authority(authority)?;
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.as_str() != source
-        {
+        let port = validate_authority(authority)?;
+        if !https_authority_is_canonical(authority, port) || !https_path_is_canonical(path) {
             return Err(invalid(
                 "application HTTPS source must already be canonical and credential-free",
             ));
@@ -200,17 +192,17 @@ pub fn validate_application_source(source: &str) -> Result<(), RegistryPackVerif
     Ok(())
 }
 
-fn validate_authority(authority: &str) -> Result<(), RegistryPackVerificationError> {
+/// Validate an ASCII authority and return its port text, if any.
+///
+/// Hosts are plain ASCII DNS labels, canonical IPv4 or bracketed IPv6. Anything
+/// needing IDNA conversion, including `xn--` labels, is refused rather than
+/// converted.
+fn validate_authority(authority: &str) -> Result<Option<&str>, RegistryPackVerificationError> {
     if authority.is_empty()
         || authority != authority.to_ascii_lowercase()
         || authority.contains(['@', '%', '/', '?', '#', '\\'])
     {
         return Err(invalid("application source authority is not canonical"));
-    }
-    let url = url::Url::parse(&format!("https://{authority}/"))
-        .map_err(|_| invalid("application source authority is invalid"))?;
-    if url.host_str().is_none() || url.path() != "/" {
-        return Err(invalid("application source requires an explicit host"));
     }
     let port = if let Some(address) = authority.strip_prefix('[') {
         let (host, suffix) = address
@@ -235,6 +227,7 @@ fn validate_authority(authority: &str) -> Result<(), RegistryPackVerificationErr
             || !host.bytes().all(|byte| {
                 byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
             })
+            || host.split('.').any(|label| label.starts_with("xn--"))
         {
             return Err(invalid("application source hostname is invalid"));
         }
@@ -258,7 +251,65 @@ fn validate_authority(authority: &str) -> Result<(), RegistryPackVerificationErr
     {
         return Err(invalid("application source port must be in 1..=65535"));
     }
-    Ok(())
+    Ok(port)
+}
+
+/// A canonical HTTPS authority has no default or zero-padded port and an
+/// IPv6 literal in its shortest form.
+fn https_authority_is_canonical(authority: &str, port: Option<&str>) -> bool {
+    if port.is_some_and(|port| port == "443" || port.starts_with('0')) {
+        return false;
+    }
+    let Some((host, _)) = authority
+        .strip_prefix('[')
+        .and_then(|address| address.split_once(']'))
+    else {
+        return true;
+    };
+    host.parse::<std::net::Ipv6Addr>()
+        .is_ok_and(|parsed| shortest_ipv6(parsed) == host)
+}
+
+fn shortest_ipv6(address: std::net::Ipv6Addr) -> String {
+    let groups = address.segments();
+    let (mut start, mut len, mut index) = (0, 0, 0);
+    while index < 8 {
+        if groups[index] != 0 {
+            index += 1;
+            continue;
+        }
+        let run = index;
+        while index < 8 && groups[index] == 0 {
+            index += 1;
+        }
+        if index - run > len {
+            (start, len) = (run, index - run);
+        }
+    }
+    let hex = |part: &[u16]| {
+        part.iter()
+            .map(|group| format!("{group:x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    if len < 2 {
+        hex(&groups)
+    } else {
+        format!("{}::{}", hex(&groups[..start]), hex(&groups[start + len..]))
+    }
+}
+
+/// A path that URL normalization would rewrite is not canonical: query,
+/// fragment, characters a URL parser percent-encodes in a path, and dot
+/// segments.
+fn https_path_is_canonical(path: &str) -> bool {
+    !path.contains(['?', '#', '"', '<', '>', '`', '{', '}'])
+        && !path.split('/').any(|segment| {
+            matches!(
+                segment.to_ascii_lowercase().as_str(),
+                "." | ".." | "%2e" | ".%2e" | "%2e." | "%2e%2e"
+            )
+        })
 }
 
 fn lower_hex(value: &str, length: usize) -> bool {

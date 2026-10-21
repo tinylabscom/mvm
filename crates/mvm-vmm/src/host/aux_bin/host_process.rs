@@ -28,6 +28,7 @@ pub const CLI_BIN: &str = "mvmctl";
 static DECLARED_HOST_BINARY_DIR: OnceLock<PathBuf> = OnceLock::new();
 static DECLARED_LIBRARY_EMBEDDER: OnceLock<()> = OnceLock::new();
 static DECLARED_SOURCE_HELPER_BUILDS: OnceLock<()> = OnceLock::new();
+static DECLARED_RELEASE_BINARY: OnceLock<()> = OnceLock::new();
 
 /// Declare the directory holding this process's host helper binaries.
 ///
@@ -63,6 +64,15 @@ pub fn declare_library_embedder() {
 /// helper is `cargo` work, and an embedder runs neither `mvmctl` nor `cargo`.
 pub fn allow_helper_builds_from_source() {
     DECLARED_SOURCE_HELPER_BUILDS.get_or_init(|| ());
+}
+
+/// Declare that this process is an official release binary.
+///
+/// `mvmctl` declares it at startup when it was compiled for the release
+/// channel, so a missing helper can say what a release download ships rather
+/// than send its user to a source checkout.
+pub fn declare_release_binary() {
+    DECLARED_RELEASE_BINARY.get_or_init(|| ());
 }
 
 fn declare_dir_in(slot: &OnceLock<PathBuf>, dir: PathBuf) -> Result<(), HostBinaryDirError> {
@@ -148,6 +158,11 @@ impl HostProcess {
             library_embedder: embedder.get().is_some(),
             helper_builds_from_source: source_builds.get().is_some(),
         }
+    }
+
+    /// Whether this process declared itself an official release binary.
+    pub fn is_release_binary(&self) -> bool {
+        DECLARED_RELEASE_BINARY.get().is_some()
     }
 
     /// A process that declared nothing: `mvmctl` itself.

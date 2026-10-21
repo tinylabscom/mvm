@@ -19,7 +19,7 @@ pub use install::{
 };
 pub use launch::{
     ApplicationLaunchError, ResolvedApplication, names_installed_application,
-    resolve_installed_application,
+    names_installed_policy_pack, resolve_installed_application,
 };
 
 /// Resource ceiling shared with the bundle OCI transport.

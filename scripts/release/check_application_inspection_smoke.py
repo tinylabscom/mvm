@@ -4,6 +4,9 @@
 Only the existing signing workflow supplies signatures. This program does not
 sign, enroll inferred trust, execute an archive, or authorize a launch.
 The malformed configured revocation-trust case is not a signed-feed witness.
+Inspection preserves protected consumer state while retaining mandatory signed
+command auditing. The existing CLI verifier authenticates each inspection tail;
+its final self-outcome and resistance to an off-host rewrite are not attested.
 """
 
 import argparse
@@ -36,10 +39,22 @@ def contained(root, relative):
     return result
 
 
+# Every command appends its own invocation record here; that is the one file
+# allowed to change, and only by growing (see Smoke.inspect).
+AUDIT_LOG = "audit/local.jsonl"
+
+
+def audit_log(root):
+    path = root / AUDIT_LOG
+    return path.read_bytes() if path.exists() else b""
+
+
 def snapshot(root):
     """Hash names, types, modes and bytes; never serialize consumer contents."""
     entries = {}
     for path in sorted(root.rglob("*")):
+        if path.relative_to(root).as_posix() == AUDIT_LOG:
+            continue
         metadata = path.lstat()
         if stat.S_ISLNK(metadata.st_mode):
             raise ValueError("consumer state contains a symlink")
@@ -51,6 +66,105 @@ def snapshot(root):
         else:
             raise ValueError("consumer state contains a special file")
     return entries
+
+
+def snapshot_changes(before, after):
+    """Report bounded changed metadata, never file contents or an entire home."""
+    names = sorted(
+        name for name in before.keys() | after.keys()
+        if before.get(name) != after.get(name)
+    )
+    entries = []
+    for name in names[:32]:
+        identity = (
+            {"relative_path": name} if len(name.encode()) <= 512
+            else {"relative_path_sha256": digest(name.encode())}
+        )
+        entries.append({
+            **identity, "before": before.get(name), "after": after.get(name),
+        })
+    return {"changed_count": len(names), "changes": entries, "truncated": len(names) > 32}
+
+
+def protected_state(entries):
+    # Only this single chain may append. Keys, trust, pins, installed files,
+    # audit-directory metadata and every other audit file remain protected.
+    return {name: value for name, value in entries.items() if name != "audit/local.jsonl"}
+
+
+def read_audit_input(path, maximum):
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.getuid() or not 0 < info.st_size <= maximum
+        ):
+            raise ValueError("audit input type/owner/link/size refused")
+        data = stream.read(maximum + 1)
+        current = os.fstat(stream.fileno())
+    identity = (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+    observed = path.lstat()
+    if (
+        len(data) != info.st_size or current.st_size != info.st_size
+        or (observed.st_dev, observed.st_ino, stat.S_IMODE(observed.st_mode)) != identity
+        or not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1
+    ):
+        raise ValueError("audit input changed during its bounded read")
+    return data, identity
+
+
+def assert_audit_append(before, after, verb, outcome):
+    """Check the expected suffix; canonical CLI verification authenticates it later."""
+    if not before.endswith(b"\n") or not after.startswith(before):
+        raise ValueError("audit chain lost its original prefix")
+    prefix = before.splitlines()
+    suffix = after[len(before):].splitlines()
+    if not all(prefix) or len(suffix) != 2 or not after.endswith(b"\n"):
+        raise ValueError("audit command must append exactly two complete records")
+
+    def unique_fields(pairs):
+        fields = {}
+        for key, value in pairs:
+            if key in fields:
+                raise ValueError("ambiguous audit record")
+            fields[key] = value
+        return fields
+
+    for line, event in zip(suffix, (f"cmd.{verb}.invoked", f"cmd.{verb}.{outcome}")):
+        entry = json.loads(line, object_pairs_hook=unique_fields)["entry"]
+        labels = entry["labels"]
+        expected_labels = {"category", "verb"}
+        if event.endswith(".invoked"):
+            expected_labels.add("pid")
+            if not isinstance(labels.get("pid"), str) or not re.fullmatch(r"[1-9][0-9]*", labels["pid"]):
+                raise ValueError("audit invocation lacks its process label")
+        elif outcome == "failed":
+            expected_labels.add("error")
+            if not isinstance(labels.get("error"), str):
+                raise ValueError("audit failure lacks its error label")
+        if (
+            entry["event"] != event or entry["tenant"] != "local"
+            or labels.get("category") != "cmd" or labels.get("verb") != verb
+            or set(labels) != expected_labels
+        ):
+            raise ValueError("audit suffix describes another command, tenant or outcome")
+    return len(prefix) + 2
+
+
+def assert_verified_audit(result, home, inspected_entries):
+    # The verifier audits its invocation BEFORE LocalAuditReader verifies the
+    # chain. Its final self-outcome is appended afterwards and is not covered.
+    chain = home / "audit/local.jsonl"
+    expected = [
+        f"[mvm] audit chain '{chain}' verifies clean: {inspected_entries + 1} entries",
+        "[mvm] No published audit roots, so nothing attests the log was only appended to. "
+        "Roots are published at admission and exit.",
+        "[mvm] No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite "
+        "by this host is undetectable from here.",
+    ]
+    if result.returncode != 0 or result.stderr or result.stdout.decode("utf-8").splitlines() != expected:
+        raise ValueError("canonical audit verification did not cover the exact inspection tail")
+    return inspected_entries + 1
 
 
 def assert_inspection(document, fixture):
@@ -181,6 +295,29 @@ class Smoke:
         self.fixture = fixture
         self.records = []
         self.context = {}
+        self.audit_identity = None
+
+    def capture_audit_identity(self, home):
+        public_key, _ = read_audit_input(contained(home, "keys/host-signer.pub"), 32)
+        if len(public_key) != 32:
+            raise ValueError("setup audit public key has the wrong size")
+        self.audit_identity = public_key
+
+    def check_protected_state(self, name, before, after):
+        if protected_state(before) != protected_state(after):
+            self.records.append({
+                "name": name + "-state-mutation",
+                **snapshot_changes(protected_state(before), protected_state(after)),
+            })
+            raise ValueError(name + " mutated protected consumer state")
+
+    def audit_snapshot(self, home):
+        if self.audit_identity is None:
+            raise ValueError("setup audit identity was not independently captured")
+        public_key, _ = read_audit_input(contained(home, "keys/host-signer.pub"), 32)
+        if public_key != self.audit_identity:
+            raise ValueError("setup audit identity changed")
+        return read_audit_input(contained(home, "audit/local.jsonl"), 2 * 1024 * 1024)
 
     def report(self, outcome, error=None):
         report = {
@@ -232,10 +369,12 @@ class Smoke:
         return result
 
     def inspect(self, label, home, accepted):
-        before = snapshot(home)
         for verb in ("info", "verify"):
+            name = f"{label}-{verb}"
+            before = snapshot(home)
+            audit_before, identity = self.audit_snapshot(home)
             result = self.command(
-                f"{label}-{verb}", home,
+                name, home,
                 ["pack", verb, self.fixture["reference"], "--json"],
             )
             if accepted:
@@ -245,12 +384,36 @@ class Smoke:
             else:
                 stage = assert_refusal(result, label, home, self.fixture)
                 self.records.append({"name": f"{label}-{verb}-classification", "stage": stage})
-            if snapshot(home) != before:
-                raise ValueError(f"{label}-{verb} mutated consumer state")
-        self.records.append({
-            "name": label, "state_before_sha256": digest(json.dumps(before, sort_keys=True).encode()),
-            "state_after_sha256": digest(json.dumps(snapshot(home), sort_keys=True).encode()),
-        })
+            after = snapshot(home)
+            self.check_protected_state(name, before, after)
+            audit_after, current_identity = self.audit_snapshot(home)
+            if current_identity != identity:
+                raise ValueError(name + " replaced the audit file or changed its mode")
+            inspected_entries = assert_audit_append(
+                audit_before, audit_after, "pack", "completed" if accepted else "failed",
+            )
+            verification = self.command(
+                name + "-audit-verification", home,
+                ["--verbose", "trust", "audit", "verify", "--tenant", "local"],
+            )
+            self.check_protected_state(name + "-audit-verification", before, snapshot(home))
+            audit_final, final_identity = self.audit_snapshot(home)
+            if final_identity != identity:
+                raise ValueError("canonical audit verifier replaced its chain or changed its mode")
+            assert_audit_append(audit_after, audit_final, "audit", "completed")
+            verified_entries = assert_verified_audit(verification, home, inspected_entries)
+            self.records.append({
+                "name": name + "-audited-state",
+                "reference": self.fixture["reference"],
+                "state_before_sha256": digest(json.dumps(protected_state(before), sort_keys=True).encode()),
+                "state_after_sha256": digest(json.dumps(protected_state(snapshot(home)), sort_keys=True).encode()),
+                "audit_before_sha256": digest(audit_before),
+                "inspection_tail_sha256": digest(audit_after),
+                "audit_after_verifier_sha256": digest(audit_final),
+                "verified_entries": verified_entries,
+                "audit_setup_public_key_sha256": digest(self.audit_identity),
+                "verifier_final_self_outcome_covered": False,
+            })
 
 
 def mutate(home, fixture, case, wrong_signature):
@@ -391,6 +554,7 @@ def exercise(smoke, fixture_root, wrong_signature):
             result = smoke.command(f"setup-{number}", baseline, argv)
             if result.returncode != 0:
                 raise ValueError("fixture setup refused; see retained stderr")
+        smoke.capture_audit_identity(baseline)
         smoke.inspect("positive", baseline, True)
         for case in CASES:
             home = private / case

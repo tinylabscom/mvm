@@ -206,11 +206,19 @@ fn resolve_run_image_with(
         }
         (Some(cached), Some(trust)) if acquisition == RunImageAcquisition::PreparedOnly => {
             let cached_reference = cached.reference.clone();
+            let prepared_tag = cached.runtime_tag.clone();
             match adopt_prepared_rootfs(cache_root, cached, &runtime_tag, prod)? {
                 Some(adopted) => (adopted, false, trust, None),
-                None => bail!(
-                    "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
-                ),
+                None => {
+                    tracing::warn!(
+                        launch_runtime_tag = %runtime_tag,
+                        prepared_runtime_tag = ?prepared_tag,
+                        "no rootfs prepared for the launch-time guest runtime"
+                    );
+                    bail!(
+                        "cached OCI image {cached_reference} is not launch-ready; run `mvmctl image pull {reference}` first"
+                    )
+                }
             }
         }
         (Some(cached), Some(trust)) => {

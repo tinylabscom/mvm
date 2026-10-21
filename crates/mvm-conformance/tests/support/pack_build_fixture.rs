@@ -5,14 +5,34 @@ pub fn producer_binary(
     live: bool,
     configured: Option<std::ffi::OsString>,
 ) -> Option<std::ffi::OsString> {
+    // Both verbs seal an archive and so carry the release guest runtime;
+    // everything that consumes one runs on the ordinary binary.
     if live
-        && arguments.first().is_some_and(|arg| arg == "pack")
-        && arguments.get(1).is_some_and(|arg| arg == "build")
+        && matches!(
+            (arguments.first(), arguments.get(1)),
+            (Some(group), Some(verb))
+                if verb == "build" && (group == "pack" || group == "bundle")
+        )
     {
         configured
     } else {
         None
     }
+}
+
+/// The arguments that apply the published, signed image-set revocation list
+/// from the directory the e2e script downloaded it into. The update verb is
+/// offline and has no default source, so the files must be named.
+pub fn revocation_update_args(directory: &Path) -> Vec<std::ffi::OsString> {
+    vec![
+        "image".into(),
+        "revocations".into(),
+        "update".into(),
+        "--document".into(),
+        directory.join("revocations.json").into(),
+        "--bundle".into(),
+        directory.join("revocations.json.bundle").into(),
+    ]
 }
 
 /// Stage authored data independently of the output archive and lock, so later

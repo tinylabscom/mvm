@@ -4,7 +4,7 @@ use mvm_conformance::IsolatedHome;
 use crate::world::CliWorld;
 
 #[path = "../support/pack_build_fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 
 #[given("a local pack build fixture")]
 fn local_pack_build_fixture(world: &mut CliWorld) {
@@ -75,17 +75,12 @@ fn run(world: &mut CliWorld, args: &str, live: bool) {
         super::live_home::use_seeded_runtime(&mut command);
         mvm_conformance::vmm_reaper::register_launched_home(home);
         world.last_live_home = Some(home.to_path_buf());
-        if let Some(path) = &selected {
-            let policy = super::cli::command_for_binary(std::path::Path::new(path))
-                .current_dir(dir)
-                .isolated_home(home)
-                .args(["image", "revocations", "update"])
-                .output()
-                .expect("apply the canonical signed image revocation policy for the producer");
-            if !policy.status.success() {
-                world.last_run = Some(policy);
-                return;
-            }
+        if let Some(path) = &selected
+            && let Some(refused) =
+                super::cli::apply_producer_revocations(std::path::Path::new(path), dir, home)
+        {
+            world.last_run = Some(refused);
+            return;
         }
     }
     world.last_run = Some(
