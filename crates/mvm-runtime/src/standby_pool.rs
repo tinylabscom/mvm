@@ -322,6 +322,9 @@ impl SupervisorStandbyPool {
                         unsafe { libc::kill(h.pid as libc::pid_t, libc::SIGTERM) };
                     }
                     self.remove(&h.id)?;
+                    if !alive {
+                        reap_dead_standby_runtime(&h.id);
+                    }
                     reaped.push(h.id);
                 }
             }
@@ -344,9 +347,34 @@ pub fn terminate_standby_process(pid: u32) {
     unsafe { libc::kill(pid, libc::SIGTERM) };
 }
 
-/// `kill(pid, 0)` liveness — 0 ⇒ the process exists.
+/// Collect the exit of a standby supervisor this process spawned. A pid that
+/// is not this process's child, or was already collected, is a no-op.
+pub fn reap_standby_child(pid: u32) {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+        return;
+    };
+    // SAFETY: waitpid with WNOHANG and a null status pointer only collects the
+    // exit of a child of this process.
+    unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) };
+}
+
+/// Whether `pid` names a running process. An exited supervisor its parent has
+/// not yet reaped is a zombie, which still answers `kill(pid, 0)`, so this
+/// asks the shared liveness probe that treats a zombie as gone.
 fn pid_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    i32::try_from(pid).is_ok_and(mvm_vmm::host::process_liveness::pid_is_alive)
+}
+
+/// Remove the runtime state a dead standby's supervisor left behind. The pool
+/// record was the only owner keeping the sweep away from it, and the record is
+/// gone by now. Best-effort: a state directory something else still holds is
+/// left for the next sweep.
+fn reap_dead_standby_runtime(id: &str) {
+    let state_dir = mvm_core::config::vm_state_dir(id);
+    let instance_dir = mvm_core::config::instance_dir(id);
+    if let Err(error) = crate::vm::reconcile::reap_unowned_state_dir(&state_dir, &instance_dir) {
+        tracing::debug!(%error, standby = id, "removing a dead standby's state directory failed");
+    }
 }
 
 fn set_mode_0700(p: &Path) -> Result<()> {
@@ -732,6 +760,71 @@ mod tests {
         assert!(pool.load("old").is_err());
         // The live-expired standby's supervisor was SIGTERM'd.
         let _ = sleeper.wait();
+    }
+
+    /// A child that has exited and not been waited on: a zombie.
+    fn zombie_child() -> std::process::Child {
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        wait_until_exited(pid);
+        child
+    }
+
+    /// Block until `pid` has exited, without reaping it.
+    fn wait_until_exited(pid: u32) {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: waitid with WNOWAIT only observes the child's exit and
+        // leaves it unreaped; `info` is a valid out-pointer.
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(rc, 0, "waiting for the stand-in to exit");
+    }
+
+    #[test]
+    fn a_zombie_supervisor_is_not_alive() {
+        let mut child = zombie_child();
+        assert!(!pid_alive(child.id()));
+        assert!(pid_alive(std::process::id()));
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_zombie_standby_is_dead_and_its_record_and_state_dir_are_reaped() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut child = zombie_child();
+        let mut stopped = handle("standby-stopped", "aa", StandbyState::Idle);
+        stopped.pid = child.id();
+        stopped.spawned_unix_secs = mvm_core::time::now_unix_secs();
+        pool.record(&stopped).unwrap();
+        let state_dir = mvm_core::config::vm_state_dir("standby-stopped");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("snapshot.ram"), b"ram").unwrap();
+        std::fs::write(state_dir.join("hvf.pid"), child.id().to_string()).unwrap();
+
+        let loaded = pool.load("standby-stopped").unwrap();
+        assert!(!SupervisorStandbyPool::is_live_or_saved(&loaded));
+        assert_eq!(pool.idle_count_compatible(&compat("aa")).unwrap(), 0);
+
+        let reaped = pool
+            .reap_stale(
+                std::time::Duration::from_secs(3600),
+                stopped.spawned_unix_secs,
+            )
+            .unwrap();
+        assert_eq!(reaped, vec!["standby-stopped".to_string()]);
+        assert!(pool.load("standby-stopped").is_err(), "no idle record");
+        assert!(!state_dir.exists(), "no state directory");
+        child.wait().unwrap();
     }
 
     #[test]

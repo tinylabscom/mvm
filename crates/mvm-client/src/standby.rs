@@ -137,6 +137,7 @@ fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Dur
             }
             release_idle(pool, idle_timeout);
             let now = live_standbys(pool);
+            reap_exited_children(&seen, &now);
             // The home can also vanish mid-sweep, after the check above; an
             // empty listing then means the standbys seen last tick are
             // orphaned, not released.
@@ -153,6 +154,19 @@ fn watch_idle_in(pool: &SupervisorStandbyPool, idle_timeout: Duration, tick: Dur
         if live_standbys(pool).is_empty() {
             return;
         }
+    }
+}
+
+/// Collect the exit of every standby supervisor that stopped since the last
+/// sweep. A refill is the parent of the supervisors it spawned and never waits
+/// on them, so a stopped one would stay a zombie until the refill exits. A pid
+/// that is not this process's child, or was already collected, is a no-op.
+fn reap_exited_children(before: &BTreeMap<String, u32>, now: &BTreeMap<String, u32>) {
+    for (id, pid) in before {
+        if now.contains_key(id) {
+            continue;
+        }
+        mvm_runtime::standby_pool::reap_standby_child(*pid);
     }
 }
 
@@ -406,6 +420,36 @@ mod tests {
         watcher.join().unwrap();
         let status = child.wait().expect("waiting for the stand-in");
         assert!(!status.success(), "the orphaned standby was stopped");
+    }
+
+    /// Stopping a standby the refill spawned leaves its supervisor a zombie
+    /// until the refill collects it; the watcher collects it on its next sweep.
+    #[test]
+    fn the_watcher_collects_a_stopped_standby_it_spawned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SupervisorStandbyPool::at(tmp.path());
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawning a stand-in standby process");
+        let pid = child.id();
+        let mut handle = idle_handle("s1", pid);
+        handle.spawned_unix_secs = mvm_core::time::now_unix_secs();
+        pool.record(&handle).unwrap();
+        let tick = Duration::from_millis(50);
+        let watcher =
+            std::thread::spawn(move || watch_idle_in(&pool, Duration::from_secs(3600), tick));
+        let lock_path = tmp.path().join(WATCH_LOCK);
+        wait_until("the watcher to take the watch lock", || {
+            lock_path.with_extension("lock").exists()
+        });
+        child.kill().unwrap();
+        watcher.join().unwrap();
+        // ECHILD from the std handle means the watcher already collected it.
+        assert!(
+            child.try_wait().is_err(),
+            "the watcher collected the stopped standby"
+        );
     }
 
     fn wait_until(what: &str, mut done: impl FnMut() -> bool) {

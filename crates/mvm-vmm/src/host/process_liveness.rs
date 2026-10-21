@@ -77,6 +77,14 @@ fn macos_process_is_zombie(pid: i32) -> bool {
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         )
     };
+    // The kernel still answers `kill(pid, 0)` for a zombie but refuses its
+    // process info with ESRCH, so an empty answer with that error is how an
+    // exited, unreaped child shows up here. A pid that is gone entirely gives
+    // the same answer and is just as dead; any other failure (EPERM for
+    // another user's process) proves nothing.
+    if bytes == 0 {
+        return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+    }
     if bytes != std::mem::size_of::<libc::proc_bsdinfo>() as i32 {
         return false;
     }
