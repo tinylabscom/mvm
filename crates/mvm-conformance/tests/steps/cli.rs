@@ -184,12 +184,29 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    let mut command = mvmctl_command();
+    let argv = mvm_conformance::doc_examples::tokenize(&args);
+    let live = super::live_home::is_prepared_live_home(home.path());
+    let producer = super::pack_build::fixture::producer_binary(
+        &argv,
+        live,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &producer {
+        Some(path) => command_for_binary(Path::new(path)),
+        None => mvmctl_command(),
+    };
+    if let Some(path) = &producer
+        && let Some(refused) =
+            apply_producer_revocations(Path::new(path), scratch.path(), home.path())
+    {
+        world.last_run = Some(refused);
+        return;
+    }
     command
-        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .args(argv)
         .current_dir(scratch.path())
         .isolated_home(home.path());
-    if super::live_home::is_prepared_live_home(home.path()) {
+    if live {
         super::live_home::use_seeded_runtime(&mut command);
     }
     let output = command.output().expect("failed to spawn mvmctl");
