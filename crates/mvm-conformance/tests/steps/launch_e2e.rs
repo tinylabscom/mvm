@@ -334,7 +334,7 @@ fn launch_with_env(world: &mut CliWorld, args: String, key: String, value: Strin
 /// Generous on purpose: this is a real cold boot on whatever backend the host
 /// has, and a timeout that fires early would report a slow machine as a broken
 /// console. Nothing hangs on it in the passing case — the read ends when the
-/// child closes the PTY.
+/// direct child exits and its buffered output has been drained.
 const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// Run `mvmctl` with a real terminal on its stdin.
@@ -640,6 +640,17 @@ fn dispatch_window_recorded(world: &mut CliWorld) {
 }
 
 mod tests {
+    #[test]
+    fn the_host_pty_ends_do_not_leak_into_spawned_children() {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        use std::os::fd::AsRawFd;
+        let (master, slave) = super::open_host_pty();
+        for fd in [&master, &slave] {
+            let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).expect("read fd flags");
+            assert!(FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC));
+        }
+    }
+
     #[test]
     fn shell_split_keeps_a_quoted_command_as_one_argument() {
         assert_eq!(

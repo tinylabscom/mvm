@@ -115,7 +115,7 @@ mvmctl = { path = "../..", default-features = false }
 # version for five shipped crates; only the `term` feature is new, and it is
 # dev-only here. `process` starts a live run in its own session, with no
 # controlling terminal, so a scenario sees what a headless caller sees.
-nix = { version = "0.29", features = ["term", "process"] }
+nix = { version = "0.29", features = ["term", "process", "fs"] }
 
 [lints]
 workspace = true

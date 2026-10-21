@@ -358,6 +358,9 @@ jobs:
         with:
           version: "0.12.5"
 
+      - name: Provide a python3 new enough for the repository scripts
+        uses: ./.github/actions/python3-via-uv
+
       - name: Fetch the exact release runtime candidate
         id: candidate
         if: ${{ inputs.runtime_candidate_artifact_id != '' || inputs.runtime_candidate_artifact_digest != '' || inputs.runtime_archive_sha256 != '' || inputs.runtime_checksum_sha256 != '' || inputs.runtime_archive_bundle_sha256 != '' || inputs.runtime_checksum_bundle_sha256 != '' }}

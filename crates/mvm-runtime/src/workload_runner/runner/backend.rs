@@ -10,12 +10,10 @@ impl<S: NetworkEndpointSpawner + 'static, B: BrokerRegistrar + 'static>
     /// compatibility conversion to the string-only standby error.
     pub fn spawn_standby_captured_owned(
         &self,
-        _ctx: &SpawnContext<'_>,
-        _spec: &StandbySpec,
+        ctx: &SpawnContext<'_>,
+        spec: &StandbySpec,
     ) -> Result<StandbyHandle> {
-        // There is no authenticated durable receiver for the preparation's
-        // original leases. Do not launch and later downgrade to a DTO.
-        anyhow::bail!("owned HVF warm launch unavailable: durable custody handoff required")
+        self.spawn_standby_captured(ctx, spec).map_err(Into::into)
     }
 
     /// Prepare lower transport custody, not an admission capability. No native
@@ -254,12 +252,6 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        anyhow::ensure!(
-            (&self.driver as &dyn std::any::Any)
-                .downcast_ref::<mvm_backends::driver::hvf::HvfDriver>()
-                .is_none(),
-            "native HVF start requires an owning host receiver; VM-id-only start is unavailable"
-        );
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;

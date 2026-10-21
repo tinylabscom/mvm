@@ -57,6 +57,7 @@ mod source_build;
 pub use host_process::{
     CLI_BIN, CliSpawn, CliSpawnRefused, HostBinaryDirError, HostProcess,
     allow_helper_builds_from_source, declare_host_binary_dir, declare_library_embedder,
+    declare_release_binary,
 };
 
 /// A per-VM helper binary, its path-override env var, and how a source
@@ -111,6 +112,8 @@ impl<'a> AuxBin<'a> {
         self
     }
 }
+
+const LIBKRUN_SUPERVISOR_BIN: &str = "mvm-libkrun-supervisor";
 
 /// Resolve `spec` to an on-disk binary. Never builds — a missing one is a
 /// hard error with a recovery hint. Code that lists what is installed (the
@@ -688,6 +691,24 @@ fn resolve_from(spec: &AuxBin, lookup: &Lookup) -> Result<PathBuf> {
         return Ok(found);
     }
     bail!(
+        "{}",
+        missing_message(spec, HostProcess::current().is_release_binary())
+    )
+}
+
+/// The error for a helper that resolved nowhere. A release download ships a
+/// fixed set of helpers, so for one the remedy is a choice of backend, not a
+/// `cargo build`.
+fn missing_message(spec: &AuxBin, release_binary: bool) -> String {
+    if release_binary && spec.bin == LIBKRUN_SUPERVISOR_BIN {
+        return format!(
+            "{} not found. The libkrun backend is not included in this release download yet. \
+             Use HVF on macOS 26+ (the default), or build mvmctl from source to use libkrun. \
+             See https://runmvm.com/reference/platform-support/.",
+            spec.bin
+        );
+    }
+    format!(
         "{bin} not found. It is a per-VM host helper `[[bin]]` of {pkg}; on \
          a source checkout build it with `{command}` (add `--release` to match a \
          release build, or use `just payload::supervisors`), or set {env}=<path>.{hint}",
@@ -746,7 +767,7 @@ fn first_existing_bin(bin: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 
 /// Extra recovery hint for helpers with a host prerequisite. Empty otherwise.
 fn missing_hint(bin: &str) -> &'static str {
-    if bin == "mvm-libkrun-supervisor" {
+    if bin == LIBKRUN_SUPERVISOR_BIN {
         " This helper links libkrun; install it (`brew install slp/krun/libkrun`) and rebuild."
     } else {
         ""
@@ -1526,6 +1547,33 @@ mod tests {
     fn libkrun_missing_hint_mentions_libkrun() {
         assert!(missing_hint("mvm-libkrun-supervisor").contains("libkrun"));
         assert_eq!(missing_hint("mvm-hvf-supervisor"), "");
+    }
+
+    #[test]
+    fn a_release_binary_says_libkrun_is_not_in_the_download() {
+        let spec = AuxBin::new(
+            "mvm-libkrun-supervisor",
+            "MVM_LIBKRUN_SUPERVISOR",
+            "mvm-hostd",
+        );
+        let message = missing_message(&spec, true);
+        assert!(message.contains("not included in this release download"));
+        assert!(message.contains("HVF on macOS 26+"));
+        assert!(message.contains("build mvmctl from source"));
+        assert!(!message.contains("cargo build"));
+        assert!(!message.to_lowercase().contains("brew"));
+    }
+
+    #[test]
+    fn a_source_checkout_keeps_the_rebuild_remedy() {
+        let spec = AuxBin::new(
+            "mvm-libkrun-supervisor",
+            "MVM_LIBKRUN_SUPERVISOR",
+            "mvm-hostd",
+        );
+        let message = missing_message(&spec, false);
+        assert!(message.contains("cargo build"));
+        assert!(message.contains("brew install slp/krun/libkrun"));
     }
 
     #[test]

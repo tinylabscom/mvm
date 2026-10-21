@@ -62,23 +62,38 @@ pub struct ResolvedApplication {
     pub bundle_sha256: String,
 }
 
-/// Whether `reference` names an installed application, by its pin and cached
-/// descriptor kind alone. Nothing is authenticated; use [`resolve_installed_application`].
-pub fn names_installed_application(
+/// The kind of the descriptor cached for `reference`'s pin, if one is cached.
+/// Nothing is authenticated; use [`resolve_installed_application`] to launch.
+fn cached_kind_is_application(
     reference: &PackReference,
     store: &ApplicationInstallStore,
-) -> bool {
-    let Ok(lock) = load_pack_lockfile(&store.lock_path) else {
-        return false;
-    };
-    let Some(pin) = pinned(&lock, reference) else {
-        return false;
-    };
+) -> Option<bool> {
+    let lock = load_pack_lockfile(&store.lock_path).ok()?;
+    let pin = pinned(&lock, reference)?;
     let path = store
         .descriptor_cache_root
         .join(pin.manifest_sha256().as_str())
         .join(REGISTRY_MANIFEST_FILE_NAME);
-    super::super::local_input::read_metadata(&path).is_ok_and(|bytes| is_application(&bytes))
+    let bytes = super::super::local_input::read_metadata(&path).ok()?;
+    Some(is_application(&bytes))
+}
+
+/// Whether `reference` names an installed application, by its pin and cached
+/// descriptor kind alone.
+pub fn names_installed_application(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+) -> bool {
+    cached_kind_is_application(reference, store) == Some(true)
+}
+
+/// Whether `reference` names an installed pack that is not an application, so
+/// `run` can refuse it by name instead of treating it as an OCI image.
+pub fn names_installed_policy_pack(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+) -> bool {
+    cached_kind_is_application(reference, store) == Some(false)
 }
 
 fn is_application(manifest: &[u8]) -> bool {

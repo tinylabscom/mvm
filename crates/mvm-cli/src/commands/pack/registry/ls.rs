@@ -3,6 +3,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
+use mvm_core::registry_pack::application_bundle::names_installed_application;
 use mvm_core::registry_pack_store::{list_installed_registry_packs, load_pack_lockfile};
 
 use super::LsArgs;
@@ -13,11 +14,14 @@ struct RegistryRow {
     pack: String,
     version: String,
     manifest_sha256: String,
+    kind: &'static str,
     installed: bool,
 }
 
 pub(in crate::commands) fn run(args: LsArgs) -> Result<()> {
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path())?;
+    let cache = mvm_core::config::registry_pack_cache_dir();
+    let store = super::rm::store(&cache, &mvm_core::config::pack_lockfile_path())?;
     let rows: Vec<RegistryRow> =
         list_installed_registry_packs(&mvm_core::config::registry_pack_cache_dir(), &lock)
             .iter()
@@ -34,6 +38,11 @@ pub(in crate::commands) fn run(args: LsArgs) -> Result<()> {
                     .map(|version| version.to_string())
                     .unwrap_or_default(),
                 manifest_sha256: listing.pin.manifest_sha256().as_str().to_string(),
+                kind: if names_installed_application(listing.pin.reference(), &store) {
+                    "application"
+                } else {
+                    "policy"
+                },
                 installed: listing.installed,
             })
             .collect();
@@ -48,9 +57,10 @@ pub(in crate::commands) fn run(args: LsArgs) -> Result<()> {
     for row in &rows {
         let marker = if row.installed { "*" } else { " " };
         println!(
-            "{marker} {:<24} {:<12} {}",
+            "{marker} {:<24} {:<12} {:<12} {}",
             row.pack,
             row.version,
+            row.kind,
             &row.manifest_sha256[..row.manifest_sha256.len().min(12)],
         );
     }

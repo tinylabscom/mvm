@@ -282,6 +282,11 @@ fn gpu_endpoint_transport(
     }
 }
 
+/// The trusted-snapshot backend is opt-in: only the exact value `1` enables it.
+fn trusted_snapshot_opted_in(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner<D, S, B> {
     /// Build a runner over the process's registered console-streaming hook.
     ///
@@ -342,10 +347,6 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
     /// secret-free deny-all workload has no egress capability and therefore
     /// carries no endpoint process or guest egress channel.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
-        anyhow::ensure!(
-            self.driver.kind() != BackendKind::Hvf,
-            "native HVF workload requires OwnedRuntimeLaunch; legacy activation return is unavailable"
-        );
         self.require_caller_registration_shape(inputs.config)?;
         let lifecycle =
             crate::runtime_evidence::RuntimeLifecycleLease::acquire(&inputs.config.name)?;
@@ -1267,8 +1268,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
-            && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
-        {
+            && trusted_snapshot_opted_in(
+                std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT")
+                    .ok()
+                    .as_deref(),
+            ) {
             Some(
                 mvm_fs::trusted_snapshot::platform_backend(snapshots.root()).map_err(|e| {
                     StandbyError::SpawnFailed(format!("open trusted snapshot backend: {e:#}"))
@@ -1447,6 +1451,14 @@ fn supervisor_owns_console(kind: mvm_core::vm_backend::BackendKind) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn trusted_snapshot_requires_the_exact_opt_in_value() {
+        assert!(trusted_snapshot_opted_in(Some("1")));
+        assert!(!trusted_snapshot_opted_in(Some("0")));
+        assert!(!trusted_snapshot_opted_in(Some("")));
+        assert!(!trusted_snapshot_opted_in(None));
+    }
+
     use super::parent_verify::{
         reclaim_consumed_resident_checkpoint_at, verify_resident_snapshot_manifest,
     };
@@ -2063,6 +2075,47 @@ mod tests {
         assert!(!cmdline.contains("mvm.secret_env="), "{cmdline}");
         assert!(!cmdline.contains("mvm-secret-test"), "{cmdline}");
         assert!(!cmdline.contains(&hex::encode("API_KEY=")), "{cmdline}");
+    }
+
+    /// A blanket refusal in front of the HVF driver turns `machine run` into an
+    /// error on the default macOS backend before anything is checked. Both
+    /// entrypoints must reach the real launch checks, which refuse this
+    /// synthetic config for their own reasons (no rootfs, no kernel).
+    #[test]
+    fn an_hvf_runner_reaches_the_launch_checks_instead_of_a_blanket_refusal() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let runner = WorkloadRunner::new(
+            mvm_backends::driver::hvf::HvfDriver::new(),
+            RecordingSpawner::new("/run/ep.sock"),
+            RecordingBrokerRegistrar::new(),
+        );
+        let cfg = config("hvf-not-blanket-refused");
+        let redaction = RedactionPolicy::default();
+
+        let started = VmBackend::start(&runner, &cfg).expect_err("no rootfs to boot");
+        let launched = runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "local",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &cfg.network_policy,
+                cmdline: String::new(),
+            })
+            .map(|_| ())
+            .expect_err("no rootfs to boot");
+
+        for error in [format!("{started:#}"), format!("{launched:#}")] {
+            assert!(
+                !error.contains("native HVF"),
+                "HVF was refused outright instead of reaching the launch checks: {error}"
+            );
+        }
     }
 
     #[test]
