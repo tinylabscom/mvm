@@ -7,10 +7,13 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import subprocess
 import tempfile
 import tomllib
+import urllib.error
+import urllib.request
 from typing import Callable
 import zipfile
 
@@ -52,7 +55,36 @@ class ArtifactTransfer:
     max_bytes: int = MAX_TRANSFER_BYTES
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _rest_open(endpoint):
+    # Same GitHub API endpoint `gh api` calls, for runners without the gh CLI.
+    # The token goes only to api.github.com; a redirect target (signed blob
+    # URL) is fetched without it.
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("no gh CLI and no GH_TOKEN for the GitHub REST API")
+    request = urllib.request.Request(f"https://api.github.com/{endpoint}", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    })
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=60)
+    except urllib.error.HTTPError as error:
+        location = error.headers.get("Location")
+        if error.code in (301, 302, 303, 307, 308) and location and location.startswith("https://"):
+            return urllib.request.urlopen(location, timeout=60)
+        raise
+
+
 def gh_json(endpoint):
+    if shutil.which("gh") is None:
+        with _rest_open(endpoint) as response:
+            return json.loads(response.read())
     return json.loads(subprocess.check_output(
         ["gh", "api", "--hostname", "github.com", endpoint], text=True, timeout=60
     ))
@@ -385,26 +417,33 @@ def current_source(root):
     return source
 
 
-def download_archive(endpoint, archive, *, max_bytes=None):
-    limit = MAX_TRANSFER_BYTES if max_bytes is None else max_bytes
+def _gh_download(endpoint):
+    if shutil.which("gh") is None:
+        return _rest_open(endpoint + "/zip"), None
     process = subprocess.Popen(
         ["gh", "api", "--hostname", "github.com", endpoint + "/zip"], stdout=subprocess.PIPE
     )
+    return process.stdout, process
+
+
+def download_archive(endpoint, archive, *, max_bytes=None):
+    limit = MAX_TRANSFER_BYTES if max_bytes is None else max_bytes
+    stream, process = _gh_download(endpoint)
     try:
         total = 0
         with archive.open("xb") as output:
-            while block := process.stdout.read(1024 * 1024):
+            while block := stream.read(1024 * 1024):
                 total += len(block)
                 if total > limit:
                     raise ValueError("downloaded runtime artifact exceeds size bound")
                 output.write(block)
-        if process.wait() != 0:
+        if process is not None and process.wait() != 0:
             raise ValueError("runtime artifact download failed")
     finally:
-        if process.poll() is None:
+        if process is not None and process.poll() is None:
             process.kill()
             process.wait()
-        process.stdout.close()
+        stream.close()
 
 
 def retrieve_artifact(source, transfer):

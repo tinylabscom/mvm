@@ -27,6 +27,11 @@ spec.loader.exec_module(candidate)
 
 
 class CandidateTransportTests(unittest.TestCase):
+    def setUp(self):
+        which = patch.object(candidate.shutil, "which", return_value="/usr/bin/gh")
+        which.start()
+        self.addCleanup(which.stop)
+
     def env(self, version="0.24.0"):
         return {
             "GITHUB_REPOSITORY": "tinylabscom/mvm",
@@ -175,6 +180,43 @@ class CandidateTransportTests(unittest.TestCase):
                 self.assertTrue(process.stdout.closed)
                 if len(payload) > 4:
                     self.assertTrue(process.killed)
+
+    def test_without_gh_cli_the_rest_api_is_used_and_token_stays_on_api_host(self):
+        import urllib.error
+        seen = []
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                self.close()
+
+        def open_api(request, timeout=None):
+            seen.append(request)
+            headers = {"Location": "https://blob.example/zip"}
+            raise urllib.error.HTTPError(request.full_url, 302, "found", headers, None)
+
+        opener = unittest.mock.MagicMock()
+        opener.open.side_effect = open_api
+        env = {"GH_TOKEN": "tok"}
+        with patch.object(candidate.shutil, "which", return_value=None), \
+             patch.dict(candidate.os.environ, env, clear=True), \
+             patch.object(candidate.urllib.request, "build_opener", return_value=opener), \
+             patch.object(candidate.urllib.request, "urlopen",
+                          return_value=Response(b"zipbytes")) as follow:
+            stream, process = candidate._gh_download("repos/o/r/actions/artifacts/7")
+            self.assertIsNone(process)
+            self.assertEqual(stream.read(), b"zipbytes")
+        self.assertEqual(seen[0].full_url,
+                         "https://api.github.com/repos/o/r/actions/artifacts/7/zip")
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer tok")
+        self.assertEqual(follow.call_args.args[0], "https://blob.example/zip")
+
+        with patch.object(candidate.shutil, "which", return_value=None), \
+             patch.dict(candidate.os.environ, {}, clear=True):
+            with self.assertRaises(ValueError):
+                candidate.gh_json("repos/o/r")
 
     def test_checkout_tag_and_unmodified_cargo_must_agree(self):
         cargo = b'[workspace.package]\nversion = "0.24.0"\n'

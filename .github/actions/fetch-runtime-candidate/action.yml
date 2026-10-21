@@ -30,6 +30,7 @@ runs:
     - id: fetch
       shell: bash
       env:
+        GH_TOKEN: ${{ github.token }}
         CANDIDATE_ID: ${{ inputs.artifact-id }}
         CANDIDATE_DIGEST: ${{ inputs.artifact-digest }}
         RUNTIME_ARCHIVE_SHA256: ${{ inputs.archive-sha256 }}
