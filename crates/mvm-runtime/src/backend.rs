@@ -658,7 +658,6 @@ impl AnyBackend {
         ctx: &crate::workload_runner::SpawnContext<'_>,
         spec: &mvm_core::vm_backend::StandbySpec,
     ) -> Result<mvm_core::vm_backend::StandbyHandle> {
-        self.require_owned_warm_receiver()?;
         match self {
             AnyBackend::Firecracker(runner) => {
                 runner.spawn_standby_captured(ctx, spec).map_err(Into::into)
@@ -684,17 +683,6 @@ impl AnyBackend {
             }
             .into()),
         }
-    }
-
-    /// Refuse before preparation or launch until an authenticated durable
-    /// receiver actually holds the native preparation's required resources.
-    pub fn require_owned_warm_receiver(&self) -> Result<()> {
-        if let AnyBackend::Hvf(_) = self {
-            anyhow::bail!(
-                "owned HVF warm launch unavailable: authenticated durable custody receiver required"
-            );
-        }
-        Ok(())
     }
 
     /// Pause/save-memory/resume control over a running VM this backend owns —

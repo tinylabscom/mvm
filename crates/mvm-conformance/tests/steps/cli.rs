@@ -184,12 +184,29 @@ fn run_mvmctl_in_scratch_directory(world: &mut CliWorld, args: String) {
         .isolated_home
         .as_ref()
         .expect("`Given an isolated mvm home` must run before this step");
-    let mut command = mvmctl_command();
+    let argv = mvm_conformance::doc_examples::tokenize(&args);
+    let live = super::live_home::is_prepared_live_home(home.path());
+    let producer = super::pack_build::fixture::producer_binary(
+        &argv,
+        live,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &producer {
+        Some(path) => command_for_binary(Path::new(path)),
+        None => mvmctl_command(),
+    };
+    if let Some(path) = &producer
+        && let Some(refused) =
+            apply_producer_revocations(Path::new(path), scratch.path(), home.path())
+    {
+        world.last_run = Some(refused);
+        return;
+    }
     command
-        .args(mvm_conformance::doc_examples::tokenize(&args))
+        .args(argv)
         .current_dir(scratch.path())
         .isolated_home(home.path());
-    if super::live_home::is_prepared_live_home(home.path()) {
+    if live {
         super::live_home::use_seeded_runtime(&mut command);
     }
     let output = command.output().expect("failed to spawn mvmctl");
@@ -559,6 +576,28 @@ pub(crate) fn seed_live_guest_runtime(home: &Path) -> mvm_build::guest_runtime::
         .expect("prewarmed guest runtime must match the current source")
 }
 
+/// Apply the published signed image-set revocation list to `home` through the
+/// producer binary, which refuses offline admission without one. Returns the
+/// refused run when the update fails.
+pub(crate) fn apply_producer_revocations(
+    binary: &Path,
+    dir: &Path,
+    home: &Path,
+) -> Option<std::process::Output> {
+    let revocations = std::env::var_os("MVM_E2E_IMAGE_REVOCATIONS_DIR").expect(
+        "MVM_E2E_IMAGE_REVOCATIONS_DIR names the downloaded signed image-set revocation list",
+    );
+    let output = command_for_binary(binary)
+        .current_dir(dir)
+        .isolated_home(home)
+        .args(super::pack_build::fixture::revocation_update_args(
+            Path::new(&revocations),
+        ))
+        .output()
+        .expect("apply the canonical signed image revocation policy for the producer");
+    (!output.status.success()).then_some(output)
+}
+
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
@@ -575,8 +614,23 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // create` and `machine start` in two different directories.
     let home = selected_live_home(world);
     super::live_home::prepare_live_home(&home);
-    let mut command = mvmctl_command();
+    let producer = super::pack_build::fixture::producer_binary(
+        &argv,
+        true,
+        std::env::var_os("MVM_E2E_PRODUCER_MVMCTL"),
+    );
+    let mut command = match &producer {
+        Some(path) => command_for_binary(Path::new(path)),
+        None => mvmctl_command(),
+    };
     super::live_home::use_seeded_runtime(&mut command);
+    if let Some(path) = &producer
+        && let Some(refused) = apply_producer_revocations(Path::new(path), &workspace_root(), &home)
+    {
+        world.last_live_home = Some(home);
+        world.last_run = Some(refused);
+        return;
+    }
     command
         .current_dir(workspace_root())
         .args(&argv)

@@ -790,6 +790,133 @@ fn a_policy_pack_pin_is_not_an_application_and_never_resolves() {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(directory.join("manifest.json"), legacy).unwrap();
     assert!(!names_installed_application(&reference, &installed.store));
+    assert!(names_installed_policy_pack(&reference, &installed.store));
+    assert!(!names_installed_policy_pack(
+        &"runtime/python".parse().unwrap(),
+        &installed.store
+    ));
     assert!(resolve(&installed, "runtime/policy").is_err());
     resolve(&installed, "runtime/python").unwrap();
+}
+
+/// A synthetic local registry: a root catalog advertising the descriptor's
+/// digest, the descriptor and its signature bundle beside it, and the archive.
+/// Fulcio is unreachable offline, so the publisher signature is the injected
+/// `accept_signature` seam every test in this module uses.
+fn publish_to_local_registry(
+    root: &std::path::Path,
+    application: &VerifiedRegistryApplication,
+    archive: &[u8],
+) {
+    let digest = sha256_hex(application.manifest_bytes());
+    let leaf = root.join("runtime/python/1.2.3");
+    std::fs::create_dir_all(&leaf).unwrap();
+    std::fs::write(leaf.join("manifest.json"), application.manifest_bytes()).unwrap();
+    std::fs::write(
+        leaf.join("manifest.sigstore"),
+        application.signature_bundle(),
+    )
+    .unwrap();
+    std::fs::write(root.join("app.mvmpkg"), archive).unwrap();
+    let catalog = json!({
+        "schema_version": 2,
+        "packs": [{
+            "namespace": "runtime", "name": "python", "description": "Hermetic application",
+            "versions": [{"version": "1.2.3", "manifest_sha256": digest}]
+        }]
+    });
+    std::fs::write(
+        root.join("index.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_catalogued_application_installs_atomically_and_resolves_for_launch() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    let registry = directory.path().join("registry");
+    publish_to_local_registry(&registry, &descriptor(&bytes, &key_id, |_| {}), &bytes);
+
+    // Catalog: the advertised digest for the requested coordinate.
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(registry.join("index.json")).unwrap()).unwrap();
+    let advertised = catalog["packs"][0]["versions"][0]["manifest_sha256"]
+        .as_str()
+        .unwrap();
+
+    // Authenticated descriptor: fetched bytes match the catalog, then the
+    // signature and publisher policy admit them.
+    let leaf = registry.join("runtime/python/1.2.3");
+    let manifest = std::fs::read(leaf.join("manifest.json")).unwrap();
+    assert_eq!(sha256_hex(&manifest), advertised);
+    let reference: PackReference = "runtime/python@1.2.3".parse().unwrap();
+    let VerifiedRegistryManifest::Application(application) = super::super::dispatch::adopt_with(
+        &PackAdoption {
+            requested: &reference,
+            manifest_bytes: &manifest,
+            signature_bundle: &std::fs::read(leaf.join("manifest.sigstore")).unwrap(),
+            publisher_policy: &publisher_policy(),
+        },
+        accept_signature,
+    )
+    .unwrap() else {
+        panic!("application expected")
+    };
+
+    // Verified bundle, then atomic install: nothing resolves before the pin.
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    let verified =
+        verify_application_bundle(&application, &registry.join("app.mvmpkg"), &trust).unwrap();
+    assert!(!names_installed_application(&reference, &store));
+    install_with(
+        &verified,
+        &store,
+        &publisher_policy(),
+        &trust,
+        accept_signature,
+        crate::registry_pack_store::RegistryPackStoreLease::commit_application_pin,
+    )
+    .unwrap();
+
+    // Launch: the reference resolves to the bundle the descriptor names.
+    assert!(names_installed_application(&reference, &store));
+    let resolved = launch::resolve_with(
+        &"runtime/python".parse().unwrap(),
+        &store,
+        &publisher_policy(),
+        &trust,
+        accept_signature,
+    )
+    .unwrap();
+    assert_eq!(resolved.bundle_sha256, sha256_hex(&bytes));
+    assert_eq!(resolved.descriptor_sha256, advertised);
+}
+
+#[test]
+fn removing_an_application_pin_never_deletes_the_bundle_store_content() {
+    let installed = installed();
+    let python: PackReference = "runtime/python@1.2.3".parse().unwrap();
+    assert!(
+        crate::registry_pack_store::remove_installed_registry_pack(
+            &installed.store.descriptor_cache_root,
+            &installed.store.lock_path,
+            &python,
+        )
+        .unwrap()
+    );
+    assert!(
+        installed
+            .store
+            .bundle_root
+            .join(&installed.bundle_sha256)
+            .is_dir()
+    );
+    assert!(!names_installed_application(&python, &installed.store));
 }

@@ -334,6 +334,27 @@ fn launch_with_env(world: &mut CliWorld, args: String, key: String, value: Strin
 /// child closes the PTY.
 const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(240);
 
+/// Allocate the host PTY with both ends close-on-exec.
+///
+/// `openpty(3)` hands back plain descriptors. Left that way, the original slave
+/// is inherited by `mvmctl` and by every daemon it starts and leaves running (a
+/// warm standby, the host agent, the idle reaper), none of which reopen fds
+/// above 2. The master then never reports "last slave closed", the read below
+/// blocks for the whole timeout, and the bytes already read are discarded.
+/// The three standard descriptors are installed by `dup2` in the child, which
+/// clears the flag on exactly those.
+fn open_host_pty() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd) {
+    use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+    use std::os::fd::AsRawFd;
+    let pty =
+        nix::pty::openpty(None, None).expect("allocate a host PTY for the interactive launch");
+    for fd in [&pty.master, &pty.slave] {
+        fcntl(fd.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))
+            .expect("mark a PTY end close-on-exec");
+    }
+    (pty.master, pty.slave)
+}
+
 /// Run `mvmctl` with a real terminal on its stdin.
 ///
 /// `-t`/`--tty` refuses outright without one — "interactive `-t`/`--tty` needs
@@ -348,12 +369,10 @@ const INTERACTIVE_LAUNCH_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// bytes in `stdout` and leaves `stderr` empty.
 fn run_interactive_in_e2e_home(args: &str) -> LaunchRecord {
     use std::io::Read;
-    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::os::fd::AsRawFd;
     use std::process::Stdio;
 
-    let pty =
-        nix::pty::openpty(None, None).expect("allocate a host PTY for the interactive launch");
-    let (master, slave): (OwnedFd, OwnedFd) = (pty.master, pty.slave);
+    let (master, slave) = open_host_pty();
 
     let home = e2e_home();
     let mut command: Command = mvmctl_command();
@@ -681,6 +700,17 @@ fn dispatch_window_recorded(world: &mut CliWorld) {
 }
 
 mod tests {
+    #[test]
+    fn the_host_pty_ends_do_not_leak_into_spawned_children() {
+        use nix::fcntl::{FcntlArg, FdFlag, fcntl};
+        use std::os::fd::AsRawFd;
+        let (master, slave) = super::open_host_pty();
+        for fd in [&master, &slave] {
+            let flags = fcntl(fd.as_raw_fd(), FcntlArg::F_GETFD).expect("read fd flags");
+            assert!(FdFlag::from_bits_truncate(flags).contains(FdFlag::FD_CLOEXEC));
+        }
+    }
+
     #[test]
     fn shell_split_keeps_a_quoted_command_as_one_argument() {
         assert_eq!(

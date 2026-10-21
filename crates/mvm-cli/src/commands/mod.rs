@@ -670,6 +670,9 @@ fn allow_helper_builds_from_source(
     channel: mvm_build::artifact_acquisition::DistributionChannel,
     command: &Commands,
 ) {
+    if !channel.permits_automatic_builds() {
+        mvm_vmm::host::aux_bin::declare_release_binary();
+    }
     if channel.permits_automatic_builds() && command_allows_helper_source_builds(command) {
         mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
     }

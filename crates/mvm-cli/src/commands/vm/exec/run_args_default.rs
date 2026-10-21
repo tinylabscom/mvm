@@ -78,6 +78,7 @@ impl Default for RunArgs {
             applied_policy: None,
             policy_backend: None,
             review_source: None,
+            resolved_application: None,
         }
     }
 }

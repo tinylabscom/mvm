@@ -397,6 +397,23 @@ drifts, doubles the test surface, and is the most common source of bugs here.
   handled.
 - Follow the existing pattern — match surrounding naming, idiom, and layout.
 
+## Dependencies: fewer is the default
+
+Lean on fewer dependencies, always. A new crate needs a reason in the PR.
+
+- **Prefer, in order:** `std`, then a crate already in the closure, then a small
+  tested helper, then a new crate. Never add a crate for a few lines.
+- **Measure.** State what the crate replaces and the closure before and after:
+  `cargo tree -p mvmctl -e normal,build --prefix none | sort -u | wc -l`, and
+  `-p mvm-builder-guest` for the guest binaries. Check what a feature pulls in
+  with `cargo tree -e features -i <crate>`.
+- **Default features off**, enabling only what is used.
+- **Removing is measured too.** Record accepted and declined reductions in
+  `specs/contracts/build-dependency-decisions.md` with the numbers.
+- **Trust boundaries:** replacing a parser, signature or cryptography crate
+  with hand-written code to save dependencies needs a fuzz target and an owner
+  decision first.
+
 ## Rust best practices
 
 [External best-practices guide](https://gist.github.com/auser/c3161f55a8393faa8af5ddda68c6befa);
