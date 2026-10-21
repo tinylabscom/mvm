@@ -353,10 +353,8 @@ jobs:
       # No actions/setup-python here: its macOS installer hardcodes the
       # hosted-image path /Users/runner, which this self-hosted runner's user
       # cannot create. uv below provisions any interpreter a step asks for.
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v8.2.0
-        with:
-          version: "0.12.5"
+      - name: Set up uv and a python3 new enough for the repository scripts
+        uses: ./.github/actions/python3-via-uv
 
       - name: Fetch the exact release runtime candidate
         id: candidate
