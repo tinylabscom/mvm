@@ -1,7 +1,7 @@
 ---
 kind: design
 issue: https://github.com/tinylabscom/mvm/issues/4584
-status: proposed
+status: accepted
 ---
 
 # `mvmctl build` as the front door to a `.mvmpkg`
