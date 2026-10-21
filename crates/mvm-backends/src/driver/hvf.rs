@@ -519,6 +519,16 @@ fn boot_with_handoff(
     .map_err(anyhow::Error::new)
 }
 
+/// When the supervisor's pid file must have appeared by, given the launch time.
+fn readiness_deadline(launched: Instant) -> Instant {
+    launched + PID_FILE_TIMEOUT
+}
+
+/// A deadline is reached at its own instant, not only after it.
+fn deadline_reached(now: Instant, deadline: Instant) -> bool {
+    now >= deadline
+}
+
 fn boot_retaining_child(
     spec: &VmmSpec,
     handoff: Option<&HandoffConfig>,
@@ -613,7 +623,7 @@ fn boot_retaining_child(
                     .context("pipe HVF supervisor config")
                     .context(summary.child_status(status))
             })?;
-        let deadline = Instant::now() + PID_FILE_TIMEOUT;
+        let deadline = readiness_deadline(Instant::now());
         let mut attempt = 0u32;
         loop {
             if paths.pid_file.try_exists()? {
@@ -630,7 +640,7 @@ fn boot_retaining_child(
                     mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
                 );
             }
-            if Instant::now() >= deadline {
+            if deadline_reached(Instant::now(), deadline) {
                 let summary = diagnostics
                     .as_mut()
                     .map(StartupDiagnostics::snapshot)
@@ -1471,6 +1481,24 @@ impl RunningVm for HvfRunningVm {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn readiness_deadline_is_the_pid_file_timeout_after_launch() {
+        let t = Instant::now();
+        assert_eq!(readiness_deadline(t) - t, PID_FILE_TIMEOUT);
+    }
+
+    #[test]
+    fn a_deadline_is_reached_at_its_own_instant() {
+        let t = Instant::now();
+        let later = t + std::time::Duration::from_secs(1);
+        assert!(!deadline_reached(t, later));
+        assert!(deadline_reached(later, later));
+        assert!(deadline_reached(
+            later + std::time::Duration::from_secs(1),
+            later
+        ));
+    }
+
     use super::*;
 
     #[test]
