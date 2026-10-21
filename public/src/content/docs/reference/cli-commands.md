@@ -752,7 +752,11 @@ publisher policy and revocations, and the archive under your enrolled keys are
 checked again at launch, and the run then continues as
 `--manifest <bundle-sha256>`, so the signed plan and admit-time bundle
 re-verification are the ones a `.mvmpkg` gets. The resolution is recorded as an
-`application_launch` audit entry (reference, descriptor digest, bundle digest).
+`application_launch` audit entry (reference, descriptor digest, bundle digest),
+written once admission has produced the plan, so the entry also carries the
+`run_id` (the machine name) and the `plan_id` it booted under. A positional that
+names an installed policy pack is refused with a pointer to `--image`, rather
+than pulled as an OCI image.
 
 Without `-d` or another persistent flag, it is the one-shot sandbox UX: it
 boots a fresh transient microVM, runs one command, and tears the VM down on
@@ -2086,8 +2090,8 @@ replace publisher signatures or existing authenticated installed pins.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
-| `mvmctl pack rm ns/name[@version]`                        | Remove a workload pack's cache entry and lock pin; a supplied version must match the pin                                                                           |
+| `mvmctl pack ls [--json]`                                 | List pinned registry products with their kind (`application` or `policy`) and whether each is installed                                                                                                          |
+| `mvmctl pack rm ns/name[@version]`                        | Remove a registry product's cache entry and lock pin; a supplied version must match the pin. An application's installed bundle stays in the shared bundle store                                                                           |
 | `mvmctl pack update ns/name[@version]`                    | Re-pull a signed workload pack and its signed profile dependencies, adopting a newer published version when available                                             |
 | `mvmctl pack system list [--kind KIND] [--json]`          | List every recorded builder, runtime, image-project, or extension pack version, marking each active one                                                            |
 | `mvmctl pack system rollback KIND [--to VERSION]`        | Point a system pack class's active version at an already-cached one                                                                                                |
@@ -2163,7 +2167,7 @@ the complete reference committed with uncertain durability; retry the pull to
 reverify rather than assume rollback. These filesystem syncs do not certify
 hardware power-loss behavior. Installation is not a launch
 grant: host/backend compatibility and current admission checks remain required at
-execution, and application-reference launch is not implemented by this pull path.
+execution; `mvmctl run <ref>` launches an installed application (see `run`).
 Applications cannot satisfy a policy-pack dependency.
 
 `pack info` and `pack verify` reopen the original application descriptor and

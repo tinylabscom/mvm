@@ -396,6 +396,11 @@ pub(in crate::commands) struct RunArgs {
     /// refusals. Settled before a `--flake` is built into a slot.
     #[arg(skip)]
     pub review_source: Option<super::denial_review::ReviewSource>,
+    /// Internal: the installed application this run resolved to, recorded
+    /// once admission has produced the plan it boots under.
+    #[arg(skip)]
+    pub resolved_application:
+        Option<mvm_core::registry_pack::application_bundle::ResolvedApplication>,
 }
 
 /// Every flag that authors policy. A resolved manifest is the whole policy,
@@ -713,6 +718,7 @@ pub(in crate::commands) fn run_secure_started(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
+    let application_for_admit = args.resolved_application.clone();
     let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
     let denials_for_admit = std::rc::Rc::clone(&denials);
     let applied_tool_rules = args
@@ -830,6 +836,14 @@ pub(in crate::commands) fn run_secure_started(
                 .collect(),
             durability: Some(durability),
         };
+        if let Some(resolved) = &application_for_admit {
+            application_source::record_launch(
+                resolved,
+                vm_name,
+                &c.admitted.plan().plan_id.0,
+                None,
+            );
+        }
         // Bind the OCI provenance to the plan just admitted, before the backend
         // starts: claim 14 wants the image's origin in the chain for the
         // admission that booted it, and this is the first point that plan exists.

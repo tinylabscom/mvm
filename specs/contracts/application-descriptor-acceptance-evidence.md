@@ -61,9 +61,23 @@ applies: the injected checker stands in for Sigstore.
 | One deterministic reference-to-installed-bundle mapping, exact version, actionable missing install | `an_installed_reference_resolves_with_or_without_its_exact_version`, `a_missing_or_different_version_names_the_pull_that_fixes_it` (`application_bundle/tests.rs`); `the_flag_never_falls_back_and_names_the_pull` | The lock holds one pin per coordinate, so "latest installed" is that pin; there is no multi-version selection. |
 | Launch through existing verification and admission; recheck linkage, trust, revocation, compatibility | `post_install_tampering_and_withdrawn_trust_refuse_at_launch`, `a_withdrawn_publisher_policy_or_unreadable_revocation_trust_refuses_at_launch`; `the_resolved_bundle_is_the_archive_a_mvmpkg_run_would_install` | Revocation is witnessed as an unreadable trust policy failing closed, not a signed feed. Host and backend compatibility stay at the existing admission seam and are not re-tested here. No test boots a VM. |
 | Policy and grants within signed posture; no second launch path | The resolver only sets `--manifest <sha>`; every later step is the `.mvmpkg` path | Witnessed by construction and by the route tests, not by a booted application. |
-| Pull output, info/verify/list/remove/update coherent for applications | Not addressed | **Unmet.** |
-| Application reference, descriptor digest, bundle identity in traceability surfaces | `application_launch` audit entry carries all three; the plan records the bundle SHA-256 | No assertion reads the entry back; the run and plan identifiers are those of the existing plan. **Partly unmet.** |
+| Pull output, info/verify/list/remove/update coherent for applications | Pull and `update` print one text line (`installed_application_text_names_the_manifest_and_bundle`); `info`/`verify` are application-aware (#4509 evidence); `ls` now reports a `kind` column (`application`/`policy`); `rm` reports that the bundle stays; `removing_an_application_pin_never_deletes_the_bundle_store_content` | `rm` never deletes bundle-store content at all, so a bundle shared by another pin cannot be lost, but an orphaned bundle is also not reclaimed here (that is `bundle gc`). No CLI-level test of the `ls`/`rm` text; the `ls` kind comes from the cached descriptor, not a re-verification. Policy-pack behaviour is unchanged. **Partly met.**|
+| Application reference, descriptor digest, bundle identity in traceability surfaces | `application_launch` audit entry carries reference, descriptor digest, bundle digest, `run_id` (machine name) and `plan_id`, written after admission produced the plan; `the_launch_entry_names_the_run_and_the_plan` writes and reads it back | The entry is the local audit log, not the chain-signed audit log, and the wiring in the admission closure is not exercised by a booted run. **Met for the local surface.** |
 | CLI docs, parsing/UX tests | `the_three_spellings_of_the_flag_parse_to_one_field`, `the_flag_conflicts_with_every_other_source`, `oci_references_and_archives_keep_their_route`; `cli-commands.md` | None. |
-| Synthetic local-registry end-to-end | Not addressed | **Unmet.** No catalog-to-launch test. |
+| Synthetic local-registry end-to-end | `a_catalogued_application_installs_atomically_and_resolves_for_launch`: a local registry directory with a root catalog, descriptor and signature bundle; the advertised digest is compared with the fetched bytes, the descriptor is authenticated, the bundle verified, installed with the atomic pin commit, and the bare reference resolves to the bundle `run` hands to `--manifest` | Fulcio is unavailable offline: the publisher signature is the injected `accept_signature` seam. It does not call `pack_registry::pull` (which has no injection point), mirrors its catalog digest comparison, and stops at the resolved bundle; the CLI handoff is covered by the `settle` tests. Nothing boots a VM. **Partly met.** |
 | Negative tests: tampering, trust, policy denial, architecture | Tampering and trust above; architecture is the descriptor/bundle check at install and again at launch | No launch-time policy-denial test beyond the publisher policy. |
 
+Positional policy packs: `a_positional_naming_an_installed_policy_pack_is_refused_not_routed_to_oci`
+and `a_policy_pack_pin_is_not_an_application_and_never_resolves` (the
+refusal names `--image` for an OCI image of the same name).
+
+Audit of `pack build` / `bundle export` output launched with
+`mvmctl run <file>.mvmpkg` (read, not run): both seal with the host key, and
+`run` takes a `.mvmpkg` through `settle_manifest_archive`, which verifies the
+archive against `~/.mvm/trusted-publishers/` and continues as
+`--manifest <bundle-sha256>`. It launches only if that host key has been
+enrolled in the consumer trust store, a step this work does not take. No live
+export-then-run was performed (needs a builder and a VM).
+
+Verdict: criteria 1, 2, 3, 6 and 8 keep their limits above; 4 and 7 are
+partly met and 5 is met for the local audit log. The issue stays open.
