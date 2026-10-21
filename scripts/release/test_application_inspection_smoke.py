@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -58,6 +59,40 @@ def refusal_message(case, home):
         f'use `mvmctl pull {FIXTURE["reference"]}` to acquire a missing archive\n\n'
         f"Caused by:\n    {cause}\n"
     )
+
+
+def audit_line(verb, phase, tenant="local"):
+    # Deliberately unsigned mock bytes: these test harness controls, not crypto.
+    labels = {"category": "cmd", "verb": verb}
+    if phase == "invoked":
+        labels["pid"] = "12345"
+    elif phase == "failed":
+        labels["error"] = "synthetic refusal"
+    return (json.dumps({"entry": {
+        "event": f"cmd.{verb}.{phase}", "tenant": tenant,
+        "labels": labels,
+    }}) + "\n").encode()
+
+
+def prepare_audit(instance, home):
+    (home / "keys").mkdir()
+    (home / "keys/host-signer.pub").write_bytes(b"public audit identity".ljust(32, b"."))
+    (home / "audit").mkdir()
+    (home / "audit/local.jsonl").write_bytes(
+        audit_line("bundle", "invoked") + audit_line("bundle", "completed")
+        + audit_line("pull", "invoked") + audit_line("pull", "completed")
+    )
+    instance.capture_audit_identity(home)
+
+
+def audit_result(home, entries, code=0):
+    return SimpleNamespace(returncode=code, stderr=b"", stdout=(
+        f"[mvm] audit chain '{home / 'audit/local.jsonl'}' verifies clean: {entries} entries\n"
+        "[mvm] No published audit roots, so nothing attests the log was only appended to. "
+        "Roots are published at admission and exit.\n"
+        "[mvm] No readable off-host witness configured (MVM_AUDIT_WITNESS), so a rewrite "
+        "by this host is undetectable from here.\n"
+    ).encode())
 
 
 class InspectionSmokeTests(unittest.TestCase):
@@ -127,6 +162,200 @@ class InspectionSmokeTests(unittest.TestCase):
             (root / "extra").mkdir()
             self.assertNotEqual(original, smoke.snapshot(root))
 
+    def test_changed_state_diagnostic_is_bounded_and_contains_no_file_contents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "pin"
+            target.write_bytes(b"private original value")
+            before = smoke.snapshot(root)
+            target.write_bytes(b"private substituted value")
+            after = smoke.snapshot(root)
+            diagnostic = smoke.snapshot_changes(before, after)
+            self.assertEqual(diagnostic["changed_count"], 1)
+            self.assertEqual(diagnostic["changes"], [{
+                "relative_path": "pin", "before": before["pin"], "after": after["pin"],
+            }])
+            self.assertFalse(diagnostic["truncated"])
+            self.assertNotIn("private original value", json.dumps(diagnostic))
+            self.assertNotIn("private substituted value", json.dumps(diagnostic))
+            self.assertNotIn(str(root), json.dumps(diagnostic))
+
+        many = {f"changed-{number:03}": [0o600, "a" * 64] for number in range(40)}
+        diagnostic = smoke.snapshot_changes({}, many)
+        self.assertEqual(diagnostic["changed_count"], 40)
+        self.assertEqual(len(diagnostic["changes"]), 32)
+        self.assertTrue(diagnostic["truncated"])
+        long_name = "x" * 513
+        self.assertEqual(smoke.snapshot_changes({}, {long_name: [0o700, "directory"]})["changes"], [{
+            "relative_path_sha256": smoke.digest(long_name.encode()),
+            "before": None, "after": [0o700, "directory"],
+        }])
+
+    def test_changed_state_diagnostic_distinguishes_removal_type_and_mode(self):
+        before = {
+            "removed": [0o600, "a" * 64],
+            "mode": [0o600, "b" * 64],
+            "type": [0o700, "directory"],
+            "same": [0o600, "c" * 64],
+        }
+        after = {
+            "mode": [0o400, "b" * 64],
+            "type": [0o600, "d" * 64],
+            "same": before["same"],
+        }
+        diagnostic = smoke.snapshot_changes(before, after)
+        self.assertEqual(diagnostic["changed_count"], 3)
+        self.assertEqual(
+            [entry["relative_path"] for entry in diagnostic["changes"]],
+            ["mode", "removed", "type"],
+        )
+        self.assertIsNone(diagnostic["changes"][1]["after"])
+
+    def test_audit_suffix_refuses_truncation_replacement_reordering_extra_and_wrong_command(self):
+        prefix = audit_line("pull", "completed")
+        pair = audit_line("pack", "invoked") + audit_line("pack", "completed")
+        self.assertEqual(smoke.assert_audit_append(prefix, prefix + pair, "pack", "completed"), 3)
+        invalid = (
+            pair, prefix[:-1] + pair,
+            audit_line("pull", "failed") + pair,
+            prefix + audit_line("pack", "completed") + audit_line("pack", "invoked"),
+            prefix + pair + audit_line("pack", "completed"),
+            prefix + audit_line("trust", "invoked") + audit_line("trust", "completed"),
+            prefix + audit_line("pack", "invoked", "other") + audit_line("pack", "completed"),
+            prefix + audit_line("pack", "invoked") + audit_line("pack", "failed"),
+            prefix + pair[:-1],
+            prefix + b'{"entry":{},"entry":{}}\n' + audit_line("pack", "completed"),
+        )
+        for changed in invalid:
+            with self.subTest(changed=changed), self.assertRaises((ValueError, KeyError)):
+                smoke.assert_audit_append(prefix, changed, "pack", "completed")
+
+    def test_audit_verification_requires_exact_source_count_and_real_success_status(self):
+        home = Path("/private/consumer")
+        result = audit_result(home, 7)
+        self.assertEqual(smoke.assert_verified_audit(result, home, 6), 7)
+        for code in (-11, 1, 2, 101):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                smoke.assert_verified_audit(audit_result(home, 7, code), home, 6)
+        for invalid in (
+            audit_result(home, 6), audit_result(home, 0), audit_result(Path("/other"), 7),
+            SimpleNamespace(returncode=0, stdout=b"", stderr=b""),
+            SimpleNamespace(returncode=0, stdout=result.stdout, stderr=b"signature invalid"),
+            SimpleNamespace(returncode=0, stdout=result.stdout + b"append-only check failed\n", stderr=b""),
+        ):
+            with self.subTest(result=invalid), self.assertRaises(ValueError):
+                smoke.assert_verified_audit(invalid, home, 6)
+
+    def test_default_quiet_verifier_success_is_not_a_coverage_witness(self):
+        # Production ui::success/info are silent without an explicit output
+        # opt-in. Exit zero alone must never stand in for the signed-tail proof.
+        quiet = SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        with self.assertRaisesRegex(ValueError, "exact inspection tail"):
+            smoke.assert_verified_audit(quiet, Path("/private/consumer"), 6)
+
+    def test_verifier_self_events_follow_the_existing_folded_audit_verb(self):
+        workspace = Path(__file__).resolve().parents[2]
+        dispatch = (workspace / "crates/mvm-cli/src/commands/cmd_audit.rs").read_text()
+        trust = (workspace / "crates/mvm-cli/src/commands/trust/mod.rs").read_text()
+        self.assertRegex(dispatch, r"Commands::Trust\(a\)\s*=>\s*a\.action\.verb_name\(\)")
+        self.assertRegex(trust, r'TrustAction::Audit\(_\)\s*=>\s*"audit"')
+        prefix = audit_line("pack", "completed")
+        actual = prefix + audit_line("audit", "invoked") + audit_line("audit", "completed")
+        self.assertEqual(smoke.assert_audit_append(prefix, actual, "audit", "completed"), 3)
+        guessed = prefix + audit_line("trust", "invoked") + audit_line("trust", "completed")
+        with self.assertRaises(ValueError):
+            smoke.assert_audit_append(prefix, guessed, "audit", "completed")
+
+    def test_all_noncanonical_audit_state_and_security_state_stays_protected(self):
+        instance = smoke.Smoke(Path("/cli"), Path("/output"), Path("/catalog"), FIXTURE)
+        for name in (
+            "registry/packs.lock.toml", "trusted-publishers/author.pub",
+            "keys/host-signer.ed25519", "keys/host-signer.pub", "bundles/archive",
+            "audit", "audit/other.jsonl", "audit/local.roots.jsonl",
+        ):
+            before = {name: [0o600, "a" * 64]}
+            after = {name: [0o600, "b" * 64]}
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "protected"):
+                instance.check_protected_state("inspection", before, after)
+
+    def test_audit_inputs_refuse_links_and_detect_replacement_mode_or_identity_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "chain"
+            path.write_bytes(b"chain\n")
+            _, original = smoke.read_audit_input(path, 32)
+            path.chmod(0o400)
+            _, changed = smoke.read_audit_input(path, 32)
+            self.assertNotEqual(original, changed)
+            replacement = root / "replacement"
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+            self.assertNotEqual(original, smoke.read_audit_input(path, 32)[1])
+            os.link(path, root / "hardlink")
+            with self.assertRaises(ValueError):
+                smoke.read_audit_input(path, 32)
+            link = root / "symlink"
+            link.symlink_to(path)
+            with self.assertRaises(OSError):
+                smoke.read_audit_input(link, 32)
+
+    def test_setup_audit_identity_cannot_be_replaced_before_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = smoke.Smoke(Path("/cli"), root, root, FIXTURE)
+            prepare_audit(instance, root)
+            (root / "keys/host-signer.pub").write_bytes(b"other identity".ljust(32, b"."))
+            with self.assertRaisesRegex(ValueError, "identity changed"):
+                instance.audit_snapshot(root)
+
+    def test_verifier_owned_protected_mutation_is_not_exempted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = smoke.Smoke(Path("/cli"), root, root, FIXTURE)
+            prepare_audit(instance, root)
+
+            def command(name, home, argv):
+                path = home / "audit/local.jsonl"
+                before = path.read_bytes()
+                verb = "pack" if argv[0] == "pack" else "audit"
+                path.write_bytes(before + audit_line(verb, "invoked") + audit_line(verb, "completed"))
+                if verb == "pack":
+                    return SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
+                (home / "keys/host-signer.pub").write_bytes(b"replacement".ljust(32, b"."))
+                return audit_result(home, len(before.splitlines()) + 1)
+
+            with patch.object(instance, "command", side_effect=command), patch.object(smoke, "assert_inspection"):
+                with self.assertRaisesRegex(ValueError, "protected"):
+                    instance.inspect("positive", root, True)
+
+    def test_audited_inspection_uses_canonical_verifier_without_exempting_its_own_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = smoke.Smoke(Path("/cli"), root, root, FIXTURE)
+            prepare_audit(instance, root)
+            calls = []
+
+            def command(name, home, argv):
+                calls.append(argv)
+                path = home / "audit/local.jsonl"
+                before = path.read_bytes()
+                if argv[0] == "pack":
+                    path.write_bytes(before + audit_line("pack", "invoked") + audit_line("pack", "completed"))
+                    return SimpleNamespace(returncode=0, stdout=b"{}", stderr=b"")
+                self.assertEqual(argv, ["--verbose", "trust", "audit", "verify", "--tenant", "local"])
+                path.write_bytes(before + audit_line("audit", "invoked") + audit_line("audit", "completed"))
+                return audit_result(home, len(before.splitlines()) + 1)
+
+            with patch.object(instance, "command", side_effect=command), patch.object(smoke, "assert_inspection"):
+                instance.inspect("positive", root, True)
+            self.assertEqual(len(calls), 4)
+            self.assertEqual(calls[0], ["pack", "info", FIXTURE["reference"], "--json"])
+            self.assertEqual(calls[2], ["pack", "verify", FIXTURE["reference"], "--json"])
+            self.assertEqual(calls[1], ["--verbose", "trust", "audit", "verify", "--tenant", "local"])
+            self.assertEqual(calls[3], calls[1])
+            self.assertEqual([record["verified_entries"] for record in instance.records], [7, 11])
+            self.assertTrue(all(not record["verifier_final_self_outcome_covered"] for record in instance.records))
+
     def test_closed_environment_does_not_forward_credentials(self):
         with patch.dict("os.environ", {"GITHUB_TOKEN": "not-forwarded", "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "not-forwarded"}):
             env = smoke.closed_environment(Path("/consumer"), Path("/scratch"), Path("/catalog"))
@@ -158,6 +387,7 @@ class InspectionSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = smoke.Smoke(Path("/cli"), root, root, {"reference": "runtime/example@1.0.0"})
+            prepare_audit(instance, root)
             result = type("Result", (), {"returncode": 1, "stdout": b"", "stderr": b"refused"})()
             with patch.object(instance, "command", return_value=result):
                 with self.assertRaisesRegex(ValueError, "unexpectedly refused"):
@@ -167,6 +397,7 @@ class InspectionSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = smoke.Smoke(Path("/cli"), root, root, {"reference": "runtime/example@1.0.0"})
+            prepare_audit(instance, root)
             result = type("Result", (), {"returncode": 0})()
             with patch.object(instance, "command", return_value=result):
                 with self.assertRaisesRegex(ValueError, "unexpectedly accepted"):
@@ -244,6 +475,7 @@ class InspectionSmokeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = smoke.Smoke(Path("/cli"), root, root, FIXTURE)
+            prepare_audit(instance, root)
 
             def command(*_):
                 (root / "new-pin").write_text("mutation")
@@ -255,6 +487,11 @@ class InspectionSmokeTests(unittest.TestCase):
             with patch.object(instance, "command", side_effect=command):
                 with self.assertRaisesRegex(ValueError, "mutated"):
                     instance.inspect("archive", root, False)
+            mutation = instance.records[-1]
+            self.assertEqual(mutation["name"], "archive-info-state-mutation")
+            self.assertEqual(mutation["changed_count"], 1)
+            self.assertEqual(mutation["changes"][0]["relative_path"], "new-pin")
+            self.assertIsNone(mutation["changes"][0]["before"])
 
     def test_failure_report_survives_and_redacts_private_diagnostics(self):
         with tempfile.TemporaryDirectory() as tmp:
