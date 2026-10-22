@@ -2084,8 +2084,12 @@ mod tests {
     fn an_unresponsive_manager_fails_the_launch_instead_of_hanging_it() {
         let scratch = tempfile::tempdir().expect("scratch");
         let mut env = crate::util::test_env::TestEnv::new();
-        pretend_mechanism_with_launcher(&mut env, scratch.path(), "#!/bin/sh\nexec sleep 3600\n")
-            .expect("fake launcher");
+        pretend_mechanism_with_launcher(
+            &mut env,
+            scratch.path(),
+            "#!/bin/sh\nwhile true; do sleep 0.05; done\n",
+        )
+        .expect("fake launcher");
         let launcher = scratch.path().join("bin").join(SYSTEMD_RUN);
         assert!(
             launcher.is_file(),

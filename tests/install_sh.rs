@@ -2273,6 +2273,10 @@ impl Spawned {
         Self(Some(Command::new(program).arg("60").spawn().unwrap()))
     }
 
+    fn idle_as(program: &Path) -> Self {
+        Self(Some(Command::new(program).args(IDLE_ARGS).spawn().unwrap()))
+    }
+
     fn pid(&self) -> u32 {
         self.0.as_ref().unwrap().id()
     }
@@ -2299,10 +2303,26 @@ fn sleep_binary() -> PathBuf {
         .expect("a sleep binary")
 }
 
-/// A copy of `sleep` at `path`, runnable under its new name.
-fn copy_sleep_to(path: &Path) {
+/// Arguments that make a copied shell idle until signalled.
+#[cfg(not(target_os = "macos"))]
+const IDLE_ARGS: [&str; 2] = ["-c", "while :; do sleep 1; done"];
+/// macOS ships a plain `sleep`, and its shell reports its path as `/bin/bash`
+/// whatever the copy is named, so the copy there is `sleep` itself.
+#[cfg(target_os = "macos")]
+const IDLE_ARGS: [&str; 1] = ["60"];
+
+/// A copy of the shell at `path`, runnable under its new name. Not `sleep`:
+/// where coreutils is a multicall binary a renamed copy dispatches on its own
+/// name and refuses to run. A shell keeps its own executable identity, which
+/// is what the uninstaller checks the daemon by.
+fn copy_idler_to(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::copy(sleep_binary(), path).unwrap();
+    let source = if cfg!(target_os = "macos") {
+        sleep_binary()
+    } else {
+        PathBuf::from("/bin/sh")
+    };
+    std::fs::copy(source, path).unwrap();
     // macOS kills a copied platform binary at exec; an ad-hoc signature lets
     // the copy run under its new name.
     if cfg!(target_os = "macos") {
@@ -2712,8 +2732,8 @@ fn uninstall_sh_refuses_to_signal_a_pid_that_is_not_the_daemon() {
 fn uninstall_sh_refuses_a_daemon_named_binary_outside_the_install() {
     let (host, _stop) = installed_host();
     let impostor = host.root.join("elsewhere").join("mvm-host-agent");
-    copy_sleep_to(&impostor);
-    let mut process = Spawned::sleep_as(&impostor);
+    copy_idler_to(&impostor);
+    let mut process = Spawned::idle_as(&impostor);
     record_daemon_pid(&host, process.pid());
     let before = host.snapshot();
 
@@ -2733,8 +2753,8 @@ fn uninstall_sh_refuses_a_daemon_named_binary_outside_the_install() {
 fn uninstall_sh_stops_an_installed_daemon_before_removing_the_install() {
     let (host, _stop) = installed_host();
     let daemon_bin = host.current_target().join("mvm-host-agent");
-    copy_sleep_to(&daemon_bin);
-    let mut daemon = Command::new(&daemon_bin).arg("60").spawn().unwrap();
+    copy_idler_to(&daemon_bin);
+    let mut daemon = Command::new(&daemon_bin).args(IDLE_ARGS).spawn().unwrap();
     assert!(
         daemon.try_wait().unwrap().is_none(),
         "the stand-in daemon must be running before the uninstall"
