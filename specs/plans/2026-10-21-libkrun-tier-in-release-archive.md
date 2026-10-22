@@ -87,7 +87,7 @@ placed in the active install on a given host.
   list in `build.rs` stays for contributors.
 - One deployment target for every Mach-O in the tier:
   `MACOSX_DEPLOYMENT_TARGET=13.0`, applied to libkrun, libkrunfw and the
-  supervisor. Stage 1 confirms with `vtool -show-build` / `otool -l` that no
+  supervisor. Stage 1 checks with `vtool -show-build` / `otool -l` that no
   file in the tier has a higher `minos`. A file that cannot meet 13.0 is a
   finding that changes the tier's floor, recorded here, not worked around.
 - **Post-build gate** (script run in the release job, also run by
