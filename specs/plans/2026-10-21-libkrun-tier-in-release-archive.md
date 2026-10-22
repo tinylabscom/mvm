@@ -48,8 +48,8 @@ Intel macOS stays unsupported; libkrun on macOS is Apple Silicon only.
 - No Rust code calls `krun_set_gpu_options`; it only appears in the
   generated bindings. GPU work goes through the `mvm-gpu*` remoting shims.
   So **libkrun is built without its GPU feature, which removes virglrenderer,
-  libepoxy and MoltenVK from the tier.** Stage 1 proves this with `otool -L`
-  on the built dylib; if the proof fails, the tier is not shipped until the
+  libepoxy and MoltenVK from the tier.** Stage 1 checks this with `otool -L`
+  on the built dylib; if the check fails, the tier is not shipped until the
   dependency is accounted for, rather than quietly adding the GPU stack.
 
 ## Archive contents (macOS aarch64 archive only)
@@ -317,7 +317,7 @@ hosted runner can boot a libkrun guest.
 
 What can be witnessed without a runner, and what cannot:
 
-| Witness | Runner needed | Proves |
+| Witness | Runner needed | Shows |
 | --- | --- | --- |
 | Post-build gate: no host paths, one deployment target, `minos` <= 13.0 | any macOS runner | relocation and floor of the bytes, not behaviour |
 | Package inspection and signature/entitlement/notarization verification | any macOS runner | claim 20 coverage of the new files |
@@ -331,7 +331,7 @@ release. The platform-support row must say "Preview, witnessed manually on
 macOS <version>" and not "Supported" while that is the only evidence. The
 other three rows are the CI lane the issue asks for ("a CI lane that
 exercises the packaged supervisor") and are honest about what they do not
-prove. Where the host must be a macOS version below the runner's, the
+show. Where the host must be a macOS version below the runner's, the
 deployment-target check is the only automated proxy and is called that.
 
 Support-matrix testing (#4578): the table drives a generated matrix of
