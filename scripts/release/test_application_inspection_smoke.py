@@ -49,6 +49,17 @@ def refusal_message(case, home):
             "  |\n1 | schema_version = false\n  |                  ^^^^^\n"
             "invalid type: boolean `false`, expected u32\n"
         )
+    if case == "missing-revocation-trust":
+        path = home / FIXTURE["paths"]["revocation_trust"]
+        return f"Error: registry-pack revocation trust is not configured at {path}\n"
+    if case == "missing-revocation-feed":
+        return "Error: registry-pack revocation cache is missing; a signed feed must be fetched\n"
+    if case == "same-revocation-signer":
+        path = home / FIXTURE["paths"]["revocation_trust"]
+        return (
+            f"Error: registry-pack revocation trust at {path} is invalid: "
+            "release identity must differ from the pack signer\n"
+        )
     cause = {
         "bundle-key": f'trust store has no entry for key_id {FIXTURE["bundle"]["key_id"]}',
         "archive": "application archive digest differs from its descriptor",
@@ -480,7 +491,11 @@ class InspectionSmokeTests(unittest.TestCase):
                         path.write_text(reference + "\n" + descriptor_hash)
                     elif key == "policy":
                         path.write_text(fixture["identity"])
-                    elif key != "revocation_trust":
+                    elif key == "revocation_trust":
+                        path.write_bytes(b"explicit private operator trust")
+                        for name in ("feed.json", "checkpoint.json"):
+                            path.with_name(name).write_bytes(b"unit cached state")
+                    else:
                         path.write_bytes(b"fixture bytes")
                 wrong = root / "wrong-signature"
                 wrong.write_bytes(b"different genuine bundle supplied by the real workflow")
@@ -548,9 +563,15 @@ class InspectionSmokeTests(unittest.TestCase):
             (fixture / "fixture.json").write_text(json.dumps(metadata))
             (fixture / "manifest.sigstore.json").write_bytes(b"unsigned unit control")
             (fixture / "bundle-author.pub").write_bytes(b"public unit control")
+            feed_document = fixture / "operator-feed.json"
+            feed_bundle = fixture / "operator-feed.sigstore.json"
+            feed_document.write_bytes(b"unsigned feed control; no verifier is executed")
+            feed_bundle.write_bytes(b"unsigned proof control; no verifier is executed")
             args = SimpleNamespace(
                 fixture_dir=fixture, cli=Path(__file__), wrong_signature=fixture / "manifest.sigstore.json",
                 out_dir=root / "results", source_sha="a" * 40,
+                revocation_document=feed_document, revocation_bundle=feed_bundle,
+                revocation_source_sha="b" * 40,
             )
 
             def fail(instance, *_):
@@ -566,7 +587,72 @@ class InspectionSmokeTests(unittest.TestCase):
             self.assertEqual(report["error"]["detail"], "wrong failure stage")
             self.assertGreaterEqual(output.call_count, 6)
             self.assertIn("malformed-revocation-trust", smoke.CASES)
-            self.assertIn("genuine signed revocation feed", report["open_witnesses"])
+            self.assertIn(
+                "genuine signed revoked-feed refusal for a matching descriptor",
+                report["open_witnesses"],
+            )
+
+    def test_operator_trust_is_explicit_private_and_not_descriptor_inferred(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fixture = {**FIXTURE, "identity": "https://example.test/distinct-descriptor"}
+            smoke.configure_operator_trust(home, fixture)
+            path = home / fixture["paths"]["revocation_trust"]
+            text = path.read_text()
+            self.assertIn(smoke.OPERATOR_FEED_IDENTITY, text)
+            self.assertIn(smoke.OPERATOR_FEED_ISSUER, text)
+            self.assertNotIn(fixture["identity"], text)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+            before = path.read_bytes()
+            with self.assertRaises(FileExistsError):
+                smoke.configure_operator_trust(home, fixture)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_same_publisher_is_refused_before_operator_trust_is_written(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            fixture = {**FIXTURE, "identity": smoke.OPERATOR_FEED_IDENTITY}
+            with self.assertRaisesRegex(ValueError, "publishers must differ"):
+                smoke.configure_operator_trust(home, fixture)
+            self.assertFalse((home / fixture["paths"]["revocation_trust"]).exists())
+
+    def test_operator_trust_refuses_symlinked_parent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (home / "registry").symlink_to(outside, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                smoke.configure_operator_trust(home, {
+                    **FIXTURE, "identity": "https://example.test/distinct-descriptor",
+                })
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_operator_feed_update_precedes_bundle_install_and_pull(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fixture_root = root / "fixture"
+            (fixture_root / "consumer-home").mkdir(parents=True)
+            instance = smoke.Smoke(Path("/cli"), root, root, {
+                **FIXTURE, "identity": "https://example.test/distinct-descriptor",
+            })
+            document, bundle = root / "operator.json", root / "operator.sigstore.json"
+            with patch.object(instance, "command", return_value=SimpleNamespace(returncode=0)) as command, \
+                    patch.object(instance, "capture_audit_identity"), \
+                    patch.object(instance, "inspect") as inspect, patch.object(smoke, "CASES", ()):
+                smoke.exercise(instance, fixture_root, root / "wrong-signature", document, bundle)
+            calls = [call.args[2] for call in command.call_args_list]
+            self.assertEqual(calls[0], [
+                "pack", "registry", "revocations", "update",
+                "--document", str(document), "--bundle", str(bundle),
+            ])
+            self.assertNotIn("--official", calls[0])
+            self.assertEqual(calls[1][0:2], ["bundle", "install"])
+            self.assertEqual(calls[2], ["pull", FIXTURE["reference"], "--json"])
+            inspect.assert_called_once()
 
     def test_workflow_keeps_existing_gates_and_same_signing_identity(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/pack-signing-smoke.yml").read_text()
@@ -577,6 +663,13 @@ class InspectionSmokeTests(unittest.TestCase):
         self.assertEqual(workflow.count("id-token: write"), 1)
         self.assertIn("timeout-minutes: 45", workflow)
         self.assertNotIn("upload-artifact", workflow)
+        self.assertIn('timeout 60 git ls-remote', workflow)
+        self.assertIn(
+            '"https://raw.githubusercontent.com/tinylabscom/mvm-packs/${feed_sha}/packs/${name}"',
+            workflow,
+        )
+        self.assertIn("--max-filesize 1048576", workflow)
+        self.assertIn('--revocation-source-sha "${feed_sha}"', workflow)
 
 
 if __name__ == "__main__":

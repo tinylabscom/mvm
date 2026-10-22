@@ -16,11 +16,12 @@ use thiserror::Error;
 
 use crate::packs::KeylessTrust;
 use crate::registry_pack::{
-    InstalledRegistryPack, PackAdoption, PackLockfile, PackPin, PackReference, RegistryPackError,
-    RegistryPackInstallError, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
-    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryManifest,
-    VerifiedRegistryPack, adopt_registry_pack_with, default_signature_checker,
-    install_registry_pack_at, verify_registry_manifest_with, verify_registry_pack_contents,
+    AuthenticatedRegistryManifest, InstalledRegistryPack, PackAdoption, PackLockfile, PackPin,
+    PackReference, RegistryPackError, RegistryPackInstallError, RegistryPackPublisherPolicy,
+    RegistryPackSignatureChecker, RegistryPackVerification, RegistryPackVerificationError,
+    VerifiedRegistryManifest, VerifiedRegistryPack, adopt_registry_pack_with,
+    default_signature_checker, install_registry_pack_at, verify_registry_manifest_with,
+    verify_registry_pack_contents,
 };
 use crate::registry_pack_revocation::{
     RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
@@ -28,6 +29,9 @@ use crate::registry_pack_revocation::{
 use crate::registry_pack_revocation_store::{
     RegistryPackRevocationStore, RegistryPackRevocationStoreError,
 };
+
+#[cfg(test)]
+pub(crate) mod application_test_feed;
 
 const REVOCATION_TRUST_SCHEMA_VERSION: u32 = 1;
 
@@ -91,6 +95,51 @@ pub fn check_registry_pack_revocations_if_configured(
         &official_store,
         Utc::now(),
     )
+}
+
+/// Applications never inherit the legacy policy-pack absent-feed fallback.
+pub(crate) fn check_application_revocations(
+    verified: &crate::registry_pack::VerifiedRegistryApplication,
+) -> Result<(), RegistryPackStoreError> {
+    let now = Utc::now();
+    if verified.reference().namespace() == "mvm" {
+        check_official_registry_pack_revocations_with(verified, now, |trust, at| {
+            official_registry_pack_revocation_store()
+                .load(trust, at)
+                .map_err(RegistryPackStoreError::from)
+        })
+    } else {
+        check_application_revocations_with(
+            verified,
+            &crate::config::registry_pack_revocation_trust_path(),
+            now,
+            |trust, at| {
+                RegistryPackRevocationStore::in_mvm_home()
+                    .load(trust, at)
+                    .map_err(RegistryPackStoreError::from)
+            },
+        )
+    }
+}
+
+fn check_application_revocations_with<F>(
+    verified: &crate::registry_pack::VerifiedRegistryApplication,
+    trust_path: &Path,
+    now: DateTime<Utc>,
+    load: F,
+) -> Result<(), RegistryPackStoreError>
+where
+    F: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+{
+    let trust = load_revocation_trust(trust_path)?.ok_or_else(|| {
+        RegistryPackStoreError::MissingRevocationTrust {
+            path: trust_path.display().to_string(),
+        }
+    })?;
+    check_trusted_registry_pack_revocations(verified, trust_path, &trust, now, load)
 }
 
 fn official_registry_pack_revocation_trust() -> KeylessTrust {
@@ -236,6 +285,22 @@ where
         }
         None => return Ok(()),
     };
+    check_trusted_registry_pack_revocations(verified, trust_path, &trust, now, load)
+}
+
+fn check_trusted_registry_pack_revocations<F>(
+    verified: &impl crate::registry_pack::AuthenticatedRegistryManifest,
+    trust_path: &Path,
+    trust: &KeylessTrust,
+    now: DateTime<Utc>,
+    load: F,
+) -> Result<(), RegistryPackStoreError>
+where
+    F: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+{
     if trust
         .accepted_identities
         .iter()
@@ -246,7 +311,7 @@ where
             reason: "release identity must differ from the pack signer".to_string(),
         });
     }
-    let feed = load(&trust, now)?;
+    let feed = load(trust, now)?;
     feed.check_verified_pack_at(verified, now)?;
     Ok(())
 }
@@ -807,7 +872,16 @@ pub(crate) fn open_installed_registry_pack_with(
     request: &OpenInstalledRequest<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<(InstalledRegistryPack, VerifiedRegistryPack), RegistryPackStoreError> {
-    let (installed, verified) = open_installed_registry_manifest_with(request, check_signature)?;
+    // A legacy-only consumer refuses applications, rather than accepting an
+    // application or allowing its feed state to change this schema refusal.
+    let (installed, verified) =
+        open_installed_registry_manifest_with_checks(request, check_signature, |application| {
+            Err(RegistryPackVerificationError::UnsupportedManifestSchema {
+                got: application.manifest().schema_version,
+                expected: crate::registry_pack::REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            }
+            .into())
+        })?;
     match verified {
         VerifiedRegistryManifest::Legacy(pack) => Ok((installed, pack)),
         VerifiedRegistryManifest::Application(application) => {
@@ -823,6 +897,20 @@ pub(crate) fn open_installed_registry_pack_with(
 pub(crate) fn open_installed_registry_manifest_with(
     request: &OpenInstalledRequest<'_>,
     check_signature: RegistryPackSignatureChecker,
+) -> Result<(InstalledRegistryPack, VerifiedRegistryManifest), RegistryPackStoreError> {
+    open_installed_registry_manifest_with_checks(
+        request,
+        check_signature,
+        crate::registry_pack::VerifiedRegistryApplication::check_current_revocations,
+    )
+}
+
+fn open_installed_registry_manifest_with_checks(
+    request: &OpenInstalledRequest<'_>,
+    check_signature: RegistryPackSignatureChecker,
+    check_application: impl FnOnce(
+        &crate::registry_pack::VerifiedRegistryApplication,
+    ) -> Result<(), RegistryPackStoreError>,
 ) -> Result<(InstalledRegistryPack, VerifiedRegistryManifest), RegistryPackStoreError> {
     let OpenInstalledRequest {
         cache_root,
@@ -867,7 +955,7 @@ pub(crate) fn open_installed_registry_manifest_with(
             check_registry_pack_revocations_if_configured(pack)?;
         }
         VerifiedRegistryManifest::Application(application) => {
-            check_registry_pack_revocations_if_configured(application)?;
+            check_application(application)?;
         }
     }
     Ok((installed, verified))
@@ -1339,7 +1427,7 @@ mod tests {
     }
 
     fn check_signed_official_test_document(
-        verified: &VerifiedRegistryPack,
+        verified: &impl AuthenticatedRegistryManifest,
         day: u32,
         revoked_manifests: Vec<String>,
     ) -> Result<(), RegistryPackStoreError> {
@@ -1795,12 +1883,282 @@ mod tests {
         accept(payload, bundle, trust)
     }
 
+    // These descriptor fixtures already inject publisher authentication. Keep
+    // their independent feed seam equally explicit and test-only. Production
+    // mandatory-feed negatives below call super::open_* instead of this helper.
+    fn open_installed_registry_manifest_with(
+        request: &OpenInstalledRequest<'_>,
+        check_signature: RegistryPackSignatureChecker,
+    ) -> Result<(InstalledRegistryPack, VerifiedRegistryManifest), RegistryPackStoreError> {
+        super::open_installed_registry_manifest_with_checks(
+            request,
+            check_signature,
+            application_test_feed::check,
+        )
+    }
+
+    #[cfg(unix)]
+    fn application_for_revocation_test() -> crate::registry_pack::VerifiedRegistryApplication {
+        application_reference_for_revocation_test("runtime/python@1.2.3")
+    }
+
+    #[cfg(unix)]
+    fn application_reference_for_revocation_test(
+        name: &str,
+    ) -> crate::registry_pack::VerifiedRegistryApplication {
+        let fixture = application_descriptor_fixture();
+        let mut document: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(fixture.installed.manifest_path()).unwrap())
+                .unwrap();
+        document["reference"] = serde_json::json!(name);
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let requested = reference(name);
+        let lock = PackLockfile::new(vec![
+            PackPin::new(requested.clone(), Sha256Hex::from_bytes(&bytes)).unwrap(),
+        ])
+        .unwrap();
+        let policy = if requested.namespace() == "mvm" {
+            crate::registry_pack::official_publisher_policy()
+        } else {
+            fixture.policy
+        };
+        let verified = verify_registry_manifest_with(
+            &RegistryPackVerification::new(
+                &requested,
+                &bytes,
+                b"application-unit-signature",
+                &lock,
+                &policy,
+            ),
+            accept_application_signature,
+        )
+        .unwrap();
+        let VerifiedRegistryManifest::Application(application) = verified else {
+            panic!("expected authenticated application")
+        };
+        application
+    }
+
+    // Real Ed25519 signature verification through the existing private feed seam;
+    // this is not a Sigstore identity or hosted keyless-signing witness.
+    #[cfg(unix)]
+    fn signed_application_feed(
+        verified: &crate::registry_pack::VerifiedRegistryApplication,
+        trust: &KeylessTrust,
+        now: DateTime<Utc>,
+        revoked: bool,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
+        signed_application_feed_at_position(verified, trust, now, revoked, 1, None)
+    }
+
+    #[cfg(unix)]
+    fn signed_application_feed_at_position(
+        verified: &crate::registry_pack::VerifiedRegistryApplication,
+        trust: &KeylessTrust,
+        now: DateTime<Utc>,
+        revoked: bool,
+        sequence: u64,
+        previous: Option<&RegistryPackRevocationCheckpoint>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError> {
+        use ed25519_dalek::{Signer, SigningKey};
+        let key = SigningKey::from_bytes(&[71; 32]);
+        let document = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "sequence": sequence,
+            "issued_at": "2026-10-06T00:00:00Z",
+            "not_after": "2026-10-08T00:00:00Z",
+            "revoked_identities": [],
+            "revoked_manifests": if revoked {
+                vec![verified.manifest_sha256().as_str()]
+            } else {
+                vec![]
+            },
+        }))
+        .unwrap();
+        let signature = key.sign(&document).to_bytes();
+        crate::registry_pack_revocation::verify_registry_pack_revocations_with(
+            &document,
+            &signature,
+            trust,
+            now,
+            previous,
+            |bytes, signature, _| {
+                let signature = ed25519_dalek::Signature::from_slice(signature)
+                    .map_err(|error| error.to_string())?;
+                key.verifying_key()
+                    .verify_strict(bytes, &signature)
+                    .map_err(|error| error.to_string())
+            },
+        )
+        .map_err(RegistryPackStoreError::Revoked)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_requires_operator_trust_without_changing_legacy_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("missing.toml");
+        let application = application_for_revocation_test();
+        assert!(matches!(
+            check_application_revocations_with(&application, &path, Utc::now(), |_, _| {
+                panic!("absent trust must refuse before loading a feed")
+            }),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+        ));
+        check_registry_pack_revocations_with(
+            &verified_for_revocation_test(),
+            &path,
+            Utc::now(),
+            |_, _| panic!("legacy absent trust must not load a feed"),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_rejects_malformed_and_nonindependent_operator_trust() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("trust.toml");
+        let application = application_for_revocation_test();
+        for contents in [
+            "schema_version = false\n".to_string(),
+            format!(
+                "schema_version = 1\nissuer = 'test'\naccepted_identities = ['{}']\n",
+                application.signer().identity
+            ),
+        ] {
+            write_trust(&path, &contents);
+            assert!(matches!(
+                check_application_revocations_with(&application, &path, Utc::now(), |_, _| {
+                    panic!("invalid trust must refuse before loading a feed")
+                }),
+                Err(RegistryPackStoreError::RevocationTrust { .. })
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_requires_cached_feed_and_checks_signed_current_and_revoked_documents() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("trust.toml");
+        write_trust(
+            &path,
+            "schema_version = 1\nissuer = 'unit Ed25519 seam'\naccepted_identities = ['independent feed signer']\n",
+        );
+        let application = application_for_revocation_test();
+        let at = |day| {
+            Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
+                .single()
+                .unwrap()
+        };
+        assert!(matches!(
+            check_application_revocations_with(&application, &path, at(7), |trust, now| {
+                RegistryPackRevocationStore::new(home.path().join("missing"))
+                    .load(trust, now)
+                    .map_err(RegistryPackStoreError::from)
+            }),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+        check_application_revocations_with(&application, &path, at(7), |trust, now| {
+            signed_application_feed(&application, trust, now, false)
+        })
+        .unwrap();
+        assert!(matches!(
+            check_application_revocations_with(&application, &path, at(7), |trust, now| {
+                signed_application_feed(&application, trust, now, true)
+            }),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::RevokedManifest { .. }
+            ))
+        ));
+        assert!(matches!(
+            check_application_revocations_with(&application, &path, at(9), |trust, now| {
+                signed_application_feed(&application, trust, now, false)
+            }),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Expired
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_feed_checks_original_checkpoint_for_rollback_and_equivocation() {
+        let application = application_for_revocation_test();
+        let trust = KeylessTrust {
+            issuer: "unit Ed25519 seam".into(),
+            accepted_identities: vec!["independent feed signer".into()],
+        };
+        let now = Utc.with_ymd_and_hms(2026, 10, 7, 0, 0, 0).single().unwrap();
+        let current =
+            signed_application_feed_at_position(&application, &trust, now, false, 2, None).unwrap();
+        assert!(matches!(
+            signed_application_feed_at_position(
+                &application,
+                &trust,
+                now,
+                false,
+                1,
+                Some(current.checkpoint()),
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Rollback {
+                    previous: 2,
+                    received: 1,
+                }
+            ))
+        ));
+        assert!(matches!(
+            signed_application_feed_at_position(
+                &application,
+                &trust,
+                now,
+                true,
+                2,
+                Some(current.checkpoint()),
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Equivocation { sequence: 2 }
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn application_mvm_namespace_uses_official_feed_without_operator_fallback() {
+        let home = tempfile::tempdir().unwrap();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(home.path().join("home"));
+        let application = application_reference_for_revocation_test("mvm/python@1.2.3");
+        assert!(matches!(
+            application.check_current_revocations(),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+        check_signed_official_test_document(&application, 7, vec![]).unwrap();
+        assert!(matches!(
+            check_signed_official_test_document(
+                &application,
+                7,
+                vec![application.manifest_sha256().as_str().to_owned()],
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::RevokedManifest { .. }
+            ))
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn open_application_descriptor_is_typed_and_does_not_require_policy_payload() {
         let fixture = application_descriptor_fixture();
         let mut environment = crate::util::test_env::TestEnv::new();
         environment.isolate_mvm_home(fixture.home.path().join("home"));
+        application_test_feed::configure();
         let requested = reference("runtime/python");
         let request = OpenInstalledRequest {
             cache_root: &fixture.cache,
@@ -1866,6 +2224,7 @@ mod tests {
         let fixture = application_descriptor_fixture();
         let mut environment = crate::util::test_env::TestEnv::new();
         environment.isolate_mvm_home(fixture.home.path().join("home"));
+        application_test_feed::configure();
         let requested = reference("runtime/python");
         let request = OpenInstalledRequest {
             cache_root: &fixture.cache,
@@ -1916,6 +2275,7 @@ mod tests {
         let fixture = application_descriptor_fixture();
         let mut environment = crate::util::test_env::TestEnv::new();
         environment.isolate_mvm_home(fixture.home.path().join("home"));
+        application_test_feed::configure();
         let requested = reference("runtime/python");
         let policy = RegistryPackPublisherPolicy::new(vec![
             RegistryPackPublisher::new(
@@ -1955,6 +2315,7 @@ mod tests {
         let fixture = application_descriptor_fixture();
         let mut environment = crate::util::test_env::TestEnv::new();
         environment.isolate_mvm_home(fixture.home.path().join("home"));
+        application_test_feed::configure();
         let requested = reference("runtime/python");
         let request = OpenInstalledRequest {
             cache_root: &fixture.cache,
@@ -1990,6 +2351,32 @@ mod tests {
         assert!(matches!(
             open_installed_registry_manifest_with(&request, accept_application_signature),
             Err(RegistryPackStoreError::Io { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_application_descriptor_production_check_refuses_absent_feed_trust() {
+        let fixture = application_descriptor_fixture();
+        let mut environment = crate::util::test_env::TestEnv::new();
+        environment.isolate_mvm_home(fixture.home.path().join("home"));
+        let requested = reference("runtime/python");
+        let request = OpenInstalledRequest {
+            cache_root: &fixture.cache,
+            lock: &fixture.lock,
+            publisher_policy: &fixture.policy,
+            requested: &requested,
+        };
+        assert!(matches!(
+            super::open_installed_registry_manifest_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+        ));
+        assert!(!crate::config::registry_pack_revocation_trust_path().exists());
+        assert!(matches!(
+            open_installed_registry_pack_with(&request, accept_application_signature),
+            Err(RegistryPackStoreError::Verification(
+                RegistryPackVerificationError::UnsupportedManifestSchema { got: 2, .. }
+            ))
         ));
     }
 

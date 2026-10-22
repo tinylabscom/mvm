@@ -7,6 +7,7 @@ use crate::registry_pack::tests::{accept_signature, publisher_policy};
 use crate::registry_pack::{
     PackAdoption, PackReference, VerifiedRegistryApplication, VerifiedRegistryManifest,
 };
+use crate::registry_pack_store::application_test_feed;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
 
@@ -185,6 +186,7 @@ fn symlinked_roots_and_bundle_leases_refuse_without_following_targets() {
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -250,6 +252,7 @@ fn install_commit_is_last_and_failed_commit_leaves_only_complete_unreferenced_co
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -305,6 +308,7 @@ fn a_staging_dir_left_by_a_killed_install_is_never_runnable_and_the_next_install
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -353,6 +357,7 @@ fn repeated_install_rechecks_trust_and_repairs_poisoned_cache_without_digest_dri
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -424,6 +429,7 @@ fn current_revocation_policy_and_same_version_pin_drift_refuse_before_installati
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -480,6 +486,7 @@ fn publisher_policy_load_occurs_under_lease_and_withdrawal_before_commit_refuses
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -512,6 +519,7 @@ fn publisher_policy_load_occurs_under_lease_and_withdrawal_before_commit_refuses
         },
         &trust,
         accept_signature,
+        application_test_feed::check,
         crate::registry_pack_store::RegistryPackStoreLease::commit_application_pin,
     );
     assert!(result.is_err());
@@ -525,6 +533,7 @@ fn bundle_removal_is_excluded_until_application_reference_commit() {
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -607,6 +616,7 @@ fn installed() -> Installed {
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let source = directory.path().join("input.mvmpkg");
     std::fs::write(&source, &bytes).unwrap();
     let application = descriptor(&bytes, &key_id, |_| {});
@@ -643,12 +653,29 @@ fn resolve(
     installed: &Installed,
     reference: &str,
 ) -> Result<ResolvedApplication, ApplicationLaunchError> {
-    launch::resolve_with(
+    resolve_with_fixture(
         &reference.parse().unwrap(),
         &installed.store,
         &publisher_policy(),
         &installed.trust,
         accept_signature,
+    )
+}
+
+fn resolve_with_fixture(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+    policy: &crate::registry_pack::RegistryPackPublisherPolicy,
+    trust: &dyn crate::plan::bundle::TrustStore,
+    check_signature: crate::registry_pack::RegistryPackSignatureChecker,
+) -> Result<ResolvedApplication, ApplicationLaunchError> {
+    launch::resolve_with_checks(
+        reference,
+        store,
+        policy,
+        trust,
+        check_signature,
+        application_test_feed::check,
     )
 }
 
@@ -665,6 +692,120 @@ fn an_installed_reference_resolves_with_or_without_its_exact_version() {
         &"runtime/python".parse().unwrap(),
         &installed.store
     ));
+}
+
+#[cfg(unix)]
+#[test]
+fn production_resolver_requires_operator_trust_and_cached_feed_before_bundle_use() {
+    let installed = installed();
+    let reference = "runtime/python".parse().unwrap();
+    let path = crate::config::registry_pack_revocation_trust_path();
+    std::fs::remove_file(&path).unwrap();
+    let resolve = || {
+        launch::resolve_with(
+            &reference,
+            &installed.store,
+            &publisher_policy(),
+            &installed.trust,
+            accept_signature,
+        )
+    };
+    assert!(matches!(
+        resolve(),
+        Err(ApplicationLaunchError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+        ))
+    ));
+    application_test_feed::configure();
+    assert!(matches!(
+        resolve(),
+        Err(ApplicationLaunchError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
+        ))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn production_installer_refuses_absent_operator_trust_before_publishing_content() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &bytes).unwrap();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let verified = verify_application_bundle(&application, &source, &trust).unwrap();
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    let result = super::install::install_with_loader(
+        &verified,
+        &store,
+        || Ok(publisher_policy()),
+        &trust,
+        accept_signature,
+        VerifiedRegistryApplication::check_current_revocations,
+        crate::registry_pack_store::RegistryPackStoreLease::commit_application_pin,
+    );
+    assert!(matches!(
+        result,
+        Err(ApplicationBundleError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+        ))
+    ));
+    assert!(!store.lock_path.exists());
+    assert!(!store.bundle_root.exists());
+    assert!(!store.descriptor_cache_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn production_revocation_recheck_refuses_withdrawn_trust_before_pin_commit() {
+    let (directory, bytes, trust, key_id) = fixture();
+    let mut environment = crate::util::test_env::TestEnv::new();
+    environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
+    let source = directory.path().join("input.mvmpkg");
+    std::fs::write(&source, &bytes).unwrap();
+    let application = descriptor(&bytes, &key_id, |_| {});
+    let verified = verify_application_bundle(&application, &source, &trust).unwrap();
+    let store = ApplicationInstallStore::new(
+        directory.path().join("descriptors"),
+        directory.path().join("packs.lock.toml"),
+        directory.path().join("bundles"),
+    );
+    let mut checks = 0;
+    let result = super::install::install_with_loader(
+        &verified,
+        &store,
+        || Ok(publisher_policy()),
+        &trust,
+        accept_signature,
+        |application| {
+            checks += 1;
+            if checks == 1 {
+                application_test_feed::check(application)?;
+                std::fs::remove_file(crate::config::registry_pack_revocation_trust_path()).unwrap();
+                Ok(())
+            } else {
+                application.check_current_revocations()
+            }
+        },
+        |_, _| panic!("withdrawn revocation trust must refuse before committing a pin"),
+    );
+    assert_eq!(checks, 2);
+    assert!(matches!(
+        result,
+        Err(ApplicationBundleError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+        ))
+    ));
+    assert!(!store.lock_path.exists());
+    assert!(store.bundle_root.join(sha256_hex(&bytes)).is_dir());
 }
 
 #[test]
@@ -702,7 +843,7 @@ fn post_install_tampering_and_withdrawn_trust_refuse_at_launch() {
     let original = std::fs::read(&archive).unwrap();
 
     let empty = FsTrustStore::new(installed._directory.path().join("withdrawn"));
-    let withdrawn = launch::resolve_with(
+    let withdrawn = resolve_with_fixture(
         &"runtime/python".parse().unwrap(),
         &installed.store,
         &publisher_policy(),
@@ -740,7 +881,7 @@ fn post_install_tampering_and_withdrawn_trust_refuse_at_launch() {
 #[test]
 fn a_withdrawn_publisher_policy_or_unreadable_revocation_trust_refuses_at_launch() {
     let installed = installed();
-    let no_policy = launch::resolve_with(
+    let no_policy = resolve_with_fixture(
         &"runtime/python".parse().unwrap(),
         &installed.store,
         &crate::registry_pack::RegistryPackPublisherPolicy::new(Vec::new()).unwrap(),
@@ -837,6 +978,7 @@ fn a_catalogued_application_installs_atomically_and_resolves_for_launch() {
     let (directory, bytes, trust, key_id) = fixture();
     let mut environment = crate::util::test_env::TestEnv::new();
     environment.isolate_mvm_home(directory.path().join("home"));
+    application_test_feed::configure();
     let registry = directory.path().join("registry");
     publish_to_local_registry(&registry, &descriptor(&bytes, &key_id, |_| {}), &bytes);
 
@@ -887,7 +1029,7 @@ fn a_catalogued_application_installs_atomically_and_resolves_for_launch() {
 
     // Launch: the reference resolves to the bundle the descriptor names.
     assert!(names_installed_application(&reference, &store));
-    let resolved = launch::resolve_with(
+    let resolved = resolve_with_fixture(
         &"runtime/python".parse().unwrap(),
         &store,
         &publisher_policy(),

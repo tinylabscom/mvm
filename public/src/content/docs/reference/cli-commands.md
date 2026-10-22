@@ -2146,8 +2146,14 @@ archive publication, but the summary file is published afterward so an alias can
 never occupy or replace the archive destination. If summary publication fails,
 the error states that the archive was published; the valid archive is retained.
 
-Application descriptors use the same catalog digest, publisher policy, pins, and
-current revocation policy as legacy packs. Their bundles must already have an
+Application descriptors use the same catalog digest, publisher policy, and pins
+as legacy packs, but require a current independently signed revocation feed.
+Applications in `mvm/` use the built-in official feed; other namespaces require
+explicit operator revocation trust and a verified cached feed with at most
+48 hours of signed validity. Missing trust or feed, expired data, revoked
+signers/digests, rollback, equivocation, or a feed identity matching the descriptor
+publisher refuses acquisition and use. Legacy policy-only packs retain their
+optional operator-feed behavior. Their bundles must already have an
 independently enrolled key in `$MVM_HOME/trusted-publishers/`; naming a key in a
 descriptor never enrolls it. Pull accepts canonical HTTPS or digest-pinned OCI
 sources, limits acquisition to the descriptor's signed byte size and at most
@@ -2175,8 +2181,8 @@ execution; `mvmctl run <ref>` launches an installed application (see `run`).
 Applications cannot satisfy a policy-pack dependency.
 
 `pack info` and `pack verify` reopen the original application descriptor and
-signature under the current pin, publisher policy, and configured revocation
-context. An unversioned reference selects its pinned version; an explicit
+signature under the current pin, publisher policy, and mandatory current
+independent revocation feed. An unversioned reference selects its pinned version; an explicit
 different version refuses rather than selecting another catalog entry. They
 then check the cached archive's exact size, digest, independent bundle-author
 signature, key ID, and architecture binding through the normal bundle verifier.

@@ -258,6 +258,23 @@ jobs:
           # the descriptor uses this workflow's existing keyless identity.
           # Neither the archive nor its single dummy rootfs is executed.
           # Malformed revocation-trust refusal is not a signed revoked-feed witness.
+          # This operator feed is independent of THIS synthetic descriptor
+          # publisher, not of descriptors signed by mvm-packs/publish.yml.
+          # Resolve once and fetch both public signed inputs at that exact commit;
+          # HTTPS transport is not authority: the CLI verifies signature,
+          # <=48h validity and durable checkpoint before application pull.
+          feed_ref="$(timeout 60 git ls-remote https://github.com/tinylabscom/mvm-packs.git refs/heads/main)"
+          read -r feed_sha feed_name <<<"${feed_ref}"
+          [[ "${feed_sha}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${feed_name}" == refs/heads/main ]]
+          [[ "${feed_ref}" == "${feed_sha}"$'\t'refs/heads/main ]]
+          mkdir smoke/operator-revocations
+          for name in revocations.json revocations.sigstore.json; do
+            curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --max-time 60 --max-filesize 1048576 -fsSL \
+              "https://raw.githubusercontent.com/tinylabscom/mvm-packs/${feed_sha}/packs/${name}" \
+              -o "smoke/operator-revocations/${name}"
+          done
           MVM_HOME="$PWD/smoke/application/consumer-home" \
             cargo run --release -p mvm-core --example application-inspection-fixture \
             --features manifest-verify -- \
@@ -272,4 +289,7 @@ jobs:
             --fixture-dir smoke/application \
             --wrong-signature smoke/pack-manifest.json.bundle \
             --out-dir smoke/application-results \
+            --revocation-document smoke/operator-revocations/revocations.json \
+            --revocation-bundle smoke/operator-revocations/revocations.sigstore.json \
+            --revocation-source-sha "${feed_sha}" \
             --source-sha "${GITHUB_SHA}"

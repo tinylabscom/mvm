@@ -22,6 +22,13 @@ import subprocess
 import tempfile
 
 
+OPERATOR_FEED_IDENTITY = (
+    "https://github.com/tinylabscom/mvm-packs/"
+    ".github/workflows/publish.yml@refs/heads/main"
+)
+OPERATOR_FEED_ISSUER = "https://token.actions.githubusercontent.com"
+
+
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
@@ -245,6 +252,22 @@ def assert_refusal(result, case, home, fixture):
             and "invalid type: boolean `false`, expected u32" in lines
         )
         stage = "malformed-configured-revocation-trust"
+    elif case == "missing-revocation-trust":
+        path = contained(home, fixture["paths"]["revocation_trust"])
+        valid = roots[0] == f"registry-pack revocation trust is not configured at {path}"
+        stage = "mandatory-operator-revocation-trust"
+    elif case == "missing-revocation-feed":
+        valid = roots[0] == (
+            "registry-pack revocation cache is missing; a signed feed must be fetched"
+        )
+        stage = "mandatory-current-operator-feed"
+    elif case == "same-revocation-signer":
+        path = contained(home, fixture["paths"]["revocation_trust"])
+        valid = roots[0] == (
+            f"registry-pack revocation trust at {path} is invalid: "
+            "release identity must differ from the pack signer"
+        )
+        stage = "independent-revocation-signer"
     elif case in ("bundle-key", "archive", "missing-archive"):
         expected = {
             "bundle-key": f'trust store has no entry for key_id {fixture["bundle"]["key_id"]}',
@@ -323,7 +346,11 @@ class Smoke:
         report = {
             **self.context, "schema_version": 1, "outcome": outcome, "error": error,
             "scope": "synthetic publisher policy; not official registry, release, boot or launch",
-            "open_witnesses": ["genuine signed revocation feed", "application launch and teardown"],
+            "open_witnesses": [
+                "genuine signed revoked-feed refusal for a matching descriptor",
+                "default-registry descriptor/feed publisher independence",
+                "application launch and teardown",
+            ],
             "records": self.records,
         }
         (self.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -461,6 +488,17 @@ def mutate(home, fixture, case, wrong_signature):
         paths["revocation_trust"].parent.chmod(0o700)
         paths["revocation_trust"].write_text("schema_version = false\n")
         paths["revocation_trust"].chmod(0o600)
+    elif case == "missing-revocation-trust":
+        paths["revocation_trust"].unlink()
+    elif case == "missing-revocation-feed":
+        for name in ("feed.json", "checkpoint.json"):
+            paths["revocation_trust"].with_name(name).unlink()
+    elif case == "same-revocation-signer":
+        paths["revocation_trust"].write_text(
+            "schema_version = 1\n"
+            f"issuer = {json.dumps(OPERATOR_FEED_ISSUER)}\n"
+            f"accepted_identities = [{json.dumps(fixture['identity'])}]\n"
+        )
     else:
         raise ValueError(f"unknown refusal case: {case}")
 
@@ -468,7 +506,25 @@ def mutate(home, fixture, case, wrong_signature):
 CASES = (
     "pin", "version", "descriptor", "signature", "publisher",
     "bundle-key", "archive", "missing-archive", "malformed-revocation-trust",
+    "missing-revocation-trust", "missing-revocation-feed", "same-revocation-signer",
 )
+
+def configure_operator_trust(home, fixture):
+    """Explicit disposable operator policy, never inferred from the descriptor."""
+    if fixture["identity"] == OPERATOR_FEED_IDENTITY:
+        raise ValueError("synthetic descriptor and operator-feed publishers must differ")
+    path = contained(home, fixture["paths"]["revocation_trust"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    contents = (
+        "schema_version = 1\n"
+        f"issuer = {json.dumps(OPERATOR_FEED_ISSUER)}\n"
+        f"accepted_identities = [{json.dumps(OPERATOR_FEED_IDENTITY)}]\n"
+    ).encode()
+    with os.fdopen(os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600,
+    ), "wb") as stream:
+        stream.write(contents)
 
 
 def run(args):
@@ -480,6 +536,10 @@ def run(args):
         raise ValueError("unknown fixture schema")
     if len(args.source_sha) != 40 or any(c not in "0123456789abcdef" for c in args.source_sha):
         raise ValueError("source SHA must be a full Git object identity")
+    if re.fullmatch(r"[0-9a-f]{40}", args.revocation_source_sha) is None:
+        raise ValueError("revocation source SHA must be a full Git object identity")
+    feed_document, _ = read_audit_input(args.revocation_document, 1024 * 1024)
+    feed_bundle, _ = read_audit_input(args.revocation_bundle, 1024 * 1024)
     descriptor = (fixture_root / "manifest.json").read_bytes()
     archive = (fixture_root / "application.mvmpkg").read_bytes()
     if digest(descriptor) != fixture["manifest_sha256"]:
@@ -507,10 +567,20 @@ def run(args):
     smoke.context = {
         "source_sha": args.source_sha, "cli_sha256": digest(cli.read_bytes()),
         "fixture": fixture,
+        "operator_feed": {
+            "source_sha": args.revocation_source_sha,
+            "document_sha256": digest(feed_document), "document_size": len(feed_document),
+            "bundle_sha256": digest(feed_bundle), "bundle_size": len(feed_bundle),
+            "identity": OPERATOR_FEED_IDENTITY, "issuer": OPERATOR_FEED_ISSUER,
+            "scope": "explicit synthetic consumer operator policy; not default registry trust",
+        },
     }
     try:
         emit_public_fixture(fixture_root)
-        exercise(smoke, fixture_root, wrong_signature)
+        exercise(
+            smoke, fixture_root, wrong_signature,
+            args.revocation_document.absolute(), args.revocation_bundle.absolute(),
+        )
     except Exception as error:
         # The hosted runner does not upload private result directories. Publish
         # the bounded status/hash/redacted diagnostic report before aborting.
@@ -537,7 +607,7 @@ def emit_public_fixture(fixture_root):
         }))
 
 
-def exercise(smoke, fixture_root, wrong_signature):
+def exercise(smoke, fixture_root, wrong_signature, revocation_document, revocation_bundle):
     fixture = smoke.fixture
     # All consumer homes and their contents stay private and are never emitted.
     with tempfile.TemporaryDirectory(prefix="application-inspection-") as temporary:
@@ -546,7 +616,12 @@ def exercise(smoke, fixture_root, wrong_signature):
         shutil.copytree(fixture_root / "consumer-home", baseline)
         for key in fixture["paths"].values():
             contained(baseline, key)
+        configure_operator_trust(baseline, fixture)
         setup = [
+            [
+                "pack", "registry", "revocations", "update",
+                "--document", str(revocation_document), "--bundle", str(revocation_bundle),
+            ],
             ["bundle", "install", str(fixture_root / "application.mvmpkg"), "--prod"],
             ["pull", fixture["reference"], "--json"],
         ]
@@ -567,6 +642,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("cli", "fixture-dir", "wrong-signature", "out-dir"):
         parser.add_argument("--" + name, type=Path, required=True)
+    for name in ("revocation-document", "revocation-bundle"):
+        parser.add_argument("--" + name, type=Path, required=True)
+    parser.add_argument("--revocation-source-sha", required=True)
     parser.add_argument("--source-sha", required=True)
     run(parser.parse_args())
 

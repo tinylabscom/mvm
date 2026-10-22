@@ -274,7 +274,7 @@ fn acquire_application(
     application: &VerifiedRegistryApplication,
 ) -> Result<InstalledRegistryApplication> {
     use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, TrustStore};
-    check_registry_pack_revocations_if_configured(application)?;
+    application.check_current_revocations()?;
     crate::commands::bundle::fetch::admit_application_source(application)?;
     let trust = FsTrustStore::default_path()?;
     anyhow::ensure!(
@@ -448,7 +448,7 @@ fn pull_one(
     };
     let verified = match verified {
         VerifiedRegistryManifest::Application(application) => {
-            check_registry_pack_revocations_if_configured(&application)?;
+            application.check_current_revocations()?;
             // Persist a pin only after acquisition succeeds. The handoff retains
             // authenticated bytes and digest for that later transaction.
             return Ok((VerifiedPull::Application(Box::new(application)), Vec::new()));

@@ -27,6 +27,17 @@ impl VerifiedRegistryApplication {
     pub fn signature_bundle(&self) -> &[u8] {
         &self.signature_bundle
     }
+
+    /// Require a current, independently authenticated revocation feed before use.
+    ///
+    /// Official applications use the built-in MVM feed. Other applications
+    /// require operator-configured trust and a verified cached feed. This does
+    /// not acquire an archive or grant permission to execute it.
+    pub fn check_current_revocations(
+        &self,
+    ) -> Result<(), crate::registry_pack_store::RegistryPackStoreError> {
+        crate::registry_pack_store::check_application_revocations(self)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

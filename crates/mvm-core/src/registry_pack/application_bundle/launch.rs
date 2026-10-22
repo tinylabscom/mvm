@@ -17,9 +17,7 @@ use crate::registry_pack::{
     REGISTRY_SIGNATURE_FILE_NAME, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
     RegistryPackVerification, VerifiedRegistryManifest, check_registry_pack_signature,
 };
-use crate::registry_pack_store::{
-    check_registry_pack_revocations_if_configured, load_pack_lockfile,
-};
+use crate::registry_pack_store::load_pack_lockfile;
 
 #[derive(Debug, Error)]
 pub enum ApplicationLaunchError {
@@ -137,6 +135,27 @@ pub(super) fn resolve_with(
     trust: &dyn TrustStore,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<ResolvedApplication, ApplicationLaunchError> {
+    resolve_with_checks(
+        reference,
+        store,
+        policy,
+        trust,
+        check_signature,
+        crate::registry_pack::VerifiedRegistryApplication::check_current_revocations,
+    )
+}
+
+pub(super) fn resolve_with_checks(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+    policy: &RegistryPackPublisherPolicy,
+    trust: &dyn TrustStore,
+    check_signature: RegistryPackSignatureChecker,
+    check_revocations: impl FnOnce(
+        &crate::registry_pack::VerifiedRegistryApplication,
+    )
+        -> Result<(), crate::registry_pack_store::RegistryPackStoreError>,
+) -> Result<ResolvedApplication, ApplicationLaunchError> {
     let lock = load_pack_lockfile(&store.lock_path)?;
     let not_installed = || ApplicationLaunchError::NotInstalled {
         reference: reference.to_string(),
@@ -168,7 +187,7 @@ pub(super) fn resolve_with(
             reference: installed.to_string(),
         });
     };
-    check_registry_pack_revocations_if_configured(&application)?;
+    check_revocations(&application)?;
     let registry = BundleRegistry::new(&store.bundle_root);
     let archive = registry.archive_path(
         application

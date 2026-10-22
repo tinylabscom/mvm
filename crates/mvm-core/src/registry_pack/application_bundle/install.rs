@@ -11,8 +11,7 @@ use crate::registry_pack::{
     default_signature_checker,
 };
 use crate::registry_pack_store::{
-    RegistryPackStoreError, RegistryPackStoreLease, check_registry_pack_revocations_if_configured,
-    load_pack_lockfile, lock_registry_pack_store,
+    RegistryPackStoreError, RegistryPackStoreLease, load_pack_lockfile, lock_registry_pack_store,
 };
 
 /// The existing bundle registry, descriptor cache and shared pack lock.
@@ -78,6 +77,7 @@ pub fn install_application_bundle(
         },
         trust,
         default_signature_checker(),
+        VerifiedRegistryApplication::check_current_revocations,
         RegistryPackStoreLease::commit_application_pin,
     )
 }
@@ -100,6 +100,7 @@ pub(super) fn install_with(
         || Ok(policy.clone()),
         trust,
         check_signature,
+        crate::registry_pack_store::application_test_feed::check,
         commit,
     )
 }
@@ -110,6 +111,9 @@ pub(super) fn install_with_loader(
     mut load_policy: impl FnMut() -> Result<RegistryPackPublisherPolicy, RegistryPackStoreError>,
     trust: &dyn TrustStore,
     check_signature: RegistryPackSignatureChecker,
+    mut check_revocations: impl FnMut(
+        &VerifiedRegistryApplication,
+    ) -> Result<(), RegistryPackStoreError>,
     commit: impl FnOnce(
         &RegistryPackStoreLease,
         &VerifiedRegistryApplication,
@@ -119,7 +123,7 @@ pub(super) fn install_with_loader(
     let application = candidate.application();
     let lock = load_pack_lockfile(&store.lock_path)?;
     authenticate(application, &lock, &load_policy()?, check_signature)?;
-    check_registry_pack_revocations_if_configured(application)?;
+    check_revocations(application)?;
     candidate.reverify(trust)?;
     let registry = BundleRegistry::new(&store.bundle_root);
     // Retain bundle exclusion through the reference commit, not just extraction.
@@ -128,7 +132,7 @@ pub(super) fn install_with_loader(
     sync_bundle_content(&registry, &installed.bundle, application)?;
     let descriptor_root = publish_descriptor(&store.descriptor_cache_root, application)?;
     authenticate(application, &lock, &load_policy()?, check_signature)?;
-    check_registry_pack_revocations_if_configured(application)?;
+    check_revocations(application)?;
     candidate.reverify(trust)?;
     commit(&lease, application)?;
     Ok(InstalledRegistryApplication {
