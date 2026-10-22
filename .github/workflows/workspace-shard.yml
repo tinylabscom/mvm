@@ -55,7 +55,8 @@ permissions:
 jobs:
   test:
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
-    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-latest' }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-24.04' }}
     # Archive workers on one persistent host share the build-time source path.
     # Serialize that pool; GitHub-hosted workers have separate filesystems.
     concurrency:
