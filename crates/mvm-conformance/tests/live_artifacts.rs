@@ -116,14 +116,60 @@ fn sealing_scenario_registers_its_own_slot_without_replacing_the_flake_witness()
     assert!(sealing.contains("I seal the live manifest build into a bundle"));
 }
 
-fn scenario(feature: &str, name: &str) -> &str {
-    feature
-        .split(&format!("Scenario: {name}"))
-        .nth(1)
-        .unwrap_or_else(|| panic!("feature contains scenario {name:?}"))
-        .split("\n  Scenario:")
-        .next()
-        .expect("scenario ends at the next scenario or feature end")
+const LIVE_HOME_PREPARATION: &str = "And the isolated mvm home is prepared for live launches";
+
+fn scenario_steps<'a>(feature: &'a str, name: &str) -> Result<Vec<&'a str>, String> {
+    let mut found = false;
+    let mut steps = Vec::new();
+
+    for raw_line in feature.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(scenario_name) = line
+            .strip_prefix("Scenario: ")
+            .or_else(|| line.strip_prefix("Scenario Outline: "))
+        {
+            if found {
+                break;
+            }
+            found = scenario_name == name;
+            continue;
+        }
+        if found && is_gherkin_step(line) {
+            steps.push(line);
+        }
+    }
+
+    found
+        .then_some(steps)
+        .ok_or_else(|| format!("feature contains scenario {name:?}"))
+}
+
+fn is_gherkin_step(line: &str) -> bool {
+    ["Given ", "When ", "Then ", "And ", "But ", "* "]
+        .iter()
+        .any(|keyword| line.starts_with(keyword))
+}
+
+fn scenario_prepares_home_before_command(
+    feature: &str,
+    name: &str,
+    consuming_command: &str,
+) -> Result<(), String> {
+    let steps = scenario_steps(feature, name)?;
+    let prepared = steps
+        .iter()
+        .position(|step| *step == LIVE_HOME_PREPARATION)
+        .ok_or_else(|| format!("{name} must prepare its source-built runtime"))?;
+    let launch = steps
+        .iter()
+        .position(|step| *step == consuming_command)
+        .ok_or_else(|| format!("{name} contains its runtime-consuming command"))?;
+    (prepared < launch).then_some(()).ok_or_else(|| {
+        format!("{name} must prepare its source-built runtime before the command uses it")
+    })
 }
 
 #[test]
@@ -139,35 +185,69 @@ fn source_tree_live_scenarios_prepare_their_home_before_selecting_tree_runtime()
         (
             bundle_boot,
             "A signed OCI artifact boots as the positional source",
-            "When I seal",
+            "When I seal \"docker.io/library/alpine:3.20\" into a signed artifact in the live home",
         ),
         (
             documented,
             "the documented pack build health-boots and signs a frozen workload",
-            "When I run mvmctl against the live pack fixture",
+            "When I run mvmctl against the live pack fixture with \"pack build pack.json --out build.mvmpkg\"",
         ),
         (
             oci_bundle,
             "Build and verify an Alpine OCI package with explicit publisher trust",
-            "When I run mvmctl in the scratch directory",
+            "When I run mvmctl in the scratch directory with \"bundle build --image docker.io/library/alpine:3.20 --out alpine.mvmpkg --debug-out alpine.bundle.json\"",
         ),
     ] {
-        let body = scenario(feature, name);
-        let prepared = body
-            .find("the isolated mvm home is prepared for live launches")
-            .unwrap_or_else(|| {
-                panic!(
-                    "{name} must explicitly select the source-built runtime prepared in its home"
-                )
-            });
-        let launch = body
-            .find(command)
-            .unwrap_or_else(|| panic!("{name} contains its runtime-consuming command"));
-        assert!(
-            prepared < launch,
-            "{name} must prepare its source-built runtime before the command uses it"
-        );
+        scenario_prepares_home_before_command(feature, name, command)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
+}
+
+#[test]
+fn source_tree_live_scenarios_reject_commented_or_late_home_preparation() {
+    let commented_preparation = concat!(
+        "Scenario: source tree launch\n",
+        "  # And the isolated mvm home is prepared for live launches\n",
+        "  When I select the source-built runtime\n",
+    );
+    assert!(
+        scenario_prepares_home_before_command(
+            commented_preparation,
+            "source tree launch",
+            "When I select the source-built runtime",
+        )
+        .is_err()
+    );
+
+    let late_preparation = concat!(
+        "Scenario: source tree launch\n",
+        "  When I select the source-built runtime\n",
+        "  And the isolated mvm home is prepared for live launches\n",
+    );
+    assert!(
+        scenario_prepares_home_before_command(
+            late_preparation,
+            "source tree launch",
+            "When I select the source-built runtime",
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn scenario_steps_require_an_exact_header_and_stop_at_scenario_outline() {
+    let feature = concat!(
+        "Scenario: source tree launch\n",
+        "  When I select the source-built runtime\n",
+        "Scenario Outline: source tree launch with examples\n",
+        "  And the isolated mvm home is prepared for live launches\n",
+    );
+
+    assert_eq!(
+        scenario_steps(feature, "source tree launch").unwrap(),
+        ["When I select the source-built runtime"]
+    );
+    assert!(scenario_steps(feature, "source tree").is_err());
 }
 
 #[test]
