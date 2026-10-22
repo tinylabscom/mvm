@@ -490,7 +490,7 @@ impl BundleContents {
             sha256,
             size_bytes,
             BundlePayload::File(PathBuf::from(path)),
-        );
+        )?;
         Ok(())
     }
 
@@ -501,7 +501,7 @@ impl BundleContents {
             .admit(name, size_bytes)
             .with_context(|| format!("{name} cannot be bundled"))?;
         let sha256 = sha256_hex(&bytes);
-        self.declare(name, role, sha256, size_bytes, BundlePayload::Bytes(bytes));
+        self.declare(name, role, sha256, size_bytes, BundlePayload::Bytes(bytes))?;
         Ok(())
     }
 
@@ -512,8 +512,15 @@ impl BundleContents {
         sha256: String,
         size_bytes: u64,
         payload: BundlePayload,
-    ) {
+    ) -> Result<()> {
         let path = format!("{ARTIFACTS_DIR}/{name}");
+        anyhow::ensure!(
+            !self
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.name == name || artifact.path == path),
+            "duplicate bundle artifact name or path: {name}"
+        );
         self.artifacts.push(BundleArtifact {
             name: name.to_string(),
             role,
@@ -522,9 +529,12 @@ impl BundleContents {
             size_bytes,
         });
         self.payload.push((path, payload));
+        Ok(())
     }
 
     /// Carry the dm-verity sidecar and return the binding the manifest records.
+    /// Also sign its raw root hash as `Other`: 64 lowercase ASCII hex bytes
+    /// followed by one LF. Consumers must not synthesize this member.
     ///
     /// A sidecar without a root hash, or the reverse, is a misbuild. It is
     /// refused rather than exported unsealed: dropping the half that is there
@@ -536,10 +546,16 @@ impl BundleContents {
     ) -> Result<Option<VerityInfo>> {
         match (sidecar, roothash) {
             (Some(sidecar), Some(roothash)) => {
+                let hash = mvm_core::packs::Sha256Hex::new(roothash)?;
                 self.push(
                     VERITY_NAME,
                     ArtifactRole::VerityHashSidecar,
                     sidecar.to_vec(),
+                )?;
+                self.push(
+                    mvm_core::registry_pack_boot::APPLICATION_ROOT_HASH_MEMBER_NAME,
+                    ArtifactRole::Other,
+                    format!("{}\n", hash.as_str()).into_bytes(),
                 )?;
                 Ok(Some(VerityInfo {
                     roothash: roothash.to_string(),

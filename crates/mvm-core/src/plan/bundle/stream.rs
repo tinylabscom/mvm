@@ -291,6 +291,79 @@ pub struct VerifiedBundleFile {
 }
 
 impl VerifiedBundleFile {
+    /// Internal bounded selection over an independently positioned owned file.
+    /// The application facade supplies only its identity-safe retained snapshot.
+    pub(crate) fn read_small_verified_member(
+        &self,
+        mut archive: File,
+        name: &str,
+        maximum: u64,
+    ) -> Result<Vec<u8>, BundleVerifyError> {
+        use std::io::{Seek, SeekFrom};
+        let invalid = |reason: &str| BundleVerifyError::ManifestParse(reason.to_owned());
+        let mut matches = self
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|member| member.name == name);
+        let member = matches
+            .next()
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })?;
+        if matches.next().is_some()
+            || self
+                .manifest
+                .artifacts
+                .iter()
+                .filter(|other| other.path == member.path)
+                .count()
+                != 1
+        {
+            return Err(invalid("selected signed member is ambiguous"));
+        }
+        if member.size_bytes > maximum || member.size_bytes > MAX_IMAGE_SET_MANIFEST_BYTES {
+            return Err(invalid("selected signed member exceeds its capture bound"));
+        }
+        let metadata = archive
+            .metadata()
+            .map_err(|error| invalid(&format!("snapshot metadata: {error}")))?;
+        if !metadata.is_file() || metadata.len() > super::MAX_BUNDLE_TOTAL_BYTES + 64 * 1024 * 1024
+        {
+            return Err(invalid("snapshot is not a bounded regular archive"));
+        }
+        archive
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
+        let mut digest = HashingWriter::new(io::sink());
+        io::copy(
+            &mut Read::by_ref(&mut archive).take(metadata.len() + 1),
+            &mut digest,
+        )
+        .map_err(|error| invalid(&format!("snapshot hash: {error}")))?;
+        let (size, hash) = digest.finish();
+        if size != metadata.len() || hash != self.bundle_sha256 {
+            return Err(invalid(
+                "retained snapshot differs from its original archive pin",
+            ));
+        }
+        archive
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| invalid(&format!("snapshot rewind: {error}")))?;
+        let mut captured = stream_artifacts(archive, &self.manifest, |artifact| {
+            if artifact.path == member.path {
+                Destination::Capture
+            } else {
+                Destination::Discard
+            }
+        })?;
+        captured
+            .remove(&member.path)
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: name.to_owned(),
+            })
+    }
+
     /// The original archive, signature and publisher identity for independent
     /// plan admission. This is a pin, not permission to skip re-verification.
     pub fn plan_artifact(&self) -> super::PlanArtifact {
