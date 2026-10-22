@@ -14,10 +14,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail};
+#[cfg(test)]
+use mvm_agentd::vsock::GuestResponse;
 use mvm_agentd::vsock::{
-    CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
-    WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, send_request_stream,
+    CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, WORKLOAD_EXIT_PORT, connect_to_port,
+    connect_to_port_once,
 };
 use mvm_core::config::vm_state_dir;
 use mvm_core::launch_trace::LaunchTraceRecorder;
@@ -44,9 +46,13 @@ use mvm_vmm::host::boot_config::{
 };
 
 mod kernel;
+mod stop;
 #[cfg(all(test, unix))]
 use kernel::fc_descriptor_recipe;
 use kernel::resolve_fc_kernel_path;
+use stop::{bind_process_to_socket, prepare_guest_filesystems_for_stop};
+#[cfg(test)]
+use stop::{require_guest_filesystem_flush, stop_after_guest_flush, stop_firecracker_guest};
 
 /// Host→guest dial timeout (seconds) for `vsock_connect`. The underlying
 /// `connect_to_port` retries the CONNECT handshake internally within this bound.
@@ -1343,24 +1349,6 @@ impl VmmDriver for FcDriver {
     }
 }
 
-/// Observe `pid` and keep the identity only if that process serves this VM's
-/// API socket. A pid file naming another VM's Firecracker, or a process that
-/// is gone or not Firecracker, yields no identity or an error, never a binding.
-fn bind_process_to_socket(
-    vm: &str,
-    pid: u32,
-    serves_socket: impl FnOnce(u32) -> Result<bool>,
-    capture: impl FnOnce(&str, u32) -> std::io::Result<mvm_vmm::host::process_identity::ProcessIdentity>,
-) -> Result<Option<mvm_vmm::host::process_identity::ProcessIdentity>> {
-    let identity =
-        capture(vm, pid).with_context(|| format!("observe Firecracker process {pid} of '{vm}'"))?;
-    ensure!(
-        serves_socket(pid)?,
-        "process {pid} does not serve the API socket of '{vm}'; refusing to bind its identity"
-    );
-    Ok(Some(identity))
-}
-
 /// A live Firecracker VM: the detached `firecracker` daemon tracked by its PID
 /// file, with the workload's exit code persisted under its state dir and the
 /// vsock mux UDS for host→guest dials.
@@ -1378,77 +1366,6 @@ struct FcRunningVm {
     /// for a guest booted without an agent port (a builder or Stage 0 guest),
     /// which has no agent to ask and flushes its own disks before halting.
     flush_via_agent: bool,
-}
-
-fn require_guest_filesystem_flush(response: GuestResponse) -> Result<()> {
-    match response {
-        GuestResponse::SleepPrepAck { success: true, .. } => Ok(()),
-        GuestResponse::SleepPrepAck {
-            success: false,
-            detail,
-        } => bail!(
-            "guest refused the stop-time filesystem flush: {}",
-            detail.unwrap_or_else(|| "no detail supplied".to_string())
-        ),
-        other => bail!("guest returned an unexpected stop-time flush response: {other:?}"),
-    }
-}
-
-fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
-    let mut stream = connect_to_port(vsock_uds, GUEST_AGENT_PORT, GUEST_STOP_DRAIN_TIMEOUT_SECS)
-        .with_context(|| format!("connect to guest agent for filesystem flush via {vsock_uds}"))?;
-    let response = send_request_stream(
-        &mut stream,
-        &GuestRequest::SleepPrep {
-            drain_timeout_secs: GUEST_STOP_DRAIN_TIMEOUT_SECS,
-        },
-    )
-    .context("request guest filesystem flush before Firecracker stop")?;
-    require_guest_filesystem_flush(response)
-}
-
-/// Two spans, emitted at debug, splitting teardown into the only two things it
-/// does. `stop_transient` is one opaque number to the launch sample, and the
-/// guest flush and the kill-and-wait have unrelated costs and unrelated fixes —
-/// a vsock round-trip the guest controls, versus a signal plus a host-side poll
-/// loop. Without the split, a slow teardown cannot be attributed to either.
-#[cfg(test)]
-fn stop_after_guest_flush(
-    prepare: impl FnOnce() -> Result<()>,
-    terminate: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let flush_started = Instant::now();
-    let prepared = prepare();
-    tracing::debug!(
-        ms = flush_started.elapsed().as_secs_f64() * 1000.0,
-        ok = prepared.is_ok(),
-        "fc stop: guest filesystem flush"
-    );
-    prepared?;
-
-    let terminate_started = Instant::now();
-    let terminated = terminate();
-    tracing::debug!(
-        ms = terminate_started.elapsed().as_secs_f64() * 1000.0,
-        "fc stop: signal + exit wait"
-    );
-    terminated
-}
-
-/// Stop a guest, flushing through its agent only when it has one. Requiring the
-/// flush of an agentless guest would make it unkillable: the connect fails and
-/// the error returns before the process is ever signalled.
-#[cfg(test)]
-fn stop_firecracker_guest(
-    flush_via_agent: bool,
-    prepare: impl FnOnce() -> Result<()>,
-    terminate: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    if flush_via_agent {
-        stop_after_guest_flush(prepare, terminate)
-    } else {
-        terminate()
-    }
 }
 
 impl RunningVm for FcRunningVm {
@@ -1561,35 +1478,6 @@ impl RunningVm for FcRunningVm {
 
 #[cfg(test)]
 mod tests {
-    fn observed(
-        vm: &str,
-        pid: u32,
-    ) -> std::io::Result<mvm_vmm::host::process_identity::ProcessIdentity> {
-        Ok(mvm_vmm::host::process_identity::ProcessIdentity {
-            vm_id: vm.into(),
-            pid,
-            start_ticks: 9,
-            boot_id: "boot".into(),
-        })
-    }
-
-    #[test]
-    fn a_pid_serving_this_sockets_vm_is_bound() {
-        let bound = bind_process_to_socket("vm-a", 7, |_| Ok(true), observed).unwrap();
-        assert_eq!(bound.unwrap().pid, 7);
-    }
-
-    #[test]
-    fn a_pid_naming_another_vms_firecracker_is_refused() {
-        let error = bind_process_to_socket("vm-a", 7, |_| Ok(false), observed).unwrap_err();
-        assert!(format!("{error:#}").contains("does not serve the API socket"));
-        // An unanswerable identity question is an error too, never a binding.
-        assert!(bind_process_to_socket("vm-a", 7, |_| bail!("hidden"), observed).is_err());
-        // A process that cannot be observed is never bound.
-        let gone = |_: &str, _| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
-        assert!(bind_process_to_socket("vm-a", 7, |_| Ok(true), gone).is_err());
-    }
-
     use super::*;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_vmm::driver::spec::{ConsoleCapture, VirtioFsShare};
