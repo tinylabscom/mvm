@@ -25,7 +25,8 @@ env:
 jobs:
   bdd:
     name: BDD conformance
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
@@ -102,7 +103,8 @@ jobs:
   ps11-live:
     name: BDD live PS-11 frozen volume (Linux, Firecracker)
     if: ${{ inputs.run_ps11_live }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       FC_VERSION: v1.17.0

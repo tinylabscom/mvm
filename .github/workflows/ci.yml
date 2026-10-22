@@ -740,7 +740,8 @@ jobs:
     name: Lint feature coverage
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1261,7 +1262,8 @@ jobs:
     # The self-hosted box builds the suite itself against its warm target
     # directory; only the hosted path needs an archive.
     if: needs.scope.outputs.code == 'true' && needs.runners.outputs.workspace != 'hetzner'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1321,7 +1323,8 @@ jobs:
     name: Test workspace (doctests + feature suites)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1484,7 +1487,8 @@ jobs:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1584,7 +1588,8 @@ jobs:
     name: Test Linux and conformance
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
@@ -1686,7 +1691,8 @@ jobs:
     name: Test eBPF telemetry load/attach
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
@@ -1767,7 +1773,8 @@ jobs:
     if: >-
       needs.scope.outputs.code == 'true'
       && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
       # `IMAGE_TAG` is resolved from images.lock by a step below, not written
@@ -1974,7 +1981,8 @@ jobs:
     # `boot-latency` instead.
     needs: [scope]
     if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       # Must track `crates/mvm-core/src/config.rs::FC_VERSION_DEFAULT`.
@@ -2152,7 +2160,8 @@ jobs:
     # queue. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
     if: needs.scope.outputs.nix == 'true' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 

@@ -960,7 +960,7 @@ mod tests {
             "--partition \"hash:${SHARD}/${SHARD_COUNT}\"",
             "SHARD_COUNT: ${{ inputs.shard_count || '2' }}",
             "\"$SHARD\" -le \"$SHARD_COUNT\"",
-            "|| 'ubuntu-latest' }}",
+            "|| 'ubuntu-24.04' }}",
             "name: workspace-tests\n",
             "cargo nextest run -p xtask --features man",
             "cargo nextest run --workspace --all-targets --partition \"hash:${SHARD}/${SHARD_COUNT}\"",
