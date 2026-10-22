@@ -2,6 +2,37 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.24.1-rc.1] — 2026-10-22
+
+### Added
+- **core**: Require independent current feeds for applications
+- **core**: Retain current-trust application archive custody
+- **bundle**: Firecracker canonical kernel custody; open the canonical-bundle launch gate
+- **core**: Bind application boot inputs to original signed members
+
+### Changed
+- **nix**: Bump the libkrunfw kernel to Linux 6.12.114
+
+### Documentation
+- **specs**: Record the green pack signing smoke run for #4590
+- **specs**: Design mvmctl build as the front door to a .mvmpkg
+- **specs**: Design the libkrun tier in the release archive and backend selection at install
+- **specs**: Record the green scheduled Security run as lane evidence
+- Explain PHP2Shell containment boundary
+- **specs**: Record the dispatched claim-witness freshness run as watcher evidence
+
+### Fixed
+- **hvf**: Reap a stopped standby and remove its state
+- **hvf**: Start persistent machines on the default macOS backend
+- **hvf**: List a machine that has a pid file but no console log
+- **ci**: Preserve PTY output and registry lookup errors
+- **ci**: Fetch the runtime candidate over the REST API when gh is absent
+- **builder-guest**: Do not drop stderr written just before the child exits
+- **hvf**: Report a repeated machine stop as already stopped
+- **build**: Export MVM_WORKSPACE_PATH only when /work is the mvm workspace
+- **vmm**: Count a macOS zombie as not alive
+- **conformance**: Prepare all source-tree live homes
+
 ## [Unreleased]
 
 ### Fixed
