@@ -121,16 +121,24 @@ const LIVE_HOME_PREPARATION: &str = "And the isolated mvm home is prepared for l
 fn scenario_steps<'a>(feature: &'a str, name: &str) -> Result<Vec<&'a str>, String> {
     let mut found = false;
     let mut steps = Vec::new();
+    let mut doc_string_delimiter = None;
 
     for raw_line in feature.lines() {
         let line = raw_line.trim();
+        if let Some(delimiter) = doc_string_delimiter {
+            if line.starts_with(delimiter) {
+                doc_string_delimiter = None;
+            }
+            continue;
+        }
+        if let Some(delimiter) = gherkin_doc_string_delimiter(line) {
+            doc_string_delimiter = Some(delimiter);
+            continue;
+        }
         if line.starts_with('#') {
             continue;
         }
-        if let Some(scenario_name) = line
-            .strip_prefix("Scenario: ")
-            .or_else(|| line.strip_prefix("Scenario Outline: "))
-        {
+        if let Some(scenario_name) = scenario_name(line) {
             if found {
                 break;
             }
@@ -145,6 +153,18 @@ fn scenario_steps<'a>(feature: &'a str, name: &str) -> Result<Vec<&'a str>, Stri
     found
         .then_some(steps)
         .ok_or_else(|| format!("feature contains scenario {name:?}"))
+}
+
+fn gherkin_doc_string_delimiter(line: &str) -> Option<&'static str> {
+    ["\"\"\"", "```"]
+        .into_iter()
+        .find(|delimiter| line.starts_with(delimiter))
+}
+
+fn scenario_name(line: &str) -> Option<&str> {
+    line.strip_prefix("Scenario:")
+        .or_else(|| line.strip_prefix("Scenario Outline:"))
+        .map(str::trim)
 }
 
 fn is_gherkin_step(line: &str) -> bool {
@@ -237,9 +257,9 @@ fn source_tree_live_scenarios_reject_commented_or_late_home_preparation() {
 #[test]
 fn scenario_steps_require_an_exact_header_and_stop_at_scenario_outline() {
     let feature = concat!(
-        "Scenario: source tree launch\n",
+        "Scenario:  source tree launch  \n",
         "  When I select the source-built runtime\n",
-        "Scenario Outline: source tree launch with examples\n",
+        "Scenario Outline:source tree launch with examples\n",
         "  And the isolated mvm home is prepared for live launches\n",
     );
 
@@ -248,6 +268,54 @@ fn scenario_steps_require_an_exact_header_and_stop_at_scenario_outline() {
         ["When I select the source-built runtime"]
     );
     assert!(scenario_steps(feature, "source tree").is_err());
+}
+
+#[test]
+fn scenario_steps_stop_at_unnamed_scenario_boundaries() {
+    let feature = concat!(
+        "Scenario Outline: source tree launch\n",
+        "  When I select the source-built runtime\n",
+        "Scenario:\n",
+        "  And the isolated mvm home is prepared for live launches\n",
+    );
+
+    assert_eq!(
+        scenario_steps(feature, "source tree launch").unwrap(),
+        ["When I select the source-built runtime"]
+    );
+    assert_eq!(
+        scenario_steps(feature, "").unwrap(),
+        [LIVE_HOME_PREPARATION]
+    );
+}
+
+#[test]
+fn scenario_steps_ignore_structure_inside_doc_strings() {
+    for delimiter in ["\"\"\"", "```"] {
+        let feature = format!(
+            "Scenario: source tree launch\n\
+             {delimiter}\n\
+             Scenario: misleading boundary\n\
+             And the isolated mvm home is prepared for live launches\n\
+             {delimiter}\n\
+             When I select the source-built runtime\n"
+        );
+
+        assert_eq!(
+            scenario_steps(&feature, "source tree launch").unwrap(),
+            ["When I select the source-built runtime"],
+            "{delimiter} doc string must not supply a step or a boundary"
+        );
+        assert!(
+            scenario_prepares_home_before_command(
+                &feature,
+                "source tree launch",
+                "When I select the source-built runtime",
+            )
+            .is_err(),
+            "{delimiter} doc string must not supply preparation or a boundary"
+        );
+    }
 }
 
 #[test]
