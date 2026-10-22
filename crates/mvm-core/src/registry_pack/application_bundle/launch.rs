@@ -10,8 +10,14 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use super::{ApplicationBundleError, ApplicationInstallStore, verify_application_bundle};
-use crate::plan::bundle::{BundleRegistry, TrustStore};
+use super::{
+    ApplicationBundleError, ApplicationInstallStore, VerifiedApplicationBundle,
+    verify_application_bundle,
+};
+use crate::plan::bundle::{
+    BundleManifest, BundleRegistry, BundleVerifyError, MANIFEST_FILENAME, SIGNATURE_FILENAME,
+    TrustStore,
+};
 use crate::registry_pack::{
     AuthenticatedRegistryManifest, PackReference, REGISTRY_MANIFEST_FILE_NAME,
     REGISTRY_SIGNATURE_FILE_NAME, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
@@ -52,7 +58,11 @@ pub enum ApplicationLaunchError {
     Io(#[from] std::io::Error),
 }
 
-/// An installed application whose descriptor and bundle were just re-verified.
+/// Metadata from a just-verified installed application, not retained custody.
+///
+/// Runtime preparation must retain the value returned by
+/// [`resolve_installed_application_bundle`], not reconstruct authority from
+/// these public fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedApplication {
     pub reference: PackReference,
@@ -61,7 +71,8 @@ pub struct ResolvedApplication {
 }
 
 /// The kind of the descriptor cached for `reference`'s pin, if one is cached.
-/// Nothing is authenticated; use [`resolve_installed_application`] to launch.
+/// Nothing is authenticated; use [`resolve_installed_application_bundle`]
+/// before preparing a runtime.
 fn cached_kind_is_application(
     reference: &PackReference,
     store: &ApplicationInstallStore,
@@ -108,18 +119,38 @@ fn pinned<'a>(
         .find(|pin| pin.reference().coordinate_string() == reference.coordinate_string())
 }
 
-/// Resolve against the current publisher policy and real signature verifier.
+/// Resolve metadata against the current publisher policy and real verifier.
+///
+/// This compatibility interface does not retain the verified archive snapshot.
 pub fn resolve_installed_application(
     reference: &PackReference,
     store: &ApplicationInstallStore,
     publisher_policy_path: &Path,
     trust: &dyn TrustStore,
 ) -> Result<ResolvedApplication, ApplicationLaunchError> {
+    let held =
+        resolve_installed_application_bundle(reference, store, publisher_policy_path, trust)?;
+    Ok(resolution_metadata(&held))
+}
+
+/// Reauthenticate an installed application and retain its original evidence.
+///
+/// This requires the current pin, publisher policy, independent revocation feed
+/// and bundle-author trust in the same call. The returned opaque value owns
+/// the verified descriptor and private archive snapshot, not an execution
+/// grant. Canonical preparation, admission and lifecycle custody remain required.
+/// No download, installation, key enrollment or pin advancement occurs.
+pub fn resolve_installed_application_bundle(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+    publisher_policy_path: &Path,
+    trust: &dyn TrustStore,
+) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
     let policy = crate::registry_pack_store::load_publisher_policy_or_official_default(
         publisher_policy_path,
     )?
     .policy;
-    resolve_with(
+    resolve_bundle_with(
         reference,
         store,
         &policy,
@@ -128,6 +159,7 @@ pub fn resolve_installed_application(
     )
 }
 
+#[cfg(test)]
 pub(super) fn resolve_with(
     reference: &PackReference,
     store: &ApplicationInstallStore,
@@ -135,7 +167,18 @@ pub(super) fn resolve_with(
     trust: &dyn TrustStore,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<ResolvedApplication, ApplicationLaunchError> {
-    resolve_with_checks(
+    let held = resolve_bundle_with(reference, store, policy, trust, check_signature)?;
+    Ok(resolution_metadata(&held))
+}
+
+pub(super) fn resolve_bundle_with(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+    policy: &RegistryPackPublisherPolicy,
+    trust: &dyn TrustStore,
+    check_signature: RegistryPackSignatureChecker,
+) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
+    resolve_bundle_with_checks(
         reference,
         store,
         policy,
@@ -145,6 +188,7 @@ pub(super) fn resolve_with(
     )
 }
 
+#[cfg(test)]
 pub(super) fn resolve_with_checks(
     reference: &PackReference,
     store: &ApplicationInstallStore,
@@ -156,6 +200,36 @@ pub(super) fn resolve_with_checks(
     )
         -> Result<(), crate::registry_pack_store::RegistryPackStoreError>,
 ) -> Result<ResolvedApplication, ApplicationLaunchError> {
+    let held = resolve_bundle_with_checks(
+        reference,
+        store,
+        policy,
+        trust,
+        check_signature,
+        check_revocations,
+    )?;
+    Ok(resolution_metadata(&held))
+}
+
+fn resolution_metadata(held: &VerifiedApplicationBundle) -> ResolvedApplication {
+    ResolvedApplication {
+        reference: held.application().reference().clone(),
+        descriptor_sha256: held.application().manifest_sha256().as_str().to_string(),
+        bundle_sha256: held.bundle().bundle_sha256.clone(),
+    }
+}
+
+pub(super) fn resolve_bundle_with_checks(
+    reference: &PackReference,
+    store: &ApplicationInstallStore,
+    policy: &RegistryPackPublisherPolicy,
+    trust: &dyn TrustStore,
+    check_signature: RegistryPackSignatureChecker,
+    check_revocations: impl FnOnce(
+        &crate::registry_pack::VerifiedRegistryApplication,
+    )
+        -> Result<(), crate::registry_pack_store::RegistryPackStoreError>,
+) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
     let lock = load_pack_lockfile(&store.lock_path)?;
     let not_installed = || ApplicationLaunchError::NotInstalled {
         reference: reference.to_string(),
@@ -198,16 +272,49 @@ pub(super) fn resolve_with_checks(
             .as_str(),
     );
     let bundle = verify_application_bundle(&application, &archive, trust)?;
-    let bundle_sha256 = bundle.bundle().bundle_sha256.clone();
-    if registry.find(&bundle_sha256).ok().flatten().is_none() {
-        return Err(ApplicationLaunchError::BundleMissing {
-            reference: installed.to_string(),
-            bundle_sha256,
-        });
+    require_installed_metadata(&registry, &bundle)?;
+    Ok(bundle)
+}
+
+fn require_installed_metadata(
+    registry: &BundleRegistry,
+    bundle: &VerifiedApplicationBundle,
+) -> Result<(), ApplicationLaunchError> {
+    let bundle_sha256 = &bundle.bundle().bundle_sha256;
+    let root = registry.install_dir(bundle_sha256);
+    let mismatch = || {
+        ApplicationLaunchError::Bundle(ApplicationBundleError::Verification(
+            BundleVerifyError::ManifestParse(
+                "installed application metadata differs from its verified archive".into(),
+            ),
+        ))
+    };
+    let metadata = match std::fs::symlink_metadata(&root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApplicationLaunchError::BundleMissing {
+                reference: bundle.application().reference().to_string(),
+                bundle_sha256: bundle_sha256.clone(),
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_dir() {
+        return Err(mismatch());
     }
-    Ok(ResolvedApplication {
-        reference: application.reference().clone(),
-        descriptor_sha256: application.manifest_sha256().as_str().to_string(),
-        bundle_sha256,
-    })
+    let manifest = super::super::local_input::read_metadata(&root.join(MANIFEST_FILENAME))?;
+    let installed: BundleManifest = serde_json::from_slice(&manifest).map_err(|_| mismatch())?;
+    if installed != bundle.bundle().manifest {
+        return Err(mismatch());
+    }
+    let signature = super::super::local_input::read_metadata(&root.join(SIGNATURE_FILENAME))?;
+    let expected = bundle
+        .bundle()
+        .plan_artifact()
+        .signature_bytes()
+        .ok_or_else(mismatch)?;
+    if signature.as_slice() != expected.as_slice() {
+        return Err(mismatch());
+    }
+    Ok(())
 }

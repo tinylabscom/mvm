@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use crate::plan::bundle::BundleRegistry;
 use crate::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, FsTrustStore,
     key_id_from_pubkey, sha256_hex, write_bundle,
@@ -677,6 +679,347 @@ fn resolve_with_fixture(
         check_signature,
         application_test_feed::check,
     )
+}
+
+#[cfg(unix)]
+fn held_fixture_signature(
+    payload: &[u8],
+    signature: &[u8],
+    trust: &crate::packs::KeylessTrust,
+) -> Result<
+    crate::crypto::image_verify::VerifiedSigner,
+    crate::registry_pack::RegistryPackVerificationError,
+> {
+    // Private descriptor unit seam, not genuine Sigstore evidence.
+    if signature == b"synthetic publisher signature" {
+        accept_signature(payload, signature, trust)
+    } else {
+        crate::registry_pack::tests::reject_signature(payload, signature, trust)
+    }
+}
+
+#[cfg(unix)]
+fn resolve_held(
+    installed: &Installed,
+    reference: &str,
+) -> Result<VerifiedApplicationBundle, ApplicationLaunchError> {
+    launch::resolve_bundle_with_checks(
+        &reference.parse().unwrap(),
+        &installed.store,
+        &publisher_policy(),
+        &installed.trust,
+        held_fixture_signature,
+        application_test_feed::check,
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_keeps_original_descriptor_and_snapshot_after_locator_changes() {
+    let installed = installed();
+    let archive =
+        BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
+    let original = std::fs::read(&archive).unwrap();
+    let pin_before = std::fs::read(&installed.store.lock_path).unwrap();
+    let held = resolve_held(&installed, "runtime/python").unwrap();
+    let snapshot = held.archive_path().to_path_buf();
+    assert_ne!(snapshot, archive);
+    let descriptor = held.application().manifest_bytes().to_vec();
+    let signature = held.application().signature_bundle().to_vec();
+    assert_eq!(
+        resolve(&installed, "runtime/python").unwrap().bundle_sha256,
+        installed.bundle_sha256
+    );
+    assert_eq!(
+        std::fs::read(&installed.store.lock_path).unwrap(),
+        pin_before
+    );
+    let cache = installed
+        .store
+        .descriptor_cache_root
+        .join(&installed.descriptor_sha256);
+    std::fs::write(cache.join("manifest.json"), b"replaced descriptor").unwrap();
+    std::fs::write(cache.join("manifest.sigstore.json"), b"replaced proof").unwrap();
+    std::fs::write(&archive, b"replaced archive").unwrap();
+    assert_eq!(held.application().manifest_bytes(), descriptor);
+    assert_eq!(held.application().signature_bundle(), signature);
+    held.reverify(&installed.trust).unwrap();
+    assert_eq!(std::fs::read(&snapshot).unwrap(), original);
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    drop(held);
+    assert!(
+        !snapshot.exists(),
+        "final ownership releases the private snapshot"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_arc_and_unwind_retain_the_same_snapshot() {
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<VerifiedApplicationBundle>();
+    let installed = installed();
+    let first = std::sync::Arc::new(resolve_held(&installed, "runtime/python").unwrap());
+    let snapshot = first.archive_path().to_path_buf();
+    let second = std::sync::Arc::clone(&first);
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+    let weak = std::sync::Arc::downgrade(&first);
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _preparation_owner = std::sync::Arc::clone(&first);
+        panic!("synthetic preparation unwind, no native effects");
+    }));
+    assert!(unwind.is_err());
+    drop(first);
+    assert!(snapshot.exists());
+    second.reverify(&installed.trust).unwrap();
+    drop(second);
+    assert!(weak.upgrade().is_none());
+    assert!(!snapshot.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_production_check_requires_current_independent_feed() {
+    let installed = installed();
+    let reference = "runtime/python".parse().unwrap();
+    let path = crate::config::registry_pack_revocation_trust_path();
+    std::fs::remove_file(&path).unwrap();
+    let archive =
+        BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
+    std::fs::write(
+        archive,
+        b"must not reach archive verification without a feed",
+    )
+    .unwrap();
+    let reopen = || {
+        launch::resolve_bundle_with(
+            &reference,
+            &installed.store,
+            &publisher_policy(),
+            &installed.trust,
+            held_fixture_signature,
+        )
+    };
+    assert!(matches!(
+        reopen(),
+        Err(ApplicationLaunchError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::MissingRevocationTrust { .. }
+        ))
+    ));
+    application_test_feed::configure();
+    assert!(matches!(
+        reopen(),
+        Err(ApplicationLaunchError::Store(
+            crate::registry_pack_store::RegistryPackStoreError::RevocationStore(
+                crate::registry_pack_revocation_store::RegistryPackRevocationStoreError::Missing
+            )
+        ))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_rechecks_pin_version_publisher_signature_and_revocation() {
+    let installed = installed();
+    assert!(matches!(
+        resolve_held(&installed, "runtime/absent"),
+        Err(ApplicationLaunchError::NotInstalled { .. })
+    ));
+    assert!(matches!(
+        resolve_held(&installed, "runtime/python@9.9.9"),
+        Err(ApplicationLaunchError::VersionNotInstalled { .. })
+    ));
+    assert!(matches!(
+        launch::resolve_bundle_with_checks(
+            &"runtime/python".parse().unwrap(),
+            &installed.store,
+            &crate::registry_pack::RegistryPackPublisherPolicy::new(Vec::new()).unwrap(),
+            &installed.trust,
+            held_fixture_signature,
+            application_test_feed::check,
+        ),
+        Err(ApplicationLaunchError::Manifest(_))
+    ));
+    let proof = installed
+        .store
+        .descriptor_cache_root
+        .join(&installed.descriptor_sha256)
+        .join("manifest.sigstore.json");
+    let original = std::fs::read(&proof).unwrap();
+    std::fs::write(&proof, b"substituted proof").unwrap();
+    assert!(matches!(
+        resolve_held(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Manifest(_))
+    ));
+    std::fs::write(&proof, original).unwrap();
+    resolve_held(&installed, "runtime/python").unwrap();
+    std::fs::write(
+        crate::config::registry_pack_revocation_trust_path(),
+        b"not a trust policy",
+    )
+    .unwrap();
+    assert!(matches!(
+        resolve_held(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Store(_))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_refuses_installed_metadata_tamper_and_unbounded_or_special_inputs() {
+    let installed = installed();
+    let root =
+        BundleRegistry::new(&installed.store.bundle_root).install_dir(&installed.bundle_sha256);
+    let manifest = root.join("manifest.json");
+    let signature = root.join("manifest.sig");
+    let original_manifest = std::fs::read(&manifest).unwrap();
+    let original_signature = std::fs::read(&signature).unwrap();
+    let mut changed: serde_json::Value = serde_json::from_slice(&original_manifest).unwrap();
+    changed["publisher"] = json!("substituted publisher");
+    std::fs::write(&manifest, serde_json::to_vec(&changed).unwrap()).unwrap();
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    std::fs::write(&manifest, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::create_dir(&manifest).unwrap();
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    std::fs::remove_dir(&manifest).unwrap();
+    std::os::unix::fs::symlink(&signature, &manifest).unwrap();
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    std::fs::remove_file(&manifest).unwrap();
+    std::fs::write(&manifest, original_manifest).unwrap();
+    std::fs::write(&signature, [0u8; 64]).unwrap();
+    assert!(resolve_held(&installed, "runtime/python").is_err());
+    std::fs::write(signature, original_signature).unwrap();
+    resolve_held(&installed, "runtime/python").unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(matches!(
+        resolve_held(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::BundleMissing { .. })
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_rechecks_archive_and_independent_key_without_enrollment() {
+    let installed = installed();
+    let archive =
+        BundleRegistry::new(&installed.store.bundle_root).archive_path(&installed.bundle_sha256);
+    let original = std::fs::read(&archive).unwrap();
+    let mut altered = original.clone();
+    altered[0] ^= 1;
+    std::fs::write(&archive, altered).unwrap();
+    assert!(matches!(
+        resolve_held(&installed, "runtime/python"),
+        Err(ApplicationLaunchError::Bundle(
+            ApplicationBundleError::Digest
+        ))
+    ));
+    std::fs::write(archive, original).unwrap();
+    let empty = FsTrustStore::new(installed._directory.path().join("not-enrolled"));
+    assert!(matches!(
+        launch::resolve_bundle_with_checks(
+            &"runtime/python".parse().unwrap(),
+            &installed.store,
+            &publisher_policy(),
+            &empty,
+            held_fixture_signature,
+            application_test_feed::check,
+        ),
+        Err(ApplicationLaunchError::Bundle(
+            ApplicationBundleError::Verification(_)
+        ))
+    ));
+    assert!(!empty.root().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_binds_current_descriptor_size_key_and_architecture() {
+    let installed = installed();
+    let original = std::fs::read(
+        installed
+            .store
+            .descriptor_cache_root
+            .join(&installed.descriptor_sha256)
+            .join("manifest.json"),
+    )
+    .unwrap();
+    for (field, replacement) in [
+        ("archive_size", json!(1)),
+        ("key_id", json!("0".repeat(32))),
+        ("guest_arch", json!("x86_64")),
+    ] {
+        let mut document: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        if field == "guest_arch" {
+            document["application"][field] = replacement;
+        } else {
+            document["application"]["bundle"][field] = replacement;
+        }
+        let bytes = serde_json::to_vec(&document).unwrap();
+        let digest = crate::packs::Sha256Hex::from_bytes(&bytes);
+        let cache = installed.store.descriptor_cache_root.join(digest.as_str());
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("manifest.json"), bytes).unwrap();
+        std::fs::write(
+            cache.join("manifest.sigstore.json"),
+            b"synthetic publisher signature",
+        )
+        .unwrap();
+        let pin =
+            crate::registry_pack::PackPin::new("runtime/python@1.2.3".parse().unwrap(), digest)
+                .unwrap();
+        crate::registry_pack_store::save_pack_lockfile(
+            &installed.store.lock_path,
+            &crate::registry_pack::PackLockfile::new(vec![pin]).unwrap(),
+        )
+        .unwrap();
+        let error = resolve_held(&installed, "runtime/python").unwrap_err();
+        assert!(
+            matches!(
+                (field, error),
+                (
+                    "archive_size",
+                    ApplicationLaunchError::Bundle(ApplicationBundleError::Size)
+                ) | (
+                    "key_id",
+                    ApplicationLaunchError::Bundle(ApplicationBundleError::Key)
+                ) | (
+                    "guest_arch",
+                    ApplicationLaunchError::Bundle(ApplicationBundleError::Architecture)
+                )
+            ),
+            "{field} must refuse at the descriptor/archive boundary"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn held_application_public_entrypoint_has_no_injected_signature_authority() {
+    let installed = installed();
+    let policy = installed._directory.path().join("publisher-policy.toml");
+    crate::registry_pack_store::save_publisher_policy(&policy, &publisher_policy()).unwrap();
+    let reference = "runtime/python".parse().unwrap();
+    resolve_held(&installed, "runtime/python").unwrap();
+    for error in [
+        resolve_installed_application_bundle(
+            &reference,
+            &installed.store,
+            &policy,
+            &installed.trust,
+        )
+        .unwrap_err(),
+        resolve_installed_application(&reference, &installed.store, &policy, &installed.trust)
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            ApplicationLaunchError::Manifest(
+                crate::registry_pack::RegistryPackVerificationError::SignatureInvalid(_)
+            )
+        ));
+    }
 }
 
 #[test]
