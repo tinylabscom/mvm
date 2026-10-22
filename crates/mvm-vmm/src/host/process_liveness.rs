@@ -386,7 +386,7 @@ fn open_identity_pidfd(pid: i32) -> std::io::Result<std::os::fd::OwnedFd> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_proc_starttime(stat: &str) -> std::io::Result<u64> {
+pub(super) fn parse_proc_starttime(stat: &str) -> std::io::Result<u64> {
     // comm can contain spaces and ')' characters. Fields after its final ')'
     // begin at field 3; field 22 is therefore index 19.
     stat.rsplit_once(')')

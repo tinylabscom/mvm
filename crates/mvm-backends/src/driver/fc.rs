@@ -1485,6 +1485,19 @@ impl RunningVm for FcRunningVm {
         terminate_firecracker_pid(&self.id.0, pid, &self.pid_file)
     }
 
+    fn process_identity(&self) -> Result<Option<mvm_vmm::host::process_identity::ProcessIdentity>> {
+        let Some(pid) = self.pid else {
+            return Ok(None);
+        };
+        if !crate::fc::is_firecracker_pid_running(pid)? {
+            return Ok(None);
+        }
+        Ok(Some(
+            mvm_vmm::host::process_identity::ProcessIdentity::capture(&self.id.0, pid)
+                .with_context(|| format!("observe Firecracker process {pid} of '{}'", self.id.0))?,
+        ))
+    }
+
     fn pause(&self) -> Result<()> {
         // Firecracker exposes vCPU pause via the control API; reuse the existing
         // FC control helper (PATCH /vm InstanceState) keyed by the VM name.

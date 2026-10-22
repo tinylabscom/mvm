@@ -28,7 +28,7 @@ impl AdmittedKernel {
             .backend
             .context("canonical kernel requires actual backend at admission")?;
         ensure!(
-            backend == BackendKind::Hvf,
+            mvm_core::canonical_linux::supports_lifetime_custody(backend),
             "this backend has no canonical kernel lifetime release mechanism"
         );
         ensure!(

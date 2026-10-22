@@ -56,12 +56,6 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
             mvm_core::plan::bundle::BundleMember::CanonicalLinuxProof(_)
         )
     });
-    // Keep the public launch gate closed until integrated custody and abort/
-    // confirmed-exit tests have passed and this exact path is reviewed.
-    ensure!(
-        !canonical,
-        "canonical kernel backend custody is pending integrated validation"
-    );
     let kind = BackendKind::from_label(backend).context("unknown bundle boot backend")?;
     if let Some(owner) = &config.canonical_kernel {
         ensure!(
@@ -114,7 +108,7 @@ fn attach_installed_bundle(config: &mut VmStartConfig, backend: &str) -> Result<
         attach_cli_runtime(config, &installed, runtime)?;
         if canonical && config.canonical_kernel.is_none() {
             ensure!(
-                kind == BackendKind::Hvf,
+                mvm_core::canonical_linux::supports_lifetime_custody(kind),
                 "canonical kernel lifetime custody unsupported by this backend"
             );
             let owner = std::sync::Arc::new(super::canonical_linux::prepare_canonical_linux(

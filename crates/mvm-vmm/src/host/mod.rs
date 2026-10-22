@@ -29,6 +29,7 @@ pub mod linux_env;
 pub mod network_endpoint_spawn;
 pub mod observability_target;
 pub mod process_exit;
+pub mod process_identity;
 pub mod process_liveness;
 pub mod process_usage;
 pub mod restore_image;

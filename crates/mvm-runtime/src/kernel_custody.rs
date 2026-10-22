@@ -20,6 +20,10 @@ struct KernelUse {
     inode: u64,
     #[cfg(unix)]
     instance: Option<mvm_core::protocol::hvf_control::HvfInstance>,
+    /// Firecracker's lifetime evidence: the observed process, judged against
+    /// the process table at release. Never set together with `instance`.
+    #[serde(default)]
+    process: Option<mvm_vmm::host::process_identity::ProcessIdentity>,
 }
 
 /// Owns the exact final config subsequently borrowed for endpoint/spec/boot.
@@ -79,7 +83,7 @@ impl KernelBoundLaunch {
             // Other backends retain their existing explicit refusal until
             // they provide equally instance-bound lifetime evidence.
             ensure!(
-                cfg!(unix) && backend == BackendKind::Hvf,
+                mvm_core::canonical_linux::supports_lifetime_custody(backend),
                 "this backend does not support canonical kernel lifetime custody"
             );
             let host = mvm_build::stage0_kernel::current_image_set_protocol_support();
@@ -112,6 +116,7 @@ impl KernelBoundLaunch {
                 inode,
                 #[cfg(unix)]
                 instance: None,
+                process: None,
             };
             mvm_core::util::atomic_io::write_private_new(&record, &serde_json::to_vec(&pending)?)?;
         }
@@ -186,6 +191,12 @@ impl KernelBoundLaunch {
         ensure!(vm.id().0 == self.config.name, "driver returned another VM");
         #[cfg(unix)]
         {
+            if self.backend == BackendKind::Firecracker {
+                let process = vm
+                    .process_identity()?
+                    .context("started VM has no observable process identity; kernel retained")?;
+                return self.observe_process(process);
+            }
             let instance = vm
                 .authenticated_hvf_instance()?
                 .context("started VM has no authenticated lifetime identity; kernel retained")?;
@@ -209,7 +220,8 @@ impl KernelBoundLaunch {
         );
         let mut record = read_record(&self.record)?;
         ensure!(
-            record.instance.as_ref().is_none_or(|held| held == instance),
+            record.process.is_none()
+                && record.instance.as_ref().is_none_or(|held| held == instance),
             "kernel generation is already bound to another native instance"
         );
         ensure!(
@@ -222,6 +234,43 @@ impl KernelBoundLaunch {
             "kernel generation index changed during start"
         );
         record.instance = Some(instance.clone());
+        mvm_core::util::atomic_io::atomic_write_durable(
+            &self.record,
+            &serde_json::to_vec(&record)?,
+        )?;
+        Ok(())
+    }
+}
+
+impl KernelBoundLaunch {
+    #[cfg(unix)]
+    pub(crate) fn observe_process(
+        &self,
+        process: mvm_vmm::host::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        let Some(owner) = &self.config.canonical_kernel else {
+            return Ok(());
+        };
+        ensure!(
+            process.vm_id == self.config.name,
+            "kernel reader identity belongs to another VM"
+        );
+        let mut record = read_record(&self.record)?;
+        ensure!(
+            record.instance.is_none()
+                && record.process.as_ref().is_none_or(|held| held == &process),
+            "kernel generation is already bound to another instance"
+        );
+        ensure!(
+            record.generation
+                == owner
+                    .generation_dir()
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+            "kernel generation index changed during start"
+        );
+        record.process = Some(process);
         mvm_core::util::atomic_io::atomic_write_durable(
             &self.record,
             &serde_json::to_vec(&record)?,
@@ -284,12 +333,59 @@ pub(crate) fn release_after_confirmed_exit(
     release_generation(lifecycle, proof.instance(), || proof.verify_current())
 }
 
-// Resource deletion mechanics only. The sole production caller above supplies
-// the existing opaque exit proof, never a deserialized record or a stop result.
+/// Firecracker's release: the recorded process must be positively gone from
+/// the process table. The stop that preceded this is not evidence; a PID file
+/// absence or a signal acknowledgment never reaches deletion.
+#[cfg(unix)]
+pub(crate) fn release_after_process_exit(lifecycle: &RuntimeLifecycleLease) -> Result<()> {
+    let process = read_record(&lifecycle.canonical_kernel_record())?
+        .process
+        .context("kernel generation is not bound to a process; retained")?;
+    release_process_generation(lifecycle, &process, || {
+        ensure!(
+            process.has_exited()?,
+            "Firecracker process is still running; kernel retained"
+        );
+        Ok(())
+    })
+}
+
+#[cfg(unix)]
+fn release_process_generation(
+    lifecycle: &RuntimeLifecycleLease,
+    exited: &mvm_vmm::host::process_identity::ProcessIdentity,
+    recheck_exit: impl Fn() -> Result<()>,
+) -> Result<()> {
+    release_matching(
+        lifecycle,
+        &exited.vm_id,
+        |record| record.instance.is_none() && record.process.as_ref() == Some(exited),
+        recheck_exit,
+    )
+}
+
+// Resource deletion mechanics only. The sole production callers above supply
+// the existing opaque exit proof or a process-table check, never a
+// deserialized record or a stop result.
 #[cfg(unix)]
 fn release_generation(
     lifecycle: &RuntimeLifecycleLease,
     exited: &mvm_core::protocol::hvf_control::HvfInstance,
+    recheck_exit: impl Fn() -> Result<()>,
+) -> Result<()> {
+    release_matching(
+        lifecycle,
+        &exited.vm_id,
+        |record| record.process.is_none() && record.instance.as_ref() == Some(exited),
+        recheck_exit,
+    )
+}
+
+#[cfg(unix)]
+fn release_matching(
+    lifecycle: &RuntimeLifecycleLease,
+    vm_id: &str,
+    bound_to_exit: impl Fn(&KernelUse) -> bool,
     recheck_exit: impl Fn() -> Result<()>,
 ) -> Result<()> {
     let path = lifecycle.canonical_kernel_record();
@@ -299,9 +395,7 @@ fn release_generation(
     recheck_exit()?;
     let record = read_record(&path)?;
     ensure!(
-        record.version == 1
-            && record.vm == exited.vm_id
-            && record.instance.as_ref() == Some(exited),
+        record.version == 1 && record.vm == vm_id && bound_to_exit(&record),
         "kernel generation is not bound to this confirmed VM exit; retained"
     );
     ensure!(
@@ -435,6 +529,7 @@ mod tests {
             device: 1,
             inode: 2,
             instance: None,
+            process: None,
         };
         let bytes = serde_json::to_vec(&pending).unwrap();
         mvm_core::util::atomic_io::write_private_new(&record, &bytes).unwrap();
@@ -526,6 +621,7 @@ mod tests {
                 device,
                 inode,
                 instance: Some(instance.clone()),
+                process: None,
             };
             let path = lease.canonical_kernel_record();
             let bytes = serde_json::to_vec(&record).unwrap();
@@ -578,6 +674,7 @@ mod tests {
             device,
             inode,
             instance: None,
+            process: None,
         };
         let path = lease.canonical_kernel_record();
         std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
@@ -611,5 +708,102 @@ mod tests {
         assert_eq!(checks.get(), 2);
         assert!(!generation.exists());
         assert!(!path.exists());
+    }
+
+    fn process_record(
+        home: &Path,
+        lease: &RuntimeLifecycleLease,
+        process: Option<mvm_vmm::host::process_identity::ProcessIdentity>,
+    ) -> (PathBuf, PathBuf) {
+        let generation = home.join("canonical-kernel-generations/kernel-fc");
+        mvm_core::config::create_private_dir(&generation).unwrap();
+        std::fs::write(generation.join("selected-kernel"), b"unit payload").unwrap();
+        let (device, inode) = directory_identity(&generation).unwrap();
+        let record = KernelUse {
+            version: 1,
+            vm: "kernel-fc-unit".into(),
+            generation: "kernel-fc".into(),
+            device,
+            inode,
+            instance: None,
+            process,
+        };
+        let path = lease.canonical_kernel_record();
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        (generation, path)
+    }
+
+    fn fc_process(start_ticks: u64) -> mvm_vmm::host::process_identity::ProcessIdentity {
+        mvm_vmm::host::process_identity::ProcessIdentity {
+            vm_id: "kernel-fc-unit".into(),
+            pid: 4242,
+            start_ticks,
+            boot_id: "boot".into(),
+        }
+    }
+
+    #[test]
+    fn firecracker_generation_is_released_only_for_the_recorded_exited_process() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-fc-unit").unwrap();
+        let (generation, path) = process_record(home.path(), &lease, None);
+        // Never bound to a process (aborted before start): nothing to release.
+        assert!(release_process_generation(&lease, &fc_process(1), || Ok(())).is_err());
+        assert!(release_after_process_exit(&lease).is_err());
+        assert!(generation.exists() && path.exists());
+
+        std::fs::remove_file(&path).unwrap();
+        let (generation, path) = process_record(home.path(), &lease, Some(fc_process(1)));
+        // A process that is still running (recheck refuses) keeps everything.
+        let running = || anyhow::bail!("Firecracker process is still running; kernel retained");
+        assert!(release_process_generation(&lease, &fc_process(1), running).is_err());
+        // A different generation of the same pid is not the recorded process.
+        assert!(release_process_generation(&lease, &fc_process(2), || Ok(())).is_err());
+        assert!(generation.exists() && path.exists());
+
+        release_process_generation(&lease, &fc_process(1), || Ok(())).unwrap();
+        assert!(!generation.exists() && !path.exists());
+    }
+
+    #[test]
+    fn a_native_instance_record_cannot_be_released_by_process_exit() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-fc-unit").unwrap();
+        let (generation, path) = process_record(home.path(), &lease, Some(fc_process(1)));
+        let mut record = read_record(&path).unwrap();
+        record.instance = Some(mvm_core::protocol::hvf_control::HvfInstance {
+            vm_id: "kernel-fc-unit".into(),
+            boot_nonce: [1; 32],
+        });
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(release_process_generation(&lease, &fc_process(1), || Ok(())).is_err());
+        assert!(generation.exists() && path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_running_process_retains_the_generation_until_it_is_really_gone() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let lease = RuntimeLifecycleLease::acquire("kernel-fc-unit").unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let identity =
+            mvm_vmm::host::process_identity::ProcessIdentity::capture("kernel-fc-unit", child.id())
+                .unwrap();
+        let (generation, path) = process_record(home.path(), &lease, Some(identity));
+        assert!(release_after_process_exit(&lease).is_err());
+        assert!(generation.exists() && path.exists());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        release_after_process_exit(&lease).unwrap();
+        assert!(!generation.exists() && !path.exists());
     }
 }

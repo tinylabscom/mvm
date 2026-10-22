@@ -235,6 +235,14 @@ impl PreparedCanonicalLinux {
     }
 }
 
+/// Backends that hold the canonical kernel by descriptor at boot and produce
+/// lifetime evidence (an authenticated instance, or a process-table identity)
+/// before the generation may be released. Every other backend is refused.
+pub fn supports_lifetime_custody(backend: BackendKind) -> bool {
+    (cfg!(unix) && backend == BackendKind::Hvf)
+        || (cfg!(target_os = "linux") && backend == BackendKind::Firecracker)
+}
+
 /// Explicitly prepare a pinned bundle's canonical Linux proof offline.
 ///
 /// Unlike `check-artifact`, successful preparation may apply the original
@@ -411,6 +419,17 @@ use crate::image_set::published_root;
 
 #[cfg(all(test, unix, feature = "manifest-verify"))]
 mod tests {
+    #[test]
+    fn lifetime_custody_is_limited_to_backends_with_exit_evidence() {
+        assert!(super::supports_lifetime_custody(BackendKind::Hvf) == cfg!(unix));
+        assert!(
+            super::supports_lifetime_custody(BackendKind::Firecracker) == cfg!(target_os = "linux")
+        );
+        for backend in [BackendKind::Libkrun, BackendKind::Qemu] {
+            assert!(!super::supports_lifetime_custody(backend));
+        }
+    }
+
     use super::*;
     use ed25519_dalek::{SigningKey, VerifyingKey};
     use mvm_core::image_set::{ImageSetManifest, WorkloadImageProfile};

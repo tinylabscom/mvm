@@ -367,6 +367,12 @@ pub trait RunningVm: Send {
     ) -> Result<Option<mvm_core::protocol::hvf_control::HvfInstance>> {
         Ok(None)
     }
+    /// Kernel-observed identity of the host process that owns this VM, for
+    /// backends whose lifetime evidence is the process table. `None` when the
+    /// backend has no such process or is not this kind of backend.
+    fn process_identity(&self) -> Result<Option<crate::host::process_identity::ProcessIdentity>> {
+        Ok(None)
+    }
     fn pause(&self) -> Result<()>;
     fn resume(&self) -> Result<()>;
     fn status(&self) -> Result<VmStatus>;

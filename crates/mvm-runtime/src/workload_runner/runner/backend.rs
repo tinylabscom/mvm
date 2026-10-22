@@ -171,10 +171,13 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         if crate::kernel_custody::has_retained_kernel(&lifecycle)? {
             #[cfg(unix)]
             {
-                let proof = stopped.hvf_exit.as_ref().context(
-                    "kernel generation retained: backend did not provide instance-bound exit evidence"
-                )?;
-                crate::kernel_custody::release_after_confirmed_exit(&lifecycle, proof)?;
+                match stopped.hvf_exit.as_ref() {
+                    Some(proof) => {
+                        crate::kernel_custody::release_after_confirmed_exit(&lifecycle, proof)?
+                    }
+                    None => crate::kernel_custody::release_after_process_exit(&lifecycle)
+                        .context("kernel generation retained: backend did not provide instance-bound exit evidence")?,
+                }
             }
             #[cfg(not(unix))]
             anyhow::bail!("kernel generation retained: lifetime release unsupported");
