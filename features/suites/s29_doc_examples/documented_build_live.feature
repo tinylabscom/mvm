@@ -49,9 +49,10 @@ Feature: The documented flake build runs for real
   # runtime and workload kernel, and network access to the pinned Nix inputs.
   # The ordinary hermetic lane skips this scenario through the @live gate.
   # A successful build includes a zero-exit health boot before signing.
-  @live
+  @live @documented_pack_live
   Scenario: the documented pack build health-boots and signs a frozen workload
     Given a local pack build fixture
+    And the isolated mvm home is prepared for live launches
     When I run mvmctl against the pack fixture with "pack lock pack.json --mvm-revision 543e2dc1b5401d743688ab2da57a43b7d6b463a1"
     Then the command exits with code 0
     When I run mvmctl against the live pack fixture with "pack build pack.json --out build.mvmpkg"

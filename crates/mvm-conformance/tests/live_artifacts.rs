@@ -116,6 +116,60 @@ fn sealing_scenario_registers_its_own_slot_without_replacing_the_flake_witness()
     assert!(sealing.contains("I seal the live manifest build into a bundle"));
 }
 
+fn scenario(feature: &str, name: &str) -> &str {
+    feature
+        .split(&format!("Scenario: {name}"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("feature contains scenario {name:?}"))
+        .split("\n  Scenario:")
+        .next()
+        .expect("scenario ends at the next scenario or feature end")
+}
+
+#[test]
+fn source_tree_live_scenarios_prepare_their_home_before_selecting_tree_runtime() {
+    let bundle_boot =
+        include_str!("../../../features/suites/s13_bundle_boot/verify_and_boot.feature");
+    let documented =
+        include_str!("../../../features/suites/s29_doc_examples/documented_build_live.feature");
+    let oci_bundle =
+        include_str!("../../../features/suites/s13_bundle_boot/oci_bundle_build.feature");
+
+    for (feature, name, command) in [
+        (
+            bundle_boot,
+            "A signed OCI artifact boots as the positional source",
+            "When I seal",
+        ),
+        (
+            documented,
+            "the documented pack build health-boots and signs a frozen workload",
+            "When I run mvmctl against the live pack fixture",
+        ),
+        (
+            oci_bundle,
+            "Build and verify an Alpine OCI package with explicit publisher trust",
+            "When I run mvmctl in the scratch directory",
+        ),
+    ] {
+        let body = scenario(feature, name);
+        let prepared = body
+            .find("the isolated mvm home is prepared for live launches")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name} must explicitly select the source-built runtime prepared in its home"
+                )
+            });
+        let launch = body
+            .find(command)
+            .unwrap_or_else(|| panic!("{name} contains its runtime-consuming command"));
+        assert!(
+            prepared < launch,
+            "{name} must prepare its source-built runtime before the command uses it"
+        );
+    }
+}
+
 #[test]
 fn docker_volume_scenario_witnesses_the_current_selector_refusal() {
     let feature = include_str!("../../../features/suites/s26_volumes/volume_lifecycle.feature");

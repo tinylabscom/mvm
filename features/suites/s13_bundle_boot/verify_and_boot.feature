@@ -72,6 +72,7 @@ Feature: s13_bundle_boot verify-and-boot
   @live @bundle_boot_live
   Scenario: A signed OCI artifact boots as the positional source
     Given an isolated mvm home
+    And the isolated mvm home is prepared for live launches
     And a scratch working directory
     When I seal "docker.io/library/alpine:3.20" into a signed artifact in the live home
     And I boot the signed artifact in the live home with "-- /bin/echo bundle-boot-witness"
