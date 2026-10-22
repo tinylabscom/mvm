@@ -50,10 +50,10 @@ impl ProcessIdentity {
         #[cfg(target_os = "linux")]
         {
             let boot_id = std::fs::read_to_string(BOOT_ID_PATH)?;
-            Ok(self.has_exited_with(
+            self.has_exited_with(
                 boot_id.trim(),
                 std::fs::read_to_string(format!("/proc/{}/stat", self.pid)),
-            )?)
+            )
         }
         #[cfg(not(target_os = "linux"))]
         Err(unsupported())

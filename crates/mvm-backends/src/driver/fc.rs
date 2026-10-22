@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use mvm_agentd::vsock::{
     CONSOLE_PORT_BASE, GUEST_AGENT_PORT, GUEST_CID, GuestRequest, GuestResponse,
     WORKLOAD_EXIT_PORT, connect_to_port, connect_to_port_once, send_request_stream,
@@ -1343,6 +1343,24 @@ impl VmmDriver for FcDriver {
     }
 }
 
+/// Observe `pid` and keep the identity only if that process serves this VM's
+/// API socket. A pid file naming another VM's Firecracker, or a process that
+/// is gone or not Firecracker, yields no identity or an error, never a binding.
+fn bind_process_to_socket(
+    vm: &str,
+    pid: u32,
+    serves_socket: impl FnOnce(u32) -> Result<bool>,
+    capture: impl FnOnce(&str, u32) -> std::io::Result<mvm_vmm::host::process_identity::ProcessIdentity>,
+) -> Result<Option<mvm_vmm::host::process_identity::ProcessIdentity>> {
+    let identity =
+        capture(vm, pid).with_context(|| format!("observe Firecracker process {pid} of '{vm}'"))?;
+    ensure!(
+        serves_socket(pid)?,
+        "process {pid} does not serve the API socket of '{vm}'; refusing to bind its identity"
+    );
+    Ok(Some(identity))
+}
+
 /// A live Firecracker VM: the detached `firecracker` daemon tracked by its PID
 /// file, with the workload's exit code persisted under its state dir and the
 /// vsock mux UDS for host→guest dials.
@@ -1489,13 +1507,13 @@ impl RunningVm for FcRunningVm {
         let Some(pid) = self.pid else {
             return Ok(None);
         };
-        if !crate::fc::is_firecracker_pid_running(pid)? {
-            return Ok(None);
-        }
-        Ok(Some(
-            mvm_vmm::host::process_identity::ProcessIdentity::capture(&self.id.0, pid)
-                .with_context(|| format!("observe Firecracker process {pid} of '{}'", self.id.0))?,
-        ))
+        let socket = crate::fc::fc_api_socket_path(&self.state_dir.to_string_lossy());
+        bind_process_to_socket(
+            &self.id.0,
+            pid,
+            |pid| crate::fc::is_firecracker_for_socket(pid, Path::new(&socket)),
+            mvm_vmm::host::process_identity::ProcessIdentity::capture,
+        )
     }
 
     fn pause(&self) -> Result<()> {
@@ -1543,6 +1561,35 @@ impl RunningVm for FcRunningVm {
 
 #[cfg(test)]
 mod tests {
+    fn observed(
+        vm: &str,
+        pid: u32,
+    ) -> std::io::Result<mvm_vmm::host::process_identity::ProcessIdentity> {
+        Ok(mvm_vmm::host::process_identity::ProcessIdentity {
+            vm_id: vm.into(),
+            pid,
+            start_ticks: 9,
+            boot_id: "boot".into(),
+        })
+    }
+
+    #[test]
+    fn a_pid_serving_this_sockets_vm_is_bound() {
+        let bound = bind_process_to_socket("vm-a", 7, |_| Ok(true), observed).unwrap();
+        assert_eq!(bound.unwrap().pid, 7);
+    }
+
+    #[test]
+    fn a_pid_naming_another_vms_firecracker_is_refused() {
+        let error = bind_process_to_socket("vm-a", 7, |_| Ok(false), observed).unwrap_err();
+        assert!(format!("{error:#}").contains("does not serve the API socket"));
+        // An unanswerable identity question is an error too, never a binding.
+        assert!(bind_process_to_socket("vm-a", 7, |_| bail!("hidden"), observed).is_err());
+        // A process that cannot be observed is never bound.
+        let gone = |_: &str, _| Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(bind_process_to_socket("vm-a", 7, |_| Ok(true), gone).is_err());
+    }
+
     use super::*;
     use mvm_agentd::vsock::{BROKER_PORT, EGRESS_PORT};
     use mvm_vmm::driver::spec::{ConsoleCapture, VirtioFsShare};

@@ -1026,6 +1026,22 @@ Prod / sealed / `--prod` workloads — and Firecracker on every tier — stay on
 Option B, where claim 3 holds unchanged. No numbered claim is weakened; this
 note only scopes which backends the existing witness covers.
 
+**Canonical kernel custody on Firecracker — limits.** A bundle carrying a
+canonical Linux proof is launched on HVF and on Linux Firecracker; every other
+backend refuses it. The two backends do not offer the same lifetime evidence.
+HVF releases the kernel generation on an authenticated, instance-bound exit
+proof. Firecracker releases it on a process-table identity only: the pid read
+from the VM's pid file, accepted only if that process serves this VM's
+`--api-sock`, recorded with its start time and the host boot id, and judged
+exited when `/proc` no longer shows that start time or the boot id differs.
+Firecracker is therefore not instance-bound in HVF's sense, and the identity
+is only as trustworthy as the host's process table. An unreaped zombie still
+has a process-table entry and counts as not exited, so its generation is
+retained. A start that fails or crashes between boot and recording the
+identity leaves the generation retained and the VM name blocked. This
+narrows nothing in claims 3 or 8; it states what the Firecracker release
+mechanism rests on.
+
 **Claim 20 boundaries — five refusing paths and the installer trust root.** The
 four consuming paths inside `mvmctl` verify the Sigstore bundle in-process
 against the embedded trust root and refuse a missing, unparseable, or
