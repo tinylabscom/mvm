@@ -143,9 +143,11 @@ jobs:
           tag="${RELEASE_TAG}"
           if [ -z "${tag}" ]; then
             # CLI releases are the `v<semver>` tags; the repository also
-            # publishes SDK and revocation releases under other prefixes.
-            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --limit 50 \
-              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))][0]')"
+            # publishes SDK, revocation and per-commit source-helper
+            # releases. The helpers are pre-releases and outnumber the CLI
+            # releases, so they are excluded before the window is applied.
+            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --exclude-pre-releases --limit 50 \
+              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))] | first // empty')"
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
