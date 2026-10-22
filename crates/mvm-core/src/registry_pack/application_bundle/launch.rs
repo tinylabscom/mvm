@@ -159,18 +159,6 @@ pub fn resolve_installed_application_bundle(
     )
 }
 
-#[cfg(test)]
-pub(super) fn resolve_with(
-    reference: &PackReference,
-    store: &ApplicationInstallStore,
-    policy: &RegistryPackPublisherPolicy,
-    trust: &dyn TrustStore,
-    check_signature: RegistryPackSignatureChecker,
-) -> Result<ResolvedApplication, ApplicationLaunchError> {
-    let held = resolve_bundle_with(reference, store, policy, trust, check_signature)?;
-    Ok(resolution_metadata(&held))
-}
-
 pub(super) fn resolve_bundle_with(
     reference: &PackReference,
     store: &ApplicationInstallStore,

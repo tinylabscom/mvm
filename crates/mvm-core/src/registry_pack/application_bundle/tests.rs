@@ -1045,7 +1045,7 @@ fn production_resolver_requires_operator_trust_and_cached_feed_before_bundle_use
     let path = crate::config::registry_pack_revocation_trust_path();
     std::fs::remove_file(&path).unwrap();
     let resolve = || {
-        launch::resolve_with(
+        launch::resolve_bundle_with(
             &reference,
             &installed.store,
             &publisher_policy(),
