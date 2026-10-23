@@ -280,6 +280,10 @@ Two notes from experience:
   extra serial suites to the PR gate. The ARM lane runs its privileged
   witnesses first, isolates test state, then compiles and runs the workspace
   once under that final environment.
+  The shared Rust-cache action sets Cargo's worker count to the available CPUs
+  on dedicated GitHub-hosted Linux runners after cache restoration. Explicit
+  `CARGO_BUILD_JOBS` settings and shared/self-hosted machines retain their limits;
+  the local two-worker default does not cap dedicated CI machines.
   Nix evaluation runs only when the changed paths can affect the Nix surface;
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —

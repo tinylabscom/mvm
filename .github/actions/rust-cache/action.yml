@@ -53,3 +53,15 @@ runs:
         cache-workspace-crates: "true"
         # The eBPF lane's pinned bpf-linker install also benefits from this.
         cache-bin: "true"
+
+    # The two-worker repository default protects shared developer hosts, not
+    # dedicated runners. Configure after restore so a scheduling-only setting
+    # does not change the cache key saved by the action's post step.
+    - name: Configure dedicated Linux build workers
+      if: runner.environment == 'github-hosted' && runner.os == 'Linux' && env.CARGO_BUILD_JOBS == ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        workers="$(nproc)"
+        printf 'CARGO_BUILD_JOBS=%s\n' "$workers" >> "$GITHUB_ENV"
+        printf 'Cargo build workers: %s (dedicated Linux runner)\n' "$workers"

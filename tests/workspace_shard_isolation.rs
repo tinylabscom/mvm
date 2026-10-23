@@ -1,6 +1,21 @@
 use std::fs;
 
 #[test]
+fn dedicated_linux_runners_use_their_cpus_without_changing_shared_host_limits() {
+    let cache = fs::read_to_string(".github/actions/rust-cache/action.yml").unwrap();
+    let configure = cache
+        .find("- name: Configure dedicated Linux build workers")
+        .unwrap();
+    assert!(cache.find("uses: Swatinem/rust-cache@v2").unwrap() < configure);
+    let step = &cache[configure..];
+    assert!(step.contains("runner.environment == 'github-hosted'"));
+    assert!(step.contains("runner.os == 'Linux'"));
+    assert!(step.contains("env.CARGO_BUILD_JOBS == ''"));
+    assert!(step.contains("workers=\"$(nproc)\""));
+    assert!(step.contains("printf 'CARGO_BUILD_JOBS=%s\\n' \"$workers\" >> \"$GITHUB_ENV\""));
+}
+
+#[test]
 fn feature_suites_have_two_complete_nonoverlapping_partitions() {
     let ci = fs::read_to_string(".github/workflows/ci.yml").unwrap();
     let features = ci
