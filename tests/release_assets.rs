@@ -702,6 +702,46 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
     );
 }
 
+/// The packaging dry run runs independently of a tag push. It must not mistake
+/// source-build, SDK, draft, or pre-release assets for the stable CLI release
+/// whose tarballs it verifies and repackages.
+#[test]
+fn distro_packages_discover_an_exact_stable_cli_release_across_all_pages() {
+    let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
+        .expect("distro-packages.yml must exist");
+    let downloader = packages
+        .split("- name: Download a published release's tarballs")
+        .nth(1)
+        .expect("distro-packages.yml must download published release tarballs")
+        .split("- name: Download and authenticate the published packages")
+        .next()
+        .expect("published tarball downloader must end before package download");
+
+    assert!(
+        downloader
+            .contains("gh api --paginate \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\""),
+        "release discovery must exhaust every releases API page, not inspect a fixed window"
+    );
+    assert!(
+        !downloader.contains("gh api --paginate --slurp") && !downloader.contains("--slurp"),
+        "gh api does not support combining --slurp with --jq; aggregate the paginated JSON with jq"
+    );
+    assert!(
+        downloader.contains("| jq -rs"),
+        "release discovery must emit the selected tag as raw text for gh release download"
+    );
+    assert!(
+        downloader.contains(
+            "select((.draft | not) and (.prerelease | not) and (.tag_name | test(\"^v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$\")))"
+        ),
+        "release discovery must use release metadata and accept only exact stable vX.Y.Z CLI tags"
+    );
+    assert!(
+        !downloader.contains("gh release list"),
+        "the fixed-size release-list command misses stable CLI releases after source-build pages"
+    );
+}
+
 /// The CLI release carries no image. Images are built and signed in
 /// mvm-images, and every consumer verifies them against the signed root the
 /// lock pins; a CLI release that rebuilt, mirrored or re-signed one would be a
