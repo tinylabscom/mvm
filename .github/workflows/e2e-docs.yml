@@ -62,7 +62,8 @@ env:
 jobs:
   e2e-docs-linux:
     name: Documented surface e2e (Linux, Firecracker, shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # Both required matrix jobs partition the complete scenario inventory;
     # neither shard is a substitute for the other. Separate hosted runners
     # retain the full live witness without one serial suite exhausting its
@@ -270,7 +271,8 @@ jobs:
     if: >-
       inputs.macos_blocks_on_unusable_host &&
       needs.e2e-docs-macos-host-check.outputs.supported != 'true'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       # Full history: on a mismatch the gate diffs the recorded commit against

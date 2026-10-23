@@ -94,7 +94,8 @@ permissions:
 jobs:
   release-archive-smoke:
     name: First run of the unpublished archive (Linux, Firecracker)
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # Above the smoke's summed budgets (bootstrap 20 min, four boots 25 min),
     # so a slow step fails on its own budget with a transcript, not on this.
     timeout-minutes: 50

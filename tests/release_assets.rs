@@ -318,7 +318,7 @@ fn every_cross_compiled_release_target_is_pinned_by_the_toolchain_file() {
     // Runner image -> the triple its rustc is native to.
     let native = [
         ("macos-latest", "aarch64-apple-darwin"),
-        ("ubuntu-latest", "x86_64-unknown-linux-gnu"),
+        ("ubuntu-24.04", "x86_64-unknown-linux-gnu"),
         ("ubuntu-24.04-arm", "aarch64-unknown-linux-gnu"),
     ];
 
@@ -881,7 +881,7 @@ fn every_release_archive_is_installed_and_its_hostlib_loaded_natively() {
     ] {
         assert!(smoke.contains(target), "{target} needs an installed smoke");
     }
-    for runner in ["ubuntu-latest", "ubuntu-24.04-arm", "macos-latest"] {
+    for runner in ["ubuntu-24.04", "ubuntu-24.04-arm", "macos-latest"] {
         assert!(
             smoke.contains(runner),
             "{runner} must run its native payload"
@@ -1537,7 +1537,7 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
          no hosted macOS runner can"
     );
     assert!(
-        smoke.contains("runner: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        smoke.contains("runner: ubuntu-24.04") && smoke.contains("sudo chmod 666 /dev/kvm"),
         "the Linux lane must boot through KVM on a hosted runner"
     );
     assert!(
@@ -1669,7 +1669,7 @@ fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
     );
     let smoke = job_block(&lane, "release-archive-smoke");
     assert!(
-        smoke.contains("runs-on: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        smoke.contains("runs-on: ubuntu-24.04") && smoke.contains("sudo chmod 666 /dev/kvm"),
         "the archive must boot through KVM on a hosted runner"
     );
     for attempt in ["github.run_attempt", "inputs.run_attempt"] {

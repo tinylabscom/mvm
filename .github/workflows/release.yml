@@ -81,7 +81,8 @@ jobs:
   runtime-proof-input-check:
     needs: guest-runtime
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -123,7 +124,8 @@ jobs:
     needs: [guest-runtime, runtime-proof-input-check]
     if: ${{ !cancelled() && github.event_name == 'push' && github.ref_type == 'tag' && needs.guest-runtime.result == 'success' && needs.runtime-proof-input-check.result == 'success' }}
     environment: release-signing
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -219,10 +221,12 @@ jobs:
           # distributions too.
           - target: x86_64-unknown-linux-gnu
             build_target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             build_target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            os: ubuntu-24.04
 
     runs-on: ${{ matrix.os }}
     # Backstop: a cold macOS release plus host binaries took 43 min before the
@@ -567,7 +571,8 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            # ubuntu-24.04 until the 26.04 runner failures are fixed
+            runner: ubuntu-24.04
             library: libmvm_hostlib.so
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
@@ -669,7 +674,8 @@ jobs:
     # ref cannot produce a signature the shipped verifier accepts. Revocations
     # are gated the same way against their own tag.
     environment: release-signing
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     env:
       RUNTIME_ARCHIVE_SHA256: ${{ needs.runtime-proof-candidate.outputs.archive_sha256 }}
       RUNTIME_CHECKSUM_SHA256: ${{ needs.runtime-proof-candidate.outputs.checksum_sha256 }}
@@ -947,7 +953,8 @@ jobs:
     # under a `refs/tags/*` identity a dispatch cannot produce. Running it there
     # would fail for reasons that say nothing about the release.
     if: ${{ github.event_name == 'push' && needs.release.result == 'success' }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -1022,7 +1029,8 @@ jobs:
   published-installed-boot:
     needs: [verify-release, first-run-smoke]
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       actions: read
@@ -1087,7 +1095,8 @@ jobs:
     name: Promote the release once a fresh install boots
     needs: [published-installed-boot, published-package-smoke, recipe-install-smoke]
     if: ${{ !cancelled() && github.event_name == 'push' && needs.published-installed-boot.result == 'success' && needs.published-package-smoke.result == 'success' && (needs.recipe-install-smoke.result == 'success' || (contains(github.ref_name, '-') && needs.recipe-install-smoke.result == 'skipped')) }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # The release event emitted by GITHUB_TOKEN does not start workers.yml,
@@ -1122,7 +1131,8 @@ jobs:
     name: Propose verified Nix prebuilt pin
     needs: [promote-release]
     if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       actions: write
       contents: write
