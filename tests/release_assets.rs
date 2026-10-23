@@ -719,13 +719,16 @@ fn distro_packages_discover_an_exact_stable_cli_release_across_all_pages() {
 
     assert!(
         downloader
-            .contains("gh api --paginate \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\"")
-            && downloader.contains("| jq -s"),
+            .contains("gh api --paginate \"repos/${GITHUB_REPOSITORY}/releases?per_page=100\""),
         "release discovery must exhaust every releases API page, not inspect a fixed window"
     );
     assert!(
         !downloader.contains("gh api --paginate --slurp") && !downloader.contains("--slurp"),
         "gh api does not support combining --slurp with --jq; aggregate the paginated JSON with jq"
+    );
+    assert!(
+        downloader.contains("| jq -rs"),
+        "release discovery must emit the selected tag as raw text for gh release download"
     );
     assert!(
         downloader.contains(

@@ -149,7 +149,7 @@ jobs:
             # releases. Traverse every release page: source-helper releases can
             # fill more than one API page before a stable CLI release.
             tag="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              | jq -s 'first(.[][] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tag_name) // empty')"
+              | jq -rs 'first(.[][] | select((.draft | not) and (.prerelease | not) and (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | .tag_name) // empty')"
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
