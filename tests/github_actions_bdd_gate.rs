@@ -83,7 +83,7 @@ fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_in_the_queu
     let live = job_block(&extended, "bdd-live-readme");
 
     for expected in [
-        "runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}",
+        "runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-24.04' }}",
         "inputs.tool_live_only &&",
         "\"witness\":\"ci_live\",\"timeout\":90",
         "\"witness\":\"tool_live\",\"timeout\":60",
