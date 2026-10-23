@@ -32,7 +32,7 @@ use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
 use mvm_conformance::sharding::ScenarioShard;
 use mvm_conformance::{
-    RuntimeCaps, ScenarioGate, inherited_tags, scenario_gate_for_selection_with_runtime_candidate,
+    RuntimeCaps, ScenarioGate, gate_selected_scenario_with_runtime_candidate, inherited_tags,
 };
 use world::CliWorld;
 
@@ -298,7 +298,7 @@ fn should_run(
         rule.map_or(&[][..], |rule| &rule.tags),
         &scenario.tags,
     );
-    let gate = scenario_gate_for_selection_with_runtime_candidate(
+    let gate = gate_selected_scenario_with_runtime_candidate(
         &tags,
         probe_caps(),
         only_tag.as_deref(),

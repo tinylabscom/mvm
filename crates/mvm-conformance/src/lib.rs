@@ -458,7 +458,7 @@ pub fn scenario_gate_for_selection(
 /// the signed runtime quartet. A nightly on unreleased `main` therefore names
 /// this skip, while the release e2e workflow supplies the signed candidate and
 /// runs the same scenarios.
-pub fn scenario_gate_for_selection_with_runtime_candidate(
+pub fn gate_selected_scenario_with_runtime_candidate(
     tags: &[String],
     caps: RuntimeCaps,
     only_tag: Option<&str>,
@@ -1509,24 +1509,19 @@ mod tests {
         let tagged = tags(&[LIVE_TAG, RUNTIME_CANDIDATE_TAG]);
 
         assert_eq!(
-            scenario_gate_for_selection_with_runtime_candidate(&tagged, NONE, None, false),
+            gate_selected_scenario_with_runtime_candidate(&tagged, NONE, None, false),
             ScenarioGate::NeedsLiveOptIn
         );
         assert_eq!(
-            scenario_gate_for_selection_with_runtime_candidate(
-                &tagged,
-                ALL,
-                Some(CI_LIVE_TAG),
-                false
-            ),
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, Some(CI_LIVE_TAG), false),
             ScenarioGate::OutsideSelectedTag
         );
         assert_eq!(
-            scenario_gate_for_selection_with_runtime_candidate(&tagged, ALL, None, false),
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, None, false),
             ScenarioGate::NeedsRuntimeCandidate
         );
         assert_eq!(
-            scenario_gate_for_selection_with_runtime_candidate(&tagged, ALL, None, true),
+            gate_selected_scenario_with_runtime_candidate(&tagged, ALL, None, true),
             ScenarioGate::Run
         );
     }
