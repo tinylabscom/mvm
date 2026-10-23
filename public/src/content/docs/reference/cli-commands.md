@@ -1997,6 +1997,13 @@ Exec](/guides/exec/) guide for the full background.
 | `mvmctl machine volume ls <vm> --json`                                                                | List registered volume mounts as JSON                                                    |
 | `mvmctl machine volume unmount <vm> <guest-path>`                                                     | Remove a registered volume mount                                                         |
 
+Guest destinations must be at or under `/data` or `/work`. Every destination
+component must be a real directory, not a symlink, including components inside
+earlier attached volumes. Mounts use pinned directory descriptors rather than
+reopening a validated pathname. This requires Linux 5.2+ mount APIs; unavailable
+support fails closed. See [Persistent workspaces](/guides/persistent-workspaces/)
+for local sources and tenant-managed `mvmd` volumes.
+
 Managed local volumes are encrypted by mvm at rest. `volume create` writes a
 locked AES-256-GCM encrypted archive plus wrapped per-volume data key metadata
 in `~/.mvm/volumes/registry.json`; it does not leave a plaintext directory

@@ -245,36 +245,13 @@ pub fn is_lower_hex(text: &str) -> bool {
 /// or DNS forgery running as the tool identity.
 #[must_use]
 pub fn is_dangerous_loader_var(key: &str) -> bool {
-    key.starts_with("LD_")
-        || matches!(
-            key,
-            "HOSTALIASES"
-                | "RES_OPTIONS"
-                | "LOCALDOMAIN"
-                | "NLSPATH"
-                | "LOCPATH"
-                | "MALLOC_TRACE"
-                | "MALLOC_CHECK_"
-                // Shell startup injection: a mediated shell-class tool that
-                // runs a script reads BASH_ENV (bash, non-interactive) or ENV
-                // (posix mode), and BASHOPTS/SHELLOPTS reshape what the
-                // running script may do. All four name a workload-writable
-                // file the tool would execute as its own identity inside the
-                // attributed session — an attribution/scope bypass vector.
-                | "BASH_ENV"
-                | "ENV"
-                | "BASHOPTS"
-                | "SHELLOPTS"
-        )
+    crate::trusted_env::is_startup_var(key)
 }
 
-/// `env` with [`is_dangerous_loader_var`] entries removed.
+/// Trusted tool environment: startup controls removed and PATH replaced.
 #[must_use]
 pub fn sanitized_tool_env(env: &[(String, String)]) -> Vec<(String, String)> {
-    env.iter()
-        .filter(|(key, _)| !is_dangerous_loader_var(key))
-        .cloned()
-        .collect()
+    crate::trusted_env::sanitized_env(env)
 }
 
 /// One shim-to-helper request, sent as a single bounded JSON line with the
@@ -531,8 +508,8 @@ mod tests {
         assert_eq!(
             cleaned,
             vec![
-                ("PATH".into(), "/bin".into()),
                 ("TOKEN".into(), "placeholder".into()),
+                ("PATH".into(), crate::trusted_env::TRUSTED_PATH.into()),
             ]
         );
     }

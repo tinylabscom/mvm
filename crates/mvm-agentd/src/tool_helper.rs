@@ -827,7 +827,11 @@ mod tests {
         .expect("mediated run approves");
         assert_eq!(run.argv, vec!["/bin/sh", "-c", "echo hi"]);
         assert!(!run.env.iter().any(|(key, _)| key == "LD_PRELOAD"));
-        assert!(run.env.iter().any(|(key, _)| key == "PATH"));
+        assert!(
+            run.env
+                .iter()
+                .any(|(key, value)| { key == "PATH" && value == crate::trusted_env::TRUSTED_PATH })
+        );
         assert!(!run.helper_minted_binding);
     }
 

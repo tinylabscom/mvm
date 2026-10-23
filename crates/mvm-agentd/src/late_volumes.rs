@@ -292,6 +292,7 @@ mod linux {
         let (agent_end, helper_end) = UnixStream::pair()?;
         let helper_fd = helper_end.as_raw_fd();
         let mut cmd = Command::new("/proc/self/exe");
+        crate::trusted_env::configure_command(&mut cmd);
         cmd.arg(HELPER_ARG)
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())

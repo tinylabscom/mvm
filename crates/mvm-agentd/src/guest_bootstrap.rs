@@ -645,7 +645,8 @@ pub fn resolve_egress_client_for(is_exec: impl Fn(&Path) -> bool) -> Option<Path
 }
 
 pub fn is_executable(path: &Path) -> bool {
-    path.is_file()
+    path.is_absolute()
+        && path.is_file()
         && fs::metadata(path)
             .map(|m| {
                 use std::os::unix::fs::PermissionsExt;
@@ -658,7 +659,15 @@ pub fn run_one(path: Option<PathBuf>, label: &str) {
     let Some(path) = path else {
         return;
     };
+    if !is_executable(&path) {
+        eprintln!(
+            "mvm-guest-init: invalid executable {label} at {}",
+            path.display()
+        );
+        return;
+    }
     let mut cmd = Command::new(&path);
+    crate::trusted_env::configure_command(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -707,6 +716,7 @@ pub(crate) fn guest_helper_command(
     use std::os::unix::process::CommandExt;
 
     let mut cmd = Command::new(path);
+    crate::trusted_env::configure_command(&mut cmd);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
@@ -841,6 +851,7 @@ fn busybox_loopback_up() -> bool {
         return false;
     }
     let mut ip = Command::new(busybox);
+    crate::trusted_env::configure_command(&mut ip);
     ip.args(["ip", "link", "set", "lo", "up"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -851,6 +862,7 @@ fn busybox_loopback_up() -> bool {
         return true;
     }
     let mut ifconfig = Command::new(busybox);
+    crate::trusted_env::configure_command(&mut ifconfig);
     ifconfig
         .args(["ifconfig", "lo", "up"])
         .stdin(Stdio::null())

@@ -404,6 +404,7 @@ fn volume_mount_scaffold(root: &Path, mountpoint: &str) -> Result<Option<PathBuf
     Ok(Some(root.join(base.as_os_str())))
 }
 
+#[cfg(not(target_os = "linux"))]
 fn ensure_volume_mount_target(
     root: &Path,
     mountpoint: &str,
@@ -443,6 +444,31 @@ fn ensure_volume_mount_target(
         ensure_dir(&target.to_string_lossy())?;
         Ok(target)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn ensure_volume_mount_target(
+    root: &Path,
+    mountpoint: &str,
+    scaffolds: &mut BTreeSet<PathBuf>,
+) -> Result<crate::safe_mount_target::Target> {
+    use crate::safe_mount_target::Target;
+    let target = volume_mount_target(root, mountpoint)?;
+    match Target::resolve(&target, true) {
+        Ok(target) => return Ok(target),
+        Err(error) if error.raw_os_error() == Some(libc::EROFS) => {}
+        Err(error) => return Err(MountError::syscall("resolve volume mount target", error)),
+    }
+    let scaffold = volume_mount_scaffold(root, mountpoint)?
+        .ok_or_else(|| MountError::InvalidConfig("read-only volume mount root".into()))?;
+    if !scaffolds.contains(&scaffold) {
+        Target::resolve(&scaffold, false)
+            .and_then(|target| target.mount("tmpfs", "tmpfs", false, None, true))
+            .map_err(|error| MountError::syscall("mount volume scaffold", error))?;
+        scaffolds.insert(scaffold);
+    }
+    Target::resolve(&target, true)
+        .map_err(|error| MountError::syscall("resolve volume mount target after scaffold", error))
 }
 
 /// Find the attached block device whose ext4 label is `label`.
@@ -537,11 +563,15 @@ pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
         let _ = &target;
         #[cfg(target_os = "linux")]
         {
-            let flags = if vol.read_only { libc::MS_RDONLY } else { 0 };
-            mount(&source, &target.to_string_lossy(), filesystem, flags, "")?;
-            if let Some((uid, gid)) = writable_block_volume_owner(vol) {
-                chown(&target.to_string_lossy(), uid, gid)?;
-            }
+            target
+                .mount(
+                    &source,
+                    filesystem,
+                    vol.read_only,
+                    writable_block_volume_owner(vol),
+                    false,
+                )
+                .map_err(|error| MountError::syscall("mount pinned volume", error))?;
         }
     }
     Ok(())
@@ -1627,6 +1657,52 @@ mod tests {
     use std::io::{Seek, SeekFrom, Write};
 
     const FAKE_HASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires builder VM Linux mount namespace and CAP_SYS_ADMIN"]
+    fn read_only_root_scaffold_supports_sibling_and_nested_mounts() {
+        use crate::safe_mount_target::{Target, tests::private_mount_namespace};
+
+        private_mount_namespace();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        Target::resolve(&root, true)
+            .unwrap()
+            .mount("tmpfs", "tmpfs", false, None, true)
+            .unwrap();
+        std::fs::create_dir(root.join("data")).unwrap();
+        let root_cstring = CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: the path names this test's tmpfs in its private namespace.
+        assert_eq!(
+            unsafe {
+                libc::mount(
+                    std::ptr::null(),
+                    root_cstring.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REMOUNT | libc::MS_RDONLY,
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        let mut scaffolds = BTreeSet::new();
+        for path in ["/data/first", "/data/second", "/data/first/nested"] {
+            ensure_volume_mount_target(&root, path, &mut scaffolds)
+                .unwrap()
+                .mount("tmpfs", "tmpfs", false, None, true)
+                .unwrap();
+        }
+        assert_eq!(scaffolds, BTreeSet::from([root.join("data")]));
+        for path in ["data/first/nested", "data/first", "data/second", "data", ""] {
+            assert!(
+                Target::resolve(&root.join(path), false)
+                    .unwrap()
+                    .unmount(false)
+                    .unwrap()
+            );
+        }
+    }
 
     /// A guest kernel without device-mapper says so, rather than reporting a
     /// missing file.

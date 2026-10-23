@@ -126,54 +126,16 @@ pub struct OsMountFs;
 #[cfg(target_os = "linux")]
 impl MountFs for OsMountFs {
     fn ensure_dir(&self, path: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(path)
+        crate::safe_mount_target::Target::resolve(path, true).map(|_| ())
     }
 
     fn mount(&self, tag: &str, path: &Path, read_only: bool) -> std::io::Result<()> {
-        use std::ffi::CString;
-        let source = CString::new(tag).map_err(std::io::Error::other)?;
-        let target = CString::new(path.as_os_str().to_string_lossy().as_bytes())
-            .map_err(std::io::Error::other)?;
-        let fstype = CString::new("virtiofs").map_err(std::io::Error::other)?;
-        let mut flags: libc::c_ulong = 0;
-        if read_only {
-            flags |= libc::MS_RDONLY;
-        }
-        // SAFETY: source/target/fstype are owned CStrings borrowed for the call,
-        // so the NUL-terminated pointers stay valid; the fs-data pointer is null
-        // (no virtiofs-specific options). mount(2) only reads these strings.
-        let rc = unsafe {
-            libc::mount(
-                source.as_ptr(),
-                target.as_ptr(),
-                fstype.as_ptr(),
-                flags,
-                std::ptr::null(),
-            )
-        };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
+        crate::safe_mount_target::Target::resolve(path, true)?
+            .mount(tag, "virtiofs", read_only, None, false)
     }
 
     fn umount(&self, path: &Path, force: bool) -> std::io::Result<bool> {
-        use std::ffi::CString;
-        let target = CString::new(path.as_os_str().to_string_lossy().as_bytes())
-            .map_err(std::io::Error::other)?;
-        let flags: libc::c_int = if force { libc::MNT_DETACH } else { 0 };
-        // SAFETY: `target` is an owned CString alive across the call; umount2(2)
-        // reads the NUL-terminated path plus an int flag, with no writeback.
-        let rc = unsafe { libc::umount2(target.as_ptr(), flags) };
-        if rc == 0 {
-            return Ok(true);
-        }
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EBUSY) && !force {
-            return Ok(false);
-        }
-        Err(err)
+        crate::safe_mount_target::Target::resolve(path, false)?.unmount(force)
     }
 }
 
