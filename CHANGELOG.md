@@ -23,6 +23,7 @@ All notable changes to mvm are documented in this file.
 - **changelog**: Complete v0.24.1 notes
 
 ### Fixed
+- **applications**: Bind installed application descriptor pins into signed plans and reverify their trusted bundle at host boot admission (#4511)
 - **hvf**: Reap a stopped standby and remove its state (#4575)
 - **hvf**: Start persistent machines on the default macOS backend
 - **hvf**: List a machine that has a pid file but no console log

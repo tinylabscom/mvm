@@ -751,7 +751,11 @@ is used; with one it must be the installed version. The descriptor, its
 publisher policy and revocations, and the archive under your enrolled keys are
 checked again at launch, and the run then continues as
 `--manifest <bundle-sha256>`, so the signed plan and admit-time bundle
-re-verification are the ones a `.mvmpkg` gets. The resolution is recorded as an
+re-verification are the ones a `.mvmpkg` gets. The exact application reference
+and descriptor digest are also bound into that signed plan; client and host
+admission each reopen the typed descriptor, and host boot preparation retains
+the independently reverified archive while checking the final boot files. The
+resolution is recorded as an
 `application_launch` audit entry (reference, descriptor digest, bundle digest),
 written once admission has produced the plan, so the entry also carries the
 `run_id` (the machine name) and the `plan_id` it booted under. A positional that

@@ -670,6 +670,7 @@ fn admit(
                 caller_assets.push(mvm_core::plan::AssetIdentity::new(*kind, name, digest)?);
             }
             AssetSpec::RegistryPack(pin) => {
+                use mvm_core::registry_pack::AuthenticatedRegistryManifest as _;
                 let lock = mvm_core::registry_pack_store::load_pack_lockfile(
                     &mvm_core::config::pack_lockfile_path(),
                 )?;
@@ -678,12 +679,13 @@ fn admit(
                         &mvm_core::config::registry_pack_publisher_policy_path(),
                     )?
                     .policy;
-                let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
-                    &mvm_core::config::registry_pack_cache_dir(),
-                    &lock,
-                    &publisher,
-                    pin.reference(),
-                )?;
+                let (_, verified) =
+                    mvm_core::registry_pack_store::open_installed_registry_manifest(
+                        &mvm_core::config::registry_pack_cache_dir(),
+                        &lock,
+                        &publisher,
+                        pin.reference(),
+                    )?;
                 anyhow::ensure!(
                     verified.manifest_sha256() == pin.manifest_sha256(),
                     "registry pack {} changed after source selection",
@@ -691,7 +693,7 @@ fn admit(
                 );
                 caller_assets.push(mvm_core::plan::AssetIdentity::new(
                     mvm_core::plan::AssetKind::RegistryPack,
-                    verified.manifest().reference.to_string(),
+                    verified.reference().to_string(),
                     verified.manifest_sha256().as_str(),
                 )?);
             }
