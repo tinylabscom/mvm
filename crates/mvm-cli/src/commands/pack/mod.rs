@@ -10,7 +10,7 @@ use mvm_core::user_config::MvmConfig;
 use super::{Cli, pull, search};
 
 mod author;
-mod build;
+pub(in crate::commands) mod build;
 mod download;
 mod inspect;
 mod list;

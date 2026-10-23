@@ -252,6 +252,7 @@ impl Commands {
             Commands::Doctor(_) => "doctor",
             Commands::Dashboard(_) => "dashboard",
             Commands::Prepare(_) => "prepare",
+            Commands::Build(_) => "build",
             Commands::Kernel(_) => "kernel",
             Commands::Generate(_) => "generate",
             Commands::Template(_) => "template",

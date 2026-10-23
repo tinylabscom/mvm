@@ -22,6 +22,11 @@ tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
 
 [[command]]
+path = "build"
+tier = "parse"
+reason = "compiles a pack, manifest, or flake through the builder and signs a local archive; source detection, ambiguity refusal, export controls, and origin stamping have focused unit, CLI, and BDD coverage, while the live build witness runs in the builder environment"
+
+[[command]]
 path = "dev compile"
 tier = "exec"
 fixture = "decorator-script"

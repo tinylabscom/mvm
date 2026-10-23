@@ -32,6 +32,15 @@ Feature: mvmctl top-level CLI surface
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
 
+  Scenario: build refuses an ambiguous source before invoking a builder
+    Given an isolated mvm home
+    And a scratch working directory
+    And the scratch directory contains ambiguous manifest and flake sources
+    When I run mvmctl in the scratch directory with "build ."
+    Then the command exits with code 1
+    And the error output contains "ambiguous source"
+    And the error output contains "--from manifest|flake"
+
   Scenario: every CLI help item is one line shorter than 80 columns
     Then every mvmctl command and subcommand help item is one line shorter than 80 columns
 

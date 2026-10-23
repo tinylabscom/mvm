@@ -220,6 +220,47 @@ fn dev_help_lists_every_contributor_subcommand() {
     }
 }
 
+#[test]
+fn build_help_advertises_source_detection_and_export_controls() {
+    let help = help_text(&["build", "--help"]);
+    for expected in [
+        "SOURCE",
+        "--out",
+        "--from",
+        "--flake",
+        "--label",
+        "--posture",
+        "--environment",
+        "--health-timeout",
+        "--input-observation",
+    ] {
+        assert!(
+            help.contains(expected),
+            "build help missing {expected}: {help}"
+        );
+    }
+}
+
+#[test]
+fn build_rejects_an_ambiguous_source_before_building() {
+    let source = tempfile::tempdir().expect("create source directory");
+    std::fs::write(source.path().join("mvm.toml"), "schema_version = 1\n")
+        .expect("write manifest marker");
+    std::fs::write(source.path().join("flake.nix"), "{ outputs = _: {}; }\n")
+        .expect("write flake marker");
+    let state = tempfile::tempdir().expect("create isolated state");
+    let output = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("MVM_HOME", state.path())
+        .args(["build"])
+        .arg(source.path())
+        .output()
+        .expect("run build source detection");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous source"), "{stderr}");
+    assert!(stderr.contains("--from manifest|flake"), "{stderr}");
+}
+
 /// `dev guest-bins` produces mvmctl's guest-runtime archive; its help names
 /// the output directory, the per-architecture selector, and whose archive it
 /// is, and its long help says mvm-images is not a consumer.

@@ -29,7 +29,7 @@ use mvm_core::plan::types::{BuildProvenance, InputKind};
 use mvm_core::security::AgentProfile;
 
 use super::author::{LoadedSpec, locked_revision, read_lock};
-use crate::commands::bundle::export::{TemplateExport, stage_template};
+use crate::commands::bundle::export::{ExportOptions, TemplateExport, stage_template};
 use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
 use crate::commands::vm::invoke::{EntrypointCall, EntrypointStdin, boot_entrypoint};
 use mvm_client::bundle::{
@@ -59,6 +59,17 @@ pub(in crate::commands) struct BuildArgs {
 }
 
 pub(super) fn run(args: BuildArgs) -> Result<()> {
+    run_inner(args, None)
+}
+
+pub(in crate::commands) fn run_for_front_door(
+    args: BuildArgs,
+    options: ExportOptions,
+) -> Result<()> {
+    run_inner(args, Some(options))
+}
+
+fn run_inner(args: BuildArgs, options: Option<ExportOptions>) -> Result<()> {
     let observation = args
         .input_observation
         .as_ref()
@@ -175,6 +186,10 @@ pub(super) fn run(args: BuildArgs) -> Result<()> {
     // ---- 5. Seal and sign under the host key ----
     producer.build.verify_revision()?;
     let mut export = pack_export(&args.out, &loaded.spec, &lock, image_argv)?;
+    if let Some(options) = options {
+        export = options.apply(export)?;
+        export.local_build = true;
+    }
     export.portable_boot_assets = Some(std::sync::Arc::clone(&producer.boot));
     let mut staged = stage_template(slot, export)?;
     // The exporter re-read the slot's files; what it sealed must be what the

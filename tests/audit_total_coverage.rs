@@ -712,6 +712,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ),
     // Contributor compilation and artifact preparation stay grouped under
     // `dev <sub>` while retaining their existing per-operation audit verbs.
+    ("build", AuditPosture::Emits("cmd.build")),
     ("dev", AuditPosture::DelegatesToSub(DEV_SUB)),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
@@ -983,6 +984,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "chain.pruned",
         // Top-level command audit envelopes.
         "cmd.agent-session",
+        "cmd.build",
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",
