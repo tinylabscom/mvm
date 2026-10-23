@@ -23,15 +23,15 @@ All notable changes to mvm are documented in this file.
 - **changelog**: Complete v0.24.1 notes
 
 ### Fixed
-- **hvf**: Reap a stopped standby and remove its state
+- **hvf**: Reap a stopped standby and remove its state (#4575)
 - **hvf**: Start persistent machines on the default macOS backend
 - **hvf**: List a machine that has a pid file but no console log
 - **ci**: Preserve PTY output and registry lookup errors
 - **ci**: Fetch the runtime candidate over the REST API when gh is absent
-- **builder-guest**: Do not drop stderr written just before the child exits
-- **hvf**: Report a repeated machine stop as already stopped
+- **builder-guest**: Do not drop stderr written just before the child exits (#4581)
+- **hvf**: Report a repeated machine stop as already stopped (#4576)
 - **build**: Export MVM_WORKSPACE_PATH only when /work is the mvm workspace
-- **vmm**: Count a macOS zombie as not alive
+- **vmm**: Count a macOS zombie as not alive (#4575)
 - **conformance**: Prepare all source-tree live homes
 - **fs**: Hold a runtime overlay to the guest paths its own version promises, so a signed bundle pinned to the published image set's overlay boots again instead of being refused for the declared-command shims it predates
 - **bdd**: Accept the standby an unnamed run leaves behind, and the child preloaded for it, in the live warm-claim leak check, waiting a bounded time for the detached refill to register them
