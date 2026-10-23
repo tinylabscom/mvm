@@ -105,6 +105,10 @@ fn settle(
         return Ok(());
     };
     let resolved = resolve(&reference)?;
+    args.registry_pack_image = Some(mvm_core::registry_pack::PackPin::new(
+        resolved.reference.clone(),
+        mvm_core::packs::Sha256Hex::new(&resolved.descriptor_sha256)?,
+    )?);
     eprintln!(
         "[mvm] {} is installed as bundle {}",
         resolved.reference, resolved.bundle_sha256
@@ -121,8 +125,15 @@ mod tests {
     const SHA: &str = "ab";
 
     fn resolved(reference: &PackReference) -> Result<ResolvedApplication, ApplicationLaunchError> {
+        let reference = if reference.version().is_some() {
+            reference.clone()
+        } else {
+            format!("{reference}@1.0.1")
+                .parse()
+                .expect("test application reference is exact")
+        };
         Ok(ResolvedApplication {
-            reference: reference.clone(),
+            reference,
             descriptor_sha256: "d".repeat(64),
             bundle_sha256: SHA.repeat(32),
         })
@@ -173,6 +184,12 @@ mod tests {
         let mut args = positional("agent/claude@1.0.1");
         settle(&mut args, |_| true, |_| false, resolved).unwrap();
         assert_eq!(args.manifest.as_deref(), Some(SHA.repeat(32).as_str()));
+        let pin = args
+            .registry_pack_image
+            .as_ref()
+            .expect("application descriptor pin reaches admission");
+        assert_eq!(pin.reference().to_string(), "agent/claude@1.0.1");
+        assert_eq!(pin.manifest_sha256().as_str(), "d".repeat(64));
         assert!(args.source.is_none() && args.image.is_none());
     }
 

@@ -9,7 +9,13 @@ use mvm_core::vm_backend::{BackendKind, VmStartConfig};
 /// backend effects, and retains their authenticated closure for the VM.
 pub struct PreparedBuiltPackRuntime {
     _manifest: mvm_build::guest_runtime::evidence::VerifiedRuntimeManifest,
+    application: Option<PreparedApplicationRuntime>,
     boot_images: Option<mvm_vmm::host::boot_images::FrozenBootImageBytes>,
+}
+
+struct PreparedApplicationRuntime {
+    candidate: mvm_core::registry_pack::application_bundle::VerifiedApplicationBundle,
+    plan: ExecutionPlan,
 }
 
 impl std::fmt::Debug for PreparedBuiltPackRuntime {
@@ -37,6 +43,13 @@ impl PreparedBuiltPackRuntime {
             current._manifest.archive_sha256() == self._manifest.archive_sha256(),
             "built pack runtime changed after its final admission check"
         );
+        if let Some(application) = &self.application {
+            mvm_core::registry_pack_boot::AuthenticatedBootImageExpectations::for_application(
+                &application.candidate,
+                &application.plan,
+                config,
+            )?;
+        }
         Ok(())
     }
 }
@@ -161,6 +174,8 @@ pub(super) fn verify_runtime_at_dispatch(
 /// lock state. A signed plan alone cannot establish that an installed payload
 /// is still present, unmodified, and published by a trusted identity.
 pub(super) fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
+    use mvm_core::registry_pack::AuthenticatedRegistryManifest as _;
+
     let packs = plan
         .asset_identities
         .iter()
@@ -187,7 +202,7 @@ pub(super) fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
             reference.version().is_some(),
             "registry pack identity in signed plan must name an exact version"
         );
-        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_manifest(
             &cache, &lock, &publisher, &reference,
         )
         .with_context(|| format!("verifying registry pack {reference} at admission"))?;
@@ -220,11 +235,14 @@ fn finalize_registry_images(
     backend: BackendKind,
     preparation: ImagePreparation,
 ) -> Result<Option<PreparedBuiltPackRuntime>> {
-    use mvm_core::registry_pack::{PackPin, RegistryPackImage};
-    use mvm_core::registry_pack_boot::BuiltPackBootContract;
+    use mvm_core::registry_pack::{
+        AuthenticatedRegistryManifest as _, PackPin, RegistryPackImage, VerifiedRegistryManifest,
+    };
+    use mvm_core::registry_pack_boot::{AuthenticatedBootImageExpectations, BuiltPackBootContract};
 
     let mut built = false;
     let mut boot_images = None;
+    let mut application = None;
     for identity in plan
         .asset_identities
         .iter()
@@ -245,7 +263,7 @@ fn finalize_registry_images(
             &mvm_core::config::registry_pack_publisher_policy_path(),
         )?
         .policy;
-        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_manifest(
             &mvm_core::config::registry_pack_cache_dir(),
             &lock,
             &publisher,
@@ -255,24 +273,59 @@ fn finalize_registry_images(
             verified.manifest_sha256() == pin.manifest_sha256(),
             "registry pack no longer matches the admitted pin at backend handoff"
         );
-        if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
-            anyhow::ensure!(
-                !built,
-                "more than one admitted registry pack declares a built image"
-            );
-            built = true;
-            let contract = BuiltPackBootContract::open_for_admission(
-                &pin,
-                &mvm_build::stage0_kernel::current_image_set_protocol_support(),
-            )?;
-            contract.verify_image_config(
-                plan,
-                config,
-                mvm_core::arch::GuestArch::host(),
-                backend,
-            )?;
-            if matches!(preparation, ImagePreparation::Freeze) {
-                boot_images = Some(freeze_admitted_images(&contract, plan, config, backend)?);
+        match verified {
+            VerifiedRegistryManifest::Legacy(verified) => {
+                if matches!(verified.manifest().image, Some(RegistryPackImage::Built(_))) {
+                    anyhow::ensure!(
+                        !built,
+                        "more than one admitted registry pack declares a boot image"
+                    );
+                    built = true;
+                    let contract = BuiltPackBootContract::open_for_admission(
+                        &pin,
+                        &mvm_build::stage0_kernel::current_image_set_protocol_support(),
+                    )?;
+                    contract.verify_image_config(
+                        plan,
+                        config,
+                        mvm_core::arch::GuestArch::host(),
+                        backend,
+                    )?;
+                    if matches!(preparation, ImagePreparation::Freeze) {
+                        boot_images =
+                            Some(freeze_admitted_images(&contract, plan, config, backend)?);
+                    }
+                }
+            }
+            VerifiedRegistryManifest::Application(_) => {
+                anyhow::ensure!(
+                    !built,
+                    "more than one admitted registry pack declares a boot image"
+                );
+                built = true;
+                let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+                let store =
+                    mvm_core::registry_pack::application_bundle::ApplicationInstallStore::new(
+                        mvm_core::config::registry_pack_cache_dir(),
+                        mvm_core::config::pack_lockfile_path(),
+                        registry.root(),
+                    );
+                let trust = mvm_core::plan::bundle::FsTrustStore::default_path()?;
+                let held = mvm_core::registry_pack::application_bundle::resolve_installed_application_bundle(
+                    pin.reference(),
+                    &store,
+                    &mvm_core::config::registry_pack_publisher_policy_path(),
+                    &trust,
+                )?;
+                let expectations =
+                    AuthenticatedBootImageExpectations::for_application(&held, plan, config)?;
+                if matches!(preparation, ImagePreparation::Freeze) {
+                    boot_images = Some(freeze_image_sources(config, |_| Ok(expectations))?);
+                }
+                application = Some(PreparedApplicationRuntime {
+                    candidate: held,
+                    plan: plan.clone(),
+                });
             }
         }
     }
@@ -280,6 +333,7 @@ fn finalize_registry_images(
         return Ok(None);
     }
     let mut runtime = checked_release_runtime(config)?;
+    runtime.application = application;
     runtime.boot_images = boot_images;
     Ok(Some(runtime))
 }
@@ -289,6 +343,24 @@ fn freeze_admitted_images(
     plan: &ExecutionPlan,
     config: &VmStartConfig,
     backend: BackendKind,
+) -> Result<mvm_vmm::host::boot_images::FrozenBootImageBytes> {
+    freeze_image_sources(config, |root_hash| {
+        contract.capture_image_expectations(
+            plan,
+            config,
+            mvm_core::arch::GuestArch::host(),
+            backend,
+            root_hash,
+        )
+    })
+}
+
+fn freeze_image_sources(
+    config: &VmStartConfig,
+    capture: impl FnOnce(
+        &mut std::fs::File,
+    )
+        -> Result<mvm_core::registry_pack_boot::AuthenticatedBootImageExpectations>,
 ) -> Result<mvm_vmm::host::boot_images::FrozenBootImageBytes> {
     use std::fs::OpenOptions;
     use std::io::{Seek, SeekFrom};
@@ -307,7 +379,6 @@ fn freeze_admitted_images(
     };
     let root_path = Path::new(&config.rootfs_path);
     let directory = root_path.parent().context("rootfs directory missing")?;
-    // Acquire every original input before capturing facts; no hash-sidecar reopen.
     let rootfs = open(root_path)?;
     let verity = open(Path::new(
         config
@@ -318,13 +389,8 @@ fn freeze_admitted_images(
     let metadata = open(&directory.join("mvm-meta.json"))?;
     let mut root_hash = open(&directory.join("rootfs.roothash"))?;
     root_hash.seek(SeekFrom::Start(0))?;
-    let expectations = contract.capture_image_expectations(
-        plan,
-        config,
-        mvm_core::arch::GuestArch::host(),
-        backend,
-        &mut root_hash,
-    )?;
+    // Acquire every original input before capturing facts; no hash-sidecar reopen.
+    let expectations = capture(&mut root_hash)?;
     let private = mvm_core::config::vm_state_dir(&config.name).join("boot-images");
     mvm_core::config::create_private_dir(&private)?;
     mvm_vmm::host::boot_images::FrozenBootImageBytes::prepare(
@@ -353,6 +419,7 @@ fn checked_release_runtime(config: &VmStartConfig) -> Result<PreparedBuiltPackRu
     )?;
     Ok(PreparedBuiltPackRuntime {
         _manifest: manifest,
+        application: None,
         boot_images: None,
     })
 }
