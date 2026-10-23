@@ -10,6 +10,7 @@ pub const RUNTIME_ASSEMBLY_FORMAT: u32 = 1;
 
 /// A producer must be built from the protocol source it is declaring. Refuse a
 /// different checkout rather than labeling its binaries with host constants.
+#[tracing::instrument(skip_all)]
 pub(crate) fn verify_protocol_source(workspace: &std::path::Path) -> Result<(), GuestBinsError> {
     let source = workspace.join("crates/mvm-agentd/src/vsock/mod.rs");
     let expected = mvm_agentd::vsock::COMPILED_PROTOCOL_SOURCE;
@@ -100,6 +101,7 @@ impl GuestBinsArtifact {
 
 /// Derive from captured archive members in a fresh private cache. This is a byte
 /// assembly operation, not a guest compiler invocation or release authentication.
+#[tracing::instrument(skip_all)]
 pub(crate) fn derive_runtime_assembly(
     runtime: &crate::guest_runtime::GuestRuntime,
     arch: GuestArch,

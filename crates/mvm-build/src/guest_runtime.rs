@@ -590,6 +590,7 @@ pub fn seed_source_guest_runtime(
 /// Find the already-built runtime for this source tree without compiling it.
 /// A corrupt pointer or object is an error, not a cache miss that might hide
 /// evidence of tampering.
+#[tracing::instrument(skip_all)]
 pub fn cached_source_guest_runtime(
     cache_root: &Path,
     version: &str,
