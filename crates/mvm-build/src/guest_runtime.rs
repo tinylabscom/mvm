@@ -31,6 +31,7 @@ pub struct GuestRuntime {
     pub release_proof: Option<evidence::RuntimeReleaseProof>,
 }
 
+mod declaration_cache;
 pub mod evidence;
 pub mod source;
 #[cfg(any(test, feature = "test-support"))]
