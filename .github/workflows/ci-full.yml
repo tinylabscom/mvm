@@ -100,7 +100,8 @@ jobs:
     name: E2E Tests
     needs: libkrun-macos
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -145,7 +146,8 @@ jobs:
   bdd-live-warm-claim:
     name: BDD live warm claim (Linux, Firecracker)
     if: ${{ github.event_name != 'workflow_dispatch' || !inputs.tool_live_only }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     # The scenario enforces the 300 ms startup ceiling, so the recipe builds an
     # optimized mvmctl beside the debug test harness; the second profile is
     # what the extra quarter hour pays for.
@@ -229,7 +231,8 @@ jobs:
     # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
     # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
     # the one self-hosted certification machine.
-    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-24.04' }}
     permissions:
       contents: read
     strategy:
@@ -407,7 +410,8 @@ jobs:
   source-bootstrap-linux:
     name: Source builder bootstrap (Linux, cold Stage 0)
     if: github.repository == 'tinylabscom/mvm'
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     # Stage 0's own builder timeout is two hours; the job has to outlast it by
@@ -704,7 +708,8 @@ jobs:
     name: Workload spawn smoke (Plan 107 A2.4)
     needs: e2e
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # ubuntu-24.04 until the 26.04 runner failures are fixed
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 

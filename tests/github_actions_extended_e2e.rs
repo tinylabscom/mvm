@@ -78,7 +78,7 @@ fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd(
         "the focused matrix must contain only tool_live"
     );
     assert!(
-        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-latest'"),
+        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-24.04'"),
         "the focused witness must use the dedicated self-hosted KVM runner"
     );
 }
