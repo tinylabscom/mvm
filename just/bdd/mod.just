@@ -63,10 +63,7 @@ live-ci TAG="ci_live":
     cargo build -p mvm-hostd --bin mvm-host-agent --bin mvm-signer-helper --bin mvm-network-endpoint
     "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
     @allowed_skips=outside-selected-tag; \
-    if [ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" = true ] && \
-       [ -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]; then \
-      allowed_skips="$allowed_skips,needs-runtime-candidate"; \
-    fi; \
+    if [ "${MVM_BDD_ALLOW_RUNTIME_CANDIDATE_SKIP:-false}" = true ] && [ -z "${MVM_E2E_RUNTIME_CANDIDATE_DIR:-}" ]; then allowed_skips="$allowed_skips,needs-runtime-candidate"; fi; \
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" \
     MVM_BDD_LIVE=1 \
     MVM_BDD_ONLY_TAG={{ TAG }} \
