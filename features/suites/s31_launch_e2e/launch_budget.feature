@@ -35,7 +35,7 @@ Feature: the launch budget stays observable on every run
   # `@perf_budget` gates the *threshold*, not the measurement: the two scenarios
   # above still record a dispatch window everywhere. A 200 ms budget on a host
   # with rotational storage measures the disk rather than the launch path.
-  @live @perf_budget
+  @live @perf_budget @warm_claim
   Scenario: a warm-residency launch meets the documented start budget
     Given an Alpine warm parent is ready
     When I launch "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm"
@@ -53,7 +53,7 @@ Feature: the launch budget stays observable on every run
   # single claim would have missed. Each claim also runs with
   # `MVM_COLD_BUILD=refuse`, so a claim that would rebuild something fails
   # naming the artifact instead of only coming in slow.
-  @live @perf_budget
+  @live @perf_budget @warm_claim
   Scenario: repeated warm launches each meet the documented start budget
     Given an Alpine warm parent is ready
     Then each of 3 repeated launches of "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm" meets its hard dispatch ceiling
@@ -61,12 +61,12 @@ Feature: the launch budget stays observable on every run
   # Nothing prepared by hand: the first unnamed run of an image leaves a
   # standby behind, and the next run of the same image claims it and is held
   # to the same ceiling as a run whose standby `pool warm` prepared.
-  @live @perf_budget
+  @live @perf_budget @warm_claim
   Scenario: a second run of an image claims the standby the first run left
-    When I launch "machine run --image alpine -- true"
+    When I launch "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm"
     Then the launch succeeds
     And a standby left by that run is ready within 180 seconds
-    When I launch "machine run --image alpine -- true"
+    When I launch "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm"
     Then the launch succeeds
     And the launch claimed a standby
     And the warm launch meets its hard dispatch ceiling

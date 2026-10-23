@@ -62,13 +62,11 @@ const GUEST_BOOT_FAILURES: &[(&str, &str)] = &[
 
 /// The residency the warm-launch scenarios run under.
 ///
-/// An unnamed launch claims a standby when one is ready and boots cold when
-/// none is; either way it leaves one behind for the next run. The warm
-/// scenarios prepare their standby explicitly and pin the residency so the
-/// claim they measure is the one they prepared for. A launch that means to
-/// boot cold is named, which also keeps it from leaving a standby behind.
+/// Ordinary documented scenarios run cold on every backend. A warm-claim
+/// capability opt-in only selects eligible scenarios; it must not change the
+/// residency of unrelated launches. Warm steps override this explicitly.
 const RESIDENCY_ENV: &str = mvm_core::residency::MVM_RESIDENCY_ENV;
-const DOCUMENTED_RESIDENCY: &str = "warm";
+const DOCUMENTED_RESIDENCY: &str = "cold";
 
 pub(crate) fn e2e_home() -> PathBuf {
     std::env::var_os(E2E_HOME_ENV)

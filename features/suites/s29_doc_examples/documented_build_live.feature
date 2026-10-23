@@ -23,7 +23,9 @@ Feature: The documented flake build runs for real
   # the expensive part and this scenario reuses what the one above just built.
   # Named so it takes the cold path: an unnamed launch has to claim a prepared
   # warm standby, and nothing warms one for a freshly built flake.
-  @live @release_gate_flake
+  # The native HVF invocation path still refuses before verified input custody;
+  # Linux/Firecracker must prove this positive rather than weakening that gate.
+  @live @firecracker @release_gate_flake
   Scenario: the documented entrypoint launch runs the compiled workload
     When I run mvmctl in an isolated live home with "machine run --name bdd-documented-entrypoint --entrypoint --flake examples/exit_code"
     Then the command exits with code 7
@@ -49,7 +51,8 @@ Feature: The documented flake build runs for real
   # runtime and workload kernel, and network access to the pinned Nix inputs.
   # The ordinary hermetic lane skips this scenario through the @live gate.
   # A successful build includes a zero-exit health boot before signing.
-  @live @documented_pack_live
+  # Health invocation has the same Firecracker-only custody contract above.
+  @live @firecracker @documented_pack_live
   Scenario: the documented pack build health-boots and signs a frozen workload
     Given a local pack build fixture
     And the isolated mvm home is prepared for live launches
