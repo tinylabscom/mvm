@@ -801,7 +801,25 @@ mod tests {
         }
         assert_eq!(attached.roothash.as_deref(), Some(workload_hash.as_str()));
         let verity_path = PathBuf::from(attached.verity_path.as_ref().unwrap());
-        assert!(!verity_path.with_extension("roothash").exists());
+        let raw_hash_path = verity_path.with_extension("roothash");
+        let raw_hash = format!("{workload_hash}\n").into_bytes();
+        assert_eq!(raw_hash.len(), 65);
+        assert_eq!(std::fs::read(&raw_hash_path).unwrap(), raw_hash);
+        let declarations: Vec<_> = installed
+            .manifest
+            .artifacts
+            .iter()
+            .filter(|artifact| artifact.name == "rootfs.roothash")
+            .collect();
+        assert_eq!(declarations.len(), 1);
+        let declaration = declarations[0];
+        assert_eq!(declaration.role, ArtifactRole::Other);
+        assert_eq!(declaration.size_bytes, 65);
+        assert_eq!(
+            declaration.sha256,
+            mvm_core::plan::bundle::sha256_hex(&raw_hash)
+        );
+        assert_eq!(installed.root.join(&declaration.path), raw_hash_path);
         assert_eq!(
             verity_path,
             installed.root.join(
