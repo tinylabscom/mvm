@@ -125,8 +125,6 @@ base64.workspace = true
 chrono.workspace = true
 # rand_core feature for the signers' Ed25519 keygen.
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
-# Packet parse + payload rebuild for the endpoint transformation pipeline.
-etherparse = { workspace = true }
 sysinfo = { version = "0.30", default-features = false }
 ipnet.workspace = true
 # Evented readiness for FlowMux UDP relays.

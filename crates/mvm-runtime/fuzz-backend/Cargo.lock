@@ -2383,7 +2383,6 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "mvm-runtime",
- "tempfile",
 ]
 
 [[package]]
