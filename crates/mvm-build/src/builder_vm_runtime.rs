@@ -39,8 +39,8 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 mod image_lock;
 
 pub use image_lock::{
-    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError, NixStoreImageLock,
-    UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
+    DEFAULT_LOCK_WAIT, HeldImageLock, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError,
+    NixStoreImageLock, UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
     acquire_nix_store_image_lock_named, ensure_nix_store_image_unlocked, hold_image_lock,
     nix_store_image_is_contended,
 };
