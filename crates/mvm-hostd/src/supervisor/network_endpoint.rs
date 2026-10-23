@@ -1647,8 +1647,8 @@ mod tests {
     #[test]
     fn assemble_wires_remote_resolver_backend_to_the_live_uds_server() {
         use base64::Engine;
+        use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
         use mvm_core::substitution_wire::ResolveWireResponse;
-        use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
         use secrecy::ExposeSecret;
 
         let value_b64 = base64::engine::general_purpose::STANDARD.encode(b"sk-live-from-vault");

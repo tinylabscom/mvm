@@ -4147,7 +4147,6 @@ dependencies = [
  "mvm-http",
  "mvm-net",
  "mvm-runtime",
- "mvm-sdk",
  "mvm-vmm",
  "rand 0.10.2",
  "regex",
