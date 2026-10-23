@@ -21,7 +21,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, verify_bundle_file};
+use mvm_client::bundle::{BundleSigner, HostBundleSigner};
+use mvm_core::plan::bundle::{
+    BundleRegistry, FsTrustStore, inspect_bundle_manifest_file_for_refusal,
+    is_registry_forbidden_local_build, verify_bundle_file,
+};
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::oci::ImageReference;
 
@@ -29,6 +33,7 @@ use super::super::Cli;
 use super::registry::{
     REGISTRY_SCHEME, RegistryTransport, admit_registry_source, display_reference,
     parse_registry_reference, pull_bundle, pull_bundle_bounded,
+    refuse_local_build_registry_transfer,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -153,7 +158,7 @@ pub(crate) fn load_application_bundle(
 ) -> Result<LoadedBundle> {
     let source = application_source(application)?;
     let bundle = &application.manifest().application.bundle;
-    load_archive_bounded(
+    let loaded = load_archive_bounded(
         &source,
         LoadOptions {
             allow_http: false,
@@ -161,7 +166,20 @@ pub(crate) fn load_application_bundle(
         },
         Some(bundle.archive_size),
         |reference| RegistryTransport::for_reference(reference, false),
-    )
+    )?;
+    refuse_application_local_build(loaded.path())?;
+    Ok(loaded)
+}
+
+pub(crate) fn refuse_application_local_build(path: &Path) -> Result<()> {
+    let manifest = inspect_bundle_manifest_file_for_refusal(path)
+        .context("inspecting application bundle origin before registry installation")?;
+    let host_key_id = HostBundleSigner::load()?.key_id();
+    anyhow::ensure!(
+        !is_registry_forbidden_local_build(&manifest, &host_key_id),
+        "refusing to install a local build from an application registry: local builds are never published or accepted from a registry"
+    );
+    Ok(())
 }
 
 /// Apply source policy even when verified archive bytes are already cached.
@@ -248,6 +266,12 @@ fn load_archive_bounded(
                 Some(limit) => pull_bundle_bounded(reference, &transport, limit)?,
                 None => pull_bundle(reference, &transport)?,
             };
+            let host_key_id = HostBundleSigner::load()?.key_id();
+            refuse_local_build_registry_transfer(
+                &pulled.bytes,
+                &host_key_id,
+                "accept from a registry",
+            )?;
             return Ok(LoadedBundle {
                 archive: spool_to_file(&pulled.bytes)?,
                 resolved: Some(pulled.resolved),
@@ -436,8 +460,9 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::bundle::read_and_verify_bundle;
     use mvm_core::plan::bundle::{
-        ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
-        sha256_hex, write_bundle,
+        ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId,
+        inspect_bundle_manifest_for_refusal, key_id_from_pubkey, mark_local_build, sha256_hex,
+        write_bundle,
     };
     use mvm_fs::oci::test_registry::MemoryRegistry;
     use mvm_fs::oci::{
@@ -648,21 +673,35 @@ mod tests {
                 sha256: sha256_hex(kernel),
                 size_bytes: kernel.len() as u64,
             };
-            let manifest = BundleManifest {
-                schema_version: BUNDLE_SCHEMA_VERSION,
-                publisher: "registry-test".to_string(),
-                key_id: key_id_from_pubkey(&self.key.verifying_key()),
-                arch: "aarch64".to_string(),
-                kernel_version: None,
-                profile: None,
-                workload_label: Some("registry-round-trip".to_string()),
-                created_at: "2026-09-16T00:00:00Z".to_string(),
-                labels: Default::default(),
-                artifacts: vec![artifact],
-                members: Vec::new(),
-                verity: None,
-                resources: None,
-            };
+            self.bundle_from_manifest(
+                BundleManifest {
+                    schema_version: BUNDLE_SCHEMA_VERSION,
+                    publisher: "registry-test".to_string(),
+                    key_id: key_id_from_pubkey(&self.key.verifying_key()),
+                    arch: "aarch64".to_string(),
+                    kernel_version: None,
+                    profile: None,
+                    workload_label: Some("registry-round-trip".to_string()),
+                    created_at: "2026-09-16T00:00:00Z".to_string(),
+                    labels: Default::default(),
+                    artifacts: vec![artifact],
+                    members: Vec::new(),
+                    verity: None,
+                    resources: None,
+                },
+                kernel,
+            )
+        }
+
+        fn local_bundle(&self, kernel: &[u8]) -> Vec<u8> {
+            let mut manifest =
+                inspect_bundle_manifest_for_refusal(std::io::Cursor::new(self.bundle(kernel)))
+                    .expect("inspect fixture");
+            mark_local_build(&mut manifest);
+            self.bundle_from_manifest(manifest, kernel)
+        }
+
+        fn bundle_from_manifest(&self, manifest: BundleManifest, kernel: &[u8]) -> Vec<u8> {
             write_bundle(
                 &manifest,
                 &self.key,
@@ -670,6 +709,65 @@ mod tests {
             )
             .expect("write bundle")
         }
+    }
+
+    fn other_host_key_id() -> KeyId {
+        key_id_from_pubkey(&SigningKey::from_bytes(&[250; 32]).verifying_key())
+    }
+
+    #[test]
+    fn a_local_build_is_refused_by_push_and_by_pull() {
+        let registry = MemoryRegistry::start();
+        let host = Publisher::trusted(7);
+        let archive = host.local_bundle(b"kernel bytes");
+        let host_key_id = key_id_from_pubkey(&host.key.verifying_key());
+
+        let push_error = publish_bundle(
+            &archive,
+            &reference(&registry, ":local"),
+            &http_transport(),
+            &host.trust(),
+            &host_key_id,
+        )
+        .expect_err("a local build must not be published");
+        assert!(
+            push_error.to_string().contains("local build"),
+            "{push_error:#}"
+        );
+        assert!(registry.requests().is_empty(), "nothing was sent");
+
+        push_unverified(&registry, ":local", &archive);
+        let pull_error = load_archive(
+            &source(&registry, ":local"),
+            LoadOptions::default(),
+            with_http,
+        )
+        .err()
+        .expect("a registry must not re-import a local build");
+        assert!(
+            pull_error.to_string().contains("local build"),
+            "{pull_error:#}"
+        );
+    }
+
+    #[test]
+    fn enrolling_the_host_key_does_not_make_a_local_build_publishable() {
+        let registry = MemoryRegistry::start();
+        let host = Publisher::trusted(8);
+        let archive = host.local_bundle(b"kernel bytes");
+        let host_key_id = key_id_from_pubkey(&host.key.verifying_key());
+
+        let error = publish_bundle(
+            &archive,
+            &reference(&registry, ":local"),
+            &http_transport(),
+            &host.trust(),
+            &host_key_id,
+        )
+        .expect_err("trust enrollment must not unlock publication");
+
+        assert!(error.to_string().contains("local build"), "{error:#}");
+        assert!(registry.requests().is_empty(), "nothing was sent");
     }
 
     fn http_transport() -> RegistryTransport {
@@ -750,6 +848,7 @@ mod tests {
             &reference(&registry, ":bounded"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .unwrap();
         let pinned = format!("@{}", pushed.manifest_digest);
@@ -785,6 +884,7 @@ mod tests {
             &reference(&registry, ":v1"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .expect("publish");
         assert_eq!(
@@ -820,6 +920,7 @@ mod tests {
             &reference(&registry, ":v1"),
             &http_transport(),
             &stranger.trust(),
+            &other_host_key_id(),
         )
         .expect_err("an unverifiable bundle must not be published");
 
@@ -959,6 +1060,7 @@ mod tests {
             &reference(&registry, ":v1"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .expect("publish");
         registry.require_token("anonymous-only");
@@ -1000,6 +1102,7 @@ mod tests {
             &reference(&registry, ":v1"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .expect("publish");
         registry.serve_blob_as(&pushed.layer_digest, &publisher.bundle(b"other kernel"));
@@ -1020,6 +1123,7 @@ mod tests {
             &reference(&registry, ":v1"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .expect("publish first");
         publish_bundle(
@@ -1027,6 +1131,7 @@ mod tests {
             &reference(&registry, ":v2"),
             &http_transport(),
             &publisher.trust(),
+            &other_host_key_id(),
         )
         .expect("publish second");
         let second = registry

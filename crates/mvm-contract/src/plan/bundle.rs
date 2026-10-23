@@ -356,8 +356,10 @@ pub struct BundleManifest {
     pub workload_label: Option<String>,
     /// ISO-8601 timestamp the bundle was sealed at.
     pub created_at: String,
-    /// Free-form metadata key/value pairs. Reserved for publisher
-    /// annotations; verifiers must not interpret these.
+    /// Free-form metadata key/value pairs. Most entries are publisher
+    /// annotations. The reserved `mvm.origin` entry is interpreted by bundle
+    /// admission together with the signing key; the label alone grants no
+    /// authority.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
     /// Every artifact inside the archive. Order is preserved in the

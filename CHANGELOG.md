@@ -24,6 +24,7 @@ All notable changes to mvm are documented in this file.
 
 ### Fixed
 - **applications**: Bind installed application descriptor pins into signed plans and reverify their trusted bundle at host boot admission (#4511)
+- **bundle**: Reserve signed local-build provenance and refuse host-local archives at every registry boundary (#4584)
 - **hvf**: Reap a stopped standby and remove its state (#4575)
 - **hvf**: Start persistent machines on the default macOS backend
 - **hvf**: List a machine that has a pid file but no console log

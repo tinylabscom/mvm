@@ -114,6 +114,70 @@ pub use stream::{
 };
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
 
+/// Signed manifest label written by the local build front door.
+pub const BUNDLE_ORIGIN_LABEL: &str = "mvm.origin";
+/// Value identifying a bundle as a host-local build.
+pub const LOCAL_BUILD_ORIGIN: &str = "local-build";
+
+/// Trust class derived from both the signed manifest and consumer-owned keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleOrigin {
+    /// The signing key is enrolled in the consumer trust store.
+    ReleaseVerified,
+    /// The bundle carries the local-build label and this host signed it.
+    LocalBuild,
+    /// The bundle has no admissible release or host-local identity.
+    Untrusted,
+}
+
+/// Mark a manifest produced by the local build front door.
+pub fn mark_local_build(manifest: &mut BundleManifest) {
+    manifest.labels.insert(
+        BUNDLE_ORIGIN_LABEL.to_string(),
+        LOCAL_BUILD_ORIGIN.to_string(),
+    );
+}
+
+/// Classify a bundle without granting authority from a signer-controlled label.
+///
+/// Signature and artifact verification remain separate mandatory checks. This
+/// function only combines the signed manifest with consumer-owned key state.
+pub fn bundle_origin(
+    manifest: &BundleManifest,
+    host_key_id: &KeyId,
+    trust: &dyn TrustStore,
+) -> BundleOrigin {
+    let carries_local_label = manifest
+        .labels
+        .get(BUNDLE_ORIGIN_LABEL)
+        .is_some_and(|value| value == LOCAL_BUILD_ORIGIN);
+    let signed_by_this_host = &manifest.key_id == host_key_id;
+
+    if carries_local_label || signed_by_this_host {
+        return if carries_local_label && signed_by_this_host {
+            BundleOrigin::LocalBuild
+        } else {
+            BundleOrigin::Untrusted
+        };
+    }
+
+    match trust.lookup(&manifest.key_id) {
+        Some(key) if key_id_from_pubkey(&key) == manifest.key_id => BundleOrigin::ReleaseVerified,
+        _ => BundleOrigin::Untrusted,
+    }
+}
+
+/// Whether registry ingress or egress must reject this manifest before trust
+/// lookup. Either the host key or the reserved local-build label is sufficient
+/// for refusal; neither can be made publishable by enrolling the host key.
+pub fn is_registry_forbidden_local_build(manifest: &BundleManifest, host_key_id: &KeyId) -> bool {
+    &manifest.key_id == host_key_id
+        || manifest
+            .labels
+            .get(BUNDLE_ORIGIN_LABEL)
+            .is_some_and(|value| value == LOCAL_BUILD_ORIGIN)
+}
+
 /// Derive the key_id from a verifying-key's bytes.
 ///
 /// A free function rather than an inherent method on [`KeyId`]: that type
@@ -199,6 +263,34 @@ impl InstalledBundle {
             .find_by_name(name)
             .map(|a| self.root.join(&a.path))
     }
+}
+
+/// Parse only the signed manifest entry for an early refusal decision.
+///
+/// The returned fields are not authenticated. Callers may use them only to
+/// reject an archive before network publication or registry installation;
+/// successful admission still requires the normal signature and artifact
+/// verification path.
+pub fn inspect_bundle_manifest_for_refusal(
+    archive: impl Read,
+) -> Result<BundleManifest, BundleVerifyError> {
+    let manifest_bytes = read_manifest_entry(archive)?;
+    check_schema_cap(&manifest_bytes, BUNDLE_SCHEMA_VERSION)?;
+    serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| BundleVerifyError::ManifestParse(error.to_string()))
+}
+
+/// File-backed form of [`inspect_bundle_manifest_for_refusal`].
+pub fn inspect_bundle_manifest_file_for_refusal(
+    path: &Path,
+) -> Result<BundleManifest, BundleVerifyError> {
+    let file = std::fs::File::open(path).map_err(|error| {
+        BundleVerifyError::ManifestParse(format!(
+            "opening bundle archive {}: {error}",
+            path.display()
+        ))
+    })?;
+    inspect_bundle_manifest_for_refusal(file)
 }
 
 /// Errors specific to bundle install.
@@ -450,6 +542,24 @@ impl BundleRegistry {
 /// as both are found. A bundle writes them first, so a multi-GiB archive is
 /// read only as far as its first two entries.
 fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
+    let (manifest, signature) = read_manifest_entries_inner(archive, true)?;
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest,
+        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+    ))
+}
+
+/// Read only the manifest for denial-only classification. A missing signature
+/// is left to the mandatory verification path, which reports that failure.
+fn read_manifest_entry(archive: impl Read) -> Result<Vec<u8>, BundleVerifyError> {
+    read_manifest_entries_inner(archive, false).map(|(manifest, _)| manifest)
+}
+
+fn read_manifest_entries_inner(
+    archive: impl Read,
+    require_signature: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), BundleVerifyError> {
     let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
     let mut manifest = None;
     let mut signature = None;
@@ -470,14 +580,14 @@ fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), Bundl
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).map_err(tar_error)?;
         *slot = Some(bytes);
-        if manifest.is_some() && signature.is_some() {
+        if manifest.is_some() && (signature.is_some() || !require_signature) {
             break;
         }
     }
     let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
     Ok((
         manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
-        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+        signature,
     ))
 }
 
@@ -1407,6 +1517,91 @@ mod tests {
             verity: None,
             resources: None,
         }
+    }
+
+    #[test]
+    fn bundle_origin_is_release_verified_only_for_enrolled_keys() {
+        let release = fresh_key();
+        let host = fresh_key();
+        let manifest = make_manifest(key_id_from_pubkey(&release.verifying_key()), Vec::new());
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&release),
+            ),
+            BundleOrigin::ReleaseVerified
+        );
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &MapTrustStore(HashMap::new()),
+            ),
+            BundleOrigin::Untrusted
+        );
+    }
+
+    #[test]
+    fn the_local_label_without_the_host_key_grants_no_level() {
+        let foreign = fresh_key();
+        let host = fresh_key();
+        let mut manifest = make_manifest(key_id_from_pubkey(&foreign.verifying_key()), Vec::new());
+        mark_local_build(&mut manifest);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&foreign),
+            ),
+            BundleOrigin::Untrusted
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
+    }
+
+    #[test]
+    fn a_host_key_archive_without_the_label_is_not_a_local_build() {
+        let host = fresh_key();
+        let manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
+        let enrolled = trust(&host);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &enrolled,
+            ),
+            BundleOrigin::Untrusted
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
+    }
+
+    #[test]
+    fn marked_host_bundle_is_local_and_never_registry_eligible() {
+        let host = fresh_key();
+        let mut manifest = make_manifest(key_id_from_pubkey(&host.verifying_key()), Vec::new());
+        mark_local_build(&mut manifest);
+
+        assert_eq!(
+            bundle_origin(
+                &manifest,
+                &key_id_from_pubkey(&host.verifying_key()),
+                &trust(&host),
+            ),
+            BundleOrigin::LocalBuild
+        );
+        assert!(is_registry_forbidden_local_build(
+            &manifest,
+            &key_id_from_pubkey(&host.verifying_key())
+        ));
     }
 
     fn art(name: &str, role: ArtifactRole, path: &str, bytes: &[u8]) -> BundleArtifact {
