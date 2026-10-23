@@ -359,15 +359,15 @@ jobs:
         run: |
           hostlib_target="${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
           [[ "${BUILD_TARGET}" == *-unknown-linux-musl ]] || hostlib_target="${BUILD_TARGET}"
-          assets=()
+          size_args=()
           for f in target/"${BUILD_TARGET}"/release-min/mvmctl; do
-            [[ -f "$f" ]] && assets+=(--asset "$f")
+            [[ -f "$f" ]] && size_args+=(--asset "$f")
           done
           cargo run --package xtask -- report-compile-units \
             --build "mvmctl (release-min)=build --profile release-min --target ${BUILD_TARGET} --features ${MVMCTL_RELEASE_FEATURES}" \
             --build "daemons (release)=build --release --target ${BUILD_TARGET} -p mvm-hostd -p mvm-gpu" \
             --build "mvm-hostlib (release)=build --release --target ${hostlib_target} -p mvm-hostlib --features mvm-client/release-channel" \
-            "${assets[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
+            "${size_args[@]}" | tee -a "${GITHUB_STEP_SUMMARY}"
 
       - name: Verify Linux release payloads are statically linked
         if: endsWith(matrix.build_target, '-unknown-linux-musl')
