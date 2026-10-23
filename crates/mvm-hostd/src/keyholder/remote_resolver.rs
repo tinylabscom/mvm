@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use base64::Engine;
+use mvm_contract::ir::{AuthType, SecretRef};
 use mvm_core::substitution_wire::{ResolveWireRequest, ResolveWireResponse};
-use mvm_sdk::ir::{AuthType, SecretRef};
 use secrecy::SecretBox;
 
 use super::resolver::{ResolveError, SecretResolver};
@@ -143,7 +143,7 @@ fn read_frame<T: serde::de::DeserializeOwned>(r: &mut impl Read) -> io::Result<T
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use mvm_sdk::ir::SecretMount;
+    use mvm_contract::ir::SecretMount;
     use secrecy::ExposeSecret;
     use std::os::unix::net::UnixListener;
     use std::thread;

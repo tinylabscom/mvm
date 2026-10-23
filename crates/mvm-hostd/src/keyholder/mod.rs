@@ -46,4 +46,4 @@ pub use substitution::{
 /// `secret_resolver_daemon` test) needs to construct a `SecretRef`
 /// literal, which requires naming its `mount: SecretMount` field's
 /// type too.
-pub use mvm_sdk::ir::{AuthType, SecretMount, SecretRef, Sigv4Params};
+pub use mvm_contract::ir::{AuthType, SecretMount, SecretRef, Sigv4Params};

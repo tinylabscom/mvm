@@ -94,7 +94,10 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 375 (was 374): the first-party `mvm-builder-guest` crate, same reason as
 /// the Linux budget below.
-const MACOS_CLOSURE_BUDGET: usize = 375;
+///
+/// 374 (was 375): removing the unused direct `etherparse` dependency from
+/// `mvm-hostd` removes its final edge from the shipped graph.
+const MACOS_CLOSURE_BUDGET: usize = 374;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -271,7 +274,10 @@ const MACOS_CLOSURE_BUDGET: usize = 375;
 /// contract they share with the host, becomes its own first-party crate so the
 /// musl build that embeds them stops compiling `mvm-build`'s closure. Every
 /// dependency it has was already present, so the one new node is the crate itself.
-pub(crate) const CLOSURE_BUDGET: usize = 378;
+///
+/// 377 (was 378): removing the unused direct `etherparse` dependency from
+/// `mvm-hostd` removes its final edge from the shipped graph.
+pub(crate) const CLOSURE_BUDGET: usize = 377;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {

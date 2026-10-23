@@ -28,6 +28,8 @@ env:
   # default (a dev build does not need the payload and should not pay the
   # cross-compile), which means the *only* place it gets turned on for a shipped
   # artifact is here.
+  # The S3 template registry is fleet-only and is enabled by those builds;
+  # general release artifacts do not carry its object-store dependency graph.
   MVMCTL_RELEASE_FEATURES: host,user,release-artifact-bootstrap,release-channel,embed-host-bins
 
 jobs:
