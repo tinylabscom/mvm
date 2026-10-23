@@ -493,19 +493,43 @@ pub(super) fn find_image<'a>(
     index: &'a OciCacheIndex,
     reference: &str,
 ) -> Option<&'a CachedOciImage> {
+    let parsed = reference.parse::<mvm_fs::oci::ImageReference>().ok();
     index
         .images
         .iter()
-        .find(|image| image_matches(image, reference))
+        .find(|image| image_matches_parsed(image, reference, parsed.as_ref()))
 }
 
 pub(super) fn image_matches(image: &CachedOciImage, reference: &str) -> bool {
+    let parsed = reference.parse::<mvm_fs::oci::ImageReference>().ok();
+    image_matches_parsed(image, reference, parsed.as_ref())
+}
+
+fn image_matches_parsed(
+    image: &CachedOciImage,
+    reference: &str,
+    parsed: Option<&mvm_fs::oci::ImageReference>,
+) -> bool {
     image.reference == reference
         || image.resolved_digest == reference
         || image
             .resolved_digest
             .strip_prefix("sha256:")
             .is_some_and(|digest| digest == reference)
+        || parsed.is_some_and(|requested| {
+            requested.registry == image.registry
+                && requested.repository == image.repository
+                && if requested.digest.is_some() {
+                    image
+                        .digest_reference()
+                        .is_ok_and(|pin| pin == requested.canonical())
+                } else {
+                    image
+                        .reference
+                        .parse::<mvm_fs::oci::ImageReference>()
+                        .is_ok_and(|cached| cached.canonical() == requested.canonical())
+                }
+        })
 }
 
 pub(super) fn image_size_bytes(cache_root: &Path, image: &CachedOciImage) -> u64 {
@@ -911,6 +935,91 @@ mod tests {
             serde_json::to_vec_pretty(index).expect("serialize index"),
         )
         .expect("write index");
+    }
+
+    #[test]
+    fn digest_reference_alias_matches_only_the_cached_repository_and_registry() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let image = sample_image("docker.io/library/alpine:3.20", &digest, "blobs/a");
+        let pin = image.digest_reference().unwrap();
+        let index = OciCacheIndex {
+            images: vec![image.clone()],
+            ..Default::default()
+        };
+        assert_eq!(find_image(&index, &pin), Some(&image));
+        for reference in [
+            format!("evil.example/library/alpine@{digest}"),
+            format!("docker.io/library/other@{digest}"),
+            format!("{pin}\n"),
+            "alpine@sha256:abc".to_string(),
+        ] {
+            assert!(find_image(&index, &reference).is_none());
+        }
+        assert_eq!(find_image(&index, &digest), Some(&image));
+        assert_eq!(find_image(&index, &digest[7..]), Some(&image));
+        assert_eq!(find_image(&index, &image.reference), Some(&image));
+    }
+
+    #[test]
+    fn short_tags_and_canonical_tags_share_a_cache_entry_without_crossing_sources() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for (reference, aliases) in [
+            (
+                "docker.io/library/alpine:latest",
+                ["alpine", "alpine:latest", "docker.io/library/alpine"],
+            ),
+            (
+                "alpine:3.20",
+                [
+                    "alpine:3.20",
+                    "library/alpine:3.20",
+                    "docker.io/library/alpine:3.20",
+                ],
+            ),
+        ] {
+            let image = sample_image(reference, &digest, "blobs/a");
+            let index = OciCacheIndex {
+                images: vec![image.clone()],
+                ..Default::default()
+            };
+            for alias in aliases {
+                assert_eq!(find_image(&index, alias), Some(&image));
+            }
+            for other in [
+                "evil.example/library/alpine:latest",
+                "docker.io/library/other:latest",
+                "alpine:3.19",
+                "alpine\n",
+            ] {
+                assert!(find_image(&index, other).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn digest_reference_alias_preserves_index_identity_without_a_new_child_alias() {
+        let index_digest = format!("sha256:{}", "b".repeat(64));
+        let manifest_digest = format!("sha256:{}", "a".repeat(64));
+        let image = sample_image(
+            &format!("alpine:3.20@{index_digest}"),
+            &manifest_digest,
+            "blobs/a",
+        );
+        let index = OciCacheIndex {
+            images: vec![image.clone()],
+            ..Default::default()
+        };
+        assert_eq!(
+            find_image(&index, &image.digest_reference().unwrap()),
+            Some(&image)
+        );
+        assert!(
+            find_image(
+                &index,
+                &format!("docker.io/library/alpine@{manifest_digest}")
+            )
+            .is_none()
+        );
     }
 
     #[test]

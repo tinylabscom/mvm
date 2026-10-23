@@ -43,17 +43,28 @@ few extra steps, covered in
 ## Quick start
 
 ```bash
-mvmctl doctor
+mvmctl doctor --workflow cli-run
 mvmctl bootstrap
 mvmctl image pull alpine
-mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
+MVM_DEMO_IMAGE="$(mvmctl image inspect alpine --digest-ref)"
+mvmctl machine run --name local-demo --profile dev \
+  --image "${MVM_DEMO_IMAGE:?Run preparation in this terminal first}" \
+  --cpus 1 --memory 256M --timeout 30 \
+  -- /bin/sh -c 'printf "hello from a microVM\n"; /bin/uname -s'
 ```
 
 `bootstrap` fetches the kernel, guest runtime and builder image. `image pull`
 fetches and unpacks an OCI image; a `machine run --image` launch reads only the
 local cache and never downloads anything.
 
-The first run of an image boots cold, says so on stderr, and leaves a standby
+The named foreground run above is transient and cold: its workload VM is torn
+down on exit, with no persistent volume or standby requested. It needs no
+`mvmd`, API key, host Nix, or Docker. The captured digest keeps later launches
+on the same cached image. This is a development-profile demo, not a sealed
+production workload. See the [native local demo](public/src/content/docs/getting-started/native-demo.md)
+for expected output, cleanup, and the opt-in live smoke test.
+
+An unnamed run of an image boots cold, says so on stderr, and leaves a standby
 VM of that image ready. The next matching run claims the standby instead of
 booting, and a fresh one is prepared behind it. Standbys are held within a host
 memory cap and released after 20 idle minutes. To make even the first run warm,

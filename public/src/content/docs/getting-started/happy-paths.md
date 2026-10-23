@@ -1,9 +1,9 @@
 ---
 title: First-Use Happy Paths
-description: Three-command paths to get a microVM running for each mvm audience.
+description: Short preparation-and-run paths for each mvm audience.
 ---
 
-mvm has six primary audiences. Each one has a **three-command happy
+mvm has six primary audiences. Each one has a **short happy
 path** that takes you from "I have a thing to run" to "it's running
 under mvm." Pair each path with `mvmctl doctor --workflow <name>` to
 preflight only the host requirements that matter for your audience —
@@ -27,6 +27,11 @@ interactive-shell user no longer needs host rustup.
 
 You have an OCI image reference and want to run one command in a fresh
 microVM without writing a flake or installing host Nix.
+
+For the smallest bounded cold-run demonstration, start with the
+[native local demo](/getting-started/native-demo/). It uses a pinned cached
+image, no daemon or persistent volume, and a named foreground transient run
+so it leaves no standby behind.
 
 ```bash
 mvmctl doctor --workflow cli-run                 # preflight

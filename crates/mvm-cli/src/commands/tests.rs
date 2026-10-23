@@ -2538,10 +2538,38 @@ fn test_image_inspect_parses() {
         Commands::Image(image::Args {
             action: ImageAction::Inspect {
                 ref reference,
-                json: true
+                json: true,
+                digest_ref: false,
             },
         }) if reference == "docker.io/library/alpine:3.20"
     ));
+}
+
+#[test]
+fn test_image_inspect_digest_ref_parses_and_conflicts_with_json() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "image", "inspect", "alpine", "--digest-ref"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Inspect {
+                digest_ref: true,
+                json: false,
+                ..
+            },
+        })
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "image",
+            "inspect",
+            "alpine",
+            "--digest-ref",
+            "--json"
+        ])
+        .is_err()
+    );
 }
 
 #[test]
