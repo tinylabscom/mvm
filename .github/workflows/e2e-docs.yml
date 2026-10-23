@@ -428,7 +428,7 @@ jobs:
       - name: Dump VMM diagnostics on failure
         if: failure()
         run: |
-          for d in "$HOME"/.mvm/vms/*/; do
+          for d in "$MVM_E2E_HOME"/vms/*/; do
             echo "===== $d ====="
             ls -la "$d" || true
             # HVF flushes console.log only when the supervisor exits, so an

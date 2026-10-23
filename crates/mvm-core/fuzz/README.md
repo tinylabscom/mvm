@@ -24,6 +24,11 @@ The target's primary invariant is that every byte string yields a bounded
 must fail without allocating from an unchecked length or reading outside the
 provided buffer.
 
+`fuzz_application_locator` feeds arbitrary strings to the strict application
+locator validator (`validate_application_source`) and asserts that anything it
+accepts is bounded printable ASCII with a clean authority. The nightly fuzz job
+in `.github/workflows/security.yml` runs it for a bounded time.
+
 ## Running it
 
 Install `cargo-fuzz`, then run from this directory:
