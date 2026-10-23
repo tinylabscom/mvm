@@ -98,9 +98,21 @@ pub fn check_source_runtime(
     } else {
         // A fresh private assembly cache cannot adopt attacker-selected outputs.
         // Schema 1 has no declaration: derive it, never bless supplied hashes.
-        let cache = tempfile::tempdir()?;
-        let declaration =
-            crate::guest_bins::assembly::derive_runtime_assembly(&runtime, arch, cache.path())?;
+        // A declaration this host already derived and signed for this archive
+        // and this build is read back instead; any doubt about it derives again.
+        let declaration = match super::declaration_cache::load(cache_root, &runtime.digest, arch) {
+            Some(declaration) => declaration,
+            None => {
+                let cache = tempfile::tempdir()?;
+                let derived = crate::guest_bins::assembly::derive_runtime_assembly(
+                    &runtime,
+                    arch,
+                    cache.path(),
+                )?;
+                super::declaration_cache::store(cache_root, &runtime.digest, arch, &derived);
+                derived
+            }
+        };
         if let Some(claimed) = runtime.manifest.assemblies.get(&arch)
             && claimed != &declaration
         {
