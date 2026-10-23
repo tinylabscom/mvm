@@ -30,11 +30,13 @@ too), then `rm -rf /srv/mvm/<name>`. Nothing else on the box is yours to
 delete.
 
 **In CI.** Every job that can run on the KVM pool points `HOME`, `MVM_HOME`
-and `TMPDIR` at `/tmp/mvm-w-<run>-<attempt>-<shard>` and ends with an
+and `TMPDIR` at `$RUNNER_TEMP/mvm-w-<run>-<attempt>-<shard>` and ends with an
 `if: always()` step running `job-cleanup.sh`. That step kills, by PID, every
 process whose command line names a path the job owned (a VMM started through
 `sudo setsid` is outside the job's process tree, so the runner does not reap
-it), then removes the isolated directories and the extracted test archive. The
+it), then removes the isolated directories and the extracted test archive.
+`RUNNER_TEMP` is disk-backed; `/tmp` is a small tmpfs on the GitHub-hosted KVM
+runner and cannot hold the duplicate OCI trees some live witnesses prepare. The
 workspace `target/` stays warm for the next job until it passes
 `MVM_TARGET_BUDGET_GIB` (40 GiB). `tests/github_actions_self_hosted_runner.rs`
 fails the build when a job that can reach the pool lacks that last step.

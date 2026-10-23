@@ -292,14 +292,15 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
-      # The witness can run on the shared self-hosted KVM box: isolate its
-      # HOME/MVM_HOME/TMPDIR so the always-run cleanup at the end can kill
-      # exactly what this job started and remove exactly what it wrote.
+      # The live witness can use KVM: isolate HOME/MVM_HOME/TMPDIR so the
+      # always-run cleanup can kill and remove exactly what this job started.
+      # RUNNER_TEMP is disk-backed; /tmp is a small tmpfs and cannot hold the
+      # temporary duplicate OCI trees this witness prepares.
       - name: Isolate test state
         run: |
           set -euo pipefail
           [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
-          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
+          base="${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
           mkdir -m 700 -- "$base"
           mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
           {
@@ -373,7 +374,7 @@ jobs:
           if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
             printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
           fi
-          bash nix/ops/hetzner/job-cleanup.sh "/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
+          bash nix/ops/hetzner/job-cleanup.sh "${RUNNER_TEMP}/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${{ matrix.slot }}"
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here
